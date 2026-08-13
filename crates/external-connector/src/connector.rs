@@ -505,7 +505,7 @@ impl ExternalConnector {
         if response.status().as_u16() == 401 || response.status().as_u16() == 403 {
             return Err(ConnectorError::DestinationUnauthorized);
         }
-        if !response.status().is_success() {
+        if response.status() != reqwest::StatusCode::OK {
             return Err(ConnectorError::DestinationUnavailable);
         }
         if response
@@ -881,6 +881,33 @@ fn validate_config(
         content_sha256(credential_token),
         config.runtime_attestation_authority_key_sha256.clone(),
     ];
+    let encoded_signing_seed = BASE64.encode(signing_seed);
+    let unpadded_signing_seed = encoded_signing_seed.trim_end_matches('=');
+    let hexadecimal_signing_seed = signing_seed
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let valid_activation_lineage = match config.activation_mode {
+        crate::ActivationMode::Current => {
+            config.generation == 1
+                && config.previous_generation.is_none()
+                && config.rollback_from_generation.is_none()
+        }
+        crate::ActivationMode::Cutover => {
+            config.generation > 1
+                && config
+                    .previous_generation
+                    .is_some_and(|previous| previous < config.generation)
+                && config.rollback_from_generation.is_none()
+        }
+        crate::ActivationMode::Rollback => {
+            config.generation > 1
+                && config
+                    .previous_generation
+                    .is_some_and(|previous| previous < config.generation)
+                && config.rollback_from_generation == config.previous_generation
+        }
+    };
     let identities = [
         config.deployment_identity.as_str(),
         config.operator_trust_identity.as_str(),
@@ -924,11 +951,7 @@ fn validate_config(
         || config.destination_attestation_key_id.is_empty()
         || config.outcome_signing_key_id.is_empty()
         || config.generation == 0
-        || (config.generation == 1 && config.previous_generation.is_some())
-        || (config.generation > 1 && config.previous_generation.is_none())
-        || config
-            .previous_generation
-            .is_some_and(|previous| previous >= config.generation)
+        || !valid_activation_lineage
         || config.request_payload_schema.is_empty()
         || config.request_payload_schema.len() > 64
         || config.request_payload_schema.iter().any(|(name, kind)| {
@@ -997,6 +1020,9 @@ fn validate_config(
         || config.observer_binding.receipt_signing_public_key_sha256 != content_sha256(observer_key)
         || config.credential_token_sha256 != content_sha256(credential_token)
         || credential_token.is_empty()
+        || credential_token == encoded_signing_seed.as_bytes()
+        || credential_token == unpadded_signing_seed.as_bytes()
+        || credential_token.eq_ignore_ascii_case(hexadecimal_signing_seed.as_bytes())
         || secret_markers.is_empty()
         || !secret_markers
             .iter()

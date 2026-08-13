@@ -52,7 +52,8 @@ Configuration schema `mcloving.external-connector-config/v1` binds:
   digest;
 - pairwise-distinct request, destination-attestation, outcome-signing,
   observer-receipt, and runtime-attestation keys, with the credential token and
-  private outcome seed also distinct from every authority role;
+  private outcome seed also distinct from every authority role in raw, standard
+  Base64 (padded or unpadded), and hexadecimal representations;
 - the complete certified `OBS-001` implementation/image/configuration,
   deployment/operator/runtime/service/configuration/request/credential path,
   generation ancestry, destination, read grant, canonical query, state schema,
@@ -68,6 +69,12 @@ enabled by test configuration. The loader opens configuration, key, token, and
 secret-marker files without following a final symlink; private inputs must be
 single-link regular files owned by the process user and inaccessible to group or
 other users.
+
+Generation 1 is necessarily `current` with no predecessor or rollback source.
+A later `cutover` names exactly one lower predecessor and no rollback source; a
+later `rollback` names that predecessor as its rollback source. Impossible or
+mixed-mode provenance is rejected before the ledger opens, and the ledger then
+requires the named predecessor to be the active generation.
 
 The state directory must be a real owner-private directory, not a symlink. Each
 SQLite database is pre-created through `O_NOFOLLOW` as an owner-private,

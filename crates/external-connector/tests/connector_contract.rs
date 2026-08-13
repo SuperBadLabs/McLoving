@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Router, response::IntoResponse};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use mcloving_destination_observer::{
     ActivationMode as ObserverActivationMode, Confidentiality, ObservationPhase, ObservationReceipt,
 };
@@ -32,6 +33,7 @@ enum Mode {
     Denied,
     SignedFailure,
     SignedRetryOnce,
+    Created,
 }
 
 #[derive(Clone)]
@@ -339,7 +341,12 @@ async fn destination(
         response.body.status_code = "destination_busy".to_owned();
     }
     sign_destination_outcome(&mut response, &state.seed).unwrap();
-    (StatusCode::OK, Json(response)).into_response()
+    let status = if matches!(state.mode, Mode::Created) {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(response)).into_response()
 }
 
 #[tokio::test]
@@ -410,6 +417,16 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
         .unwrap();
     assert_eq!(receipt.status, OutcomeStatus::Ambiguous);
     assert!(receipt.ambiguous_requires_observation);
+
+    let created = Rig::new(Mode::Created, IdempotencyClass::ExternallyIdempotent).await;
+    let created_receipt = created
+        .connector
+        .execute_at(created.request(IdempotencyClass::ExternallyIdempotent), NOW)
+        .await
+        .unwrap();
+    assert_eq!(created_receipt.status, OutcomeStatus::RetryableFailure);
+    assert_eq!(created_receipt.status_code, "bounded_retry_exhausted");
+    assert_eq!(created.calls.load(Ordering::SeqCst), 2);
     let mut different_request_same_scope = request.clone();
     different_request_same_scope.request_id = Uuid::new_v4();
     sign_action_request(&mut different_request_same_scope, &rig.request_seed).unwrap();
@@ -583,6 +600,38 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
             public_key_from_seed(&rig.observer_seed).unwrap(),
             reused_credential.clone(),
             vec![reused_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let encoded_credential = BASE64.encode(&rig.outcome_seed).into_bytes();
+    let mut encoded_secret_roles = rig.config.clone();
+    encoded_secret_roles.credential_token_sha256 = content_sha256(&encoded_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            encoded_secret_roles,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            encoded_credential.clone(),
+            vec![encoded_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let mut impossible_rollback = rig.config.clone();
+    impossible_rollback.activation_mode = ActivationMode::Rollback;
+    impossible_rollback.rollback_from_generation = Some(1);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            impossible_rollback,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
         ),
         Err(ConnectorError::InvalidConfig)
     ));
