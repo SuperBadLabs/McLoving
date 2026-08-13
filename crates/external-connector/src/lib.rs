@@ -31,6 +31,7 @@ pub use model::*;
 pub use shadow::ShadowReplayer;
 pub use standalone::{
     ConnectorCommand, ConnectorResponse, MAX_FRAME_BYTES, ShadowCommand, ShadowResponse,
-    load_connector, load_shadow_replayer, serve_connector_stdio, serve_shadow_stdio,
+    load_connector, load_shadow_replayer, require_shadow_apparmor_enforcement,
+    serve_connector_stdio, serve_shadow_stdio,
 };
 pub use strict_json::parse_json_no_duplicates;

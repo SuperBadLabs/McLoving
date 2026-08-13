@@ -2,7 +2,9 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mcloving_external_connector::{ConnectorError, load_shadow_replayer, serve_shadow_stdio};
+use mcloving_external_connector::{
+    ConnectorError, load_shadow_replayer, require_shadow_apparmor_enforcement, serve_shadow_stdio,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -16,6 +18,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), ConnectorError> {
+    require_shadow_apparmor_enforcement()?;
     let arguments = env::args_os()
         .skip(1)
         .map(PathBuf::from)

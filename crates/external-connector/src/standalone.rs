@@ -21,6 +21,31 @@ const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_MARKER_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_ATTESTATION_BYTES: usize = 16 * 1024;
 const MAX_RUNTIME_ATTESTATION_WINDOW_MS: i64 = 5 * 60 * 1_000;
+#[cfg(any(target_os = "linux", test))]
+const SHADOW_APPARMOR_LABEL: &str = "mcloving-external-shadow-replay (enforce)";
+
+/// Refuse to load shadow replay authority unless the live process is confined by the exact
+/// enforcing AppArmor profile certified for the no-network replay boundary.
+pub fn require_shadow_apparmor_enforcement() -> Result<(), ConnectorError> {
+    #[cfg(target_os = "linux")]
+    {
+        let label = std::fs::read_to_string("/proc/self/attr/current")
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        if !shadow_apparmor_label_is_enforcing(&label) {
+            return Err(ConnectorError::StateUnavailable);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(ConnectorError::StateUnavailable)
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn shadow_apparmor_label_is_enforcing(label: &str) -> bool {
+    label.trim_end_matches(['\r', '\n']) == SHADOW_APPARMOR_LABEL
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -344,6 +369,22 @@ fn decode_markers(path: &Path) -> Result<Vec<Vec<u8>>, ConnectorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadow_replay_accepts_only_the_exact_enforcing_apparmor_label() {
+        assert!(shadow_apparmor_label_is_enforcing(
+            "mcloving-external-shadow-replay (enforce)\n"
+        ));
+        for rejected in [
+            "unconfined\n",
+            "mcloving-external-shadow-replay (complain)\n",
+            "mcloving-external-shadow-replay (unconfined)\n",
+            "mcloving-external-shadow-replay//child (enforce)\n",
+            "mcloving-external-shadow-replay (enforce) trailing\n",
+        ] {
+            assert!(!shadow_apparmor_label_is_enforcing(rejected));
+        }
+    }
 
     #[test]
     fn runtime_attestation_is_signed_fresh_and_bound_to_live_evidence() {

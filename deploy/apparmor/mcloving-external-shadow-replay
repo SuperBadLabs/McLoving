@@ -1,8 +1,9 @@
-# The shadow replay process must consume only signed connector evidence. It is
+# The shadow replay process must consume only signed connector evidence. It
 # uses an enforcing profile that leaves file access and inherited execution to
 # deployment filesystem policy while explicitly denying every network family.
-# Deployment opts in with aa-exec and the protected gate proves the live label
-# and denial.
+# The replay executable checks the exact enforcing label before loading authority;
+# the protected gate proves both that direct execution fails closed and that the
+# confined executable observes the live denial.
 abi <abi/4.0>,
 #include <tunables/global>
 
