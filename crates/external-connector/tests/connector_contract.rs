@@ -504,6 +504,24 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
         Err(ConnectorError::ExpiredAuthority)
     );
 
+    let mut too_short_for_transport = rig.request(IdempotencyClass::ExternallyIdempotent);
+    too_short_for_transport.expires_at_unix_ms = NOW + 49;
+    sign_action_request(&mut too_short_for_transport, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.connector
+            .execute_at(too_short_for_transport.clone(), NOW)
+            .await,
+        Err(ConnectorError::ExpiredAuthority)
+    );
+    too_short_for_transport.expires_at_unix_ms = NOW + 30_000;
+    sign_action_request(&mut too_short_for_transport, &rig.request_seed).unwrap();
+    assert!(
+        rig.connector
+            .execute_at(too_short_for_transport, NOW)
+            .await
+            .is_ok()
+    );
+
     let calls_before_zero_fence = rig.calls.load(Ordering::SeqCst);
     let mut zero_fence = rig.request(IdempotencyClass::NonIdempotent);
     zero_fence.effect_fence = 0;

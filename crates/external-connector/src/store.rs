@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use uuid::Uuid;
@@ -71,7 +71,7 @@ impl ConnectorStore {
         config_sha256: &str,
         activation: RuntimeActivation<'_>,
         max_receipts: usize,
-        authority_usable: bool,
+        authority_activation_deadline_unix_ms: i64,
     ) -> Result<Self, ConnectorError> {
         let RuntimeActivation {
             generation,
@@ -151,7 +151,7 @@ impl ConnectorStore {
             .is_some_and(|(digest, active_generation)| {
                 digest == config_sha256 && *active_generation == generation
             });
-        if !authority_usable && !exact_active {
+        if unix_time_ms()? > authority_activation_deadline_unix_ms && !exact_active {
             return Err(ConnectorError::InvalidConfig);
         }
         let retained_and_reserved: usize = transaction
@@ -702,6 +702,13 @@ fn class_name(class: IdempotencyClass) -> &'static str {
     }
 }
 
+fn unix_time_ms() -> Result<i64, ConnectorError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ConnectorError::StateUnavailable)?;
+    i64::try_from(duration.as_millis()).map_err(|_| ConnectorError::StateUnavailable)
+}
+
 fn validate_private_directory(path: &Path) -> Result<(), ConnectorError> {
     let metadata = path
         .symlink_metadata()
@@ -863,7 +870,7 @@ mod tests {
                 max_history: 16,
             },
             max_receipts,
-            true,
+            i64::MAX,
         )
     }
 
@@ -887,7 +894,7 @@ mod tests {
                 max_history: 16,
             },
             max_receipts,
-            true,
+            i64::MAX,
         )
     }
 
@@ -912,7 +919,7 @@ mod tests {
                 max_history: 16,
             },
             max_receipts,
-            true,
+            i64::MAX,
         )
     }
 
@@ -1174,7 +1181,7 @@ mod tests {
                 max_history: 1,
             },
             8,
-            true,
+            i64::MAX,
         )
         .unwrap();
         assert!(
@@ -1190,7 +1197,7 @@ mod tests {
                     max_history: 1,
                 },
                 8,
-                true,
+                i64::MAX,
             )
             .is_ok()
         );
@@ -1207,7 +1214,7 @@ mod tests {
                     max_history: 1,
                 },
                 8,
-                false,
+                i64::MIN,
             )
             .is_ok()
         );
@@ -1224,7 +1231,7 @@ mod tests {
                     max_history: 2,
                 },
                 8,
-                false,
+                i64::MIN,
             ),
             Err(ConnectorError::InvalidConfig)
         ));
@@ -1241,7 +1248,7 @@ mod tests {
                     max_history: 1,
                 },
                 8,
-                true,
+                i64::MAX,
             ),
             Err(ConnectorError::CapacityExceeded)
         ));

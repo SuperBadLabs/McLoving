@@ -57,11 +57,11 @@ impl ExternalConnector {
             &credential_token,
             &secret_markers,
         )?;
-        let activation_time = unix_time_ms()?;
         let timeout =
             i64::try_from(config.limits.timeout_ms).map_err(|_| ConnectorError::InvalidConfig)?;
-        let credential_grant_usable =
-            activation_time.saturating_add(timeout) <= config.credential_grant_expires_unix_ms;
+        let credential_grant_activation_deadline = config
+            .credential_grant_expires_unix_ms
+            .saturating_sub(timeout);
         let credential_token =
             String::from_utf8(credential_token).map_err(|_| ConnectorError::InvalidConfig)?;
         if !is_bearer_token68(&credential_token) {
@@ -114,7 +114,7 @@ impl ExternalConnector {
                 max_history: config.limits.max_runtime_history,
             },
             config.limits.max_receipts,
-            credential_grant_usable,
+            credential_grant_activation_deadline,
         )?;
         Ok(Self {
             config,
@@ -208,7 +208,8 @@ impl ExternalConnector {
                     &scope,
                     request.idempotency_class,
                     self.config.limits.max_attempts,
-                    self.current_authority_valid(&request, now_unix_ms),
+                    self.validate_transport_window(&request, now_unix_ms)
+                        .is_ok(),
                 )?;
             let attempt_count = match claim {
                 Claim::Replay(receipt) => {
@@ -640,12 +641,6 @@ impl ExternalConnector {
             return Err(ConnectorError::ConfidentialityDenied);
         }
         Ok(())
-    }
-
-    fn current_authority_valid(&self, request: &ActionRequest, now_unix_ms: i64) -> bool {
-        now_unix_ms >= request.requested_at_unix_ms
-            && now_unix_ms <= request.expires_at_unix_ms
-            && now_unix_ms <= self.config.credential_grant_expires_unix_ms
     }
 
     fn validate_transport_window(
