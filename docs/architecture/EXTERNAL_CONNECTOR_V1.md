@@ -211,13 +211,18 @@ query, state schema, confidentiality class, and signing/attestation identities.
 Its destination-observed and captured times must be no earlier than the durable
 post-dispatch ambiguity capture and no later than the reconciliation clock. Its
 typed state must contain exactly the connector request digest and whether the
-effect is present.
+effect is present. Presence is positive causal evidence and may resolve the
+ambiguity. Absence is only a point-in-time observation: a timed-out request may
+still commit after it, so absence remains ambiguous until a future protocol
+version carries a destination-signed terminal-request or cursor/fence barrier
+proving that the original request can no longer commit.
 
-The connector appends a new signed outcome receipt, preserving the ambiguous
-receipt in evidence. Observed presence becomes `succeeded`; observed absence
-becomes a terminal `failed` outcome. The observation receipt digest is bound to
-the new outcome. Connector self-report, runner state, destination response
-replay, or unsigned operator assertion cannot unfreeze ambiguity.
+For observed presence, the connector appends a new signed `succeeded` outcome
+receipt, preserving the ambiguous receipt in evidence and binding the observation
+receipt digest. Observed absence fails reconciliation without changing the
+ambiguous receipt or releasing its reservation. Connector self-report, runner
+state, destination response replay, unsigned operator assertion, or causally
+unfenced absence cannot unfreeze ambiguity.
 
 ## Deny-authority shadow replay
 

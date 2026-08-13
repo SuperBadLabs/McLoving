@@ -467,6 +467,7 @@ impl ExternalConnector {
         let observed_effect = state.get("effect_observed").and_then(Value::as_bool);
         if observed_request != Some(prior.request_sha256.as_str())
             || observed_effect != Some(request.observed_effect)
+            || !request.observed_effect
         {
             return Err(ConnectorError::InvalidObservation);
         }
@@ -475,16 +476,8 @@ impl ExternalConnector {
                 .map_err(|_| ConnectorError::InvalidObservation)?;
         let mut reconciled = prior.clone();
         reconciled.evidence_sequence = store.next_sequence()?;
-        reconciled.status = if request.observed_effect {
-            OutcomeStatus::Succeeded
-        } else {
-            OutcomeStatus::Failed
-        };
-        reconciled.status_code = if request.observed_effect {
-            "reconciled_effect_observed".to_owned()
-        } else {
-            "reconciled_effect_absent".to_owned()
-        };
+        reconciled.status = OutcomeStatus::Succeeded;
+        reconciled.status_code = "reconciled_effect_observed".to_owned();
         reconciled.ambiguous_requires_observation = false;
         reconciled.observation_receipt_sha256 = Some(observation_sha256);
         reconciled.captured_at_unix_ms = now_unix_ms;

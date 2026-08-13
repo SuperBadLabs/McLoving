@@ -786,6 +786,31 @@ async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
         ),
         Err(ConnectorError::InvalidObservation)
     );
+    let mut absence_observation = observation_for(&rig, &ambiguous, false);
+    mcloving_destination_observer::sign_receipt(&mut absence_observation, &rig.observer_seed)
+        .unwrap();
+    assert_eq!(
+        rig.connector.reconcile_at(
+            ReconcileRequest {
+                schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                request_id: action.request_id,
+                expected_request_sha256: ambiguous.request_sha256.clone(),
+                expected_ambiguous_receipt_sha256: ambiguous_digest.clone(),
+                observed_effect: false,
+                observation_receipt: absence_observation,
+                audit_provenance: "audit/reconcile/absence-without-barrier".to_owned(),
+            },
+            NOW + 500,
+        ),
+        Err(ConnectorError::InvalidObservation)
+    );
+    assert_eq!(
+        rig.connector
+            .execute_at(action.clone(), NOW + 501)
+            .await
+            .unwrap(),
+        ambiguous
+    );
     let mut observation = observation_for(&rig, &ambiguous, true);
     mcloving_destination_observer::sign_receipt(&mut observation, &rig.observer_seed).unwrap();
     let reconciled = rig
