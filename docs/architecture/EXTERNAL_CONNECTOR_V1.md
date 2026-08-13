@@ -42,12 +42,14 @@ Configuration schema `mcloving.external-connector-config/v1` binds:
 - monotonic generation plus current, cutover, or rollback provenance;
 - exact endpoint URL and endpoint, account, resource, effect-class identities;
 - action name, request schema, closed typed scalar request-payload fields and
-  public-output schema, and allowed secret taints; nested request structures are
-  not admitted by v1 because a kind-only object/array would not be closed;
+  closed typed scalar public-output fields, and allowed secret taints; nested
+  request or output structures are not admitted by v1 because a kind-only
+  object/array would not be closed;
 - short-lived credential grant identity, version, scope, expiry, and token
   digest;
 - pairwise-distinct request, destination-attestation, outcome-signing,
-  observer-receipt, and runtime-attestation keys;
+  observer-receipt, and runtime-attestation keys, with the credential token and
+  private outcome seed also distinct from every authority role;
 - the complete certified `OBS-001` implementation/image/configuration,
   deployment/operator/runtime/service/configuration/request/credential path,
   generation ancestry, destination, read grant, canonical query, state schema,
@@ -69,9 +71,10 @@ SQLite database is pre-created through `O_NOFOLLOW` as an owner-private,
 single-link regular file before SQLite opens it. The database, WAL, and shared
 memory sidecars are revalidated after WAL activation. Both ledgers use
 `synchronous=FULL`, bounded writer waiting, and immediate transactions for
-claims and final evidence. Admission reserves two evidence slots for every new
-effect so an ambiguous receipt can always retain its original truth and append
-the required reconciliation receipt. A fixed owner-private nonblocking lineage lease is
+claims and final evidence. Admission durably attaches two evidence-slot
+reservations to every pending effect, including across a pre-dispatch crash, so
+an ambiguous receipt can always retain its original truth and append the
+required reconciliation receipt. A fixed owner-private nonblocking lineage lease is
 held across claim, transport, and finalization; a separate fixed lease covers
 shadow replay. Overlapping processes therefore cannot dispatch or replay the
 same pending truth concurrently.
@@ -124,6 +127,10 @@ the exact stored signed receipt without another HTTP request. Each
 tenant/project/attempt/fence/effect key is durably single-use across pending,
 ambiguous, reconciled, failed, and successful rows. New authority requires a new
 certified fence/scope; a different request ID cannot bypass uncertainty.
+Configuration rotation must advance in place from the exact recorded previous
+generation. It atomically updates the runtime fence while retaining the same
+request/scope ledger; a later generation cannot bootstrap an empty directory or
+bypass permanent physical-scope deduplication.
 
 Retry behavior is closed by idempotency class:
 
@@ -207,9 +214,12 @@ connector is rejected.
 The shadow loader applies the same short-lived signed live-runtime attestation
 check as the effectful loader before reading its replay signing seed or opening
 state. The AppArmor policy remains an independent kernel-enforced denial of all
-network families. Shadow construction also rejects reuse of the connector
-receipt public key as its replay-signing public key, so deny-authority compromise
-cannot mint connector outcomes.
+network families. Shadow construction requires its connector-receipt,
+replay-signing, and runtime-attestation public keys to be pairwise distinct, so
+deny-authority compromise cannot mint connector outcomes or attest a substituted
+runtime. The shadow ledger is fenced to the complete canonical shadow
+configuration; a changed signing or replay-authority mapping cannot return a
+receipt stored under the prior configuration.
 
 The shadow verifies the connector receipt and stores an exactly-once replay keyed
 by both replay ID and outcome digest. Exact restart replay returns the same

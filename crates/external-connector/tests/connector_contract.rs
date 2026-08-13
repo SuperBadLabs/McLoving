@@ -554,6 +554,38 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         ),
         Err(ConnectorError::InvalidConfig)
     ));
+
+    let mut open_public_output_schema = rig.config.clone();
+    open_public_output_schema.public_output_schema =
+        BTreeMap::from([("url".to_owned(), JsonKind::Array)]);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            open_public_output_schema,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let reused_credential = rig.outcome_seed.clone();
+    let mut shared_secret_roles = rig.config.clone();
+    shared_secret_roles.credential_token_sha256 = content_sha256(&reused_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            shared_secret_roles,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            reused_credential.clone(),
+            vec![reused_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
 }
 
 #[tokio::test]
@@ -696,6 +728,24 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
             rig.outcome_seed.clone(),
         ),
         Err(ConnectorError::InvalidConfig)
+    ));
+    let replay_public = public_key_from_seed(&replay_seed).unwrap();
+    let mut shared_attestation_key = config.clone();
+    shared_attestation_key.runtime_attestation_authority_key_sha256 =
+        content_sha256(&replay_public);
+    assert!(matches!(
+        ShadowReplayer::new_loopback_test(
+            shared_attestation_key,
+            outcome_key.clone(),
+            replay_seed.clone(),
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+    let mut changed_config = config.clone();
+    changed_config.implementation_sha256 = "5".repeat(64);
+    assert!(matches!(
+        ShadowReplayer::new_loopback_test(changed_config, outcome_key.clone(), replay_seed.clone(),),
+        Err(ConnectorError::RuntimeFenced)
     ));
     let mut substituted_outcome = outcome.clone();
     substituted_outcome.connector_image_sha256 = "f".repeat(64);

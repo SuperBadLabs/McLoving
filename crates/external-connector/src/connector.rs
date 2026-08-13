@@ -83,10 +83,12 @@ impl ExternalConnector {
                 .add_root_certificate(certificate);
         }
         let client = client.build().map_err(|_| ConnectorError::InvalidConfig)?;
+        let _lineage_lock = acquire_connector_lock(&config.state_dir)?;
         let store = ConnectorStore::open(
             &config.state_dir,
             &config_sha256,
             config.generation,
+            config.previous_generation,
             config.limits.max_receipts,
         )?;
         let credential_token =
@@ -154,6 +156,10 @@ impl ExternalConnector {
         resample_system_clock: bool,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let _lineage_lock = acquire_connector_lock(&self.config.state_dir)?;
+        self.store
+            .lock()
+            .map_err(|_| ConnectorError::StateUnavailable)?
+            .assert_runtime()?;
         self.validate_request(&request, now_unix_ms)?;
         let serialized =
             serde_json::to_vec(&request).map_err(|_| ConnectorError::MalformedRequest)?;
@@ -352,6 +358,10 @@ impl ExternalConnector {
         now_unix_ms: i64,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let _lineage_lock = acquire_connector_lock(&self.config.state_dir)?;
+        self.store
+            .lock()
+            .map_err(|_| ConnectorError::StateUnavailable)?
+            .assert_runtime()?;
         if request.schema_version != RECONCILE_REQUEST_SCHEMA_VERSION
             || request.request_id.is_nil()
             || request.audit_provenance.is_empty()
@@ -862,6 +872,15 @@ fn validate_config(
         content_sha256(observer_key),
         config.runtime_attestation_authority_key_sha256.clone(),
     ];
+    let authority_material_digests = [
+        content_sha256(request_key),
+        content_sha256(destination_key),
+        content_sha256(signing_seed),
+        content_sha256(&signing_public),
+        content_sha256(observer_key),
+        content_sha256(credential_token),
+        config.runtime_attestation_authority_key_sha256.clone(),
+    ];
     let identities = [
         config.deployment_identity.as_str(),
         config.operator_trust_identity.as_str(),
@@ -905,6 +924,11 @@ fn validate_config(
         || config.destination_attestation_key_id.is_empty()
         || config.outcome_signing_key_id.is_empty()
         || config.generation == 0
+        || (config.generation == 1 && config.previous_generation.is_some())
+        || (config.generation > 1 && config.previous_generation.is_none())
+        || config
+            .previous_generation
+            .is_some_and(|previous| previous >= config.generation)
         || config.request_payload_schema.is_empty()
         || config.request_payload_schema.len() > 64
         || config.request_payload_schema.iter().any(|(name, kind)| {
@@ -913,10 +937,11 @@ fn validate_config(
                 || matches!(kind, crate::JsonKind::Array | crate::JsonKind::Object)
         })
         || config.public_output_schema.len() > 64
-        || config
-            .public_output_schema
-            .keys()
-            .any(|name| name.is_empty() || name.len() > 128)
+        || config.public_output_schema.iter().any(|(name, kind)| {
+            name.is_empty()
+                || name.len() > 128
+                || matches!(kind, crate::JsonKind::Array | crate::JsonKind::Object)
+        })
         || config.allowed_secret_taints.len() > 32
         || config.limits.max_request_bytes == 0
         || config.limits.max_response_bytes == 0
@@ -947,6 +972,11 @@ fn validate_config(
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             != authority_public_key_digests.len()
+        || authority_material_digests
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != authority_material_digests.len()
         || config.observer_binding.generation == 0
         || !is_sha256(&config.observer_binding.implementation_sha256)
         || !is_sha256(&config.observer_binding.image_sha256)

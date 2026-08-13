@@ -21,6 +21,11 @@ impl ShadowReplayer {
         replay_signing_seed: Vec<u8>,
     ) -> Result<Self, ConnectorError> {
         let replay_public = public_key_from_seed(&replay_signing_seed)?;
+        let shadow_authority_key_digests = [
+            config.connector_receipt_key_sha256.as_str(),
+            config.replay_signing_public_key_sha256.as_str(),
+            config.runtime_attestation_authority_key_sha256.as_str(),
+        ];
         let identities = [
             config.shadow_identity.as_str(),
             config.replay_authority_identity.as_str(),
@@ -73,6 +78,12 @@ impl ShadowReplayer {
             || config.max_receipts == 0
             || config.connector_receipt_key_sha256 != content_sha256(&connector_receipt_key)
             || content_sha256(&replay_public) == config.connector_receipt_key_sha256
+            || shadow_authority_key_digests
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != shadow_authority_key_digests.len()
             || config.replay_signing_seed_sha256 != content_sha256(&replay_signing_seed)
             || config.replay_signing_public_key_sha256 != content_sha256(&replay_public)
             || config.denied_endpoint_identities.is_empty()
@@ -82,7 +93,8 @@ impl ShadowReplayer {
         {
             return Err(ConnectorError::InvalidConfig);
         }
-        let store = ShadowStore::open(&config.state_dir, config.max_receipts)?;
+        let config_sha256 = config.canonical_digest()?;
+        let store = ShadowStore::open(&config.state_dir, &config_sha256, config.max_receipts)?;
         Ok(Self {
             config,
             connector_receipt_key,

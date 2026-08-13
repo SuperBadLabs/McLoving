@@ -50,6 +50,8 @@ pub(crate) enum Claim {
 
 pub(crate) struct ConnectorStore {
     connection: Connection,
+    config_sha256: String,
+    generation: u64,
     max_receipts: usize,
 }
 
@@ -58,6 +60,7 @@ impl ConnectorStore {
         state_dir: &Path,
         config_sha256: &str,
         generation: u64,
+        previous_generation: Option<u64>,
         max_receipts: usize,
     ) -> Result<Self, ConnectorError> {
         validate_private_directory(state_dir)?;
@@ -86,6 +89,7 @@ impl ConnectorStore {
                    dispatched INTEGER NOT NULL CHECK(dispatched IN (0,1)),
                    dispatched_at_unix_ms INTEGER,
                    attempt_count INTEGER NOT NULL CHECK(attempt_count BETWEEN 0 AND 255),
+                   reserved_receipts INTEGER NOT NULL CHECK(reserved_receipts BETWEEN 0 AND 2),
                    current_receipt_sha256 TEXT,
                    current_receipt_json BLOB
                  );
@@ -109,8 +113,20 @@ impl ConnectorStore {
             )
             .optional()
             .map_err(|_| ConnectorError::StateUnavailable)?;
+        let retained_and_reserved: usize = connection
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM evidence) +
+                   (SELECT COALESCE(SUM(reserved_receipts), 0) FROM requests)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        if retained_and_reserved > max_receipts {
+            return Err(ConnectorError::CapacityExceeded);
+        }
         match existing {
-            None => {
+            None if generation == 1 && previous_generation.is_none() => {
                 connection
                     .execute(
                         "INSERT INTO runtime(singleton, config_sha256, generation) VALUES(1, ?1, ?2)",
@@ -118,14 +134,47 @@ impl ConnectorStore {
                     )
                     .map_err(|_| ConnectorError::StateUnavailable)?;
             }
+            None => return Err(ConnectorError::RuntimeFenced),
             Some((digest, active_generation))
                 if digest == config_sha256 && active_generation == generation => {}
+            Some((_, active_generation))
+                if generation > active_generation
+                    && previous_generation == Some(active_generation) =>
+            {
+                let changed = connection
+                    .execute(
+                        "UPDATE runtime SET config_sha256 = ?1, generation = ?2
+                         WHERE singleton = 1 AND generation = ?3",
+                        params![config_sha256, generation, active_generation],
+                    )
+                    .map_err(|_| ConnectorError::StateUnavailable)?;
+                if changed != 1 {
+                    return Err(ConnectorError::RuntimeFenced);
+                }
+            }
             Some(_) => return Err(ConnectorError::RuntimeFenced),
         }
         Ok(Self {
             connection,
+            config_sha256: config_sha256.to_owned(),
+            generation,
             max_receipts,
         })
+    }
+
+    pub(crate) fn assert_runtime(&self) -> Result<(), ConnectorError> {
+        let active = self
+            .connection
+            .query_row(
+                "SELECT config_sha256, generation FROM runtime WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+            )
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        if active != (self.config_sha256.clone(), self.generation) {
+            return Err(ConnectorError::RuntimeFenced);
+        }
+        Ok(())
     }
 
     pub(crate) fn claim(
@@ -195,6 +244,18 @@ impl ConnectorStore {
                     attempt_count: attempts,
                 });
             }
+            let retained_and_reserved: usize = tx
+                .query_row(
+                    "SELECT
+                       (SELECT COUNT(*) FROM evidence) +
+                       (SELECT COALESCE(SUM(reserved_receipts), 0) FROM requests)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ConnectorError::StateUnavailable)?;
+            if retained_and_reserved > self.max_receipts {
+                return Err(ConnectorError::CapacityExceeded);
+            }
             let next = attempts.saturating_add(1);
             tx.execute(
                 "UPDATE requests
@@ -209,10 +270,16 @@ impl ConnectorStore {
             });
         }
 
-        let retained: usize = tx
-            .query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0))
+        let retained_and_reserved: usize = tx
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM evidence) +
+                   (SELECT COALESCE(SUM(reserved_receipts), 0) FROM requests)",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|_| ConnectorError::StateUnavailable)?;
-        if retained.saturating_add(2) > self.max_receipts {
+        if retained_and_reserved.saturating_add(2) > self.max_receipts {
             return Err(ConnectorError::CapacityExceeded);
         }
         let conflicting = tx
@@ -229,8 +296,8 @@ impl ConnectorStore {
         tx.execute(
             "INSERT INTO requests(
                request_id, request_sha256, scope_key, idempotency_class,
-               status, dispatched, attempt_count
-             ) VALUES(?1, ?2, ?3, ?4, 'pending', 0, 1)",
+               status, dispatched, attempt_count, reserved_receipts
+             ) VALUES(?1, ?2, ?3, ?4, 'pending', 0, 1, 2)",
             params![
                 request_id.to_string(),
                 request_sha256,
@@ -317,13 +384,14 @@ impl ConnectorStore {
             .execute(
                 "UPDATE requests
                  SET status = 'terminal', current_receipt_sha256 = ?3,
-                     current_receipt_json = ?4
+                     current_receipt_json = ?4, reserved_receipts = ?5
                  WHERE request_id = ?1 AND request_sha256 = ?2",
                 params![
                     receipt.request_id.to_string(),
                     request_sha256,
                     digest,
-                    bytes
+                    bytes,
+                    usize::from(receipt.ambiguous_requires_observation)
                 ],
             )
             .map_err(|_| ConnectorError::StateUnavailable)?;
@@ -374,7 +442,8 @@ impl ConnectorStore {
         }
         let changed = tx
             .execute(
-                "UPDATE requests SET current_receipt_sha256 = ?3, current_receipt_json = ?4
+                "UPDATE requests SET current_receipt_sha256 = ?3, current_receipt_json = ?4,
+                                     reserved_receipts = 0
                  WHERE request_id = ?1 AND current_receipt_sha256 = ?2 AND status = 'terminal'",
                 params![receipt.request_id.to_string(), prior_digest, digest, bytes],
             )
@@ -398,7 +467,11 @@ pub(crate) struct ShadowStore {
 }
 
 impl ShadowStore {
-    pub(crate) fn open(state_dir: &Path, max_receipts: usize) -> Result<Self, ConnectorError> {
+    pub(crate) fn open(
+        state_dir: &Path,
+        config_sha256: &str,
+        max_receipts: usize,
+    ) -> Result<Self, ConnectorError> {
         validate_private_directory(state_dir)?;
         let path = state_dir.join(SHADOW_DATABASE_FILE);
         prepare_private_database(&path)?;
@@ -410,6 +483,10 @@ impl ShadowStore {
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
                  PRAGMA synchronous=FULL;
+                 CREATE TABLE IF NOT EXISTS runtime (
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                   config_sha256 TEXT NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS replays (
                    replay_id TEXT PRIMARY KEY,
                    outcome_receipt_sha256 TEXT NOT NULL UNIQUE,
@@ -419,6 +496,32 @@ impl ShadowStore {
             )
             .map_err(|_| ConnectorError::StateUnavailable)?;
         validate_sqlite_files(state_dir, SHADOW_DATABASE_FILE)?;
+        let existing = connection
+            .query_row(
+                "SELECT config_sha256 FROM runtime WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        match existing {
+            None => {
+                connection
+                    .execute(
+                        "INSERT INTO runtime(singleton, config_sha256) VALUES(1, ?1)",
+                        [config_sha256],
+                    )
+                    .map_err(|_| ConnectorError::StateUnavailable)?;
+            }
+            Some(digest) if digest == config_sha256 => {}
+            Some(_) => return Err(ConnectorError::RuntimeFenced),
+        }
+        let retained: usize = connection
+            .query_row("SELECT COUNT(*) FROM replays", [], |row| row.get(0))
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        if retained > max_receipts {
+            return Err(ConnectorError::CapacityExceeded);
+        }
         Ok(Self {
             connection,
             max_receipts,
@@ -635,7 +738,7 @@ mod tests {
         let state = tempdir().unwrap();
         make_private(state.path());
         let request_id = Uuid::new_v4();
-        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
+        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 8).unwrap();
         assert!(matches!(
             first
                 .claim(
@@ -653,7 +756,8 @@ mod tests {
             .unwrap();
         drop(first);
 
-        let mut restarted = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
+        let mut restarted =
+            ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 8).unwrap();
         assert!(matches!(
             restarted
                 .claim(
@@ -676,7 +780,7 @@ mod tests {
         let state = tempdir().unwrap();
         make_private(state.path());
         let request_id = Uuid::new_v4();
-        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
+        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 8).unwrap();
         assert!(matches!(
             first
                 .claim(
@@ -691,7 +795,8 @@ mod tests {
         ));
         drop(first);
 
-        let mut restarted = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
+        let mut restarted =
+            ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 8).unwrap();
         assert!(matches!(
             restarted
                 .claim(
@@ -710,7 +815,7 @@ mod tests {
     fn new_effect_reserves_capacity_for_ambiguity_reconciliation() {
         let state = tempdir().unwrap();
         make_private(state.path());
-        let mut store = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 1).unwrap();
+        let mut store = ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 1).unwrap();
         assert!(matches!(
             store.claim(
                 Uuid::new_v4(),
@@ -720,6 +825,97 @@ mod tests {
                 1,
             ),
             Err(ConnectorError::CapacityExceeded)
+        ));
+    }
+
+    #[test]
+    fn pending_claim_keeps_its_capacity_reservation_after_restart() {
+        let state = tempdir().unwrap();
+        make_private(state.path());
+        let request_id = Uuid::new_v4();
+        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 3).unwrap();
+        assert!(matches!(
+            first
+                .claim(
+                    request_id,
+                    &"b".repeat(64),
+                    &"c".repeat(64),
+                    IdempotencyClass::ExternallyIdempotent,
+                    3,
+                )
+                .unwrap(),
+            Claim::Dispatch { attempt_count: 1 }
+        ));
+        drop(first);
+
+        let mut restarted =
+            ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 3).unwrap();
+        assert!(matches!(
+            restarted
+                .claim(
+                    request_id,
+                    &"b".repeat(64),
+                    &"c".repeat(64),
+                    IdempotencyClass::ExternallyIdempotent,
+                    3,
+                )
+                .unwrap(),
+            Claim::Dispatch { attempt_count: 2 }
+        ));
+        let reserved: usize = restarted
+            .connection
+            .query_row("SELECT SUM(reserved_receipts) FROM requests", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(reserved, 2);
+        assert!(matches!(
+            restarted.claim(
+                Uuid::new_v4(),
+                &"d".repeat(64),
+                &"e".repeat(64),
+                IdempotencyClass::NonIdempotent,
+                1,
+            ),
+            Err(ConnectorError::CapacityExceeded)
+        ));
+    }
+
+    #[test]
+    fn certified_generation_rotation_preserves_permanent_scope_dedup() {
+        let state = tempdir().unwrap();
+        make_private(state.path());
+        let scope = "c".repeat(64);
+        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, None, 8).unwrap();
+        first
+            .claim(
+                Uuid::new_v4(),
+                &"b".repeat(64),
+                &scope,
+                IdempotencyClass::NonIdempotent,
+                1,
+            )
+            .unwrap();
+        drop(first);
+
+        let mut rotated =
+            ConnectorStore::open(state.path(), &"d".repeat(64), 2, Some(1), 8).unwrap();
+        assert!(matches!(
+            rotated.claim(
+                Uuid::new_v4(),
+                &"e".repeat(64),
+                &scope,
+                IdempotencyClass::NonIdempotent,
+                1,
+            ),
+            Err(ConnectorError::EffectPending)
+        ));
+
+        let fresh = tempdir().unwrap();
+        make_private(fresh.path());
+        assert!(matches!(
+            ConnectorStore::open(fresh.path(), &"d".repeat(64), 2, Some(1), 8),
+            Err(ConnectorError::RuntimeFenced)
         ));
     }
 
@@ -746,14 +942,14 @@ mod tests {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
-            ConnectorStore::open(&state, &"a".repeat(64), 1, 8),
+            ConnectorStore::open(&state, &"a".repeat(64), 1, None, 8),
             Err(ConnectorError::StateUnavailable)
         ));
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let link = root.path().join("linked-state");
         symlink(&state, &link).unwrap();
         assert!(matches!(
-            ConnectorStore::open(&link, &"a".repeat(64), 1, 8),
+            ConnectorStore::open(&link, &"a".repeat(64), 1, None, 8),
             Err(ConnectorError::StateUnavailable)
         ));
     }
