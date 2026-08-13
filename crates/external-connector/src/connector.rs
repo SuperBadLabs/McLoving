@@ -578,6 +578,7 @@ impl ExternalConnector {
             || request.pipeline_id.is_nil()
             || request.build_id.is_nil()
             || request.attempt_id.is_nil()
+            || request.effect_fence == 0
             || request.effect_key.is_empty()
             || request.effect_key.len() > 256
             || request.audit_provenance.is_empty()
@@ -1015,6 +1016,9 @@ fn validate_config(
         || config.destination_attestation_key_sha256 != content_sha256(destination_key)
         || config.outcome_signing_seed_sha256 != content_sha256(signing_seed)
         || config.outcome_signing_public_key_sha256 != content_sha256(&signing_public)
+        || request_key.len() != 32
+        || destination_key.len() != 32
+        || observer_key.len() != 32
         || authority_public_key_digests
             .iter()
             .collect::<std::collections::BTreeSet<_>>()

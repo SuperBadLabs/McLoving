@@ -504,6 +504,16 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
         Err(ConnectorError::ExpiredAuthority)
     );
 
+    let calls_before_zero_fence = rig.calls.load(Ordering::SeqCst);
+    let mut zero_fence = rig.request(IdempotencyClass::NonIdempotent);
+    zero_fence.effect_fence = 0;
+    sign_action_request(&mut zero_fence, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.connector.execute_at(zero_fence, NOW).await,
+        Err(ConnectorError::MalformedRequest)
+    );
+    assert_eq!(rig.calls.load(Ordering::SeqCst), calls_before_zero_fence);
+
     let mut substituted = rig.request(IdempotencyClass::ExternallyIdempotent);
     sign_action_request(&mut substituted, &rig.request_seed).unwrap();
     substituted.resource_identity = "resource/substituted-after-signing".to_owned();
@@ -713,6 +723,46 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
                 public_key_from_seed(&rig.observer_seed).unwrap(),
                 invalid_rotation_credential.clone(),
                 vec![invalid_rotation_credential, SECRET.to_vec()],
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+    }
+    for malformed_key_role in 0..3 {
+        let malformed_key = vec![7; 31];
+        let mut malformed_rotation = rig.config.clone();
+        malformed_rotation.generation = 2;
+        malformed_rotation.activation_mode = ActivationMode::Cutover;
+        malformed_rotation.previous_generation = Some(1);
+        malformed_rotation.previous_config_sha256 = Some(rig.connector.config_sha256().to_owned());
+        let mut request_key = public_key_from_seed(&rig.request_seed).unwrap();
+        let mut destination_key = public_key_from_seed(&rig.destination_seed).unwrap();
+        let mut observer_key = public_key_from_seed(&rig.observer_seed).unwrap();
+        match malformed_key_role {
+            0 => {
+                request_key = malformed_key.clone();
+                malformed_rotation.request_authority_key_sha256 = content_sha256(&request_key);
+            }
+            1 => {
+                destination_key = malformed_key.clone();
+                malformed_rotation.destination_attestation_key_sha256 =
+                    content_sha256(&destination_key);
+            }
+            _ => {
+                observer_key = malformed_key.clone();
+                malformed_rotation
+                    .observer_binding
+                    .receipt_signing_public_key_sha256 = content_sha256(&observer_key);
+            }
+        }
+        assert!(matches!(
+            ExternalConnector::new_loopback_test(
+                malformed_rotation,
+                request_key,
+                destination_key,
+                rig.outcome_seed.clone(),
+                observer_key,
+                TOKEN.to_vec(),
+                vec![TOKEN.to_vec(), SECRET.to_vec()],
             ),
             Err(ConnectorError::InvalidConfig)
         ));
