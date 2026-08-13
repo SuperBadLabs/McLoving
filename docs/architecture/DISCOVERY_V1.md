@@ -98,9 +98,12 @@ Every reported observation is retained with an explicit `active`,
 - exact Jenkinsfile path and content SHA-256; and
 - child-configuration SHA-256.
 
-Repository, branch, PR, and Jenkinsfile filters are evaluated before admission.
-An origin ref is trusted. A fork is trusted only under the configured closed
-policy; an admitted but untrusted fork becomes `quarantined`, never `active`.
+Structural branch/PR identity consistency is validated before any policy
+filter, so a malformed excluded observation cannot reserve an invalid retained
+identity. Repository, branch, PR, and Jenkinsfile filters are then evaluated
+before admission. An origin ref is trusted. A fork is trusted only under the
+configured closed policy; an admitted but untrusted fork becomes
+`quarantined`, never `active`.
 Filtered observations remain immutable audit/transfer evidence but create no
 child. Their retained key/UUID and identity tuple is nevertheless authoritative:
 neither a previously observed nor materialized child key or pipeline UUID can
@@ -126,6 +129,9 @@ State generations and source cursors advance monotonically. A delta never
 retires an omitted child. A complete snapshot with `retain` also preserves
 omitted children. `retain` never preserves a reported child that is known to
 violate the current repository, ref, trust, or Jenkinsfile selection policy.
+Complete-snapshot orphan retirement is one set-based database update against
+the scan's bounded selected-key set; the controller neither materializes nor
+updates the accumulated unseen-child population row by row.
 No discovery path physically deletes a child or creates a runnable build, so
 retention and rollback evidence remain available.
 

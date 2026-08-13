@@ -441,6 +441,36 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
             ),
         ]
     );
+    let mut malformed_filtered_branch = filtered.clone();
+    malformed_filtered_branch.head_repository_identity = "github:attacker/fork".to_owned();
+    let malformed_filtered_scan = scan(
+        &parent,
+        "scan-malformed-filtered-branch",
+        DiscoveryScanSource::Webhook,
+        Some("github-delivery-malformed-filtered-branch"),
+        2,
+        vec![malformed_filtered_branch],
+    );
+    assert!(matches!(
+        store
+            .reconcile_discovery_scan(&malformed_filtered_scan)
+            .await,
+        Err(StoreError::InvalidDiscovery(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM discovery_observations
+             WHERE organization_id = $1 AND parent_id = $2 AND scan_id = $3",
+        )
+        .bind(organization_id)
+        .bind(parent_id)
+        .bind(&malformed_filtered_scan.scan_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0,
+        "a malformed filtered branch must not reserve retained identity"
+    );
     let mut divergent = initial.clone();
     divergent.provider_snapshot_sha256 = digest("substituted-provider-snapshot");
     divergent.expected_request_sha256 = compute_discovery_scan_request_sha256(&divergent).unwrap();
@@ -575,6 +605,21 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
             .filter(|child| child.state == DiscoveryChildState::Retired)
             .count(),
         3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM discovery_children
+             WHERE organization_id = $1 AND parent_id = $2
+               AND state = 'retired' AND last_scan_id = $3",
+        )
+        .bind(organization_id)
+        .bind(parent_id)
+        .bind(&catch_up.scan_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        3,
+        "one complete snapshot must retire every omitted current child"
     );
     let DiscoveryScanOutcome::Replayed(historical) =
         store.reconcile_discovery_scan(&initial).await.unwrap()

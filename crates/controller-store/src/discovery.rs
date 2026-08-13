@@ -1347,34 +1347,24 @@ impl Store {
         }
 
         if input.complete_snapshot && parent.orphan_policy == OrphanPolicy::Retire {
-            let rows = sqlx::query_scalar::<_, String>(
-                "SELECT child_key FROM discovery_children
+            let seen = seen.into_iter().collect::<Vec<_>>();
+            sqlx::query(
+                "UPDATE discovery_children
+                 SET state = 'retired', state_generation = state_generation + 1,
+                     parent_generation = $3, source_cursor = $4,
+                     last_scan_id = $5, updated_at = clock_timestamp()
                  WHERE organization_id = $1 AND parent_id = $2
-                   AND state <> 'retired' ORDER BY child_key FOR UPDATE",
+                   AND state <> 'retired'
+                   AND NOT (child_key = ANY($6::text[]))",
             )
             .bind(input.organization_id)
             .bind(input.parent_id)
-            .fetch_all(&mut *tx)
+            .bind(parent.generation)
+            .bind(input.source_cursor)
+            .bind(&input.scan_id)
+            .bind(&seen)
+            .execute(&mut *tx)
             .await?;
-            for child_key in rows {
-                if !seen.contains(&child_key) {
-                    sqlx::query(
-                        "UPDATE discovery_children
-                         SET state = 'retired', state_generation = state_generation + 1,
-                             parent_generation = $4, source_cursor = $5,
-                             last_scan_id = $6, updated_at = clock_timestamp()
-                         WHERE organization_id = $1 AND parent_id = $2 AND child_key = $3",
-                    )
-                    .bind(input.organization_id)
-                    .bind(input.parent_id)
-                    .bind(child_key)
-                    .bind(parent.generation)
-                    .bind(input.source_cursor)
-                    .bind(&input.scan_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
         }
         let counts = child_counts(&mut tx, input.organization_id, input.parent_id).await?;
         sqlx::query(
@@ -1970,6 +1960,10 @@ fn evaluate_observations<'a>(
         .collect::<BTreeSet<_>>();
     let mut evaluated = Vec::new();
     for observation in observations {
+        let is_fork = observation.head_repository_identity != observation.repository_identity;
+        if observation.ref_kind == DiscoveredRefKind::Branch && is_fork {
+            return invalid("branch observation cannot substitute a fork head repository");
+        }
         if !repositories.contains(&observation.repository_identity)
             || !matches_branch_filters(parent, &observation.ref_name)
             || observation.jenkinsfile_path != parent.jenkinsfile_path
@@ -1981,7 +1975,6 @@ fn evaluate_observations<'a>(
             ));
             continue;
         }
-        let is_fork = observation.head_repository_identity != observation.repository_identity;
         if observation.ref_kind == DiscoveredRefKind::PullRequest {
             match parent.pull_request_strategy {
                 PullRequestDiscoveryStrategy::None => {
@@ -2003,8 +1996,6 @@ fn evaluate_observations<'a>(
                 PullRequestDiscoveryStrategy::OriginOnly
                 | PullRequestDiscoveryStrategy::OriginAndForks => {}
             }
-        } else if is_fork {
-            return invalid("branch observation cannot substitute a fork head repository");
         }
         let trusted = !is_fork
             || match parent.fork_trust_strategy {
