@@ -1229,24 +1229,38 @@ impl Store {
             }
             let expected_fork =
                 observation.head_repository_identity != observation.repository_identity;
-            let retained = sqlx::query_as::<_, DiscoveryIdentityRow>(
-                "SELECT child_key, child_pipeline_id, repository_identity, ref_kind, ref_name,
-                        pull_request_number, head_repository_identity, is_fork
-                 FROM discovery_observations
-                 WHERE organization_id = $1 AND parent_id = $2
-                   AND (child_key = $3 OR child_pipeline_id = $4)
-                 FOR SHARE",
+            let retained_mismatch = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM discovery_observations
+                     WHERE organization_id = $1 AND parent_id = $2
+                       AND (child_key = $3 OR child_pipeline_id = $4)
+                       AND NOT (
+                           child_key = $3
+                           AND child_pipeline_id = $4
+                           AND repository_identity = $5
+                           AND ref_kind = $6
+                           AND ref_name = $7
+                           AND pull_request_number IS NOT DISTINCT FROM $8
+                           AND head_repository_identity = $9
+                           AND is_fork = $10
+                       )
+                     LIMIT 1
+                 )",
             )
             .bind(input.organization_id)
             .bind(input.parent_id)
             .bind(&observation.child_key)
             .bind(observation.child_pipeline_id)
-            .fetch_all(&mut *tx)
+            .bind(&observation.repository_identity)
+            .bind(observation.ref_kind.as_str())
+            .bind(&observation.ref_name)
+            .bind(observation.pull_request_number)
+            .bind(&observation.head_repository_identity)
+            .bind(expected_fork)
+            .fetch_one(&mut *tx)
             .await?;
-            if retained
-                .iter()
-                .any(|existing| !discovery_identity_matches(existing, observation, expected_fork))
-            {
+            if retained_mismatch {
                 return conflict("discovery observation key or pipeline identity was substituted");
             }
             let existing = sqlx::query_as::<_, DiscoveryIdentityRow>(

@@ -108,6 +108,10 @@ be rebound. A key/UUID cross-pair or any change to repository, ref, PR,
 head-repository, or fork identity aborts the whole scan as a domain conflict
 before an insert.
 
+The retained-history fence asks PostgreSQL only whether a mismatching tuple
+exists and never materializes the child's observation history in controller
+memory. Tenant/parent/key and tenant/parent/pipeline indexes bound lookup paths.
+
 ## Child and orphan state
 
 Current child truth has three closed states:
