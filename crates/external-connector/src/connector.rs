@@ -57,6 +57,10 @@ impl ExternalConnector {
             &credential_token,
             &secret_markers,
         )?;
+        let credential_token =
+            String::from_utf8(credential_token).map_err(|_| ConnectorError::InvalidConfig)?;
+        HeaderValue::from_str(&format!("Bearer {credential_token}"))
+            .map_err(|_| ConnectorError::InvalidConfig)?;
         let config_sha256 = config.canonical_digest()?;
         let endpoint =
             Url::parse(&config.endpoint_url).map_err(|_| ConnectorError::InvalidConfig)?;
@@ -103,8 +107,6 @@ impl ExternalConnector {
             },
             config.limits.max_receipts,
         )?;
-        let credential_token =
-            String::from_utf8(credential_token).map_err(|_| ConnectorError::InvalidConfig)?;
         Ok(Self {
             config,
             config_sha256,
