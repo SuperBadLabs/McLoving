@@ -772,6 +772,47 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         Err(ConnectorError::InvalidConfig)
     ));
 
+    let canonical_request_seed = BASE64.encode(&rig.request_seed);
+    let extra_padding_credential = format!("{canonical_request_seed}=").into_bytes();
+    let mut discarded_bit_credential = BASE64.encode(&rig.request_seed).into_bytes();
+    let content_end = discarded_bit_credential
+        .iter()
+        .position(|byte| *byte == b'=')
+        .unwrap();
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let last = content_end - 1;
+    let canonical_index = alphabet
+        .iter()
+        .position(|byte| *byte == discarded_bit_credential[last])
+        .unwrap();
+    assert_eq!(canonical_index & 0b11, 0);
+    discarded_bit_credential[last] = alphabet[canonical_index | 0b01];
+    for noncanonical_credential in [extra_padding_credential, discarded_bit_credential] {
+        let noncanonical_state = tempfile::tempdir().unwrap();
+        make_private(noncanonical_state.path());
+        let mut noncanonical_config = rig.config.clone();
+        noncanonical_config.state_dir = noncanonical_state.path().to_path_buf();
+        noncanonical_config.credential_token_sha256 = content_sha256(&noncanonical_credential);
+        assert!(matches!(
+            ExternalConnector::new_loopback_test(
+                noncanonical_config,
+                public_key_from_seed(&rig.request_seed).unwrap(),
+                public_key_from_seed(&rig.destination_seed).unwrap(),
+                rig.outcome_seed.clone(),
+                public_key_from_seed(&rig.observer_seed).unwrap(),
+                noncanonical_credential.clone(),
+                vec![noncanonical_credential, SECRET.to_vec()],
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+        assert!(
+            !noncanonical_state
+                .path()
+                .join("external-connector.sqlite3")
+                .exists()
+        );
+    }
+
     let encoded_destination_credential = BASE64.encode(&rig.destination_seed).into_bytes();
     let encoded_destination_state = tempfile::tempdir().unwrap();
     make_private(encoded_destination_state.path());

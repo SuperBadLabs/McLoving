@@ -1121,17 +1121,14 @@ fn credential_encodes_authority_seed(
         candidates.insert(credential_token.to_vec());
     }
     if let Ok(encoded) = std::str::from_utf8(credential_token) {
-        for decoded in [
-            BASE64.decode(encoded),
-            BASE64_NO_PAD.decode(encoded),
-            BASE64_URL_SAFE.decode(encoded),
-            BASE64_URL_SAFE_NO_PAD.decode(encoded),
-        ] {
-            if let Ok(seed) = decoded
-                && seed.len() == 32
-            {
-                candidates.insert(seed);
-            }
+        for seed in [
+            decode_base64_seed_alias(encoded, false),
+            decode_base64_seed_alias(encoded, true),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            candidates.insert(seed);
         }
         if encoded.len() == 64 && encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
             let seed = (0..encoded.len())
@@ -1151,6 +1148,43 @@ fn credential_encodes_authority_seed(
                 .any(|authority_digest| authority_digest == &digest)
         })
     })
+}
+
+fn decode_base64_seed_alias(encoded: &str, url_safe: bool) -> Option<Vec<u8>> {
+    let bytes = encoded.as_bytes();
+    let content_len = bytes
+        .iter()
+        .position(|byte| *byte == b'=')
+        .unwrap_or(bytes.len());
+    if content_len != 43 || bytes[content_len..].iter().any(|byte| *byte != b'=') {
+        return None;
+    }
+    let mut seed = Vec::with_capacity(32);
+    let mut pending = 0_u32;
+    let mut pending_bits = 0_u8;
+    for byte in &bytes[..content_len] {
+        pending = (pending << 6) | u32::from(base64_value(*byte, url_safe)?);
+        pending_bits += 6;
+        if pending_bits >= 8 {
+            pending_bits -= 8;
+            seed.push(((pending >> pending_bits) & 0xff) as u8);
+            pending &= (1_u32 << pending_bits) - 1;
+        }
+    }
+    (seed.len() == 32).then_some(seed)
+}
+
+fn base64_value(byte: u8, url_safe: bool) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' if !url_safe => Some(62),
+        b'/' if !url_safe => Some(63),
+        b'-' if url_safe => Some(62),
+        b'_' if url_safe => Some(63),
+        _ => None,
+    }
 }
 
 fn valid_observer_activation_lineage(binding: &crate::ObserverReceiptBinding) -> bool {
