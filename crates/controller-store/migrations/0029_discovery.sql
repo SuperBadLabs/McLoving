@@ -350,6 +350,12 @@ CREATE TABLE discovery_children (
     )
 );
 
+CREATE INDEX discovery_observations_child_key_idx
+    ON discovery_observations (organization_id, parent_id, child_key);
+
+CREATE INDEX discovery_observations_child_pipeline_idx
+    ON discovery_observations (organization_id, parent_id, child_pipeline_id);
+
 CREATE INDEX discovery_children_state_idx
     ON discovery_children (organization_id, parent_id, state, child_key);
 

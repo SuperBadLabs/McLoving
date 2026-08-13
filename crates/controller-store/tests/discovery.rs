@@ -350,7 +350,7 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
             origin_pr,
             trusted_fork,
             untrusted_fork,
-            filtered,
+            filtered.clone(),
         ],
     );
     let (left, right) = tokio::join!(
@@ -477,6 +477,42 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     assert!(matches!(
         store
             .reconcile_discovery_scan(&pipeline_identity_substitution)
+            .await,
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+
+    let mut filtered_key_reuse = filtered.clone();
+    filtered_key_reuse.child_pipeline_id = Uuid::new_v4();
+    filtered_key_reuse.ref_name = "main".to_owned();
+    let filtered_key_substitution = scan(
+        &parent,
+        "scan-filtered-key-substitution",
+        DiscoveryScanSource::Webhook,
+        Some("github-delivery-filtered-key-substitution"),
+        2,
+        vec![filtered_key_reuse],
+    );
+    assert!(matches!(
+        store
+            .reconcile_discovery_scan(&filtered_key_substitution)
+            .await,
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+
+    let mut filtered_pipeline_reuse = filtered;
+    filtered_pipeline_reuse.child_key = "mcloving:branch:private-alias".to_owned();
+    filtered_pipeline_reuse.ref_name = "main".to_owned();
+    let filtered_pipeline_substitution = scan(
+        &parent,
+        "scan-filtered-pipeline-substitution",
+        DiscoveryScanSource::Webhook,
+        Some("github-delivery-filtered-pipeline-substitution"),
+        2,
+        vec![filtered_pipeline_reuse],
+    );
+    assert!(matches!(
+        store
+            .reconcile_discovery_scan(&filtered_pipeline_substitution)
             .await,
         Err(StoreError::DiscoveryConflict(_))
     ));
