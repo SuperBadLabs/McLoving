@@ -23,7 +23,7 @@ async fn run() -> Result<(), ConnectorError> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if arguments.len() != 5 {
+    if arguments.len() != 6 {
         return Err(ConnectorError::InvalidConfig);
     }
     let shadow = load_shadow_replayer(
@@ -32,6 +32,7 @@ async fn run() -> Result<(), ConnectorError> {
         &arguments[2],
         &arguments[3],
         &arguments[4],
+        &arguments[5],
     )?;
     serve_shadow_stdio(&shadow).await
 }

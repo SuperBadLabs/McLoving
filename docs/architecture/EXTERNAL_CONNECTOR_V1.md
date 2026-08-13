@@ -52,8 +52,9 @@ Configuration schema `mcloving.external-connector-config/v1` binds:
   digest;
 - pairwise-distinct request, destination-attestation, outcome-signing,
   observer-receipt, and runtime-attestation keys, with the credential token and
-  private outcome seed also distinct from every authority role in raw, standard
-  Base64 (padded or unpadded), and hexadecimal representations;
+  private outcome seed also distinct from every authority role in every
+  32-byte window of the bounded raw token and its complete or segmented
+  standard/Base64URL (padded or unpadded) and hexadecimal decodings;
 - the complete certified `OBS-001` implementation/image/configuration,
   deployment/operator/runtime/service/configuration/request/credential path,
   generation ancestry, destination, read grant, canonical query, state schema,
@@ -113,7 +114,8 @@ authority/key/grant identifiers, payload fields or types outside the exact
 fail before transport. Secret markers cover
 raw, standard-Base64, unpadded-Base64, hexadecimal, and percent-encoded forms.
 The connector token itself must be in the marker set, so accidental reflection
-is denied.
+is denied. Decoded Base64 payloads are searched at every byte offset, including
+when a marker is wrapped by non-secret bytes.
 
 Production construction is crate-private to the standalone loader. Before it
 reads a connector token or signing seed or opens state, it verifies a short-lived
@@ -133,7 +135,8 @@ runtime attestation, runtime-attestation public key, request public key,
 destination public key, outcome signing seed, observer public key, connector
 token, and secret markers. The shadow binary accepts configuration, runtime
 attestation, runtime-attestation public key, connector-receipt public key, and
-replay signing seed. Unknown or missing arguments fail closed.
+replay signing seed, and secret markers. Unknown or missing arguments fail
+closed.
 
 Before an HTTP request, the connector commits an immutable request digest,
 physical effect-scope key, idempotency class, attempt count, and pending claim.
@@ -237,14 +240,20 @@ endpoint/account/resource/effect, action/schema, credential grant, and
 outcome-signing mapping. A valid receipt from an old or differently scoped
 connector is rejected.
 
+Shadow audit provenance is scanned against the owner-private marker set before
+request hashing, signing, or persistence. Raw, hexadecimal, percent-encoded,
+and normalized Base64 representations—including markers at nonzero decoded
+offsets—fail with `confidentiality_denied`; a denied replay ID remains unused.
+
 The shadow loader applies the same short-lived signed live-runtime attestation
 check as the effectful loader before reading its replay signing seed or opening
 state. The AppArmor probe first verifies the live named non-complain label and
 then requires the kernel to reject an IPv4 stream socket with permission denied;
-the policy source denies all network families. Shadow construction requires its connector-receipt,
-replay-signing, and runtime-attestation public keys to be pairwise distinct, so
-deny-authority compromise cannot mint connector outcomes or attest a substituted
-runtime. The shadow ledger is fenced to the complete canonical shadow
+the policy source denies all network families. Shadow construction requires its
+connector-receipt, replay-signing, and runtime-attestation public keys to be
+pairwise distinct and rejects replay-secret material equal to any public
+authority-key bytes, so deny-authority compromise cannot mint connector outcomes
+or attest a substituted runtime. The shadow ledger is fenced to the complete canonical shadow
 configuration; a changed signing or replay-authority mapping cannot return a
 receipt stored under the prior configuration.
 

@@ -807,6 +807,14 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
             .encode([b"x".as_slice(), raw_request_seed.as_slice()].concat())
             .into_bytes(),
         format!("78{hex_request_seed}").into_bytes(),
+        format!(
+            "prefix.{}.suffix",
+            BASE64_URL_SAFE
+                .encode(&raw_request_seed)
+                .trim_end_matches('=')
+        )
+        .into_bytes(),
+        format!("prefix.{hex_request_seed}.suffix").into_bytes(),
     ] {
         let wrapped_state = tempfile::tempdir().unwrap();
         make_private(wrapped_state.path());
@@ -1258,6 +1266,7 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         .unwrap();
     let outcome_key = public_key_from_seed(&rig.outcome_seed).unwrap();
     let replay_seed = vec![8; 32];
+    let shadow_markers = vec![TOKEN.to_vec(), SECRET.to_vec()];
     let shadow_state = tempfile::tempdir().unwrap();
     make_private(shadow_state.path());
     let config = ShadowReplayConfig {
@@ -1309,9 +1318,13 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         max_receipts: 8,
         state_dir: shadow_state.path().to_path_buf(),
     };
-    let replayer =
-        ShadowReplayer::new_loopback_test(config.clone(), outcome_key.clone(), replay_seed.clone())
-            .unwrap();
+    let replayer = ShadowReplayer::new_loopback_test(
+        config.clone(),
+        outcome_key.clone(),
+        replay_seed.clone(),
+        shadow_markers.clone(),
+    )
+    .unwrap();
     for (mode, generation, previous_generation, previous_digest, rollback_from_generation) in [
         (ActivationMode::Current, 2, None, None, None),
         (ActivationMode::Cutover, 2, None, None, None),
@@ -1337,6 +1350,7 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
                 invalid_lineage,
                 outcome_key.clone(),
                 replay_seed.clone(),
+                shadow_markers.clone(),
             ),
             Err(ConnectorError::InvalidConfig)
         ));
@@ -1357,7 +1371,12 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         .connector_binding
         .outcome_signing_public_key_sha256 = content_sha256(&malformed_key);
     assert!(matches!(
-        ShadowReplayer::new_loopback_test(malformed_key_config, malformed_key, replay_seed.clone(),),
+        ShadowReplayer::new_loopback_test(
+            malformed_key_config,
+            malformed_key,
+            replay_seed.clone(),
+            shadow_markers.clone(),
+        ),
         Err(ConnectorError::InvalidConfig)
     ));
     assert!(
@@ -1374,6 +1393,7 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
             shared_key_config,
             outcome_key.clone(),
             rig.outcome_seed.clone(),
+            shadow_markers.clone(),
         ),
         Err(ConnectorError::InvalidConfig)
     ));
@@ -1386,13 +1406,47 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
             shared_attestation_key,
             outcome_key.clone(),
             replay_seed.clone(),
+            shadow_markers.clone(),
         ),
         Err(ConnectorError::InvalidConfig)
     ));
+    for (public_material, is_runtime_key) in [(outcome_key.clone(), false), (vec![9; 32], true)] {
+        let public_material_state = tempfile::tempdir().unwrap();
+        make_private(public_material_state.path());
+        let mut public_material_config = config.clone();
+        public_material_config.state_dir = public_material_state.path().to_path_buf();
+        public_material_config.replay_signing_seed_sha256 = content_sha256(&public_material);
+        public_material_config.replay_signing_public_key_sha256 =
+            content_sha256(&public_key_from_seed(&public_material).unwrap());
+        if is_runtime_key {
+            public_material_config.runtime_attestation_authority_key_sha256 =
+                content_sha256(&public_material);
+        }
+        assert!(matches!(
+            ShadowReplayer::new_loopback_test(
+                public_material_config,
+                outcome_key.clone(),
+                public_material,
+                shadow_markers.clone(),
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+        assert!(
+            !public_material_state
+                .path()
+                .join("external-shadow-replay.sqlite3")
+                .exists()
+        );
+    }
     let mut changed_config = config.clone();
     changed_config.implementation_sha256 = "5".repeat(64);
     assert!(matches!(
-        ShadowReplayer::new_loopback_test(changed_config, outcome_key.clone(), replay_seed.clone(),),
+        ShadowReplayer::new_loopback_test(
+            changed_config,
+            outcome_key.clone(),
+            replay_seed.clone(),
+            shadow_markers.clone(),
+        ),
         Err(ConnectorError::RuntimeFenced)
     ));
     let mut substituted_outcome = outcome.clone();
@@ -1410,6 +1464,24 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         }),
         Err(ConnectorError::InvalidReplay)
     );
+    let secret_replay_id = Uuid::new_v4();
+    let mut secret_audit_request = ShadowReplayRequest {
+        schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
+        replay_id: secret_replay_id,
+        expected_outcome_receipt_sha256: outcome_receipt_digest(&outcome).unwrap(),
+        expected_shadow_identity: config.shadow_identity.clone(),
+        outcome_receipt: outcome.clone(),
+        replayed_at_unix_ms: NOW + 2,
+        audit_provenance: BASE64.encode([b"x".as_slice(), TOKEN].concat()),
+    };
+    assert_eq!(
+        replayer.replay(secret_audit_request.clone()),
+        Err(ConnectorError::ConfidentialityDenied)
+    );
+    secret_audit_request.audit_provenance = "audit/shadow/1".to_owned();
+    let request = secret_audit_request;
+    let first = replayer.replay(request.clone()).unwrap();
+    verify_shadow_receipt(&first, &public_key_from_seed(&replay_seed).unwrap()).unwrap();
     let replay_id = Uuid::new_v4();
     let large_output_state = tempfile::tempdir().unwrap();
     make_private(large_output_state.path());
@@ -1421,6 +1493,7 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         large_output_config.clone(),
         outcome_key.clone(),
         replay_seed.clone(),
+        shadow_markers.clone(),
     )
     .unwrap();
     let mut oversized_request = ShadowReplayRequest {
@@ -1458,18 +1531,9 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         audit_provenance: "audit/shadow/frame-retry".to_owned(),
     };
     assert!(large_output_replayer.replay(small_request).is_ok());
-    let request = ShadowReplayRequest {
-        schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
-        replay_id,
-        expected_outcome_receipt_sha256: outcome_receipt_digest(&outcome).unwrap(),
-        expected_shadow_identity: config.shadow_identity.clone(),
-        outcome_receipt: outcome,
-        replayed_at_unix_ms: NOW + 2,
-        audit_provenance: "audit/shadow/1".to_owned(),
-    };
-    let first = replayer.replay(request.clone()).unwrap();
-    verify_shadow_receipt(&first, &public_key_from_seed(&replay_seed).unwrap()).unwrap();
-    let restarted = ShadowReplayer::new_loopback_test(config, outcome_key, replay_seed).unwrap();
+    let restarted =
+        ShadowReplayer::new_loopback_test(config, outcome_key, replay_seed, shadow_markers)
+            .unwrap();
     assert_eq!(restarted.replay(request).unwrap(), first);
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
 }

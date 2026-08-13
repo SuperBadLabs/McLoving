@@ -11,6 +11,7 @@ pub struct ShadowReplayer {
     config: ShadowReplayConfig,
     connector_receipt_key: Vec<u8>,
     replay_signing_seed: Vec<u8>,
+    secret_markers: Vec<Vec<u8>>,
     store: Mutex<ShadowStore>,
 }
 
@@ -19,8 +20,10 @@ impl ShadowReplayer {
         config: ShadowReplayConfig,
         connector_receipt_key: Vec<u8>,
         replay_signing_seed: Vec<u8>,
+        secret_markers: Vec<Vec<u8>>,
     ) -> Result<Self, ConnectorError> {
         let replay_public = public_key_from_seed(&replay_signing_seed)?;
+        let replay_seed_digest = content_sha256(&replay_signing_seed);
         let shadow_authority_key_digests = [
             config.connector_receipt_key_sha256.as_str(),
             config.replay_signing_public_key_sha256.as_str(),
@@ -86,8 +89,13 @@ impl ShadowReplayer {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 != shadow_authority_key_digests.len()
-            || config.replay_signing_seed_sha256 != content_sha256(&replay_signing_seed)
+            || shadow_authority_key_digests.contains(&replay_seed_digest.as_str())
+            || config.replay_signing_seed_sha256 != replay_seed_digest
             || config.replay_signing_public_key_sha256 != content_sha256(&replay_public)
+            || secret_markers.is_empty()
+            || secret_markers
+                .iter()
+                .any(|marker| marker.len() < 4 || marker.len() > 4096)
             || config.denied_endpoint_identities.is_empty()
             || !config
                 .denied_endpoint_identities
@@ -95,12 +103,18 @@ impl ShadowReplayer {
         {
             return Err(ConnectorError::InvalidConfig);
         }
+        let config_bytes =
+            serde_json::to_vec(&config).map_err(|_| ConnectorError::InvalidConfig)?;
+        if crate::connector::contains_secret_value(&config_bytes, &secret_markers) {
+            return Err(ConnectorError::ConfidentialityDenied);
+        }
         let config_sha256 = config.canonical_digest()?;
         let store = ShadowStore::open(&config.state_dir, &config_sha256, config.max_receipts)?;
         Ok(Self {
             config,
             connector_receipt_key,
             replay_signing_seed,
+            secret_markers,
             store: Mutex::new(store),
         })
     }
@@ -111,8 +125,14 @@ impl ShadowReplayer {
         config: ShadowReplayConfig,
         connector_receipt_key: Vec<u8>,
         replay_signing_seed: Vec<u8>,
+        secret_markers: Vec<Vec<u8>>,
     ) -> Result<Self, ConnectorError> {
-        Self::new(config, connector_receipt_key, replay_signing_seed)
+        Self::new(
+            config,
+            connector_receipt_key,
+            replay_signing_seed,
+            secret_markers,
+        )
     }
 
     pub fn replay(
@@ -126,6 +146,12 @@ impl ShadowReplayer {
             || request.audit_provenance.is_empty()
         {
             return Err(ConnectorError::InvalidReplay);
+        }
+        if crate::connector::contains_secret_value(
+            request.audit_provenance.as_bytes(),
+            &self.secret_markers,
+        ) {
+            return Err(ConnectorError::ConfidentialityDenied);
         }
         verify_outcome_receipt(&request.outcome_receipt, &self.connector_receipt_key)?;
         let outcome_digest = outcome_receipt_digest(&request.outcome_receipt)?;

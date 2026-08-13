@@ -129,6 +129,7 @@ pub fn load_shadow_replayer(
     runtime_attestation_key_path: &Path,
     connector_key_path: &Path,
     replay_seed_path: &Path,
+    marker_path: &Path,
 ) -> Result<ShadowReplayer, ConnectorError> {
     let config: ShadowReplayConfig = parse_config(&read_private_bounded_regular_file(
         config_path,
@@ -154,6 +155,7 @@ pub fn load_shadow_replayer(
         config,
         decode_single_key(connector_key_path)?,
         decode_single_key(replay_seed_path)?,
+        decode_markers(marker_path)?,
     )
 }
 

@@ -1111,23 +1111,8 @@ fn credential_encodes_authority_seed(
     authority_public_key_digests: &[String],
 ) -> bool {
     let mut payloads = std::collections::BTreeSet::from([credential_token.to_vec()]);
-    if let Ok(encoded) = std::str::from_utf8(credential_token) {
-        if let Some(decoded) = decode_base64_alias_payload(encoded.as_bytes()) {
-            payloads.insert(decoded);
-        }
-        if encoded.len() >= 64
-            && encoded.len().is_multiple_of(2)
-            && encoded.as_bytes().iter().all(u8::is_ascii_hexdigit)
-        {
-            let decoded = (0..encoded.len())
-                .step_by(2)
-                .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
-                .collect::<Result<Vec<_>, _>>();
-            if let Ok(decoded) = decoded {
-                payloads.insert(decoded);
-            }
-        }
-    }
+    insert_base64_credential_payloads(credential_token, &mut payloads);
+    insert_hex_credential_payloads(credential_token, &mut payloads);
     payloads.into_iter().any(|payload| {
         payload.windows(32).any(|seed| {
             crate::public_key_from_seed(seed).is_ok_and(|public_key| {
@@ -1138,6 +1123,79 @@ fn credential_encodes_authority_seed(
             })
         })
     })
+}
+
+fn insert_base64_credential_payloads(
+    encoded: &[u8],
+    payloads: &mut std::collections::BTreeSet<Vec<u8>>,
+) {
+    let mut index = 0;
+    while index < encoded.len() {
+        if base64_value(encoded[index]).is_none() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < encoded.len() && base64_value(encoded[index]).is_some() {
+            index += 1;
+        }
+        let content_end = index;
+        while index < encoded.len() && encoded[index] == b'=' {
+            index += 1;
+        }
+        if let Some(decoded) = decode_base64_alias_payload(&encoded[start..index]) {
+            payloads.insert(decoded);
+        }
+        for window in encoded[start..content_end].windows(43) {
+            if let Some(decoded) = decode_base64_alias_payload(window)
+                && decoded.len() == 32
+            {
+                payloads.insert(decoded);
+            }
+        }
+    }
+}
+
+fn insert_hex_credential_payloads(
+    encoded: &[u8],
+    payloads: &mut std::collections::BTreeSet<Vec<u8>>,
+) {
+    let mut index = 0;
+    while index < encoded.len() {
+        if !encoded[index].is_ascii_hexdigit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < encoded.len() && encoded[index].is_ascii_hexdigit() {
+            index += 1;
+        }
+        let run = &encoded[start..index];
+        if run.len() >= 64
+            && run.len().is_multiple_of(2)
+            && let Some(decoded) = decode_hex_payload(run)
+        {
+            payloads.insert(decoded);
+        }
+        for window in run.windows(64) {
+            if let Some(decoded) = decode_hex_payload(window) {
+                payloads.insert(decoded);
+            }
+        }
+    }
+}
+
+fn decode_hex_payload(encoded: &[u8]) -> Option<Vec<u8>> {
+    (encoded.len().is_multiple_of(2) && encoded.iter().all(u8::is_ascii_hexdigit))
+        .then(|| {
+            (0..encoded.len())
+                .step_by(2)
+                .map(|index| {
+                    Some((hex_value(encoded[index])? << 4) | hex_value(encoded[index + 1])?)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .flatten()
 }
 
 fn decode_base64_alias_payload(encoded: &[u8]) -> Option<Vec<u8>> {
@@ -1279,7 +1337,7 @@ fn maximum_receipt_envelope_fits(config: &ConnectorConfig, signing_public: &[u8]
         .is_some_and(|size| size <= crate::MAX_FRAME_BYTES)
 }
 
-fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
+pub(crate) fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     markers.iter().any(|marker| {
         let mut candidate = raw.to_vec();
         loop {
