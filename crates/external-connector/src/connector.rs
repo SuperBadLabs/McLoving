@@ -1051,6 +1051,7 @@ fn validate_config(
         || config.observer_binding.receipt_signing_public_key_sha256 != content_sha256(observer_key)
         || config.credential_token_sha256 != content_sha256(credential_token)
         || credential_token.is_empty()
+        || credential_token.len() > 4096
         || credential_encodes_authority_seed(credential_token, &authority_public_key_digests)
         || secret_markers.is_empty()
         || !secret_markers
@@ -1109,56 +1110,57 @@ fn credential_encodes_authority_seed(
     credential_token: &[u8],
     authority_public_key_digests: &[String],
 ) -> bool {
-    let mut candidates = std::collections::BTreeSet::new();
-    if credential_token.len() == 32 {
-        candidates.insert(credential_token.to_vec());
-    }
+    let mut payloads = std::collections::BTreeSet::from([credential_token.to_vec()]);
     if let Ok(encoded) = std::str::from_utf8(credential_token) {
-        if let Some(seed) = decode_base64_seed_alias(encoded) {
-            candidates.insert(seed);
+        if let Some(decoded) = decode_base64_alias_payload(encoded.as_bytes()) {
+            payloads.insert(decoded);
         }
-        if encoded.len() == 64 && encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-            let seed = (0..encoded.len())
+        if encoded.len() >= 64
+            && encoded.len().is_multiple_of(2)
+            && encoded.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        {
+            let decoded = (0..encoded.len())
                 .step_by(2)
                 .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
                 .collect::<Result<Vec<_>, _>>();
-            if let Ok(seed) = seed {
-                candidates.insert(seed);
+            if let Ok(decoded) = decoded {
+                payloads.insert(decoded);
             }
         }
     }
-    candidates.into_iter().any(|seed| {
-        crate::public_key_from_seed(&seed).is_ok_and(|public_key| {
-            let digest = content_sha256(&public_key);
-            authority_public_key_digests
-                .iter()
-                .any(|authority_digest| authority_digest == &digest)
+    payloads.into_iter().any(|payload| {
+        payload.windows(32).any(|seed| {
+            crate::public_key_from_seed(seed).is_ok_and(|public_key| {
+                let digest = content_sha256(&public_key);
+                authority_public_key_digests
+                    .iter()
+                    .any(|authority_digest| authority_digest == &digest)
+            })
         })
     })
 }
 
-fn decode_base64_seed_alias(encoded: &str) -> Option<Vec<u8>> {
-    let bytes = encoded.as_bytes();
-    let content_len = bytes
+fn decode_base64_alias_payload(encoded: &[u8]) -> Option<Vec<u8>> {
+    let content_len = encoded
         .iter()
         .position(|byte| *byte == b'=')
-        .unwrap_or(bytes.len());
-    if content_len != 43 || bytes[content_len..].iter().any(|byte| *byte != b'=') {
+        .unwrap_or(encoded.len());
+    if content_len == 0 || encoded[content_len..].iter().any(|byte| *byte != b'=') {
         return None;
     }
-    let mut seed = Vec::with_capacity(32);
+    let mut decoded = Vec::with_capacity(content_len.saturating_mul(3) / 4);
     let mut pending = 0_u32;
     let mut pending_bits = 0_u8;
-    for byte in &bytes[..content_len] {
+    for byte in &encoded[..content_len] {
         pending = (pending << 6) | u32::from(base64_value(*byte)?);
         pending_bits += 6;
         if pending_bits >= 8 {
             pending_bits -= 8;
-            seed.push(((pending >> pending_bits) & 0xff) as u8);
+            decoded.push(((pending >> pending_bits) & 0xff) as u8);
             pending &= (1_u32 << pending_bits) - 1;
         }
     }
-    (seed.len() == 32).then_some(seed)
+    Some(decoded)
 }
 
 fn base64_value(byte: u8) -> Option<u8> {
@@ -1310,10 +1312,34 @@ fn contains_base64_alias(raw: &[u8], marker: &[u8]) -> bool {
     let Some(content_len) = bit_len.checked_add(5).map(|bits| bits / 6) else {
         return false;
     };
-    content_len != 0
+    (content_len != 0
         && raw
             .windows(content_len)
-            .any(|window| base64_alias_decodes_to(window, marker))
+            .any(|window| base64_alias_decodes_to(window, marker)))
+        || decoded_base64_run_contains(raw, marker)
+}
+
+fn decoded_base64_run_contains(raw: &[u8], marker: &[u8]) -> bool {
+    let mut index = 0;
+    while index < raw.len() {
+        if base64_value(raw[index]).is_none() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < raw.len() && base64_value(raw[index]).is_some() {
+            index += 1;
+        }
+        while index < raw.len() && raw[index] == b'=' {
+            index += 1;
+        }
+        if decode_base64_alias_payload(&raw[start..index])
+            .is_some_and(|decoded| contains(&decoded, marker))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn base64_alias_decodes_to(encoded: &[u8], expected: &[u8]) -> bool {

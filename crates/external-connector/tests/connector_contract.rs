@@ -35,6 +35,7 @@ enum Mode {
     PercentEncodedSecret,
     PercentEncodedBase64Secret,
     Base64AliasSecret,
+    Base64WrappedSecret,
     Malformed,
     Denied,
     SignedFailure,
@@ -364,6 +365,11 @@ async fn destination(
             Value::String(String::from_utf8(alias).unwrap()),
         );
     }
+    if matches!(state.mode, Mode::Base64WrappedSecret) {
+        let wrapped = [b"x".as_slice(), TOKEN].concat();
+        body.public_values
+            .insert("url".to_owned(), Value::String(BASE64.encode(wrapped)));
+    }
     let mut response = SignedDestinationOutcome {
         body,
         signature_base64: String::new(),
@@ -486,6 +492,7 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
         (Mode::PercentEncodedSecret, "confidentiality_denied"),
         (Mode::PercentEncodedBase64Secret, "confidentiality_denied"),
         (Mode::Base64AliasSecret, "confidentiality_denied"),
+        (Mode::Base64WrappedSecret, "confidentiality_denied"),
     ] {
         let rig = Rig::new(mode, IdempotencyClass::ExternallyIdempotent).await;
         let receipt = rig
@@ -789,6 +796,44 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         ),
         Err(ConnectorError::InvalidConfig)
     ));
+
+    let hex_request_seed = raw_request_seed
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    for wrapped_request_credential in [
+        [b"x".as_slice(), raw_request_seed.as_slice()].concat(),
+        BASE64
+            .encode([b"x".as_slice(), raw_request_seed.as_slice()].concat())
+            .into_bytes(),
+        format!("78{hex_request_seed}").into_bytes(),
+    ] {
+        let wrapped_state = tempfile::tempdir().unwrap();
+        make_private(wrapped_state.path());
+        let mut wrapped_config = rig.config.clone();
+        wrapped_config.state_dir = wrapped_state.path().to_path_buf();
+        wrapped_config.request_authority_key_sha256 =
+            content_sha256(&public_key_from_seed(&raw_request_seed).unwrap());
+        wrapped_config.credential_token_sha256 = content_sha256(&wrapped_request_credential);
+        assert!(matches!(
+            ExternalConnector::new_loopback_test(
+                wrapped_config,
+                public_key_from_seed(&raw_request_seed).unwrap(),
+                public_key_from_seed(&rig.destination_seed).unwrap(),
+                rig.outcome_seed.clone(),
+                public_key_from_seed(&rig.observer_seed).unwrap(),
+                wrapped_request_credential.clone(),
+                vec![wrapped_request_credential, SECRET.to_vec()],
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+        assert!(
+            !wrapped_state
+                .path()
+                .join("external-connector.sqlite3")
+                .exists()
+        );
+    }
 
     let canonical_request_seed = BASE64.encode(&rig.request_seed);
     let extra_padding_credential = format!("{canonical_request_seed}=").into_bytes();
