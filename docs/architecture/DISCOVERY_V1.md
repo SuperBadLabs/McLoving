@@ -36,7 +36,7 @@ Every parent generation binds all authority-bearing inputs:
 - child-configuration policy digest and `retain` or `retire` orphan policy;
 - exact current project authorization generation and policy digest;
 - exact enabled SCM-webhook trigger identity, generation, configuration digest,
-  and provider identity;
+  provider, and provider identity;
 - source-acquirer implementation, protocol, and configuration digests; and
 - actor, reason, idempotency key, optional retained rollback generation, and
   hash-chained audit event.
@@ -48,6 +48,11 @@ idempotent replay returns the retained generation even after a bound dependency
 has advanced, because it creates no new authority. Divergent reuse, stale
 preconditions, missing saved pipelines, missing authorization policy, and
 trigger/configuration/provider substitution fail closed.
+
+Repository, branch-filter, and trusted-fork sets are bounded both by item count
+and by the exact 65,536-byte PostgreSQL JSONB text limit. Oversized sets fail
+request validation before a transaction begins rather than surfacing as a
+database constraint error.
 
 `enabled` admits reconciliation. `quiesced` denies every new scan and is the
 only state eligible for transfer export. Quiescence must be a state-only
@@ -77,8 +82,9 @@ without allowing older events to overwrite newer truth.
 
 Before committing a scan, the transaction locks and re-reads the current parent,
 authorization policy, and SCM trigger. Parent generation, enabled state,
-authorization generation/digest, and trigger generation/kind/state/digest must
-still match. The audit event, scan row, immutable observations, materialized
+authorization generation/digest, and trigger
+generation/kind/state/digest/provider/provider identity must still match. The
+audit event, scan row, immutable observations, materialized
 children, and orphan transitions commit or roll back together.
 
 Every reported observation is retained with an explicit `active`,

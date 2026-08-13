@@ -595,6 +595,29 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         store.put_discovery_parent(&substituted).await,
         Err(StoreError::InvalidDiscovery(_))
     ));
+
+    let mut oversized = parent.clone();
+    oversized.repositories = (0..130)
+        .map(|index| format!("{index:04}-{}", "x".repeat(507)))
+        .collect();
+    oversized.idempotency_key = "discovery-parent-oversized-repositories".to_owned();
+    oversized.expected_configuration_sha256 =
+        compute_discovery_parent_configuration_sha256(&oversized).unwrap();
+    assert!(matches!(
+        store.put_discovery_parent(&oversized).await,
+        Err(StoreError::InvalidDiscovery(_))
+    ));
+
+    let mut provider_substituted = parent.clone();
+    provider_substituted.provider = "gitlab".to_owned();
+    provider_substituted.idempotency_key = "discovery-parent-provider-substitution".to_owned();
+    provider_substituted.expected_configuration_sha256 =
+        compute_discovery_parent_configuration_sha256(&provider_substituted).unwrap();
+    assert!(matches!(
+        store.put_discovery_parent(&provider_substituted).await,
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+
     store.put_discovery_parent(&parent).await.unwrap();
 
     let seeded_observation = observation(
@@ -745,6 +768,12 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         "ffffffffffffffffffffffffffffffffffffffff".to_owned();
     assert!(matches!(
         verify_discovery_transfer_snapshot(&substituted_transfer, transfer.audit_event_hash),
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+    let mut malformed_audit_commitment = transfer.clone();
+    malformed_audit_commitment.handoff_audit_event.payload["ledger_sha256"] = json!(null);
+    assert!(matches!(
+        verify_discovery_transfer_snapshot(&malformed_audit_commitment, transfer.audit_event_hash),
         Err(StoreError::DiscoveryConflict(_))
     ));
     assert!(matches!(

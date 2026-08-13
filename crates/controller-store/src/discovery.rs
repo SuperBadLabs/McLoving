@@ -12,6 +12,7 @@ const MAX_TEXT_BYTES: usize = 512;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_REASON_BYTES: usize = 2048;
 const MAX_SET_ITEMS: usize = 4096;
+const MAX_JSONB_TEXT_BYTES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -668,10 +669,16 @@ pub fn verify_discovery_transfer_snapshot(
         None | Some(_) => {}
     }
     let ledger_sha256 = compute_discovery_transfer_ledger_sha256(snapshot)?;
+    let ledger_hex = hex::encode(ledger_sha256);
     if ledger_sha256 != snapshot.ledger_sha256
         || snapshot.handoff_audit_event.category != "discovery"
         || snapshot.handoff_audit_event.action != "discovery.handoff.exported"
-        || snapshot.handoff_audit_event.payload["ledger_sha256"] != hex::encode(ledger_sha256)
+        || snapshot
+            .handoff_audit_event
+            .payload
+            .get("ledger_sha256")
+            .and_then(serde_json::Value::as_str)
+            != Some(ledger_hex.as_str())
         || compute_discovery_transfer_snapshot_sha256(snapshot)? != snapshot.state_sha256
     {
         return conflict("discovery transfer digest or audit commitment was substituted");
@@ -1804,9 +1811,10 @@ async fn lock_and_validate_dependencies(
     {
         return conflict("discovery authorization generation or digest was substituted");
     }
-    let trigger = sqlx::query_as::<_, (i64, String, String, Vec<u8>, String)>(
+    let trigger = sqlx::query_as::<_, (i64, String, String, Vec<u8>, String, String)>(
         "SELECT definition.current_generation, version.trigger_kind, version.state,
-                version.configuration_sha256, version.event_source_identity
+                version.configuration_sha256, version.event_source_identity,
+                version.configuration ->> 'provider'
          FROM pipeline_trigger_definitions AS definition
          JOIN pipeline_trigger_versions AS version
            ON version.organization_id = definition.organization_id
@@ -1822,7 +1830,7 @@ async fn lock_and_validate_dependencies(
     .bind(input.trigger_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((generation, kind, state, digest, source_identity)) = trigger else {
+    let Some((generation, kind, state, digest, source_identity, provider)) = trigger else {
         return conflict("discovery parent requires a saved SCM webhook trigger");
     };
     if generation != input.trigger_generation
@@ -1830,9 +1838,10 @@ async fn lock_and_validate_dependencies(
         || state != "enabled"
         || digest_array(&digest)? != input.trigger_configuration_sha256
         || source_identity != input.provider_identity
+        || provider != input.provider
     {
         return conflict(
-            "discovery trigger generation, configuration, state, or provider identity was substituted",
+            "discovery trigger generation, configuration, state, provider, or provider identity was substituted",
         );
     }
     Ok(())
@@ -1855,36 +1864,47 @@ async fn validate_live_authorities(
     .bind(parent.project_id)
     .fetch_optional(&mut **tx)
     .await?;
-    if authorization.as_ref().is_none_or(|(generation, digest)| {
-        *generation != parent.authorization_generation
-            || digest.as_slice() != parent.authorization_policy_sha256
-    }) {
+    let authorization_matches = match authorization {
+        Some((generation, digest)) => {
+            generation == parent.authorization_generation
+                && digest_array(&digest)? == parent.authorization_policy_sha256
+        }
+        None => false,
+    };
+    if !authorization_matches {
         return conflict("discovery authorization authority drifted before reconciliation");
     }
-    let trigger = sqlx::query_as::<_, (i64, String, String, Vec<u8>)>(
+    let trigger = sqlx::query_as::<_, (i64, String, String, Vec<u8>, String, String)>(
         "SELECT definition.current_generation, version.trigger_kind, version.state,
-                version.configuration_sha256
+                version.configuration_sha256, version.event_source_identity,
+                version.configuration ->> 'provider'
          FROM pipeline_trigger_definitions AS definition
          JOIN pipeline_trigger_versions AS version
            ON version.organization_id = definition.organization_id
           AND version.trigger_id = definition.trigger_id
           AND version.generation = definition.current_generation
          WHERE definition.organization_id = $1 AND definition.trigger_id = $2
+           AND definition.project_id = $3 AND definition.pipeline_id = $4
          FOR UPDATE OF definition",
     )
     .bind(parent.organization_id)
     .bind(parent.trigger_id)
+    .bind(parent.project_id)
+    .bind(parent.pipeline_id)
     .fetch_optional(&mut **tx)
     .await?;
-    if trigger
-        .as_ref()
-        .is_none_or(|(generation, kind, state, digest)| {
-            *generation != parent.trigger_generation
-                || kind != "scm_webhook"
-                || state != "enabled"
-                || digest.as_slice() != parent.trigger_configuration_sha256
-        })
-    {
+    let trigger_matches = match trigger {
+        Some((generation, kind, state, digest, source_identity, provider)) => {
+            generation == parent.trigger_generation
+                && kind == "scm_webhook"
+                && state == "enabled"
+                && digest_array(&digest)? == parent.trigger_configuration_sha256
+                && source_identity == parent.provider_identity
+                && provider == parent.provider
+        }
+        None => false,
+    };
+    if !trigger_matches {
         return conflict("discovery trigger authority drifted before reconciliation");
     }
     Ok(())
@@ -2359,6 +2379,20 @@ fn validate_string_set(name: &str, values: &[String]) -> Result<(), StoreError> 
         if !unique.insert(value) {
             return invalid(format!("{name} contains duplicates"));
         }
+    }
+    // PostgreSQL renders JSONB array separators as `, `, while serde_json's
+    // compact representation uses `,`. Account for those spaces so validation
+    // exactly fences the migration's `octet_length(value::text)` constraint.
+    let compact_bytes = serde_json::to_vec(values)
+        .map_err(|error| StoreError::InvalidDiscovery(error.to_string()))?
+        .len();
+    let database_text_bytes = compact_bytes
+        .checked_add(values.len().saturating_sub(1))
+        .ok_or_else(|| {
+            StoreError::InvalidDiscovery(format!("{name} exceeds its serialized size bound"))
+        })?;
+    if database_text_bytes > MAX_JSONB_TEXT_BYTES {
+        return invalid(format!("{name} exceeds its serialized size bound"));
     }
     Ok(())
 }
