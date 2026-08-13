@@ -41,11 +41,13 @@ Configuration schema `mcloving.external-connector-config/v1` binds:
   issuance, and independent observer identities;
 - monotonic generation plus current, cutover, or rollback provenance;
 - exact endpoint URL and endpoint, account, resource, effect-class identities;
-- action name, request schema, closed typed request-payload and public-output
-  schemas, and allowed secret taints;
+- action name, request schema, closed typed scalar request-payload fields and
+  public-output schema, and allowed secret taints; nested request structures are
+  not admitted by v1 because a kind-only object/array would not be closed;
 - short-lived credential grant identity, version, scope, expiry, and token
   digest;
-- request, destination-attestation, outcome-signing, and observer-receipt keys;
+- pairwise-distinct request, destination-attestation, outcome-signing,
+  observer-receipt, and runtime-attestation keys;
 - the complete certified `OBS-001` implementation/image/configuration,
   deployment/operator/runtime/service/configuration/request/credential path,
   generation ancestry, destination, read grant, canonical query, state schema,
@@ -86,7 +88,7 @@ validity window; and audit provenance.
 Unknown or duplicate members, nil identifiers, invalid signatures, stale or
 oversized requests, divergent runtime/endpoint/grant bindings, empty physical
 authority/key/grant identifiers, payload fields or types outside the exact
-configured closed schema, and secret-marker disclosure in public request fields
+  configured closed scalar schema, and secret-marker disclosure in public request fields
 fail before transport. Secret markers cover
 raw, standard-Base64, unpadded-Base64, hexadecimal, and percent-encoded forms.
 The connector token itself must be in the marker set, so accidental reflection
@@ -114,7 +116,9 @@ replay signing seed. Unknown or missing arguments fail closed.
 
 Before an HTTP request, the connector commits an immutable request digest,
 physical effect-scope key, idempotency class, attempt count, and pending claim.
-It then commits `dispatched=true` immediately before transport. A request ID can
+It then commits `dispatched=true` and the trusted pre-send timestamp immediately
+before transport. Crash recovery clamps ambiguity capture strictly after that
+durable dispatch boundary even if the host clock moves backward. A request ID can
 be reused only with byte-identical canonical truth. A completed replay returns
 the exact stored signed receipt without another HTTP request. Each
 tenant/project/attempt/fence/effect key is durably single-use across pending,
@@ -203,7 +207,9 @@ connector is rejected.
 The shadow loader applies the same short-lived signed live-runtime attestation
 check as the effectful loader before reading its replay signing seed or opening
 state. The AppArmor policy remains an independent kernel-enforced denial of all
-network families.
+network families. Shadow construction also rejects reuse of the connector
+receipt public key as its replay-signing public key, so deny-authority compromise
+cannot mint connector outcomes.
 
 The shadow verifies the connector receipt and stores an exactly-once replay keyed
 by both replay ID and outcome digest. Exact restart replay returns the same
@@ -231,6 +237,8 @@ The standard crate gate proves:
 - exactly-once signed shadow replay across restart with no endpoint authority and
   substituted connector mapping denial;
 - fresh signed runtime attestation and live boot/namespace/cgroup binding;
+- pairwise connector authority-key and connector/shadow signing-key separation;
+- durable dispatch-time recovery under backward clock movement;
 - evidence-capacity reservation for the original ambiguity plus reconciliation;
 - crash-after-dispatch recovery into ambiguity; and
 - permissive or symlinked state-directory denial, cross-process lease

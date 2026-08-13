@@ -72,6 +72,7 @@ impl ShadowReplayer {
                 != content_sha256(&connector_receipt_key)
             || config.max_receipts == 0
             || config.connector_receipt_key_sha256 != content_sha256(&connector_receipt_key)
+            || content_sha256(&replay_public) == config.connector_receipt_key_sha256
             || config.replay_signing_seed_sha256 != content_sha256(&replay_signing_seed)
             || config.replay_signing_public_key_sha256 != content_sha256(&replay_public)
             || config.denied_endpoint_identities.is_empty()

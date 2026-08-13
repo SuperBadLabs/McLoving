@@ -35,10 +35,17 @@ pub(crate) fn acquire_shadow_lock(state_dir: &Path) -> Result<LineageLock, Conne
 
 #[derive(Debug)]
 pub(crate) enum Claim {
-    Dispatch { attempt_count: u8 },
+    Dispatch {
+        attempt_count: u8,
+    },
     Replay(Box<OutcomeReceipt>),
-    AmbiguousAfterRestart { attempt_count: u8 },
-    RetryBudgetExhausted { attempt_count: u8 },
+    AmbiguousAfterRestart {
+        attempt_count: u8,
+        dispatched_at_unix_ms: i64,
+    },
+    RetryBudgetExhausted {
+        attempt_count: u8,
+    },
 }
 
 pub(crate) struct ConnectorStore {
@@ -77,6 +84,7 @@ impl ConnectorStore {
                    idempotency_class TEXT NOT NULL,
                    status TEXT NOT NULL CHECK(status IN ('pending','terminal')),
                    dispatched INTEGER NOT NULL CHECK(dispatched IN (0,1)),
+                   dispatched_at_unix_ms INTEGER,
                    attempt_count INTEGER NOT NULL CHECK(attempt_count BETWEEN 0 AND 255),
                    current_receipt_sha256 TEXT,
                    current_receipt_json BLOB
@@ -135,7 +143,7 @@ impl ConnectorStore {
         let existing = tx
             .query_row(
                 "SELECT request_sha256, idempotency_class, status, dispatched,
-                        attempt_count, current_receipt_json
+                        dispatched_at_unix_ms, attempt_count, current_receipt_json
                  FROM requests WHERE request_id = ?1",
                 [request_id.to_string()],
                 |row| {
@@ -144,14 +152,24 @@ impl ConnectorStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, bool>(3)?,
-                        row.get::<_, u8>(4)?,
-                        row.get::<_, Option<Vec<u8>>>(5)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, u8>(5)?,
+                        row.get::<_, Option<Vec<u8>>>(6)?,
                     ))
                 },
             )
             .optional()
             .map_err(|_| ConnectorError::StateUnavailable)?;
-        if let Some((stored_sha, stored_class, status, dispatched, attempts, receipt)) = existing {
+        if let Some((
+            stored_sha,
+            stored_class,
+            status,
+            dispatched,
+            dispatched_at,
+            attempts,
+            receipt,
+        )) = existing
+        {
             if stored_sha != request_sha256 || stored_class != class_name(class) {
                 return Err(ConnectorError::ReplayMismatch);
             }
@@ -163,9 +181,12 @@ impl ConnectorStore {
                 return Ok(Claim::Replay(Box::new(receipt)));
             }
             if dispatched && !class.retry_safe() {
+                let dispatched_at_unix_ms =
+                    dispatched_at.ok_or(ConnectorError::StateUnavailable)?;
                 tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
                 return Ok(Claim::AmbiguousAfterRestart {
                     attempt_count: attempts,
+                    dispatched_at_unix_ms,
                 });
             }
             if attempts >= max_attempts {
@@ -176,7 +197,9 @@ impl ConnectorStore {
             }
             let next = attempts.saturating_add(1);
             tx.execute(
-                "UPDATE requests SET dispatched = 0, attempt_count = ?2 WHERE request_id = ?1",
+                "UPDATE requests
+                 SET dispatched = 0, dispatched_at_unix_ms = NULL, attempt_count = ?2
+                 WHERE request_id = ?1",
                 params![request_id.to_string(), next],
             )
             .map_err(|_| ConnectorError::StateUnavailable)?;
@@ -224,13 +247,18 @@ impl ConnectorStore {
         &mut self,
         request_id: Uuid,
         request_sha256: &str,
+        dispatched_at_unix_ms: i64,
     ) -> Result<(), ConnectorError> {
         let changed = self
             .connection
             .execute(
-                "UPDATE requests SET dispatched = 1
+                "UPDATE requests SET dispatched = 1, dispatched_at_unix_ms = ?3
                  WHERE request_id = ?1 AND request_sha256 = ?2 AND status = 'pending'",
-                params![request_id.to_string(), request_sha256],
+                params![
+                    request_id.to_string(),
+                    request_sha256,
+                    dispatched_at_unix_ms
+                ],
             )
             .map_err(|_| ConnectorError::StateUnavailable)?;
         if changed != 1 {
@@ -247,7 +275,7 @@ impl ConnectorStore {
         let changed = self
             .connection
             .execute(
-                "UPDATE requests SET dispatched = 0
+                "UPDATE requests SET dispatched = 0, dispatched_at_unix_ms = NULL
                  WHERE request_id = ?1 AND request_sha256 = ?2 AND status = 'pending'",
                 params![request_id.to_string(), request_sha256],
             )
@@ -620,7 +648,9 @@ mod tests {
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
         ));
-        first.mark_dispatched(request_id, &"b".repeat(64)).unwrap();
+        first
+            .mark_dispatched(request_id, &"b".repeat(64), 1_800_000_000_000)
+            .unwrap();
         drop(first);
 
         let mut restarted = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
@@ -634,7 +664,10 @@ mod tests {
                     2,
                 )
                 .unwrap(),
-            Claim::AmbiguousAfterRestart { attempt_count: 1 }
+            Claim::AmbiguousAfterRestart {
+                attempt_count: 1,
+                dispatched_at_unix_ms: 1_800_000_000_000,
+            }
         ));
     }
 

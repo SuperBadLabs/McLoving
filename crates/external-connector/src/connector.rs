@@ -188,14 +188,21 @@ impl ExternalConnector {
                     )?;
                     return Ok(*receipt);
                 }
-                Claim::AmbiguousAfterRestart { attempt_count } => {
+                Claim::AmbiguousAfterRestart {
+                    attempt_count,
+                    dispatched_at_unix_ms,
+                } => {
                     return self.finalize_local(
                         &request,
                         &request_sha256,
                         attempt_count,
                         OutcomeStatus::Ambiguous,
                         "transport_state_lost_after_dispatch",
-                        now_unix_ms,
+                        post_dispatch_capture_time(
+                            resample_system_clock,
+                            now_unix_ms,
+                            dispatched_at_unix_ms,
+                        )?,
                     );
                 }
                 Claim::RetryBudgetExhausted { attempt_count } => {
@@ -231,7 +238,7 @@ impl ExternalConnector {
             self.store
                 .lock()
                 .map_err(|_| ConnectorError::StateUnavailable)?
-                .mark_dispatched(request.request_id, &request_sha256)?;
+                .mark_dispatched(request.request_id, &request_sha256, dispatch_time)?;
             match self.dispatch(&request, &request_sha256).await {
                 Ok(response) => {
                     if response.body.status == OutcomeStatus::RetryableFailure
@@ -650,6 +657,10 @@ impl ExternalConnector {
             || body.credential_grant_version != self.config.credential_grant_version
             || body.credential_grant_scope != self.config.credential_grant_scope
             || body.attestation_key_id != self.config.destination_attestation_key_id
+            || body.status_code.is_empty()
+            || body.status_code.len() > 256
+            || body.completed_at_unix_ms < request.requested_at_unix_ms
+            || body.completed_at_unix_ms > request.expires_at_unix_ms
             || !is_sha256(&body.downstream_control_digest)
             || !is_sha256(&body.later_intents_digest)
             || body.public_values.len() != self.config.public_output_schema.len()
@@ -664,6 +675,10 @@ impl ExternalConnector {
                     || secret.reference.is_empty()
                     || secret.version.is_empty()
                     || !self.config.allowed_secret_taints.contains(&secret.taint)
+            })
+            || body.external_ids.len() > 64
+            || body.external_ids.iter().any(|(name, value)| {
+                name.is_empty() || name.len() > 128 || value.is_empty() || value.len() > 1024
             })
         {
             return Err(ConnectorError::MalformedResponse);
@@ -840,6 +855,13 @@ fn validate_config(
     secret_markers: &[Vec<u8>],
 ) -> Result<(), ConnectorError> {
     let signing_public = crate::public_key_from_seed(signing_seed)?;
+    let authority_public_key_digests = [
+        content_sha256(request_key),
+        content_sha256(destination_key),
+        content_sha256(&signing_public),
+        content_sha256(observer_key),
+        config.runtime_attestation_authority_key_sha256.clone(),
+    ];
     let identities = [
         config.deployment_identity.as_str(),
         config.operator_trust_identity.as_str(),
@@ -885,7 +907,16 @@ fn validate_config(
         || config.generation == 0
         || config.request_payload_schema.is_empty()
         || config.request_payload_schema.len() > 64
+        || config.request_payload_schema.iter().any(|(name, kind)| {
+            name.is_empty()
+                || name.len() > 128
+                || matches!(kind, crate::JsonKind::Array | crate::JsonKind::Object)
+        })
         || config.public_output_schema.len() > 64
+        || config
+            .public_output_schema
+            .keys()
+            .any(|name| name.is_empty() || name.len() > 128)
         || config.allowed_secret_taints.len() > 32
         || config.limits.max_request_bytes == 0
         || config.limits.max_response_bytes == 0
@@ -911,6 +942,11 @@ fn validate_config(
         || config.destination_attestation_key_sha256 != content_sha256(destination_key)
         || config.outcome_signing_seed_sha256 != content_sha256(signing_seed)
         || config.outcome_signing_public_key_sha256 != content_sha256(&signing_public)
+        || authority_public_key_digests
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != authority_public_key_digests.len()
         || config.observer_binding.generation == 0
         || !is_sha256(&config.observer_binding.implementation_sha256)
         || !is_sha256(&config.observer_binding.image_sha256)

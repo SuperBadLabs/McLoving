@@ -522,6 +522,38 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         ),
         Err(ConnectorError::InvalidConfig)
     ));
+
+    let mut shared_authority_keys = rig.config.clone();
+    let request_public = public_key_from_seed(&rig.request_seed).unwrap();
+    shared_authority_keys.destination_attestation_key_sha256 = content_sha256(&request_public);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            shared_authority_keys,
+            request_public.clone(),
+            request_public,
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let mut open_nested_schema = rig.config.clone();
+    open_nested_schema.request_payload_schema =
+        BTreeMap::from([("release".to_owned(), JsonKind::Object)]);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            open_nested_schema,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
 }
 
 #[tokio::test]
@@ -654,6 +686,17 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
     let replayer =
         ShadowReplayer::new_loopback_test(config.clone(), outcome_key.clone(), replay_seed.clone())
             .unwrap();
+    let mut shared_key_config = config.clone();
+    shared_key_config.replay_signing_seed_sha256 = content_sha256(&rig.outcome_seed);
+    shared_key_config.replay_signing_public_key_sha256 = content_sha256(&outcome_key);
+    assert!(matches!(
+        ShadowReplayer::new_loopback_test(
+            shared_key_config,
+            outcome_key.clone(),
+            rig.outcome_seed.clone(),
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
     let mut substituted_outcome = outcome.clone();
     substituted_outcome.connector_image_sha256 = "f".repeat(64);
     sign_outcome_receipt(&mut substituted_outcome, &rig.outcome_seed).unwrap();
