@@ -1600,6 +1600,299 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
 }
 
 #[tokio::test]
+async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, pipeline_id) = fixture(&store).await;
+    let now = database_unix_ms(&store).await;
+    let webhook_trigger_id = Uuid::new_v4();
+    let api_trigger_id = Uuid::new_v4();
+    let schedule_trigger_id = Uuid::new_v4();
+    let upstream_trigger_id = Uuid::new_v4();
+    let upstream_pipeline_id = Uuid::new_v4();
+
+    let triggers = [
+        trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            webhook_trigger_id,
+            0,
+            TriggerKind::ScmWebhook,
+            PipelineTriggerState::Enabled,
+            "scm:github:installation:42",
+            json!({
+                "provider": "github",
+                "repository_identity": "github:superbadlabs/mcloving",
+                "filter": {
+                    "event_kinds": ["push"],
+                    "branches": ["main"],
+                    "path_prefixes": []
+                },
+            }),
+            "disabled-webhook-create",
+            3,
+        ),
+        trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            api_trigger_id,
+            0,
+            TriggerKind::RemoteApi,
+            PipelineTriggerState::Enabled,
+            "api:diff002",
+            json!({
+                "audience": "mcloving:remote-build",
+                "filter": {
+                    "event_kinds": ["remote"],
+                    "request_methods": ["POST"]
+                },
+            }),
+            "disabled-api-create",
+            3,
+        ),
+        trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            schedule_trigger_id,
+            0,
+            TriggerKind::Schedule,
+            PipelineTriggerState::Enabled,
+            "scheduler:mcloving:primary",
+            schedule_configuration("0 2 * * *", now),
+            "disabled-schedule-create",
+            3,
+        ),
+        trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            upstream_trigger_id,
+            0,
+            TriggerKind::Upstream,
+            PipelineTriggerState::Enabled,
+            "controller:upstream-events",
+            json!({
+                "upstream_pipeline_id": upstream_pipeline_id,
+                "filter": {
+                    "event_kinds": ["upstream"],
+                    "statuses": ["succeeded"]
+                },
+            }),
+            "disabled-upstream-create",
+            3,
+        ),
+    ];
+    for trigger in &triggers {
+        assert!(matches!(
+            store
+                .put_pipeline_trigger(trigger)
+                .await
+                .expect("install typed DIFF-002 trigger"),
+            TriggerPutOutcome::Created(_)
+        ));
+    }
+
+    assert!(matches!(
+        store
+            .transition_pipeline_operational_state(&PipelineOperationalStateTransition {
+                organization_id,
+                project_id,
+                pipeline_id,
+                expected_generation: 1,
+                state: PipelineOperationalState::Disabled,
+                reason: "DIFF-002 typed ingress fence".to_owned(),
+                actor_subject: "reviewer:diff002".to_owned(),
+                source_identity: "jenkins:diff002-stateful".to_owned(),
+                source_generation: "disabled-generation-2".to_owned(),
+                source_effective_at_unix_ms: now,
+                source_provenance_sha256: Sha256::digest(b"diff002-disabled-ingress").into(),
+                idempotency_key: "diff002-disabled-ingress".to_owned(),
+            })
+            .await
+            .expect("disable the typed-ingress fixture"),
+        PipelineOperationalStateTransitionOutcome::Applied(_)
+    ));
+
+    let manual_denied = matches!(
+        store
+            .admit_dag(&dag(
+                organization_id,
+                project_id,
+                pipeline_id,
+                "diff002-disabled-manual",
+            ))
+            .await,
+        Err(StoreError::PipelineDisabled { .. })
+    );
+    let webhook_denied = matches!(
+        store
+            .accept_trigger_delivery(&delivery(
+                organization_id,
+                project_id,
+                pipeline_id,
+                webhook_trigger_id,
+                1,
+                "diff002-disabled-webhook",
+                "diff002-disabled-webhook-event",
+                now,
+            ))
+            .await,
+        Err(StoreError::PipelineDisabled { .. })
+    );
+    let mut api_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        api_trigger_id,
+        1,
+        "diff002-disabled-api",
+        "diff002-disabled-api-event",
+        now,
+    );
+    api_delivery.caller_identity = "api:diff002".to_owned();
+    let api_delivery = remote_delivery(api_delivery);
+    let api_denied = matches!(
+        store.accept_trigger_delivery(&api_delivery).await,
+        Err(StoreError::PipelineDisabled { .. })
+    );
+
+    let schedule_identity_sha256: [u8; 32] = Sha256::digest(b"schedule-identity").into();
+    let schedule_payload = json!({
+        "event_kind": "schedule",
+        "event_time_unix_ms": now,
+        "payload": {
+            "timezone": "America/Chicago",
+            "calendar": "gregorian:tzdata-2026a",
+            "expression": "0 2 * * *",
+            "schedule_identity_sha256": hex::encode(schedule_identity_sha256),
+            "expected_last_resolved_slot_unix_ms": null,
+            "resolved_slot_unix_ms": now,
+        },
+    });
+    let schedule_delivery = NewTriggerDelivery {
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id: schedule_trigger_id,
+        expected_trigger_generation: 1,
+        delivery_id: "diff002-disabled-schedule".to_owned(),
+        event_id: "diff002-disabled-schedule-event".to_owned(),
+        event_kind: "schedule".to_owned(),
+        caller_identity: "scheduler:mcloving:primary".to_owned(),
+        payload_sha256: Sha256::digest(
+            serde_json::to_vec(&schedule_payload)
+                .expect("serialize disabled schedule payload")
+                .as_slice(),
+        )
+        .into(),
+        canonical_payload: schedule_payload,
+        parameters: json!({}),
+        requested_platform: "linux".to_owned(),
+        requested_trust_pool: "trusted-linux".to_owned(),
+        event_time_unix_ms: now,
+        accepted_at_unix_ms: now,
+        schedule_slot: Some(TriggerScheduleSlot {
+            timezone: "America/Chicago".to_owned(),
+            calendar: "gregorian:tzdata-2026a".to_owned(),
+            expression: "0 2 * * *".to_owned(),
+            schedule_identity_sha256,
+            expected_last_resolved_slot_unix_ms: None,
+            resolved_slot_unix_ms: now,
+        }),
+    };
+    let schedule_denied = matches!(
+        store.accept_trigger_delivery(&schedule_delivery).await,
+        Err(StoreError::PipelineDisabled { .. })
+    );
+
+    let upstream_payload = json!({
+        "event_kind": "upstream",
+        "event_time_unix_ms": now,
+        "payload": {
+            "upstream_pipeline_id": upstream_pipeline_id,
+            "upstream_build_id": Uuid::new_v4(),
+            "status": "succeeded",
+        },
+    });
+    let upstream_delivery = NewTriggerDelivery {
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id: upstream_trigger_id,
+        expected_trigger_generation: 1,
+        delivery_id: "diff002-disabled-upstream".to_owned(),
+        event_id: "diff002-disabled-upstream-event".to_owned(),
+        event_kind: "upstream".to_owned(),
+        caller_identity: "controller:upstream-events".to_owned(),
+        payload_sha256: Sha256::digest(
+            serde_json::to_vec(&upstream_payload)
+                .expect("serialize disabled upstream payload")
+                .as_slice(),
+        )
+        .into(),
+        canonical_payload: upstream_payload,
+        parameters: json!({}),
+        requested_platform: "linux".to_owned(),
+        requested_trust_pool: "trusted-linux".to_owned(),
+        event_time_unix_ms: now,
+        accepted_at_unix_ms: now,
+        schedule_slot: None,
+    };
+    let upstream_denied = matches!(
+        store.accept_trigger_delivery(&upstream_delivery).await,
+        Err(StoreError::PipelineDisabled { .. })
+    );
+
+    let outcomes = json!({
+        "manual": if manual_denied { "deny" } else { "allow" },
+        "api": if api_denied { "deny" } else { "allow" },
+        "upstream": if upstream_denied { "deny" } else { "allow" },
+        "webhook": if webhook_denied { "deny" } else { "allow" },
+        "schedule": if schedule_denied { "deny" } else { "allow" },
+    });
+    assert!(
+        [
+            manual_denied,
+            api_denied,
+            upstream_denied,
+            webhook_denied,
+            schedule_denied,
+        ]
+        .into_iter()
+        .all(|denied| denied),
+        "every typed ingress rejects while the pipeline is disabled"
+    );
+    let queued_builds = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM builds
+         WHERE organization_id = $1 AND pipeline_id = $2",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count builds after disabled typed ingress attempts");
+    assert_eq!(queued_builds, 0);
+
+    if let Ok(path) = std::env::var("MCLOVING_DIFF002_INGRESS_OUTPUT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({
+                "schema": "mcloving.diff002.target-ingress/v1",
+                "disabled_ingress": outcomes,
+                "disabled_queued_builds": queued_builds,
+            }))
+            .expect("serialize DIFF-002 typed ingress observation"),
+        )
+        .expect("write DIFF-002 typed ingress observation");
+    }
+}
+
+#[tokio::test]
 async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies_new_events() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

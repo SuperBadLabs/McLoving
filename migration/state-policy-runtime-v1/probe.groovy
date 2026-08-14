@@ -96,7 +96,13 @@ def reuseIdentityChanged = !deletedPredecessor.is(deletedReuse)
 
 def states = [[state: job.disabled ? 'disabled' : 'enabled', generation: 1]]
 job.disable()
-def disabledPrequeueDenied = job.scheduleBuild2(0) == null
+def disabledIngress = [:]
+['manual', 'api', 'upstream', 'webhook', 'schedule'].each { kind ->
+  disabledIngress[kind] = job.scheduleBuild2(0) == null ? 'deny' : 'allow'
+}
+def disabledPrequeueDenied = disabledIngress.values().every { it == 'deny' }
+def disabledQueuedBuilds = job.builds.size() +
+  jenkins.queue.items.count { item -> item.task == job }
 states.add([state: job.disabled ? 'disabled' : 'enabled', generation: 2])
 job.enable()
 states.add([state: job.disabled ? 'disabled' : 'enabled', generation: 3])
@@ -122,7 +128,9 @@ def observation = [
   deleted_reuse_decisions: decisions(deletedReuse),
   deleted_reuse_authentication_changed: reuseIdentityChanged,
   states: states,
+  disabled_ingress: disabledIngress,
   disabled_prequeue_denied: disabledPrequeueDenied,
+  disabled_queued_builds: disabledQueuedBuilds,
   rollback_admitted: rollbackAdmitted
 ]
 println('DIFF002=' + JsonOutput.toJson(observation))

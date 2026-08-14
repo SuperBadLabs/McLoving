@@ -148,7 +148,15 @@ jq --exit-status '
     {"state":"disabled","generation":2},
     {"state":"enabled","generation":3}
   ]
+  and .disabled_ingress == {
+    "manual":"deny",
+    "api":"deny",
+    "upstream":"deny",
+    "webhook":"deny",
+    "schedule":"deny"
+  }
   and .disabled_prequeue_denied
+  and .disabled_queued_builds == 0
   and .rollback_admitted
 ' "${evidence}/jenkins-runtime.json" >/dev/null
 if podman exec "${jenkins}" bash -c \
@@ -199,6 +207,7 @@ podman create --name "${runner}" \
   --env MCLOVING_TEST_DATABASE_URL=postgres://mcloving@postgres:5432/mcloving \
   --env MCLOVING_DIFF002_AUTHZ_OUTPUT=/evidence/target-authorization.json \
   --env MCLOVING_DIFF002_OPERATIONAL_OUTPUT=/evidence/target-operational.json \
+  --env MCLOVING_DIFF002_INGRESS_OUTPUT=/evidence/target-ingress.json \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${evidence}:/evidence:Z" \
   --volume "${repo_root}:/work:Z" \
@@ -213,6 +222,8 @@ podman create --name "${runner}" \
       --test authorization_mapping -- --test-threads=1
     cargo test --locked --offline -p mcloving-controller-store \
       --test pipeline_operational_state -- --test-threads=1
+    cargo test --locked --offline -p mcloving-controller-store \
+      --test trigger_ingress -- --test-threads=1
     cargo run --locked --offline --quiet \
       -p mcloving-state-policy-differential -- \
       migration/state-policy-differential-v1
@@ -231,12 +242,14 @@ podman image inspect "${MCLOVING_POSTGRES_IMAGE}" >"${evidence}/postgres-image-i
 jq -n \
   --slurpfile source "${evidence}/jenkins-runtime.json" \
   --slurpfile authorization "${evidence}/target-authorization.json" \
-  --slurpfile operational "${evidence}/target-operational.json" '
+  --slurpfile operational "${evidence}/target-operational.json" \
+  --slurpfile ingress "${evidence}/target-ingress.json" '
   {
     schema: "mcloving.diff002.runtime-comparison/v1",
     source_schema: $source[0].schema,
     authorization_schema: $authorization[0].schema,
     operational_schema: $operational[0].schema,
+    ingress_schema: $ingress[0].schema,
     immutable_identity_equal:
       ($source[0].immutable_id == $authorization[0].immutable_id),
     decisions_equal:
@@ -270,6 +283,11 @@ jq -n \
     disabled_prequeue_equal:
       ($source[0].disabled_prequeue_denied
        == $operational[0].disabled_prequeue_denied),
+    disabled_ingress_equal:
+      ($source[0].disabled_ingress == $ingress[0].disabled_ingress),
+    disabled_queued_builds_equal:
+      ($source[0].disabled_queued_builds
+       == $ingress[0].disabled_queued_builds),
     rollback_admission_equal:
       ($source[0].rollback_admitted == $operational[0].rollback_admitted),
     parity:
@@ -294,6 +312,9 @@ jq -n \
        and $source[0].states == $operational[0].states
        and $source[0].disabled_prequeue_denied
           == $operational[0].disabled_prequeue_denied
+       and $source[0].disabled_ingress == $ingress[0].disabled_ingress
+       and $source[0].disabled_queued_builds
+          == $ingress[0].disabled_queued_builds
        and $source[0].rollback_admitted
           == $operational[0].rollback_admitted)
   }

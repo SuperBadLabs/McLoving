@@ -610,11 +610,17 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         .await
         .expect("authenticate first mapped session")
         .principal;
-    let deleted_predecessor_principal = runtime
+    let deleted_predecessor_authenticated = runtime
         .authenticate_api_token(organization_id, deleted_predecessor_token, 20_000)
         .await
-        .expect("authenticate the predecessor before deletion")
-        .principal;
+        .expect("authenticate the predecessor before deletion");
+    let deleted_predecessor_authenticated_identity_id =
+        deleted_predecessor_authenticated.identity_id;
+    assert_eq!(
+        deleted_predecessor_authenticated_identity_id, deleted_predecessor_identity_id,
+        "predecessor authentication resolves to its provisioned immutable identity"
+    );
+    let deleted_predecessor_principal = deleted_predecessor_authenticated.principal;
     let deleted_predecessor_decisions =
         observed_decisions(&deleted_predecessor_principal, organization_id, project_id);
     assert!(
@@ -719,11 +725,16 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         )
         .await
         .expect("issue the distinct deleted-name-reuse session");
-    let deleted_reuse_principal = runtime
+    let deleted_reuse_authenticated = runtime
         .authenticate_api_token(organization_id, deleted_reuse_token, 20_000)
         .await
-        .expect("authenticate the distinct deleted-name-reuse principal")
-        .principal;
+        .expect("authenticate the distinct deleted-name-reuse principal");
+    let deleted_reuse_authenticated_identity_id = deleted_reuse_authenticated.identity_id;
+    assert_eq!(
+        deleted_reuse_authenticated_identity_id, deleted_reuse_identity_id,
+        "replacement authentication resolves to its provisioned immutable identity"
+    );
+    let deleted_reuse_principal = deleted_reuse_authenticated.principal;
     assert!(
         authorize(
             &principal,
@@ -771,13 +782,18 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
                 "decisions": observed_decisions(&principal, organization_id, project_id),
                 "deleted_reuse_name": "alice-reused",
                 "deleted_predecessor_immutable_id": "jenkins-user-deleted-2041",
+                "deleted_predecessor_authenticated_identity_id":
+                    deleted_predecessor_authenticated_identity_id,
                 "deleted_predecessor_decisions": deleted_predecessor_decisions,
                 "deleted_predecessor_deleted": deleted_predecessor_generation == 2,
                 "deleted_predecessor_post_delete_decisions":
                     deleted_predecessor_post_delete_decisions,
                 "deleted_reuse_immutable_id": "jenkins-user-deleted-reuse-2042",
+                "deleted_reuse_authenticated_identity_id":
+                    deleted_reuse_authenticated_identity_id,
                 "deleted_reuse_authentication_changed":
-                    deleted_predecessor_identity_id != deleted_reuse_identity_id,
+                    deleted_predecessor_authenticated_identity_id
+                        != deleted_reuse_authenticated_identity_id,
                 "deleted_reuse_decisions": observed_decisions(
                     &deleted_reuse_principal,
                     organization_id,
