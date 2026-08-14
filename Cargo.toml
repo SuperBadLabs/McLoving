@@ -27,6 +27,7 @@ members = [
   "crates/secret-broker",
   "crates/source-acquirer",
   "crates/state-machine",
+  "crates/state-policy-differential",
   "crates/state-transfer",
   "crates/windows-job",
 ]

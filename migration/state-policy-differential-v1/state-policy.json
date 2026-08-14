@@ -1,0 +1,267 @@
+{
+  "schema": "mcloving.jenkins.state-policy-differential/v1",
+  "case": "mig005a-state-policy-exact-profile",
+  "frozen": {
+    "jenkins_image_sha256": "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+    "postgres_image_sha256": "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+    "mig005a_forward_sha256": "af172be8893e282b72fc20b820382c8236e18c7b981bc3b4acbf57884ead55e4",
+    "mig005a_reverse_sha256": "1a66f2c6354011abd23f45671674291e0b22faeea1043791920fc5ee0123ef52",
+    "mig005a_evidence_sha256": "e28b47d2aa70ec2ad8cdaa2c48e1100c8862c9a47765d22a355c1660e96cafe7",
+    "idp001_implementation_head": "1da73ee8362e5977b922e531cf03f89cfc760e6f",
+    "authz001_implementation_head": "8b9b11dcb6a51f491b3c052beb7cdf2282e55702",
+    "jobstate001_implementation_head": "4c07ad57f50d694965d2fb6b2e43f7888afda200",
+    "audit001_review": "12b8839ebc44bfde3467d66d5c4567872da52c25a828721d9292420c7155337c"
+  },
+  "principals": [
+    {
+      "name": "active-renamed-human",
+      "source": {
+        "realm_digest": "3eb4dcfd3b3bc1105995cce02ec50855210b4d3e4d934f2889dc4c03e29094dd",
+        "immutable_id": "jenkins-user-immutable-1042",
+        "aliases": ["alice", "alice.legacy"],
+        "membership_generation": 19,
+        "lifecycle": "active",
+        "acl_entry_id": "folder/release:user/jenkins-user-immutable-1042",
+        "acl_scope": "folder/release/job/deploy",
+        "acl_generation": "acl-generation-12"
+      },
+      "target": {
+        "issuer": "https://idp.authz.test",
+        "external_subject": "jenkins-user-immutable-1042",
+        "principal_id": "4d634c6f-7669-6e67-2000-000000000004",
+        "lifecycle": "active",
+        "lifecycle_generation": 1,
+        "group_generation": 1,
+        "provenance_digest": "4653bfac75baba4b9c3f7799a2a4fc17ceda0ffc0ce8d8528c9e3592d7e51bb4"
+      },
+      "decisions": [
+        {"action": "project_view", "source": "allow", "target": "allow"},
+        {"action": "build_trigger", "source": "deny", "target": "deny"},
+        {"action": "build_cancel", "source": "deny", "target": "deny"},
+        {"action": "project_configure", "source": "deny", "target": "deny"}
+      ]
+    },
+    {
+      "name": "deleted-name-reuse",
+      "source": {
+        "realm_digest": "3eb4dcfd3b3bc1105995cce02ec50855210b4d3e4d934f2889dc4c03e29094dd",
+        "immutable_id": "jenkins-user-deleted-2041",
+        "aliases": ["alice-reused"],
+        "membership_generation": 20,
+        "lifecycle": "deleted",
+        "acl_entry_id": "folder/release:user/jenkins-user-deleted-2041",
+        "acl_scope": "folder/release/job/deploy",
+        "acl_generation": "acl-generation-12",
+        "replacement_immutable_id": "jenkins-user-deleted-reuse-2042"
+      },
+      "target": {
+        "issuer": "https://idp.authz.test",
+        "external_subject": "jenkins-user-deleted-2041",
+        "principal_id": "4d634c6f-7669-6e67-2000-000000000005",
+        "lifecycle": "deleted",
+        "lifecycle_generation": 2,
+        "group_generation": 1,
+        "provenance_digest": "34b860a485cf48627215eb169e9fa6bf92cac02bb37e032899a898351181ae46",
+        "replacement_external_subject": "jenkins-user-deleted-reuse-2042",
+        "replacement_principal_id": "4d634c6f-7669-6e67-2000-000000000006"
+      },
+      "decisions": [
+        {"action": "project_view", "source": "deny", "target": "deny"},
+        {"action": "build_trigger", "source": "deny", "target": "deny"},
+        {"action": "build_cancel", "source": "deny", "target": "deny"},
+        {"action": "project_configure", "source": "deny", "target": "deny"}
+      ]
+    }
+  ],
+  "operational_cases": [
+    {
+      "name": "disabled_generation_2",
+      "source": {
+        "state": "disabled", "generation": 2,
+        "ingress": [
+          {"kind": "api", "outcome": "rejected_before_queue"},
+          {"kind": "manual", "outcome": "rejected_before_queue"},
+          {"kind": "schedule", "outcome": "rejected_before_queue"},
+          {"kind": "upstream", "outcome": "rejected_before_queue"},
+          {"kind": "webhook", "outcome": "rejected_before_queue"}
+        ],
+        "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0,
+        "audit_outcome": "pipeline_disabled"
+      },
+      "target": {
+        "state": "disabled", "generation": 2,
+        "ingress": [
+          {"kind": "api", "outcome": "rejected_before_queue"},
+          {"kind": "manual", "outcome": "rejected_before_queue"},
+          {"kind": "schedule", "outcome": "rejected_before_queue"},
+          {"kind": "upstream", "outcome": "rejected_before_queue"},
+          {"kind": "webhook", "outcome": "rejected_before_queue"}
+        ],
+        "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0,
+        "audit_outcome": "pipeline_disabled"
+      }
+    },
+    {
+      "name": "enabled_generation_1",
+      "source": {
+        "state": "enabled", "generation": 1,
+        "ingress": [
+          {"kind": "api", "outcome": "accepted"},
+          {"kind": "manual", "outcome": "accepted"},
+          {"kind": "schedule", "outcome": "accepted"},
+          {"kind": "upstream", "outcome": "accepted"},
+          {"kind": "webhook", "outcome": "accepted"}
+        ],
+        "queued_builds": 5, "grants": 0, "approvals": 0, "effects": 0,
+        "audit_outcome": "accepted"
+      },
+      "target": {
+        "state": "enabled", "generation": 1,
+        "ingress": [
+          {"kind": "api", "outcome": "accepted"},
+          {"kind": "manual", "outcome": "accepted"},
+          {"kind": "schedule", "outcome": "accepted"},
+          {"kind": "upstream", "outcome": "accepted"},
+          {"kind": "webhook", "outcome": "accepted"}
+        ],
+        "queued_builds": 5, "grants": 0, "approvals": 0, "effects": 0,
+        "audit_outcome": "accepted"
+      }
+    },
+    {
+      "name": "rollback_enabled_generation_3",
+      "source": {
+        "state": "enabled", "generation": 3,
+        "ingress": [
+          {"kind": "api", "outcome": "accepted"},
+          {"kind": "manual", "outcome": "accepted"},
+          {"kind": "schedule", "outcome": "accepted"},
+          {"kind": "upstream", "outcome": "accepted"},
+          {"kind": "webhook", "outcome": "accepted"}
+        ],
+        "queued_builds": 5, "grants": 0, "approvals": 0, "effects": 0,
+        "audit_outcome": "accepted"
+      },
+      "target": {
+        "state": "enabled", "generation": 3,
+        "ingress": [
+          {"kind": "api", "outcome": "accepted"},
+          {"kind": "manual", "outcome": "accepted"},
+          {"kind": "schedule", "outcome": "accepted"},
+          {"kind": "upstream", "outcome": "accepted"},
+          {"kind": "webhook", "outcome": "accepted"}
+        ],
+        "queued_builds": 5, "grants": 0, "approvals": 0, "effects": 0,
+        "audit_outcome": "accepted"
+      }
+    }
+  ],
+  "history": {
+    "source": {
+      "build_numbers": [1, 2, 3, 4],
+      "next_build_number": 5,
+      "previous_result": "succeeded",
+      "scm_revisions": [
+        "386706bf1f6ba515d60d6a3e5ab8e610177f518a162849c959431cd8535ec1df",
+        "5e3cf12147cca0b3d28c67be8bd1c482d2a84c03096cebbb57c83963cef60f46",
+        "815aa351ae1e139bfc60fb6730f72989f82ad59671a83785e87f042d83817d77",
+        "090b4212e7dc0709b4c210f47ba7c6987d51598413f3a48189ab06d3da3a2387"
+      ],
+      "predicate_selected": [false, true, true, false],
+      "cross_build_artifacts": {
+        "build-1": "c4793fb94443793eb32e1128b2d4d2cb4c20bed467a6929ec09f78cb87af21a1",
+        "build-2": "65b52ff3986b5ad33bd0ebdb49a989113e42ea761a96a4558f6644f86c8b582f",
+        "build-3": "bdf22aa21729fcbda0ac8229fd4d505fa2b4a6aca8af1e426f4a3730b0e18a5f",
+        "build-4": "475f97e65731b7707d9dd8376690219bc698dadc4449604efac24c50d9b0b3f3"
+      },
+      "retained_workspace_digest": "21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08",
+      "persistent_state_digest": "929f7d96cf9c8afd8517b80afadeb4a7f01f95107f4e83fc1cfb7c5ccb58e61b",
+      "retention_deadline_unix_ms": 2000000000000,
+      "active_holds": [
+        {"id": "hold-artifact", "generation": 1, "release_authority": "legal@example.test"},
+        {"id": "hold-build", "generation": 2, "release_authority": "legal@example.test"},
+        {"id": "hold-workspace", "generation": 1, "release_authority": "legal@example.test"}
+      ],
+      "approval": {
+        "approval_id": "approval-stateful-3",
+        "approver_subject": "principal-alice-001",
+        "submitted_value_digests": {"release-channel": "b3d55aacb75a27cf61c23c05f40ddf9a1689698cd232bd1b4c8e26ce45985fac"},
+        "expires_at_unix_ms": 1785866400000,
+        "expired_submission": "deny"
+      },
+      "retry_history": [
+        {"node": "checkout", "outcomes": ["failed", "succeeded"]},
+        {"node": "changelog-predicate", "outcomes": ["fail_fast_skipped", "succeeded"]},
+        {"node": "changeset-predicate", "outcomes": ["fail_fast_skipped", "succeeded"]},
+        {"node": "effect-free-state", "outcomes": ["fail_fast_skipped", "succeeded"]}
+      ],
+      "first_authoritative_run": {"build_number": 3, "external_effect_authority": false, "result": "succeeded"},
+      "restart_digest": "3ace60b0a0c1b6c9345e31494142947aa97d4ef4912e895d8795663393819759",
+      "rollback_digest": "da25480fb483e6ce3d30f1a179c3c07e9f3b045425b0ac54acc6758a97e2db62"
+    },
+    "target": {
+      "build_numbers": [1, 2, 3, 4],
+      "next_build_number": 5,
+      "previous_result": "succeeded",
+      "scm_revisions": [
+        "386706bf1f6ba515d60d6a3e5ab8e610177f518a162849c959431cd8535ec1df",
+        "5e3cf12147cca0b3d28c67be8bd1c482d2a84c03096cebbb57c83963cef60f46",
+        "815aa351ae1e139bfc60fb6730f72989f82ad59671a83785e87f042d83817d77",
+        "090b4212e7dc0709b4c210f47ba7c6987d51598413f3a48189ab06d3da3a2387"
+      ],
+      "predicate_selected": [false, true, true, false],
+      "cross_build_artifacts": {
+        "build-1": "c4793fb94443793eb32e1128b2d4d2cb4c20bed467a6929ec09f78cb87af21a1",
+        "build-2": "65b52ff3986b5ad33bd0ebdb49a989113e42ea761a96a4558f6644f86c8b582f",
+        "build-3": "bdf22aa21729fcbda0ac8229fd4d505fa2b4a6aca8af1e426f4a3730b0e18a5f",
+        "build-4": "475f97e65731b7707d9dd8376690219bc698dadc4449604efac24c50d9b0b3f3"
+      },
+      "retained_workspace_digest": "21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08",
+      "persistent_state_digest": "929f7d96cf9c8afd8517b80afadeb4a7f01f95107f4e83fc1cfb7c5ccb58e61b",
+      "retention_deadline_unix_ms": 2000000000000,
+      "active_holds": [
+        {"id": "hold-artifact", "generation": 1, "release_authority": "legal@example.test"},
+        {"id": "hold-build", "generation": 2, "release_authority": "legal@example.test"},
+        {"id": "hold-workspace", "generation": 1, "release_authority": "legal@example.test"}
+      ],
+      "approval": {
+        "approval_id": "approval-stateful-3",
+        "approver_subject": "principal-alice-001",
+        "submitted_value_digests": {"release-channel": "b3d55aacb75a27cf61c23c05f40ddf9a1689698cd232bd1b4c8e26ce45985fac"},
+        "expires_at_unix_ms": 1785866400000,
+        "expired_submission": "deny"
+      },
+      "retry_history": [
+        {"node": "checkout", "outcomes": ["failed", "succeeded"]},
+        {"node": "changelog-predicate", "outcomes": ["fail_fast_skipped", "succeeded"]},
+        {"node": "changeset-predicate", "outcomes": ["fail_fast_skipped", "succeeded"]},
+        {"node": "effect-free-state", "outcomes": ["fail_fast_skipped", "succeeded"]}
+      ],
+      "first_authoritative_run": {"build_number": 3, "external_effect_authority": false, "result": "succeeded"},
+      "restart_digest": "3ace60b0a0c1b6c9345e31494142947aa97d4ef4912e895d8795663393819759",
+      "rollback_digest": "da25480fb483e6ce3d30f1a179c3c07e9f3b045425b0ac54acc6758a97e2db62"
+    }
+  },
+  "adversarial_scenarios": [
+    {"name": "approval_expiry_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "approval_identity_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "approval_value_substitution_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "deleted_identity_reuse_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "disable_race_fenced", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "disabled_api_ingress", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "disabled_manual_ingress", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "disabled_schedule_ingress", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "disabled_upstream_ingress", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "disabled_webhook_ingress", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "first_authoritative_run_effect_free", "source_outcome": "preserved", "target_outcome": "preserved", "expected_outcome": "preserved", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "group_change_fences_stale_generation", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "history_gap_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "hold_omission_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "hold_release_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "rename_preserves_immutable_identity", "source_outcome": "preserved", "target_outcome": "preserved", "expected_outcome": "preserved", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "restart_preserves_state", "source_outcome": "preserved", "target_outcome": "preserved", "expected_outcome": "preserved", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "reverse_reconciliation_exact", "source_outcome": "preserved", "target_outcome": "preserved", "expected_outcome": "preserved", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "rollback_restores_state", "source_outcome": "preserved", "target_outcome": "preserved", "expected_outcome": "preserved", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0},
+    {"name": "same_name_collision_denied", "source_outcome": "denied", "target_outcome": "denied", "expected_outcome": "denied", "queued_builds": 0, "grants": 0, "approvals": 0, "effects": 0}
+  ]
+}

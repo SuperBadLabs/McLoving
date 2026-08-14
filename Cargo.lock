@@ -1743,6 +1743,16 @@ name = "mcloving-state-machine"
 version = "0.0.0"
 
 [[package]]
+name = "mcloving-state-policy-differential"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "mcloving-state-transfer"
 version = "0.0.0"
 dependencies = [

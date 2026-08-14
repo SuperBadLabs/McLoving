@@ -239,7 +239,7 @@ async fn transitions_admission_scheduler_restart_and_audit_are_generation_fenced
             current_generation: 2
         }
     ));
-    assert!(matches!(
+    let disabled_prequeue_denied = matches!(
         store
             .admit_dag(&dag(
                 organization_id,
@@ -253,7 +253,8 @@ async fn transitions_admission_scheduler_restart_and_audit_are_generation_fenced
             pipeline_id: denied_pipeline,
             generation: 2
         }) if denied_pipeline == pipeline_id
-    ));
+    );
+    assert!(disabled_prequeue_denied);
     assert_eq!(
         store
             .explain_wait(
@@ -310,6 +311,23 @@ async fn transitions_admission_scheduler_restart_and_audit_are_generation_fenced
         .await
         .expect("admit exact enabled generation");
     assert!(admission.created);
+    if let Ok(path) = std::env::var("MCLOVING_DIFF002_OPERATIONAL_OUTPUT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({
+                "schema": "mcloving.diff002.target-operational/v1",
+                "states": [
+                    {"state": initial.state, "generation": initial.generation},
+                    {"state": disabled.state, "generation": disabled.generation},
+                    {"state": enabled.state, "generation": enabled.generation},
+                ],
+                "disabled_prequeue_denied": disabled_prequeue_denied,
+                "rollback_admitted": admission.created,
+            }))
+            .expect("serialize DIFF-002 target operational observation"),
+        )
+        .expect("write DIFF-002 target operational observation");
+    }
 
     let disable_again = transition(
         organization_id,
