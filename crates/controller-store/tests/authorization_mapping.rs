@@ -461,7 +461,7 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         .await
         .expect("issue first exact-generation session");
     let deleted_predecessor_token = digest("authz-deleted-predecessor-token-generation-1");
-    runtime
+    let deleted_predecessor_session = runtime
         .issue_human_session(
             &OidcIdentityClaims {
                 organization_id,
@@ -502,20 +502,37 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         first_session.group_generation,
         [(Action::BuildTrigger, GrantDecision::Deny)].into(),
     );
+    let mut deleted_predecessor_mapping = human_mapping(
+        Uuid::new_v4(),
+        deleted_predecessor_identity_id,
+        deleted_predecessor_session.group_generation,
+        [(Action::ProjectView, GrantDecision::Allow)].into(),
+    );
+    deleted_predecessor_mapping.source_identity_id = "jenkins-user-deleted-2041".to_owned();
+    deleted_predecessor_mapping.source_alias_history = json!(["alice-reused"]);
+    deleted_predecessor_mapping.source_membership_generation = 20;
+    deleted_predecessor_mapping.source_acl_entry_id =
+        "folder/release:user/jenkins-user-deleted-2041".to_owned();
+    deleted_predecessor_mapping.source_permissions =
+        ["job.read"].into_iter().map(str::to_owned).collect();
+    deleted_predecessor_mapping.target_external_subject =
+        Some("jenkins-user-deleted-2041".to_owned());
+    deleted_predecessor_mapping.target_provenance_digest =
+        digest("authz-mig000-deleted-predecessor-provenance");
     let generation_one = policy(
         organization_id,
         project_id,
         1,
         None,
         None,
-        vec![allow_mapping, deny_mapping],
+        vec![allow_mapping, deny_mapping, deleted_predecessor_mapping],
     );
     let receipt = admin
         .install_authorization_policy(&generation_one)
         .await
         .expect("install exact first policy generation");
-    assert_eq!(receipt.mapping_count, 2);
-    assert_eq!(receipt.grant_count, 4);
+    assert_eq!(receipt.mapping_count, 3);
+    assert_eq!(receipt.grant_count, 5);
 
     let principal = runtime
         .authenticate_api_token(organization_id, first_token, 20_000)
