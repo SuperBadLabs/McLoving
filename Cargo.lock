@@ -1683,6 +1683,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-secret-broker"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "nix",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "mcloving-source-acquirer"
 version = "0.0.0"
 dependencies = [
