@@ -193,7 +193,10 @@ tuple so a downstream operator can audit the exact evidence that authorized
 placement. Receipt creation also requires chronological authorization: Rekor
 integration must not postdate independent-anchor verification, and anchor
 verification for the release and every verified rollback predecessor must not
-postdate deployment.
+postdate deployment. A successor is accepted only when its complete predecessor
+chain was independently anchored no later than the successor's Rekor integration
+time, proving that the rollback target was already verified when the successor
+became transparent.
 Its fields are private and it does not implement deserialization, so stored JSON
 cannot be converted back into deployment authority or forged as a typed
 receipt. Any authority-bearing deployment function must consume the live

@@ -783,12 +783,12 @@ pub fn verify_release(
         policy,
     )?;
     verify_rollback(&envelope.manifest, &manifest_sha256, signing, rollback)?;
-    let authorization_complete_at_unix_ms =
-        rollback.map_or(audit_anchor.verified_at_unix_ms, |previous| {
-            previous
-                .authorization_complete_at_unix_ms
-                .max(audit_anchor.verified_at_unix_ms)
-        });
+    let integrated_at_unix_ms = transparency_integrated_at_unix_ms(transparency)?;
+    if rollback
+        .is_some_and(|previous| previous.authorization_complete_at_unix_ms > integrated_at_unix_ms)
+    {
+        return Err(ReleaseError::RollbackDenied);
+    }
 
     Ok(VerifiedRelease {
         manifest: envelope.manifest.clone(),
@@ -797,7 +797,7 @@ pub fn verify_release(
         transparency: transparency.clone(),
         evidence_manifest: evidence_manifest.clone(),
         audit_anchor: audit_anchor.clone(),
-        authorization_complete_at_unix_ms,
+        authorization_complete_at_unix_ms: audit_anchor.verified_at_unix_ms,
     })
 }
 
@@ -1335,10 +1335,7 @@ fn verify_external_evidence(
     validate_transparency(transparency)?;
     validate_evidence_manifest(evidence_manifest)?;
     validate_audit_anchor(audit_anchor)?;
-    let integrated_at_unix_ms = transparency
-        .integrated_time_unix_seconds
-        .checked_mul(1_000)
-        .ok_or(ReleaseError::TransparencyDenied)?;
+    let integrated_at_unix_ms = transparency_integrated_at_unix_ms(transparency)?;
     let transparency_evidence_sha256 = sha256_hex(&serde_json::to_vec(transparency)?);
     let evidence_manifest_sha256 = sha256_hex(&serde_json::to_vec(evidence_manifest)?);
     if integrated_at_unix_ms > audit_anchor.verified_at_unix_ms
@@ -1364,6 +1361,13 @@ fn verify_external_evidence(
         return Err(ReleaseError::TransparencyDenied);
     }
     Ok(())
+}
+
+fn transparency_integrated_at_unix_ms(value: &TransparencyEvidence) -> Result<i64, ReleaseError> {
+    value
+        .integrated_time_unix_seconds
+        .checked_mul(1_000)
+        .ok_or(ReleaseError::TransparencyDenied)
 }
 
 fn valid_rollback_shape(value: &RollbackTarget) -> bool {

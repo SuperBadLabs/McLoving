@@ -234,13 +234,39 @@ fn verification_material_from(
     AuditAnchorEvidence,
     VerificationPolicy,
 ) {
+    verification_material_from_with_times(
+        signing_policy,
+        envelope,
+        sbom,
+        bundle,
+        lock,
+        1_786_000_100,
+        1_786_000_200_000,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verification_material_from_with_times(
+    signing_policy: &SigningPolicy,
+    envelope: &mcloving_release_provenance::SignedReleaseEnvelope,
+    sbom: &[u8],
+    bundle: &[u8],
+    lock: &[u8],
+    integrated_time_unix_seconds: i64,
+    verified_at_unix_ms: i64,
+) -> (
+    TransparencyEvidence,
+    ReleaseEvidenceManifest,
+    AuditAnchorEvidence,
+    VerificationPolicy,
+) {
     let transparency = TransparencyEvidence {
         schema_version: TRANSPARENCY_SCHEMA.to_owned(),
         envelope_sha256: sha256(&serde_json::to_vec(envelope).expect("canonical envelope")),
         log_identity: "rekor:production".to_owned(),
         entry_identity: "entry:12345".to_owned(),
         log_index: 12_345,
-        integrated_time_unix_seconds: 1_786_000_100,
+        integrated_time_unix_seconds,
         attestation_key_id: "rekor-attestation:production:v1".to_owned(),
         attestation_public_key_sha256: DIGEST_C.to_owned(),
         attestation_signature_sha256: DIGEST_A.to_owned(),
@@ -273,7 +299,7 @@ fn verification_material_from(
         verifier_statement_sha256: DIGEST_B.to_owned(),
         notary_reference:
             "bitcoin:0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
-        verified_at_unix_ms: 1_786_000_200_000,
+        verified_at_unix_ms,
     };
     let policy = VerificationPolicy {
         signing: signing_policy.clone(),
@@ -742,8 +768,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
 
 #[test]
 fn rollback_target_must_match_a_previously_verified_release_exactly() {
-    let mut first = fixture(SHA1_A, SHA1_B, 5);
-    first.policy.expected_audit_anchor.verified_at_unix_ms = 1_786_000_300_000;
+    let first = fixture(SHA1_A, SHA1_B, 5);
     let first_envelope = signed(&first);
     let first_verified = verify_release(
         &first_envelope,
@@ -765,12 +790,14 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         source_commit_sha1: first_verified.manifest().source.commit_sha1.clone(),
     });
     let second_envelope = signed(&second);
-    let (_, _, _, second_policy) = verification_material_from(
+    let (_, _, _, second_policy) = verification_material_from_with_times(
         &second.policy.signing,
         &second_envelope,
         &second.sbom,
         &second.bundle,
         &second.lock,
+        1_786_000_300,
+        1_786_000_400_000,
     );
     second.policy = second_policy;
     let second_verified = verify_release(
@@ -783,12 +810,35 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
     )
     .expect("exact rollback ancestry");
     assert!(matches!(
-        second_verified.deployment_receipt("production", DIGEST_A, 1_786_000_299_999),
+        second_verified.deployment_receipt("production", DIGEST_A, 1_786_000_399_999),
         Err(ReleaseError::DeploymentDenied)
     ));
     second_verified
-        .deployment_receipt("production", DIGEST_A, 1_786_000_300_000)
+        .deployment_receipt("production", DIGEST_A, 1_786_000_400_000)
         .expect("deployment follows every rollback-chain authorization");
+
+    let mut late_first_policy = first.policy.clone();
+    late_first_policy.expected_audit_anchor.verified_at_unix_ms = 1_786_000_350_000;
+    let late_first_verified = verify_release(
+        &first_envelope,
+        &late_first_policy,
+        &first.sbom,
+        &first.bundle,
+        &first.lock,
+        None,
+    )
+    .expect("verify late-anchored rollback release");
+    assert!(matches!(
+        verify_release(
+            &second_envelope,
+            &second.policy,
+            &second.sbom,
+            &second.bundle,
+            &second.lock,
+            Some(&late_first_verified),
+        ),
+        Err(ReleaseError::RollbackDenied)
+    ));
 
     let unrelated = fixture(SHA1_A, SHA1_B, 7);
     let unrelated_envelope = signed(&unrelated);
