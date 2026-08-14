@@ -50,7 +50,9 @@ output path, and a canonical Cargo cache. It archives the exact commit rather
 than bind-mounting a mutable worktree. The container runs with no network, a
 read-only root, no capabilities, `no-new-privileges`, the Docker default
 AppArmor profile, bounded CPU, memory and process count, and fixed-size private
-tmpfs filesystems. The only writable persistent mount is the newly created
+tmpfs filesystems. Only the dedicated build-target tmpfs is executable, because
+Cargo must run freshly compiled build scripts and procedural macros; it remains
+`nosuid` and `nodev`. The only writable persistent mount is the newly created
 output directory.
 
 Only registry index and packaged crate archives enter the container. Cargo

@@ -79,7 +79,7 @@ docker run --rm --pull never --platform linux/amd64 \
   --user "$(id -u):$(id -g)" \
   --tmpfs /build-src:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid="$(id -u)",gid="$(id -g)" \
   --tmpfs /cargo-home:rw,nosuid,nodev,noexec,size=2g,mode=0700,uid="$(id -u)",gid="$(id -g)" \
-  --tmpfs /target:rw,nosuid,nodev,size=8g,mode=0700,uid="$(id -u)",gid="$(id -g)" \
+  --tmpfs /target:rw,exec,nosuid,nodev,size=8g,mode=0700,uid="$(id -u)",gid="$(id -g)" \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777 \
   --mount "type=bind,src=${scratch_root},dst=/input,readonly" \
   --mount "type=bind,src=${cargo_cache}/registry,dst=/cargo-cache/registry,readonly" \
