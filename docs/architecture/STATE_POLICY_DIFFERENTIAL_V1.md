@@ -135,29 +135,32 @@ The Rust runner has all default capabilities dropped, no-new-privileges, and
 finite CPU, memory, and PID ceilings. With Cargo network access disabled it
 reads only the host's prefetched Cargo registry through a read-only mount, runs
 the sealed differential mutations and the real-PostgreSQL identity,
-authorization-mapping, and operational-state suites, then runs the independent
-bundle verifier. The authorization and operational suites export observations
-from the decisions and transitions they actually exercise. The gate compares
-their immutable identity, four-decision matrix, three state/generation pairs,
-disabled pre-queue result, and rollback admission directly with the live
-Jenkins observation and fails unless every field matches. The evidence includes
-both runtime observations, the comparison verdict, initially pinned and
-post-run-rechecked source commit/tree/status, image, container and network inspections, source-file
-hashes, the full test transcript, and a self-excluding manifest.
+authorization-mapping, operational-state, and typed-trigger-ingress suites,
+then runs the independent bundle verifier. These suites export observations
+from the authentication, decisions, transitions, and admission paths they
+actually exercise. The gate compares their immutable identity, four-decision
+matrix, three state/generation pairs, five-ingress disabled matrix, zero-build
+result, disabled pre-queue result, and rollback admission directly with the
+live Jenkins observation and fails unless every field matches. The evidence
+includes the runtime observations, the comparison verdict, initially pinned
+and post-run-rechecked source commit/tree/status, image, container and network
+inspections, source-file hashes, the full test transcript, and a self-excluding
+manifest.
 
 The protected Foundation workflow also runs authorization-mapping tests against
 its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`44f4dac18b1e0b20746ab4273f0e062f5122fc29`, tree
-`7ee7afe01cfa2448fc79af381a10cb0a4be4689e`. It passed eight sealed-bundle and
+`e969b21aedd9bdb69ec3c9546b5d0411d7222d11`, tree
+`1bf4fb4e5c4e8cbaed4e294cae5e3589b157244c`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
-authorization-mapping tests, four operational-state/race tests, and the final
-independent bundle verification. The two ignored identity and two ignored
-authorization cases are the deliberately separate source/restore halves driven
-only by `scripts/test-backup-restore.sh`; they were not silently counted as
-executed. The protected recovery job remains the required multi-database proof.
+authorization-mapping tests, four operational-state/race tests, five typed
+trigger-ingress tests, and the final independent bundle verification. The two
+ignored identity and two ignored authorization cases are the deliberately
+separate source/restore halves driven only by `scripts/test-backup-restore.sh`;
+they were not silently counted as executed. The protected recovery job remains
+the required multi-database proof.
 
 The live Jenkins and PostgreSQL-backed target observations matched the immutable
 active identity `jenkins-user-immutable-1042`; allow/deny decisions for project
@@ -166,11 +169,14 @@ view, build trigger, build cancel, and project configure; the reused login
 decisions, deletion, and four post-delete denies; replacement identity
 `jenkins-user-deleted-reuse-2042`, its changed authentication, and its four deny
 decisions; enabled generation 1, disabled generation 2, and enabled generation
-3; disabled pre-queue denial; and rollback admission. The target predecessor
-and replacement results come from real authenticated PostgreSQL-backed
-principals, an actual lifecycle transition, and calls to the product
-authorization engine, not prefilled expected values. The resulting
-`mcloving.diff002.runtime-comparison/v1` verdict reports all thirteen comparison
+3; manual, API, upstream, webhook, and schedule disabled-ingress denial with
+zero queued builds; disabled pre-queue denial; and rollback admission. The
+target predecessor and replacement results come from real authenticated
+PostgreSQL-backed principals, their returned immutable identity IDs, an actual
+lifecycle transition, and calls to the product authorization engine, not
+prefilled expected values. The five ingress results come from the distinct
+product admission paths. The resulting
+`mcloving.diff002.runtime-comparison/v1` verdict reports all fifteen comparison
 dimensions and aggregate parity as true.
 
 The runner exited zero with empty source status on an internal Podman network,
@@ -179,12 +185,12 @@ capabilities, all default capabilities dropped, no-new-privileges, a read-only
 Cargo registry mount, and finite per-container CPU, memory, and PID ceilings.
 The repository mount remained writable only for Cargo build output; no
 production credential or endpoint was present. The sealed external evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T093009Z`; its
-self-excluding 18-file manifest SHA-256 is
-`809ea6bb8d32427c91d1f38f4066b27280f147a4fc285dcfc6772ab870692bc8`.
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T093947Z`; its
+self-excluding 19-file manifest SHA-256 is
+`998cfb1d748fa5fec9d1b3ba8b79def7b196ae035d71f5ad6c447de04bdcc88e`.
 Independent re-verification of every manifest entry passed.
 
-Sixteen preserved predecessors contribute no authority. The first,
+Seventeen preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -236,6 +242,11 @@ post-delete denies but ended transiently before target startup and has no
 sealed manifest. The accepted run compares four post-delete denies derived
 through retained Jenkins authentication with four fresh McLoving token
 authentication-plus-authorization attempts.
+The `diff002-state-policy-20260814T093916Z` run proved the expanded Jenkins
+five-ingress matrix but ended transiently before PostgreSQL startup and has no
+sealed manifest. The unchanged accepted run derives the target identity change
+from the two authenticated identity IDs and drives each typed target ingress
+through its production admission path while proving zero builds were created.
 
 ## Non-authority and limitations
 
