@@ -240,16 +240,15 @@ disabledIngressDetails.api = [
   result: disabledIngress.api
 ]
 
-def upstreamFuture = upstream.scheduleBuild2(0,
-  new Cause.UserIdCause(administratorUser.id))
-assert upstreamFuture != null
-def upstreamBuild = upstreamFuture.get(30, java.util.concurrent.TimeUnit.SECONDS)
-Thread.sleep(250)
+def upstreamBuild = upstream.createExecutable()
+upstreamBuild.setResult(Result.SUCCESS)
+new ReverseBuildTrigger.RunListenerImpl().onCompleted(upstreamBuild,
+  TaskListener.NULL)
 def activityAfterUpstream = targetActivity()
 disabledIngress.upstream = upstreamBuild.result == Result.SUCCESS &&
   activityAfterUpstream == activityBefore ? 'deny' : 'allow'
 disabledIngressDetails.upstream = [
-  path: 'ReverseBuildTrigger after completed upstream build',
+  path: 'ReverseBuildTrigger.RunListenerImpl.onCompleted(Run,TaskListener)',
   upstream_build: upstreamBuild.number,
   upstream_result: upstreamBuild.result.toString(),
   result: disabledIngress.upstream
