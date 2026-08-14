@@ -161,8 +161,8 @@ single system.
 ## Verification before deployment
 
 `mcloving-release-provenance verify-chain` accepts one or more groups of exact
-signed envelope, independently provisioned policy, canonical SBOM and bundle.
-For every group it verifies:
+signed envelope, independently provisioned policy, canonical SBOM, bundle and
+Cargo.lock. For every group it verifies:
 
 - the Ed25519 signature against a nonempty, unambiguous startup-pinned signer
   registry and the manifest's public-key digest;
@@ -171,7 +171,8 @@ For every group it verifies:
   workflow, target and source epoch pins;
 - the complete sorted protected-gate set, successful conclusion, run IDs,
   evidence digests and exact source head;
-- canonical SBOM and exact lock binding;
+- a complete canonical SBOM reconstructed from the supplied exact Cargo.lock
+  and policy-pinned release-tool identity;
 - bundle size/digest and exact self-verified component equality;
 - transparency log identity, independently pinned checkpoint and audit anchor;
   and
@@ -197,6 +198,8 @@ The focused contract suite proves:
 - builder image and source-epoch substitution denial;
 - release-tool/SBOM-generator substitution denial even when re-signed;
 - re-signed SBOM generator mismatch against the signed builder identity;
+- re-signed incomplete SBOM denial during independent verification from the
+  exact supplied Cargo.lock;
 - protected-gate run substitution denial;
 - SBOM, bundle bytes and component-role substitution denial;
 - attacker key, malformed signature, malformed transparency and valid but

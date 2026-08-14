@@ -455,6 +455,7 @@ pub fn verify_release(
     policy: &VerificationPolicy,
     sbom_bytes: &[u8],
     bundle_bytes: &[u8],
+    cargo_lock_bytes: &[u8],
     rollback: Option<&VerifiedRelease>,
 ) -> Result<VerifiedRelease, ReleaseError> {
     validate_verification_policy(policy)?;
@@ -486,12 +487,17 @@ pub fn verify_release(
     verify_policy_gates(&envelope.manifest, policy)?;
     verify_transparency(&envelope.manifest.transparency, policy)?;
 
-    let sbom: ReleaseSbom = serde_json::from_slice(sbom_bytes)?;
-    validate_sbom(&sbom)?;
+    let cargo_lock =
+        std::str::from_utf8(cargo_lock_bytes).map_err(|_| ReleaseError::ArtifactDenied)?;
+    let reconstructed_sbom =
+        sbom_from_cargo_lock(cargo_lock, &envelope.manifest.builder.release_tool_sha256)
+            .map_err(|_| ReleaseError::ArtifactDenied)?;
     if sha256_hex(sbom_bytes) != envelope.manifest.sbom_sha256
-        || sbom.cargo_lock_sha256 != envelope.manifest.source.cargo_lock_sha256
-        || sbom.generator_sha256 != envelope.manifest.builder.release_tool_sha256
-        || serde_json::to_vec(&sbom)? != sbom_bytes
+        || sha256_hex(cargo_lock_bytes) != envelope.manifest.source.cargo_lock_sha256
+        || reconstructed_sbom
+            .canonical_bytes()
+            .map_err(|_| ReleaseError::ArtifactDenied)?
+            != sbom_bytes
     {
         return Err(ReleaseError::ArtifactDenied);
     }

@@ -207,6 +207,7 @@ fn exact_release_verifies_before_deployment_receipt() {
         &fixture.policy,
         &fixture.sbom,
         &fixture.bundle,
+        &fixture.lock,
         None,
     )
     .expect("verify exact release");
@@ -242,6 +243,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::SourceDenied)
@@ -256,6 +258,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::SourceDenied)
@@ -265,7 +268,14 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
     lock.source.cargo_lock_sha256 = DIGEST_B.to_owned();
     let lock = sign_release(lock, &fixture.signing_key_pkcs8).expect("resign lock");
     assert!(matches!(
-        verify_release(&lock, &fixture.policy, &fixture.sbom, &fixture.bundle, None),
+        verify_release(
+            &lock,
+            &fixture.policy,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None
+        ),
         Err(ReleaseError::SourceDenied)
     ));
 
@@ -279,6 +289,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::BuilderDenied)
@@ -302,6 +313,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.policy,
             &substituted_sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::BuilderDenied)
@@ -316,6 +328,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::BuilderDenied)
@@ -330,6 +343,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::PolicyDenied)
@@ -343,8 +357,35 @@ fn sbom_bundle_and_component_substitution_are_denied() {
     let mut sbom = fixture.sbom.clone();
     *sbom.last_mut().expect("SBOM byte") ^= 1;
     assert!(matches!(
-        verify_release(&envelope, &fixture.policy, &sbom, &fixture.bundle, None),
-        Err(ReleaseError::Encoding(_)) | Err(ReleaseError::ArtifactDenied)
+        verify_release(
+            &envelope,
+            &fixture.policy,
+            &sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None
+        ),
+        Err(ReleaseError::ArtifactDenied)
+    ));
+
+    let mut incomplete_sbom: mcloving_release_provenance::ReleaseSbom =
+        serde_json::from_slice(&fixture.sbom).expect("parse SBOM");
+    incomplete_sbom.packages.pop().expect("SBOM package");
+    let incomplete_sbom = incomplete_sbom.canonical_bytes().expect("canonical SBOM");
+    let mut incomplete_manifest = fixture.manifest.clone();
+    incomplete_manifest.sbom_sha256 = sha256(&incomplete_sbom);
+    let incomplete_envelope = sign_release(incomplete_manifest, &fixture.signing_key_pkcs8)
+        .expect("resign incomplete SBOM");
+    assert!(matches!(
+        verify_release(
+            &incomplete_envelope,
+            &fixture.policy,
+            &incomplete_sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None
+        ),
+        Err(ReleaseError::ArtifactDenied)
     ));
 
     let substituted_sbom = sbom_from_cargo_lock(
@@ -364,6 +405,7 @@ fn sbom_bundle_and_component_substitution_are_denied() {
             &fixture.policy,
             &substituted_sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::ArtifactDenied)
@@ -372,7 +414,28 @@ fn sbom_bundle_and_component_substitution_are_denied() {
     let mut bundle = fixture.bundle.clone();
     *bundle.last_mut().expect("bundle byte") ^= 1;
     assert!(matches!(
-        verify_release(&envelope, &fixture.policy, &fixture.sbom, &bundle, None),
+        verify_release(
+            &envelope,
+            &fixture.policy,
+            &fixture.sbom,
+            &bundle,
+            &fixture.lock,
+            None
+        ),
+        Err(ReleaseError::ArtifactDenied)
+    ));
+
+    let mut substituted_lock = fixture.lock.clone();
+    substituted_lock.push(b'\n');
+    assert!(matches!(
+        verify_release(
+            &envelope,
+            &fixture.policy,
+            &fixture.sbom,
+            &fixture.bundle,
+            &substituted_lock,
+            None
+        ),
         Err(ReleaseError::ArtifactDenied)
     ));
 
@@ -386,6 +449,7 @@ fn sbom_bundle_and_component_substitution_are_denied() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::ArtifactDenied)
@@ -403,6 +467,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::SignatureDenied)
@@ -420,6 +485,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::SignatureDenied)
@@ -443,6 +509,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
             &fixture.policy,
             &fixture.sbom,
             &fixture.bundle,
+            &fixture.lock,
             None
         ),
         Err(ReleaseError::TransparencyDenied)
@@ -466,6 +533,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
                 &fixture.policy,
                 &fixture.sbom,
                 &fixture.bundle,
+                &fixture.lock,
                 None
             ),
             Err(ReleaseError::TransparencyDenied)
@@ -482,6 +550,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         &first.policy,
         &first.sbom,
         &first.bundle,
+        &first.lock,
         None,
     )
     .expect("verify rollback release");
@@ -501,6 +570,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         &second.policy,
         &second.sbom,
         &second.bundle,
+        &second.lock,
         Some(&first_verified),
     )
     .expect("exact rollback ancestry");
@@ -512,6 +582,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         &unrelated.policy,
         &unrelated.sbom,
         &unrelated.bundle,
+        &unrelated.lock,
         None,
     )
     .expect("unrelated verified release");
@@ -521,6 +592,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
             &second.policy,
             &second.sbom,
             &second.bundle,
+            &second.lock,
             Some(&unrelated_verified)
         ),
         Err(ReleaseError::RollbackDenied)
@@ -531,6 +603,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
             &second.policy,
             &second.sbom,
             &second.bundle,
+            &second.lock,
             None
         ),
         Err(ReleaseError::RollbackDenied)
@@ -709,6 +782,7 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
             policy_path.to_str().expect("policy path"),
             sbom_path.to_str().expect("SBOM path"),
             bundle_path.to_str().expect("bundle path"),
+            cargo_lock_path.to_str().expect("Cargo.lock path"),
         ])
         .output()
         .expect("run verification CLI");

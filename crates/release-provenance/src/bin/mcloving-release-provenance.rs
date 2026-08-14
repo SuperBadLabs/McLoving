@@ -84,25 +84,27 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
             output,
             chain @ ..,
         ] if command == "verify-chain" => {
-            if chain.is_empty() || chain.len() % 4 != 0 {
+            if chain.is_empty() || chain.len() % 5 != 0 {
                 return Err(CliError::Usage);
             }
             let deployed_at = deployed_at
                 .parse::<i64>()
                 .map_err(|_| CliError::InvalidInput)?;
             let mut verified = None;
-            for group in chain.chunks_exact(4) {
+            for group in chain.chunks_exact(5) {
                 let envelope: SignedReleaseEnvelope =
                     serde_json::from_slice(&read_public(Path::new(&group[0]))?)?;
                 let policy: VerificationPolicy =
                     serde_json::from_slice(&read_public(Path::new(&group[1]))?)?;
                 let sbom = read_public(Path::new(&group[2]))?;
                 let bundle = read_bundle(Path::new(&group[3]))?;
+                let cargo_lock = read_public(Path::new(&group[4]))?;
                 verified = Some(verify_release(
                     &envelope,
                     &policy,
                     &sbom,
                     &bundle,
+                    &cargo_lock,
                     verified.as_ref(),
                 )?);
             }
@@ -203,7 +205,7 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: mcloving-release-provenance sbom LOCK GENERATOR_SHA256 OUTPUT | bundle ROOT COMPONENTS_JSON OUTPUT | sign-build BUILD_RECEIPT RELEASE_REQUEST COMPONENTS SBOM BUNDLE SOURCE_ARCHIVE CARGO_LOCK TOOLCHAIN PRIVATE_PKCS8 OUTPUT | verify-chain ENV CONFIG_SHA256 DEPLOYED_AT_MS OUTPUT ENVELOPE POLICY SBOM BUNDLE [ENVELOPE POLICY SBOM BUNDLE ...]"
+        "usage: mcloving-release-provenance sbom LOCK GENERATOR_SHA256 OUTPUT | bundle ROOT COMPONENTS_JSON OUTPUT | sign-build BUILD_RECEIPT RELEASE_REQUEST COMPONENTS SBOM BUNDLE SOURCE_ARCHIVE CARGO_LOCK TOOLCHAIN PRIVATE_PKCS8 OUTPUT | verify-chain ENV CONFIG_SHA256 DEPLOYED_AT_MS OUTPUT ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK [ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK ...]"
     )]
     Usage,
     #[error("release input is invalid")]
