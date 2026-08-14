@@ -234,29 +234,117 @@ pub struct VerificationPolicy {
     pub allow_genesis_release: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Audit evidence emitted from a live [`VerifiedRelease`].
+///
+/// This type is deliberately serialization-only and has private fields. It
+/// cannot be reconstructed from stored JSON or forged with a struct literal.
+/// Authority-bearing deployment code must accept a live `VerifiedRelease`,
+/// never a serialized `DeploymentReceipt`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentReceipt {
-    pub schema_version: String,
-    pub release_id: Uuid,
-    pub manifest_sha256: String,
-    pub bundle_sha256: String,
-    pub source_commit_sha1: String,
-    pub source_tree_sha1: String,
-    pub builder_image_digest: String,
-    pub release_tool_sha256: String,
-    pub signer_key_id: String,
-    pub transparency_log_identity: String,
-    pub transparency_entry_identity: String,
-    pub transparency_log_index: u64,
-    pub transparency_signed_entry_timestamp_sha256: String,
-    pub transparency_inclusion_proof_sha256: String,
-    pub transparency_checkpoint_sha256: String,
-    pub transparency_audit_event_sha256: String,
-    pub rollback_manifest_sha256: Option<String>,
-    pub deployed_at_unix_ms: i64,
-    pub deployment_environment: String,
-    pub deployment_configuration_sha256: String,
+    schema_version: String,
+    release_id: Uuid,
+    manifest_sha256: String,
+    bundle_sha256: String,
+    source_commit_sha1: String,
+    source_tree_sha1: String,
+    builder_image_digest: String,
+    release_tool_sha256: String,
+    signer_key_id: String,
+    transparency_log_identity: String,
+    transparency_entry_identity: String,
+    transparency_log_index: u64,
+    transparency_signed_entry_timestamp_sha256: String,
+    transparency_inclusion_proof_sha256: String,
+    transparency_checkpoint_sha256: String,
+    transparency_audit_event_sha256: String,
+    rollback_manifest_sha256: Option<String>,
+    deployed_at_unix_ms: i64,
+    deployment_environment: String,
+    deployment_configuration_sha256: String,
+}
+
+impl DeploymentReceipt {
+    pub fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
+
+    pub fn release_id(&self) -> Uuid {
+        self.release_id
+    }
+
+    pub fn manifest_sha256(&self) -> &str {
+        &self.manifest_sha256
+    }
+
+    pub fn bundle_sha256(&self) -> &str {
+        &self.bundle_sha256
+    }
+
+    pub fn source_commit_sha1(&self) -> &str {
+        &self.source_commit_sha1
+    }
+
+    pub fn source_tree_sha1(&self) -> &str {
+        &self.source_tree_sha1
+    }
+
+    pub fn builder_image_digest(&self) -> &str {
+        &self.builder_image_digest
+    }
+
+    pub fn release_tool_sha256(&self) -> &str {
+        &self.release_tool_sha256
+    }
+
+    pub fn signer_key_id(&self) -> &str {
+        &self.signer_key_id
+    }
+
+    pub fn transparency_log_identity(&self) -> &str {
+        &self.transparency_log_identity
+    }
+
+    pub fn transparency_entry_identity(&self) -> &str {
+        &self.transparency_entry_identity
+    }
+
+    pub fn transparency_log_index(&self) -> u64 {
+        self.transparency_log_index
+    }
+
+    pub fn transparency_signed_entry_timestamp_sha256(&self) -> &str {
+        &self.transparency_signed_entry_timestamp_sha256
+    }
+
+    pub fn transparency_inclusion_proof_sha256(&self) -> &str {
+        &self.transparency_inclusion_proof_sha256
+    }
+
+    pub fn transparency_checkpoint_sha256(&self) -> &str {
+        &self.transparency_checkpoint_sha256
+    }
+
+    pub fn transparency_audit_event_sha256(&self) -> &str {
+        &self.transparency_audit_event_sha256
+    }
+
+    pub fn rollback_manifest_sha256(&self) -> Option<&str> {
+        self.rollback_manifest_sha256.as_deref()
+    }
+
+    pub fn deployed_at_unix_ms(&self) -> i64 {
+        self.deployed_at_unix_ms
+    }
+
+    pub fn deployment_environment(&self) -> &str {
+        &self.deployment_environment
+    }
+
+    pub fn deployment_configuration_sha256(&self) -> &str {
+        &self.deployment_configuration_sha256
+    }
 }
 
 pub struct VerifiedRelease {

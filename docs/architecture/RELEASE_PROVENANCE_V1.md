@@ -22,8 +22,8 @@ The versioned objects are:
 - `mcloving.release-bundle/v1`, the deterministic self-hashing component
   archive;
 - `mcloving.release-provenance/v1`, the Ed25519-signed release manifest; and
-- `mcloving.release-deployment/v1`, which can be constructed only from the
-  private `VerifiedRelease` type.
+- `mcloving.release-deployment/v1`, serialization-only audit evidence emitted
+  from the private-field `VerifiedRelease` type.
 
 Unknown JSON fields, unknown schema versions, noncanonical encodings, empty
 identity sets, duplicate or unordered entries, malformed digests, and
@@ -153,6 +153,11 @@ Verification pins the complete transparency tuple to policy: log and entry
 identity, log index, signed-entry timestamp, inclusion proof, checkpoint and
 independent audit event. The deployment receipt carries the same tuple so a
 downstream operator can audit the exact evidence that authorized placement.
+Its fields are private and it does not implement deserialization, so stored JSON
+cannot be converted back into deployment authority or forged as a typed
+receipt. Any authority-bearing deployment function must consume the live
+`VerifiedRelease` value in the verifier process; the serialized receipt is
+post-verification audit evidence only.
 
 The signer host must separately establish:
 
@@ -205,10 +210,13 @@ release without its exact verified predecessor is denied. An unrelated valid
 release cannot satisfy rollback. Only the final verified value can emit a
 deployment receipt binding environment, deployment configuration digest,
 release, source, builder, signer, transparency entry and rollback manifest.
+That receipt is serialization-only audit output and cannot recreate the
+verified value.
 
 The verifier never extracts or executes the bundle. Installation remains a
-separate least-authority deployment operation that must consume the verified
-receipt and recheck the same bundle digest immediately before placement.
+separate least-authority deployment operation that must consume the live
+`VerifiedRelease` and recheck the same bundle digest immediately before
+placement; serialized receipt JSON must never be accepted as authority.
 
 ## Substitution and permission-negative proof
 
@@ -223,6 +231,8 @@ The focused contract suite proves:
   exact supplied Cargo.lock;
 - replacement component bytes plus attacker-regenerated canonical component
   JSON, bundle and edited unsigned receipt denial at the signing boundary;
+- non-deserializable, private-field deployment audit evidence so only the live
+  private-field `VerifiedRelease` can cross an authority-bearing API;
 - protected-gate run substitution denial;
 - SBOM, bundle bytes and component-role substitution denial;
 - attacker key, malformed signature, malformed transparency and valid but

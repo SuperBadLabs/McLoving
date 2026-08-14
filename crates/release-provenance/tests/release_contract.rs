@@ -220,19 +220,22 @@ fn exact_release_verifies_before_deployment_receipt() {
     let receipt = verified
         .deployment_receipt("production", DIGEST_A, 10_000)
         .expect("verified deployment receipt");
-    assert_eq!(receipt.manifest_sha256, envelope.manifest_sha256);
-    assert_eq!(receipt.bundle_sha256, fixture.manifest.bundle_sha256);
-    assert_eq!(receipt.source_commit_sha1, SHA1_A);
-    assert_eq!(receipt.builder_image_digest, BUILDER_DIGEST);
-    assert_eq!(receipt.release_tool_sha256, DIGEST_B);
-    assert_eq!(receipt.transparency_log_identity, "rekor:production");
-    assert_eq!(receipt.transparency_entry_identity, "entry:12345");
-    assert_eq!(receipt.transparency_log_index, 12_345);
-    assert_eq!(receipt.transparency_signed_entry_timestamp_sha256, DIGEST_A);
-    assert_eq!(receipt.transparency_inclusion_proof_sha256, DIGEST_B);
-    assert_eq!(receipt.transparency_checkpoint_sha256, DIGEST_C);
-    assert_eq!(receipt.transparency_audit_event_sha256, DIGEST_A);
-    assert!(receipt.rollback_manifest_sha256.is_none());
+    assert_eq!(receipt.manifest_sha256(), envelope.manifest_sha256);
+    assert_eq!(receipt.bundle_sha256(), fixture.manifest.bundle_sha256);
+    assert_eq!(receipt.source_commit_sha1(), SHA1_A);
+    assert_eq!(receipt.builder_image_digest(), BUILDER_DIGEST);
+    assert_eq!(receipt.release_tool_sha256(), DIGEST_B);
+    assert_eq!(receipt.transparency_log_identity(), "rekor:production");
+    assert_eq!(receipt.transparency_entry_identity(), "entry:12345");
+    assert_eq!(receipt.transparency_log_index(), 12_345);
+    assert_eq!(
+        receipt.transparency_signed_entry_timestamp_sha256(),
+        DIGEST_A
+    );
+    assert_eq!(receipt.transparency_inclusion_proof_sha256(), DIGEST_B);
+    assert_eq!(receipt.transparency_checkpoint_sha256(), DIGEST_C);
+    assert_eq!(receipt.transparency_audit_event_sha256(), DIGEST_A);
+    assert!(receipt.rollback_manifest_sha256().is_none());
 }
 
 #[test]
@@ -805,14 +808,14 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
         "{}",
         String::from_utf8_lossy(&verify.stderr)
     );
-    let receipt: mcloving_release_provenance::DeploymentReceipt =
+    let receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&receipt_path).expect("read receipt"))
-            .expect("parse receipt");
+            .expect("parse serialized audit evidence");
     let envelope: mcloving_release_provenance::SignedReleaseEnvelope =
         serde_json::from_slice(&std::fs::read(&envelope_path).expect("read envelope"))
             .expect("parse envelope");
-    assert_eq!(receipt.manifest_sha256, envelope.manifest_sha256);
-    assert_eq!(receipt.bundle_sha256, fixture.manifest.bundle_sha256);
+    assert_eq!(receipt["manifest_sha256"], envelope.manifest_sha256);
+    assert_eq!(receipt["bundle_sha256"], fixture.manifest.bundle_sha256);
 
     std::fs::write(&source_archive_path, b"substituted source archive")
         .expect("substitute source archive");
