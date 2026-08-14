@@ -82,6 +82,9 @@ class Diff002Acl extends ACL {
 
   @Override
   boolean hasPermission2(Authentication authentication, hudson.security.Permission permission) {
+    if (authentication == ACL.SYSTEM2) {
+      return true
+    }
     if (matchesStableIdentity(authentication, administratorUserId,
                               administratorSeed)) {
       return true
@@ -240,15 +243,16 @@ disabledIngressDetails.api = [
   result: disabledIngress.api
 ]
 
-def upstreamBuild = upstream.createExecutable()
-upstreamBuild.setResult(Result.SUCCESS)
-new ReverseBuildTrigger.RunListenerImpl().onCompleted(upstreamBuild,
-  TaskListener.NULL)
+def upstreamFuture = upstream.scheduleBuild2(0,
+  new Cause.UserIdCause(administratorUser.id))
+assert upstreamFuture != null
+def upstreamBuild = upstreamFuture.get(15, java.util.concurrent.TimeUnit.SECONDS)
+Thread.sleep(250)
 def activityAfterUpstream = targetActivity()
 disabledIngress.upstream = upstreamBuild.result == Result.SUCCESS &&
   activityAfterUpstream == activityBefore ? 'deny' : 'allow'
 disabledIngressDetails.upstream = [
-  path: 'ReverseBuildTrigger.RunListenerImpl.onCompleted(Run,TaskListener)',
+  path: 'ReverseBuildTrigger after completed upstream build',
   upstream_build: upstreamBuild.number,
   upstream_result: upstreamBuild.result.toString(),
   result: disabledIngress.upstream
