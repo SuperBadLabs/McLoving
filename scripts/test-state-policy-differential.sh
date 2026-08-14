@@ -32,6 +32,8 @@ if [[ -n "${source_status}" ]]; then
   printf '%s\n' "${source_status}" >&2
   exit 78
 fi
+source_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+source_tree="$(git -C "${repo_root}" rev-parse "${source_commit}^{tree}")"
 output_root="${output_parent}/${output_leaf}"
 evidence="${output_root}/evidence"
 network="mcloving-diff002-${RANDOM}-${RANDOM}"
@@ -42,13 +44,19 @@ jenkins_runtime="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-diff002-jenkins.XXXXXX")"
 jenkins_home="${jenkins_runtime}/home"
 jenkins_port="$((19000 + (RANDOM % 2000)))"
 jenkins_password="$(openssl rand -hex 32)"
+jenkins_password_file="${jenkins_runtime}/admin-password"
 jenkins_netrc="${jenkins_runtime}/netrc"
+printf '%s\n' "${jenkins_password}" >"${jenkins_password_file}"
 printf 'machine 127.0.0.1 login diff002-admin password %s\n' \
   "${jenkins_password}" >"${jenkins_netrc}"
-chmod 600 "${jenkins_netrc}"
+chmod 600 "${jenkins_password_file}" "${jenkins_netrc}"
 
 cleanup() {
-  podman rm --force "${runner}" "${postgres}" "${jenkins}" >/dev/null 2>&1 || true
+  for container in "${runner}" "${postgres}" "${jenkins}"; do
+    if [[ -n "${container}" ]]; then
+      podman rm --force "${container}" >/dev/null 2>&1 || true
+    fi
+  done
   podman network rm "${network}" >/dev/null 2>&1 || true
   podman unshare chown -R 0:0 "${jenkins_runtime}" >/dev/null 2>&1 || true
   rm -rf -- "${jenkins_runtime}"
@@ -68,7 +76,7 @@ podman run --detach --name "${jenkins}" \
   --security-opt no-new-privileges \
   --cap-drop all \
   --env JAVA_OPTS='-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true' \
-  --env DIFF002_ADMIN_PASSWORD="${jenkins_password}" \
+  --volume "${jenkins_password_file}:/run/secrets/diff002-admin-password:ro,Z" \
   --volume "${jenkins_home}:/var/jenkins_home:Z" \
   "${jenkins_image}" >/dev/null
 
@@ -116,11 +124,21 @@ sed -n 's/^DIFF002=//p' "${evidence}/jenkins-probe.txt" \
 jq --exit-status '
   .schema == "mcloving.diff002.jenkins-runtime/v1"
   and .security_realm == "hudson.security.HudsonPrivateSecurityRealm"
-  and .authorization_strategy
-      == "hudson.security.FullControlOnceLoggedInAuthorizationStrategy"
+  and .authorization_strategy == "Diff002AuthorizationStrategy"
+  and .installed_acl == "Diff002Acl"
   and (.decisions | length) == 4
+  and .deleted_reuse_name == "alice.reused"
+  and .deleted_predecessor_immutable_id == "jenkins-user-deleted-2041"
+  and .deleted_predecessor_decisions == {
+    "project_view":"allow",
+    "build_trigger":"deny",
+    "build_cancel":"deny",
+    "project_configure":"deny"
+  }
+  and .deleted_predecessor_deleted
   and .deleted_reuse_immutable_id == "jenkins-user-deleted-reuse-2042"
   and ([.deleted_reuse_decisions[]] | all(. == "deny"))
+  and .deleted_reuse_authentication_changed
   and .states == [
     {"state":"enabled","generation":1},
     {"state":"disabled","generation":2},
@@ -138,6 +156,14 @@ printf 'public-network-denied\n' >"${evidence}/jenkins-network-negative.txt"
 podman logs "${jenkins}" >"${evidence}/jenkins-controller.log" 2>&1
 podman inspect "${jenkins}" >"${evidence}/jenkins-inspect.json"
 podman image inspect "${jenkins_image}" >"${evidence}/jenkins-image-inspect.json"
+if rg --fixed-strings --quiet "${jenkins_password}" "${evidence}"; then
+  echo "DIFF-002 generated Jenkins credential entered retained evidence" >&2
+  exit 1
+fi
+podman rm --force "${jenkins}" >/dev/null
+jenkins=''
+rm -f -- "${jenkins_password_file}" "${jenkins_netrc}" "${jenkins_runtime}/cookies"
+jenkins_password=''
 
 podman run --detach --name "${postgres}" \
   --network "${network}" --network-alias postgres \
@@ -210,12 +236,27 @@ jq -n \
       ($source[0].immutable_id == $authorization[0].immutable_id),
     decisions_equal:
       ($source[0].decisions == $authorization[0].decisions),
+    deleted_reuse_name_equal:
+      ($source[0].deleted_reuse_name
+       == $authorization[0].deleted_reuse_name),
+    deleted_predecessor_identity_equal:
+      ($source[0].deleted_predecessor_immutable_id
+       == $authorization[0].deleted_predecessor_immutable_id),
+    deleted_predecessor_decisions_equal:
+      ($source[0].deleted_predecessor_decisions
+       == $authorization[0].deleted_predecessor_decisions),
+    deleted_predecessor_deleted_equal:
+      ($source[0].deleted_predecessor_deleted
+       == $authorization[0].deleted_predecessor_deleted),
     deleted_reuse_identity_equal:
       ($source[0].deleted_reuse_immutable_id
        == $authorization[0].deleted_reuse_immutable_id),
     deleted_reuse_decisions_equal:
       ($source[0].deleted_reuse_decisions
        == $authorization[0].deleted_reuse_decisions),
+    deleted_reuse_authentication_changed_equal:
+      ($source[0].deleted_reuse_authentication_changed
+       == $authorization[0].deleted_reuse_authentication_changed),
     operational_states_equal:
       ($source[0].states == $operational[0].states),
     disabled_prequeue_equal:
@@ -226,10 +267,20 @@ jq -n \
     parity:
       ($source[0].immutable_id == $authorization[0].immutable_id
        and $source[0].decisions == $authorization[0].decisions
+       and $source[0].deleted_reuse_name
+          == $authorization[0].deleted_reuse_name
+       and $source[0].deleted_predecessor_immutable_id
+          == $authorization[0].deleted_predecessor_immutable_id
+       and $source[0].deleted_predecessor_decisions
+          == $authorization[0].deleted_predecessor_decisions
+       and $source[0].deleted_predecessor_deleted
+          == $authorization[0].deleted_predecessor_deleted
        and $source[0].deleted_reuse_immutable_id
           == $authorization[0].deleted_reuse_immutable_id
        and $source[0].deleted_reuse_decisions
           == $authorization[0].deleted_reuse_decisions
+       and $source[0].deleted_reuse_authentication_changed
+          == $authorization[0].deleted_reuse_authentication_changed
        and $source[0].states == $operational[0].states
        and $source[0].disabled_prequeue_denied
           == $operational[0].disabled_prequeue_denied
@@ -241,15 +292,18 @@ jq --exit-status '.parity == true' \
   "${evidence}/runtime-comparison.json" >/dev/null
 
 source_status="$(git -C "${repo_root}" status --porcelain=v1 --untracked-files=all)"
-if [[ -n "${source_status}" ]]; then
-  echo "DIFF-002 source tree changed during execution; evidence remains unsealed at ${output_root}" >&2
+final_source_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+final_source_tree="$(git -C "${repo_root}" rev-parse HEAD^{tree})"
+if [[ -n "${source_status}" || "${final_source_commit}" != "${source_commit}" \
+  || "${final_source_tree}" != "${source_tree}" ]]; then
+  echo "DIFF-002 source commit, tree, or status changed during execution; evidence remains unsealed at ${output_root}" >&2
   printf '%s\n' "${source_status}" >&2
   exit 78
 fi
 
 {
-  printf 'source_commit=%s\n' "$(git -C "${repo_root}" rev-parse HEAD)"
-  printf 'source_tree=%s\n' "$(git -C "${repo_root}" rev-parse HEAD^{tree})"
+  printf 'source_commit=%s\n' "${source_commit}"
+  printf 'source_tree=%s\n' "${source_tree}"
   printf 'source_status='
   printf '%s' "${source_status}" | tr '\n' ','
   printf '\n'
@@ -276,6 +330,16 @@ done >"${evidence}/source-files.sha256"
 if [[ ${runner_status} -ne 0 ]]; then
   echo "DIFF-002 contained runner failed; evidence retained at ${output_root}" >&2
   exit "${runner_status}"
+fi
+
+seal_source_status="$(git -C "${repo_root}" status --porcelain=v1 --untracked-files=all)"
+seal_source_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+seal_source_tree="$(git -C "${repo_root}" rev-parse HEAD^{tree})"
+if [[ -n "${seal_source_status}" || "${seal_source_commit}" != "${source_commit}" \
+  || "${seal_source_tree}" != "${source_tree}" ]]; then
+  echo "DIFF-002 source commit, tree, or status changed before sealing; evidence remains unsealed at ${output_root}" >&2
+  printf '%s\n' "${seal_source_status}" >&2
+  exit 78
 fi
 
 find "${evidence}" -type f ! -name SHA256SUMS -printf '%P\0' \
