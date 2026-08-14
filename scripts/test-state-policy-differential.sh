@@ -159,6 +159,13 @@ jq --exit-status '
     "webhook":"deny",
     "schedule":"deny"
   }
+  and (.disabled_ingress_details | keys) ==
+    ["api", "manual", "schedule", "upstream", "webhook"]
+  and ([.disabled_ingress_details[].result] | all(. == "deny"))
+  and (.disabled_ingress_details.api.http_status >= 400)
+  and (.disabled_ingress_details.upstream.upstream_build >= 1)
+  and .disabled_ingress_details.upstream.upstream_result == "SUCCESS"
+  and ([.disabled_ingress_details[].path] | unique | length) == 5
   and .disabled_prequeue_denied
   and .disabled_queued_builds == 0
   and .rollback_admitted
