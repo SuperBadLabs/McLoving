@@ -42,6 +42,7 @@ runner="mcloving-diff002-runner-${RANDOM}-${RANDOM}"
 jenkins="mcloving-diff002-jenkins-${RANDOM}-${RANDOM}"
 jenkins_runtime="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-diff002-jenkins.XXXXXX")"
 jenkins_home="${jenkins_runtime}/home"
+cargo_target="${jenkins_runtime}/cargo-target"
 jenkins_port="$((19000 + (RANDOM % 2000)))"
 jenkins_password="$(openssl rand -hex 32)"
 jenkins_password_file="${jenkins_runtime}/admin-password"
@@ -65,6 +66,7 @@ trap cleanup EXIT
 
 mkdir -p "${evidence}"
 mkdir -p "${jenkins_home}/init.groovy.d"
+mkdir -p "${cargo_target}"
 cp "${repo_root}/migration/state-policy-runtime-v1/init.groovy" \
   "${jenkins_home}/init.groovy.d/10-diff002.groovy"
 podman unshare chown -R 1000:1000 "${jenkins_home}"
@@ -203,14 +205,16 @@ podman create --name "${runner}" \
   --security-opt no-new-privileges \
   --cap-drop all \
   --env CARGO_NET_OFFLINE=true \
+  --env CARGO_TARGET_DIR=/cargo-target \
   --env RUSTUP_TOOLCHAIN=1.97.1 \
   --env MCLOVING_TEST_DATABASE_URL=postgres://mcloving@postgres:5432/mcloving \
   --env MCLOVING_DIFF002_AUTHZ_OUTPUT=/evidence/target-authorization.json \
   --env MCLOVING_DIFF002_OPERATIONAL_OUTPUT=/evidence/target-operational.json \
   --env MCLOVING_DIFF002_INGRESS_OUTPUT=/evidence/target-ingress.json \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
+  --volume "${cargo_target}:/cargo-target:Z" \
   --volume "${evidence}:/evidence:Z" \
-  --volume "${repo_root}:/work:Z" \
+  --volume "${repo_root}:/work:ro,Z" \
   --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
   bash -c '
