@@ -1,7 +1,12 @@
 # State and policy differential v1
 
-Status: `DIFF-002` verified implementation; independent exact-head review,
-protected checks, and merge remain required before closure.
+Status: `DIFF-002` complete. Exact implementation head
+`f0b3f6dced45f33e9ef6d0ea88af013912cb76bd` produced the accepted receipt;
+exact PR head `c6baebe3ec3a702ee94c8fb1ad211a446fc787c8` passed all nine
+protected checks and clean independent exact-head review after all nineteen
+review threads were fixed and resolved. PR #55 squash-merged as protected-main
+commit `5e02566ac3f76d8261b6578f71ccb438bd51bda3`, whose Windows run
+`31795542752` and unchanged-head Foundation run `31795542707` attempt 2 passed.
 
 ## Certified boundary
 
