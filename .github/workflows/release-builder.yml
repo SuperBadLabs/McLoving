@@ -41,11 +41,13 @@ jobs:
           RELEASE_HEAD: ${{ github.event.workflow_run.head_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "${RELEASE_HEAD}"
-          release_output="${RUNNER_TEMP}/mcloving-release-${RELEASE_HEAD}"
+          release_parent="${RUNNER_TEMP}/mcloving-release-private-${RELEASE_HEAD}"
+          install -d -m 0700 "${release_parent}"
+          release_output="${release_parent}/output"
           scripts/release-builder-contained.sh \
             "${GITHUB_WORKSPACE}" \
             "${release_output}" \
-            "${CARGO_HOME}"
+            "${HOME}/.cargo"
           source_date_epoch="$(git show -s --format=%ct "${RELEASE_HEAD}")"
           artifact="${RUNNER_TEMP}/mcloving-release-${RELEASE_HEAD}.tar"
           tar --sort=name \

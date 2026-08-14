@@ -27,14 +27,21 @@ source_root_canonical="$(realpath -e -- "${source_root}")"
 cargo_cache_canonical="$(realpath -e -- "${cargo_cache}")"
 [[ "${source_root}" == "${source_root_canonical}" && -d "${source_root}" ]] ||
   deny "source root must be a canonical directory"
-[[ "${cargo_cache}" == "${cargo_cache_canonical}" && -d "${cargo_cache}/registry" ]] ||
-  deny "Cargo cache must be canonical and contain registry metadata"
+[[ "${cargo_cache}" == "${cargo_cache_canonical}" ]] || deny "Cargo cache must be canonical"
+for cargo_input in "${cargo_cache}/registry/cache" "${cargo_cache}/registry/index"; do
+  [[ -d "${cargo_input}" && ! -L "${cargo_input}" && "$(realpath -e -- "${cargo_input}")" == "${cargo_input}" ]] ||
+    deny "Cargo cache inputs must be canonical directories"
+done
 [[ ! -e "${output_root}" && ! -L "${output_root}" ]] || deny "output root already exists"
 output_parent="$(dirname -- "${output_root}")"
 output_name="$(basename -- "${output_root}")"
 output_parent_canonical="$(realpath -e -- "${output_parent}")"
 [[ "${output_parent}" == "${output_parent_canonical}" && "${output_name}" != "." && "${output_name}" != ".." ]] ||
   deny "output parent and name must be canonical"
+output_parent_uid="$(stat -c '%u' "${output_parent}")"
+output_parent_mode="$(stat -c '%a' "${output_parent}")"
+[[ "${output_parent_uid}" == "$(id -u)" ]] || deny "output parent must be owned by the invoking user"
+[[ "$((8#${output_parent_mode} & 077))" -eq 0 ]] || deny "output parent must deny group and other access"
 
 git -C "${source_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || deny "source is not a Git worktree"
 [[ "$(git -C "${source_root}" rev-parse --show-toplevel)" == "${source_root}" ]] ||
@@ -82,7 +89,8 @@ docker run --rm --pull never --platform linux/amd64 \
   --tmpfs /target:rw,exec,nosuid,nodev,size=8g,mode=0700,uid="$(id -u)",gid="$(id -g)" \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777 \
   --mount "type=bind,src=${scratch_root},dst=/input,readonly" \
-  --mount "type=bind,src=${cargo_cache}/registry,dst=/cargo-cache/registry,readonly" \
+  --mount "type=bind,src=${cargo_cache}/registry/cache,dst=/cargo-cache/registry/cache,readonly" \
+  --mount "type=bind,src=${cargo_cache}/registry/index,dst=/cargo-cache/registry/index,readonly" \
   --mount "type=bind,src=${output_root},dst=/out" \
   --env CARGO_HOME=/cargo-home \
   --env CARGO_NET_OFFLINE=true \
@@ -105,6 +113,12 @@ expected_directories="$(find "${output_root}" -mindepth 1 -type d -printf '%P\n'
   deny "builder emitted an unexpected release directory set"
 [[ -z "$(find "${output_root}" -mindepth 1 ! -type f ! -type d -print -quit)" ]] ||
   deny "builder emitted an unsupported filesystem node"
+[[ -z "$(find "${output_root}" -type f -links +1 -print -quit)" ]] ||
+  deny "builder emitted a hardlinked file"
+[[ -z "$(find "${output_root}" -mindepth 1 ! -uid "$(id -u)" -print -quit)" ]] ||
+  deny "builder emitted a node owned by another user"
+[[ -z "$(find "${output_root}" -mindepth 1 -perm /077 -print -quit)" ]] ||
+  deny "builder emitted a node accessible by group or others"
 printf 'release_builder_complete source=%s tree=%s bundle=%s\n' \
   "${source_commit}" \
   "${source_tree}" \

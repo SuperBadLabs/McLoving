@@ -46,8 +46,9 @@ toolchain: 1.97.1
 ```
 
 The outer builder accepts only a canonical clean Git worktree, a new canonical
-output path, and a canonical Cargo cache. It archives the exact commit rather
-than bind-mounting a mutable worktree. The container runs with no network, a
+output path beneath an owner-owned directory that denies group and other
+access, and a canonical Cargo cache. It archives the exact commit rather than
+bind-mounting a mutable worktree. The container runs with no network, a
 read-only root, no capabilities, `no-new-privileges`, the Docker default
 AppArmor profile, bounded CPU, memory and process count, and fixed-size private
 tmpfs filesystems. Only the dedicated build-target and ephemeral Cargo-home
@@ -56,12 +57,14 @@ scripts, procedural macros, and checksum-pinned vendored tools such as
 `protoc`; both remain `nosuid` and `nodev`. The only writable persistent mount
 is the newly created output directory.
 
-Only registry index and packaged crate archives enter the container. Cargo
+Only the registry index and packaged crate archive directories enter the
+container as separate read-only mounts. Before copying them, the inner builder
+rejects symlinks, hardlinked files, and special filesystem nodes. Cargo
 credentials, mutable unpacked registry sources, the host target directory, and
-Git configuration do not. Cargo reconstructs dependencies in an ephemeral
-home using `--locked --offline`; the SBOM requires each registry source to have
-the exact Cargo.lock checksum and therefore rejects Git or other unchecksummed
-sources in v1.
+Git configuration do not enter. Cargo reconstructs dependencies in an
+ephemeral home using `--locked --offline`; the SBOM requires each registry
+source to have the exact Cargo.lock checksum and therefore rejects Git or
+other unchecksummed sources in v1.
 
 The inner builder fixes its source path, target triple, locale, timezone,
 `SOURCE_DATE_EPOCH`, incremental setting, debug stripping and linker build-ID
@@ -80,9 +83,10 @@ source.tar
 toolchain.txt
 ```
 
-Any missing, additional, symlinked, or unexpected output denies the build.
-The workflow packages those outputs into a deterministic tar and uploads it as
-one immutable unsigned workflow artifact. CI has no production signing key.
+Any missing, additional, symlinked, hardlinked, unexpectedly owned,
+group/other-accessible, or otherwise unexpected output denies the build. The
+workflow packages those outputs into a deterministic tar and uploads it as one
+immutable unsigned workflow artifact. CI has no production signing key.
 
 ## Bundle and SBOM
 
@@ -105,9 +109,9 @@ registry metadata.
 It does not accept a preassembled manifest. Before producing a signature it
 recomputes and compares the build receipt against the exact component JSON,
 SBOM, bundle, source archive, Cargo.lock and toolchain record. It also reparses
-the bundle, requires exact component equivalence, requires canonical JSON, and
-requires the SBOM generator to be the release executable named by the build
-receipt.
+the bundle, requires exact component equivalence and canonical JSON, and
+reconstructs the complete canonical SBOM from the supplied Cargo.lock and the
+release executable digest named by the receipt before signing.
 
 The release request supplies only the release ID/version/profile, signer key
 identity, sorted exact protected policy gates, externally validated
@@ -119,6 +123,11 @@ keys are denied. Inputs are opened once with `O_NOFOLLOW` and verified through
 that same file descriptor. Key bytes are zeroized after the signing attempt.
 Every output requires an owner-private directory, uses create-new mode, is
 synchronized, and is never overwritten.
+
+Verification pins the complete transparency tuple to policy: log and entry
+identity, log index, signed-entry timestamp, inclusion proof, checkpoint and
+independent audit event. The deployment receipt carries the same tuple so a
+downstream operator can audit the exact evidence that authorized placement.
 
 The signer host must separately establish:
 
@@ -180,11 +189,13 @@ The focused contract suite proves:
 - protected-gate run substitution denial;
 - SBOM, bundle bytes and component-role substitution denial;
 - attacker key, malformed signature, malformed transparency and valid but
-  independently untrusted checkpoint/audit substitution denial;
+  independently untrusted entry identity, log index, signed-entry timestamp,
+  inclusion proof, checkpoint and audit substitution denial;
 - missing, unrelated and field-substituted rollback target denial;
 - deterministic bundle reconstruction plus traversal and trailing-byte denial;
 - complete canonical projection of the repository Cargo.lock; and
-- end-to-end CLI signing/verification, owner-private key enforcement, symlink
+- end-to-end CLI signing/verification, incomplete-SBOM denial even with a
+  matching attacker-edited receipt, owner-private key enforcement, symlink
   denial and create-new output enforcement.
 
 The protected Foundation workflow runs the same crate in workspace Clippy and

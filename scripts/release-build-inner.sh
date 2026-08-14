@@ -23,13 +23,17 @@ readonly SHA1_PATTERN='^[0-9a-f]{40}$'
 [[ -d "${SOURCE_ROOT}" && -d "${OUTPUT_ROOT}" && -z "$(find "${OUTPUT_ROOT}" -mindepth 1 -print -quit)" ]] ||
   deny "source or output boundary is invalid"
 
+for cache_tree in /cargo-cache/registry/cache /cargo-cache/registry/index; do
+  [[ -d "${cache_tree}" && ! -L "${cache_tree}" ]] || deny "Cargo cache input is not a directory"
+  [[ -z "$(find "${cache_tree}" -type l -print -quit)" ]] || deny "Cargo cache contains a symlink"
+  [[ -z "$(find "${cache_tree}" ! -type f ! -type d -print -quit)" ]] ||
+    deny "Cargo cache contains a special filesystem node"
+  [[ -z "$(find "${cache_tree}" -type f -links +1 -print -quit)" ]] ||
+    deny "Cargo cache contains a hardlinked file"
+done
 mkdir -p /cargo-home/registry
-if [[ -d /cargo-cache/registry/cache ]]; then
-  cp -a /cargo-cache/registry/cache /cargo-home/registry/cache
-fi
-if [[ -d /cargo-cache/registry/index ]]; then
-  cp -a /cargo-cache/registry/index /cargo-home/registry/index
-fi
+cp -a /cargo-cache/registry/cache /cargo-home/registry/cache
+cp -a /cargo-cache/registry/index /cargo-home/registry/index
 [[ ! -e /cargo-home/credentials && ! -e /cargo-home/credentials.toml ]] ||
   deny "Cargo credentials entered the builder"
 

@@ -156,6 +156,10 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         expected_target_triple: "x86_64-unknown-linux-gnu".to_owned(),
         expected_source_date_epoch: 1_786_000_000,
         expected_transparency_log_identity: "rekor:production".to_owned(),
+        expected_transparency_entry_identity: "entry:12345".to_owned(),
+        expected_transparency_log_index: 12_345,
+        expected_transparency_signed_entry_timestamp_sha256: DIGEST_A.to_owned(),
+        expected_transparency_inclusion_proof_sha256: DIGEST_B.to_owned(),
         expected_transparency_checkpoint_sha256: DIGEST_C.to_owned(),
         expected_audit_event_sha256: DIGEST_A.to_owned(),
         required_policy_gates: vec![
@@ -211,6 +215,13 @@ fn exact_release_verifies_before_deployment_receipt() {
     assert_eq!(receipt.bundle_sha256, fixture.manifest.bundle_sha256);
     assert_eq!(receipt.source_commit_sha1, SHA1_A);
     assert_eq!(receipt.builder_image_digest, BUILDER_DIGEST);
+    assert_eq!(receipt.transparency_log_identity, "rekor:production");
+    assert_eq!(receipt.transparency_entry_identity, "entry:12345");
+    assert_eq!(receipt.transparency_log_index, 12_345);
+    assert_eq!(receipt.transparency_signed_entry_timestamp_sha256, DIGEST_A);
+    assert_eq!(receipt.transparency_inclusion_proof_sha256, DIGEST_B);
+    assert_eq!(receipt.transparency_checkpoint_sha256, DIGEST_C);
+    assert_eq!(receipt.transparency_audit_event_sha256, DIGEST_A);
     assert!(receipt.rollback_manifest_sha256.is_none());
 }
 
@@ -388,6 +399,30 @@ fn signer_signature_and_transparency_substitution_are_denied() {
         ),
         Err(ReleaseError::TransparencyDenied)
     ));
+
+    for mutate in [
+        |evidence: &mut TransparencyEvidence| evidence.entry_identity = "entry:54321".to_owned(),
+        |evidence: &mut TransparencyEvidence| evidence.log_index = 54_321,
+        |evidence: &mut TransparencyEvidence| {
+            evidence.signed_entry_timestamp_sha256 = DIGEST_B.to_owned()
+        },
+        |evidence: &mut TransparencyEvidence| evidence.inclusion_proof_sha256 = DIGEST_C.to_owned(),
+    ] {
+        let mut substituted = fixture.manifest.clone();
+        mutate(&mut substituted.transparency);
+        let substituted =
+            sign_release(substituted, &fixture.signing_key_pkcs8).expect("resign transparency");
+        assert!(matches!(
+            verify_release(
+                &substituted,
+                &fixture.policy,
+                &fixture.sbom,
+                &fixture.bundle,
+                None
+            ),
+            Err(ReleaseError::TransparencyDenied)
+        ));
+    }
 }
 
 #[test]
@@ -650,6 +685,29 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
     assert!(!substituted.status.success());
     assert!(!substituted_output.exists());
     std::fs::write(&source_archive_path, source_archive).expect("restore source archive");
+
+    let mut incomplete_sbom: mcloving_release_provenance::ReleaseSbom =
+        serde_json::from_slice(&fixture.sbom).expect("parse SBOM");
+    incomplete_sbom.packages.pop().expect("SBOM package");
+    let incomplete_sbom = incomplete_sbom.canonical_bytes().expect("canonical SBOM");
+    let mut substituted_receipt = build_receipt.clone();
+    substituted_receipt.sbom_sha256 = sha256(&incomplete_sbom);
+    std::fs::write(&sbom_path, &incomplete_sbom).expect("write incomplete SBOM");
+    std::fs::write(
+        &build_receipt_path,
+        serde_json::to_vec(&substituted_receipt).expect("substituted receipt JSON"),
+    )
+    .expect("write substituted receipt");
+    let incomplete_output = root_path.join("incomplete-sbom-envelope.json");
+    let incomplete = run_sign(&key_path, &incomplete_output);
+    assert!(!incomplete.status.success());
+    assert!(!incomplete_output.exists());
+    std::fs::write(&sbom_path, &fixture.sbom).expect("restore SBOM");
+    std::fs::write(
+        &build_receipt_path,
+        serde_json::to_vec(&build_receipt).expect("build receipt JSON"),
+    )
+    .expect("restore build receipt");
 
     let overwrite = run_sign(&key_path, &envelope_path);
     assert!(!overwrite.status.success());

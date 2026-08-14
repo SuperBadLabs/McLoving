@@ -217,6 +217,10 @@ pub struct VerificationPolicy {
     pub expected_target_triple: String,
     pub expected_source_date_epoch: u64,
     pub expected_transparency_log_identity: String,
+    pub expected_transparency_entry_identity: String,
+    pub expected_transparency_log_index: u64,
+    pub expected_transparency_signed_entry_timestamp_sha256: String,
+    pub expected_transparency_inclusion_proof_sha256: String,
     pub expected_transparency_checkpoint_sha256: String,
     pub expected_audit_event_sha256: String,
     pub required_policy_gates: Vec<PolicyExpectation>,
@@ -235,7 +239,13 @@ pub struct DeploymentReceipt {
     pub source_tree_sha1: String,
     pub builder_image_digest: String,
     pub signer_key_id: String,
+    pub transparency_log_identity: String,
     pub transparency_entry_identity: String,
+    pub transparency_log_index: u64,
+    pub transparency_signed_entry_timestamp_sha256: String,
+    pub transparency_inclusion_proof_sha256: String,
+    pub transparency_checkpoint_sha256: String,
+    pub transparency_audit_event_sha256: String,
     pub rollback_manifest_sha256: Option<String>,
     pub deployed_at_unix_ms: i64,
     pub deployment_environment: String,
@@ -287,7 +297,21 @@ impl VerifiedRelease {
             source_tree_sha1: self.manifest.source.tree_sha1.clone(),
             builder_image_digest: self.manifest.builder.image_digest.clone(),
             signer_key_id: self.manifest.signer_key_id.clone(),
+            transparency_log_identity: self.manifest.transparency.log_identity.clone(),
             transparency_entry_identity: self.manifest.transparency.entry_identity.clone(),
+            transparency_log_index: self.manifest.transparency.log_index,
+            transparency_signed_entry_timestamp_sha256: self
+                .manifest
+                .transparency
+                .signed_entry_timestamp_sha256
+                .clone(),
+            transparency_inclusion_proof_sha256: self
+                .manifest
+                .transparency
+                .inclusion_proof_sha256
+                .clone(),
+            transparency_checkpoint_sha256: self.manifest.transparency.checkpoint_sha256.clone(),
+            transparency_audit_event_sha256: self.manifest.transparency.audit_event_sha256.clone(),
             rollback_manifest_sha256: self
                 .manifest
                 .rollback_target
@@ -380,12 +404,10 @@ pub fn sign_build_outputs(
     {
         return Err(ReleaseError::BuildDenied);
     }
-    let sbom: ReleaseSbom = serde_json::from_slice(sbom_bytes)?;
-    validate_sbom(&sbom)?;
-    if serde_json::to_vec(&sbom)? != sbom_bytes
-        || sbom.cargo_lock_sha256 != receipt.cargo_lock_sha256
-        || sbom.generator_sha256 != receipt.release_tool_sha256
-    {
+    let cargo_lock =
+        std::str::from_utf8(cargo_lock_bytes).map_err(|_| ReleaseError::BuildDenied)?;
+    let reconstructed_sbom = sbom_from_cargo_lock(cargo_lock, &receipt.release_tool_sha256)?;
+    if reconstructed_sbom.canonical_bytes()? != sbom_bytes {
         return Err(ReleaseError::BuildDenied);
     }
     let key = ring::signature::Ed25519KeyPair::from_pkcs8(signer_pkcs8)
@@ -907,6 +929,11 @@ fn verify_transparency(
 ) -> Result<(), ReleaseError> {
     validate_transparency(value)?;
     if value.log_identity != policy.expected_transparency_log_identity
+        || value.entry_identity != policy.expected_transparency_entry_identity
+        || value.log_index != policy.expected_transparency_log_index
+        || value.signed_entry_timestamp_sha256
+            != policy.expected_transparency_signed_entry_timestamp_sha256
+        || value.inclusion_proof_sha256 != policy.expected_transparency_inclusion_proof_sha256
         || value.checkpoint_sha256 != policy.expected_transparency_checkpoint_sha256
         || value.audit_event_sha256 != policy.expected_audit_event_sha256
     {
@@ -941,6 +968,9 @@ fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), Relea
         || !valid_text(&policy.expected_target_triple)
         || policy.expected_source_date_epoch == 0
         || !valid_text(&policy.expected_transparency_log_identity)
+        || !valid_text(&policy.expected_transparency_entry_identity)
+        || !is_sha256(&policy.expected_transparency_signed_entry_timestamp_sha256)
+        || !is_sha256(&policy.expected_transparency_inclusion_proof_sha256)
         || !is_sha256(&policy.expected_transparency_checkpoint_sha256)
         || !is_sha256(&policy.expected_audit_event_sha256)
         || policy.required_policy_gates.is_empty()
