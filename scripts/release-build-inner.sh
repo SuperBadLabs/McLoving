@@ -38,6 +38,7 @@ export LC_ALL=C
 export TZ=UTC
 export RUSTFLAGS="-C debuginfo=0 -C strip=symbols -C link-arg=-Wl,--build-id=none"
 export CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR=/target
 cargo +1.97.1 build --locked --offline --release \
   --target "${MCLOVING_TARGET_TRIPLE}" \
   -p mcloving-agent \
