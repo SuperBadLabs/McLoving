@@ -12,19 +12,24 @@ use std::path::{Component, Path};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use ring::rand::SystemRandom;
 use ring::signature::KeyPair as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const RELEASE_SCHEMA: &str = "mcloving.release-provenance/v1";
+pub const RELEASE_SCHEMA: &str = "mcloving.release-provenance/v2";
 pub const BUILD_SCHEMA: &str = "mcloving.release-build/v1";
 pub const SBOM_SCHEMA: &str = "mcloving.release-sbom/v1";
 pub const BUNDLE_SCHEMA: &str = "mcloving.release-bundle/v1";
-pub const DEPLOYMENT_SCHEMA: &str = "mcloving.release-deployment/v1";
+pub const TRANSPARENCY_SCHEMA: &str = "mcloving.release-transparency/v1";
+pub const EVIDENCE_MANIFEST_SCHEMA: &str = "mcloving.release-evidence-manifest/v1";
+pub const AUDIT_ANCHOR_SCHEMA: &str = "mcloving.release-audit-anchor/v1";
+pub const KEY_INFO_SCHEMA: &str = "mcloving.release-key-info/v1";
+pub const DEPLOYMENT_SCHEMA: &str = "mcloving.release-deployment/v2";
 
-const SIGNATURE_DOMAIN: &[u8] = b"mcloving-release-signature-v1\0";
+const SIGNATURE_DOMAIN: &[u8] = b"mcloving-release-signature-v2\0";
 const BUNDLE_MAGIC: &[u8] = b"MCLOVING-BUNDLE-V1\0";
 const MAX_COMPONENTS: usize = 128;
 const MAX_COMPONENT_BYTES: u64 = 256 * 1024 * 1024;
@@ -111,14 +116,54 @@ impl ReleaseSbom {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct TransparencyRequirement {
+    pub log_identity: String,
+    pub attestation_key_id: String,
+    pub attestation_public_key_sha256: String,
+    pub audit_anchor_identity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransparencyEvidence {
+    pub schema_version: String,
+    pub envelope_sha256: String,
     pub log_identity: String,
     pub entry_identity: String,
     pub log_index: u64,
+    pub integrated_time_unix_seconds: i64,
+    pub attestation_key_id: String,
+    pub attestation_public_key_sha256: String,
+    pub attestation_signature_sha256: String,
     pub signed_entry_timestamp_sha256: String,
     pub inclusion_proof_sha256: String,
     pub checkpoint_sha256: String,
-    pub audit_event_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseEvidenceManifest {
+    pub schema_version: String,
+    pub release_id: Uuid,
+    pub manifest_sha256: String,
+    pub envelope_sha256: String,
+    pub signing_policy_sha256: String,
+    pub transparency_evidence_sha256: String,
+    pub sbom_sha256: String,
+    pub bundle_sha256: String,
+    pub cargo_lock_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditAnchorEvidence {
+    pub schema_version: String,
+    pub evidence_manifest_sha256: String,
+    pub anchor_identity: String,
+    pub proof_sha256: String,
+    pub verifier_statement_sha256: String,
+    pub notary_reference: String,
+    pub verified_at_unix_ms: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -161,7 +206,7 @@ pub struct ReleaseRequest {
     pub profile: String,
     pub signer_key_id: String,
     pub policy_gates: Vec<PolicyGate>,
-    pub transparency: TransparencyEvidence,
+    pub transparency_requirement: TransparencyRequirement,
     pub rollback_target: Option<RollbackTarget>,
 }
 
@@ -181,7 +226,7 @@ pub struct ReleaseManifest {
     pub bundle_size_bytes: u64,
     pub signer_key_id: String,
     pub signer_public_key_sha256: String,
-    pub transparency: TransparencyEvidence,
+    pub transparency_requirement: TransparencyRequirement,
     pub rollback_target: Option<RollbackTarget>,
 }
 
@@ -204,7 +249,7 @@ pub struct PolicyExpectation {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct VerificationPolicy {
+pub struct SigningPolicy {
     pub expected_source_commit_sha1: String,
     pub expected_source_tree_sha1: String,
     pub expected_source_archive_sha256: String,
@@ -223,15 +268,30 @@ pub struct VerificationPolicy {
     pub expected_bundle_sha256: String,
     pub expected_bundle_size_bytes: u64,
     pub expected_transparency_log_identity: String,
-    pub expected_transparency_entry_identity: String,
-    pub expected_transparency_log_index: u64,
-    pub expected_transparency_signed_entry_timestamp_sha256: String,
-    pub expected_transparency_inclusion_proof_sha256: String,
-    pub expected_transparency_checkpoint_sha256: String,
-    pub expected_audit_event_sha256: String,
+    pub expected_transparency_attestation_key_id: String,
+    pub expected_transparency_attestation_public_key_sha256: String,
+    pub expected_audit_anchor_identity: String,
     pub required_policy_gates: Vec<PolicyExpectation>,
     pub trusted_signer_keys: BTreeMap<String, Vec<u8>>,
     pub allow_genesis_release: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationPolicy {
+    pub signing: SigningPolicy,
+    pub expected_transparency: TransparencyEvidence,
+    pub expected_evidence_manifest: ReleaseEvidenceManifest,
+    pub expected_audit_anchor: AuditAnchorEvidence,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SigningKeyInfo {
+    pub schema_version: String,
+    pub key_id: String,
+    pub public_key: Vec<u8>,
+    pub public_key_sha256: String,
 }
 
 /// Audit evidence emitted from a live [`VerifiedRelease`].
@@ -246,6 +306,7 @@ pub struct DeploymentReceipt {
     schema_version: String,
     release_id: Uuid,
     manifest_sha256: String,
+    envelope_sha256: String,
     bundle_sha256: String,
     source_commit_sha1: String,
     source_tree_sha1: String,
@@ -258,7 +319,14 @@ pub struct DeploymentReceipt {
     transparency_signed_entry_timestamp_sha256: String,
     transparency_inclusion_proof_sha256: String,
     transparency_checkpoint_sha256: String,
-    transparency_audit_event_sha256: String,
+    transparency_attestation_key_id: String,
+    transparency_attestation_public_key_sha256: String,
+    transparency_attestation_signature_sha256: String,
+    audit_anchor_identity: String,
+    evidence_manifest_sha256: String,
+    audit_anchor_proof_sha256: String,
+    audit_anchor_verifier_statement_sha256: String,
+    audit_anchor_notary_reference: String,
     rollback_manifest_sha256: Option<String>,
     deployed_at_unix_ms: i64,
     deployment_environment: String,
@@ -280,6 +348,10 @@ impl DeploymentReceipt {
 
     pub fn bundle_sha256(&self) -> &str {
         &self.bundle_sha256
+    }
+
+    pub fn envelope_sha256(&self) -> &str {
+        &self.envelope_sha256
     }
 
     pub fn source_commit_sha1(&self) -> &str {
@@ -326,8 +398,36 @@ impl DeploymentReceipt {
         &self.transparency_checkpoint_sha256
     }
 
-    pub fn transparency_audit_event_sha256(&self) -> &str {
-        &self.transparency_audit_event_sha256
+    pub fn transparency_attestation_key_id(&self) -> &str {
+        &self.transparency_attestation_key_id
+    }
+
+    pub fn transparency_attestation_public_key_sha256(&self) -> &str {
+        &self.transparency_attestation_public_key_sha256
+    }
+
+    pub fn transparency_attestation_signature_sha256(&self) -> &str {
+        &self.transparency_attestation_signature_sha256
+    }
+
+    pub fn audit_anchor_identity(&self) -> &str {
+        &self.audit_anchor_identity
+    }
+
+    pub fn evidence_manifest_sha256(&self) -> &str {
+        &self.evidence_manifest_sha256
+    }
+
+    pub fn audit_anchor_proof_sha256(&self) -> &str {
+        &self.audit_anchor_proof_sha256
+    }
+
+    pub fn audit_anchor_verifier_statement_sha256(&self) -> &str {
+        &self.audit_anchor_verifier_statement_sha256
+    }
+
+    pub fn audit_anchor_notary_reference(&self) -> &str {
+        &self.audit_anchor_notary_reference
     }
 
     pub fn rollback_manifest_sha256(&self) -> Option<&str> {
@@ -350,6 +450,10 @@ impl DeploymentReceipt {
 pub struct VerifiedRelease {
     manifest: ReleaseManifest,
     manifest_sha256: String,
+    envelope_sha256: String,
+    transparency: TransparencyEvidence,
+    evidence_manifest: ReleaseEvidenceManifest,
+    audit_anchor: AuditAnchorEvidence,
 }
 
 impl fmt::Debug for VerifiedRelease {
@@ -371,6 +475,14 @@ impl VerifiedRelease {
         &self.manifest_sha256
     }
 
+    pub fn envelope_sha256(&self) -> &str {
+        &self.envelope_sha256
+    }
+
+    pub fn evidence_manifest(&self) -> &ReleaseEvidenceManifest {
+        &self.evidence_manifest
+    }
+
     pub fn deployment_receipt(
         &self,
         deployment_environment: &str,
@@ -387,27 +499,39 @@ impl VerifiedRelease {
             schema_version: DEPLOYMENT_SCHEMA.to_owned(),
             release_id: self.manifest.release_id,
             manifest_sha256: self.manifest_sha256.clone(),
+            envelope_sha256: self.envelope_sha256.clone(),
             bundle_sha256: self.manifest.bundle_sha256.clone(),
             source_commit_sha1: self.manifest.source.commit_sha1.clone(),
             source_tree_sha1: self.manifest.source.tree_sha1.clone(),
             builder_image_digest: self.manifest.builder.image_digest.clone(),
             release_tool_sha256: self.manifest.builder.release_tool_sha256.clone(),
             signer_key_id: self.manifest.signer_key_id.clone(),
-            transparency_log_identity: self.manifest.transparency.log_identity.clone(),
-            transparency_entry_identity: self.manifest.transparency.entry_identity.clone(),
-            transparency_log_index: self.manifest.transparency.log_index,
+            transparency_log_identity: self.transparency.log_identity.clone(),
+            transparency_entry_identity: self.transparency.entry_identity.clone(),
+            transparency_log_index: self.transparency.log_index,
             transparency_signed_entry_timestamp_sha256: self
-                .manifest
                 .transparency
                 .signed_entry_timestamp_sha256
                 .clone(),
-            transparency_inclusion_proof_sha256: self
-                .manifest
+            transparency_inclusion_proof_sha256: self.transparency.inclusion_proof_sha256.clone(),
+            transparency_checkpoint_sha256: self.transparency.checkpoint_sha256.clone(),
+            transparency_attestation_key_id: self.transparency.attestation_key_id.clone(),
+            transparency_attestation_public_key_sha256: self
                 .transparency
-                .inclusion_proof_sha256
+                .attestation_public_key_sha256
                 .clone(),
-            transparency_checkpoint_sha256: self.manifest.transparency.checkpoint_sha256.clone(),
-            transparency_audit_event_sha256: self.manifest.transparency.audit_event_sha256.clone(),
+            transparency_attestation_signature_sha256: self
+                .transparency
+                .attestation_signature_sha256
+                .clone(),
+            audit_anchor_identity: self.audit_anchor.anchor_identity.clone(),
+            evidence_manifest_sha256: self.audit_anchor.evidence_manifest_sha256.clone(),
+            audit_anchor_proof_sha256: self.audit_anchor.proof_sha256.clone(),
+            audit_anchor_verifier_statement_sha256: self
+                .audit_anchor
+                .verifier_statement_sha256
+                .clone(),
+            audit_anchor_notary_reference: self.audit_anchor.notary_reference.clone(),
             rollback_manifest_sha256: self
                 .manifest
                 .rollback_target
@@ -452,6 +576,27 @@ pub enum ReleaseError {
     Encoding(#[from] serde_json::Error),
 }
 
+pub fn generate_signing_key() -> Result<Vec<u8>, ReleaseError> {
+    let document = ring::signature::Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| ReleaseError::SignatureDenied)?;
+    Ok(document.as_ref().to_vec())
+}
+
+pub fn signing_key_info(key_id: &str, signer_pkcs8: &[u8]) -> Result<SigningKeyInfo, ReleaseError> {
+    if !valid_text(key_id) {
+        return Err(ReleaseError::SignatureDenied);
+    }
+    let key = ring::signature::Ed25519KeyPair::from_pkcs8(signer_pkcs8)
+        .map_err(|_| ReleaseError::SignatureDenied)?;
+    let public_key = key.public_key().as_ref().to_vec();
+    Ok(SigningKeyInfo {
+        schema_version: KEY_INFO_SCHEMA.to_owned(),
+        key_id: key_id.to_owned(),
+        public_key_sha256: sha256_hex(&public_key),
+        public_key,
+    })
+}
+
 pub fn sign_release(
     manifest: ReleaseManifest,
     signer_pkcs8: &[u8],
@@ -477,7 +622,7 @@ pub fn sign_release(
 pub fn sign_build_outputs(
     receipt: ReleaseBuildReceipt,
     request: ReleaseRequest,
-    policy: &VerificationPolicy,
+    policy: &SigningPolicy,
     components_bytes: &[u8],
     sbom_bytes: &[u8],
     bundle_bytes: &[u8],
@@ -538,13 +683,13 @@ pub fn sign_build_outputs(
         bundle_size_bytes: receipt.bundle_size_bytes,
         signer_key_id: request.signer_key_id,
         signer_public_key_sha256: sha256_hex(key.public_key().as_ref()),
-        transparency: request.transparency,
+        transparency_requirement: request.transparency_requirement,
         rollback_target: request.rollback_target,
     };
     verify_source(&manifest, policy)?;
     verify_builder(&manifest.builder, policy)?;
     verify_policy_gates(&manifest, policy)?;
-    verify_transparency(&manifest.transparency, policy)?;
+    verify_transparency_requirement(&manifest.transparency_requirement, policy)?;
     verify_artifact_policy(&manifest, policy)?;
     let trusted_signer_key = policy
         .trusted_signer_keys
@@ -556,9 +701,13 @@ pub fn sign_build_outputs(
     sign_release(manifest, signer_pkcs8)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_release(
     envelope: &SignedReleaseEnvelope,
     policy: &VerificationPolicy,
+    transparency: &TransparencyEvidence,
+    evidence_manifest: &ReleaseEvidenceManifest,
+    audit_anchor: &AuditAnchorEvidence,
     sbom_bytes: &[u8],
     bundle_bytes: &[u8],
     cargo_lock_bytes: &[u8],
@@ -574,7 +723,9 @@ pub fn verify_release(
     if envelope.manifest_sha256 != manifest_sha256 {
         return Err(ReleaseError::SignatureDenied);
     }
-    let signer_key = policy
+    let envelope_sha256 = sha256_hex(&serde_json::to_vec(envelope)?);
+    let signing = &policy.signing;
+    let signer_key = signing
         .trusted_signer_keys
         .get(&envelope.manifest.signer_key_id)
         .ok_or(ReleaseError::SignatureDenied)?;
@@ -588,11 +739,11 @@ pub fn verify_release(
         .verify(&signature_message(&canonical_manifest), &signature)
         .map_err(|_| ReleaseError::SignatureDenied)?;
 
-    verify_source(&envelope.manifest, policy)?;
-    verify_builder(&envelope.manifest.builder, policy)?;
-    verify_policy_gates(&envelope.manifest, policy)?;
-    verify_transparency(&envelope.manifest.transparency, policy)?;
-    verify_artifact_policy(&envelope.manifest, policy)?;
+    verify_source(&envelope.manifest, signing)?;
+    verify_builder(&envelope.manifest.builder, signing)?;
+    verify_policy_gates(&envelope.manifest, signing)?;
+    verify_transparency_requirement(&envelope.manifest.transparency_requirement, signing)?;
+    verify_artifact_policy(&envelope.manifest, signing)?;
 
     let cargo_lock =
         std::str::from_utf8(cargo_lock_bytes).map_err(|_| ReleaseError::ArtifactDenied)?;
@@ -617,11 +768,28 @@ pub fn verify_release(
     if bundle_components != envelope.manifest.components {
         return Err(ReleaseError::ArtifactDenied);
     }
-    verify_rollback(&envelope.manifest, &manifest_sha256, policy, rollback)?;
+    verify_external_evidence(
+        &envelope.manifest.transparency_requirement,
+        &envelope.manifest,
+        &manifest_sha256,
+        &envelope_sha256,
+        transparency,
+        evidence_manifest,
+        audit_anchor,
+        sbom_bytes,
+        bundle_bytes,
+        cargo_lock_bytes,
+        policy,
+    )?;
+    verify_rollback(&envelope.manifest, &manifest_sha256, signing, rollback)?;
 
     Ok(VerifiedRelease {
         manifest: envelope.manifest.clone(),
         manifest_sha256,
+        envelope_sha256,
+        transparency: transparency.clone(),
+        evidence_manifest: evidence_manifest.clone(),
+        audit_anchor: audit_anchor.clone(),
     })
 }
 
@@ -804,10 +972,7 @@ pub fn sbom_from_cargo_lock(
     Ok(sbom)
 }
 
-fn verify_source(
-    manifest: &ReleaseManifest,
-    policy: &VerificationPolicy,
-) -> Result<(), ReleaseError> {
+fn verify_source(manifest: &ReleaseManifest, policy: &SigningPolicy) -> Result<(), ReleaseError> {
     if manifest.source.commit_sha1 != policy.expected_source_commit_sha1
         || manifest.source.tree_sha1 != policy.expected_source_tree_sha1
         || manifest.source.source_archive_sha256 != policy.expected_source_archive_sha256
@@ -819,10 +984,7 @@ fn verify_source(
     Ok(())
 }
 
-fn verify_builder(
-    builder: &BuilderIdentity,
-    policy: &VerificationPolicy,
-) -> Result<(), ReleaseError> {
+fn verify_builder(builder: &BuilderIdentity, policy: &SigningPolicy) -> Result<(), ReleaseError> {
     if builder.image_reference != policy.expected_builder_image_reference
         || builder.image_digest != policy.expected_builder_image_digest
         || builder.rust_toolchain != policy.expected_rust_toolchain
@@ -839,9 +1001,9 @@ fn verify_builder(
 
 fn authenticate_build_receipt(
     receipt: &ReleaseBuildReceipt,
-    policy: &VerificationPolicy,
+    policy: &SigningPolicy,
 ) -> Result<(), ReleaseError> {
-    validate_verification_policy(policy)?;
+    validate_signing_policy(policy)?;
     if receipt.source_commit_sha1 != policy.expected_source_commit_sha1
         || receipt.source_tree_sha1 != policy.expected_source_tree_sha1
         || receipt.source_archive_sha256 != policy.expected_source_archive_sha256
@@ -866,7 +1028,7 @@ fn authenticate_build_receipt(
 
 fn verify_artifact_policy(
     manifest: &ReleaseManifest,
-    policy: &VerificationPolicy,
+    policy: &SigningPolicy,
 ) -> Result<(), ReleaseError> {
     let components = serde_json::to_vec(&manifest.components)?;
     if sha256_hex(&components) != policy.expected_components_sha256
@@ -881,7 +1043,7 @@ fn verify_artifact_policy(
 
 fn verify_policy_gates(
     manifest: &ReleaseManifest,
-    policy: &VerificationPolicy,
+    policy: &SigningPolicy,
 ) -> Result<(), ReleaseError> {
     if manifest.policy_gates.len() != policy.required_policy_gates.len() {
         return Err(ReleaseError::PolicyDenied);
@@ -906,7 +1068,7 @@ fn verify_policy_gates(
 fn verify_rollback(
     manifest: &ReleaseManifest,
     current_manifest_sha256: &str,
-    policy: &VerificationPolicy,
+    policy: &SigningPolicy,
     rollback: Option<&VerifiedRelease>,
 ) -> Result<(), ReleaseError> {
     match (&manifest.rollback_target, rollback) {
@@ -972,7 +1134,7 @@ fn validate_manifest(manifest: &ReleaseManifest) -> Result<(), ReleaseError> {
         || !is_sha256(&manifest.signer_public_key_sha256)
         || validate_components(&manifest.components).is_err()
         || validate_policy_gate_shape(&manifest.policy_gates).is_err()
-        || validate_transparency(&manifest.transparency).is_err()
+        || validate_transparency_requirement(&manifest.transparency_requirement).is_err()
         || manifest
             .rollback_target
             .as_ref()
@@ -1073,32 +1235,118 @@ fn validate_sbom(sbom: &ReleaseSbom) -> Result<(), ReleaseError> {
     Ok(())
 }
 
-fn validate_transparency(value: &TransparencyEvidence) -> Result<(), ReleaseError> {
+fn validate_transparency_requirement(value: &TransparencyRequirement) -> Result<(), ReleaseError> {
     if !valid_text(&value.log_identity)
-        || !valid_text(&value.entry_identity)
-        || !is_sha256(&value.signed_entry_timestamp_sha256)
-        || !is_sha256(&value.inclusion_proof_sha256)
-        || !is_sha256(&value.checkpoint_sha256)
-        || !is_sha256(&value.audit_event_sha256)
+        || !valid_text(&value.attestation_key_id)
+        || !is_sha256(&value.attestation_public_key_sha256)
+        || !valid_text(&value.audit_anchor_identity)
     {
         return Err(ReleaseError::TransparencyDenied);
     }
     Ok(())
 }
 
-fn verify_transparency(
-    value: &TransparencyEvidence,
+fn validate_transparency(value: &TransparencyEvidence) -> Result<(), ReleaseError> {
+    if value.schema_version != TRANSPARENCY_SCHEMA
+        || !is_sha256(&value.envelope_sha256)
+        || !valid_text(&value.log_identity)
+        || !valid_text(&value.entry_identity)
+        || value.integrated_time_unix_seconds <= 0
+        || !valid_text(&value.attestation_key_id)
+        || !is_sha256(&value.attestation_public_key_sha256)
+        || !is_sha256(&value.attestation_signature_sha256)
+        || !is_sha256(&value.signed_entry_timestamp_sha256)
+        || !is_sha256(&value.inclusion_proof_sha256)
+        || !is_sha256(&value.checkpoint_sha256)
+    {
+        return Err(ReleaseError::TransparencyDenied);
+    }
+    Ok(())
+}
+
+fn validate_audit_anchor(value: &AuditAnchorEvidence) -> Result<(), ReleaseError> {
+    if value.schema_version != AUDIT_ANCHOR_SCHEMA
+        || !is_sha256(&value.evidence_manifest_sha256)
+        || !valid_text(&value.anchor_identity)
+        || !is_sha256(&value.proof_sha256)
+        || !is_sha256(&value.verifier_statement_sha256)
+        || !valid_text(&value.notary_reference)
+        || value.verified_at_unix_ms <= 0
+    {
+        return Err(ReleaseError::TransparencyDenied);
+    }
+    Ok(())
+}
+
+fn validate_evidence_manifest(value: &ReleaseEvidenceManifest) -> Result<(), ReleaseError> {
+    if value.schema_version != EVIDENCE_MANIFEST_SCHEMA
+        || value.release_id.is_nil()
+        || !is_sha256(&value.manifest_sha256)
+        || !is_sha256(&value.envelope_sha256)
+        || !is_sha256(&value.signing_policy_sha256)
+        || !is_sha256(&value.transparency_evidence_sha256)
+        || !is_sha256(&value.sbom_sha256)
+        || !is_sha256(&value.bundle_sha256)
+        || !is_sha256(&value.cargo_lock_sha256)
+    {
+        return Err(ReleaseError::TransparencyDenied);
+    }
+    Ok(())
+}
+
+fn verify_transparency_requirement(
+    value: &TransparencyRequirement,
+    policy: &SigningPolicy,
+) -> Result<(), ReleaseError> {
+    validate_transparency_requirement(value)?;
+    if value.log_identity != policy.expected_transparency_log_identity
+        || value.attestation_key_id != policy.expected_transparency_attestation_key_id
+        || value.attestation_public_key_sha256
+            != policy.expected_transparency_attestation_public_key_sha256
+        || value.audit_anchor_identity != policy.expected_audit_anchor_identity
+    {
+        return Err(ReleaseError::TransparencyDenied);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_external_evidence(
+    requirement: &TransparencyRequirement,
+    manifest: &ReleaseManifest,
+    manifest_sha256: &str,
+    envelope_sha256: &str,
+    transparency: &TransparencyEvidence,
+    evidence_manifest: &ReleaseEvidenceManifest,
+    audit_anchor: &AuditAnchorEvidence,
+    sbom_bytes: &[u8],
+    bundle_bytes: &[u8],
+    cargo_lock_bytes: &[u8],
     policy: &VerificationPolicy,
 ) -> Result<(), ReleaseError> {
-    validate_transparency(value)?;
-    if value.log_identity != policy.expected_transparency_log_identity
-        || value.entry_identity != policy.expected_transparency_entry_identity
-        || value.log_index != policy.expected_transparency_log_index
-        || value.signed_entry_timestamp_sha256
-            != policy.expected_transparency_signed_entry_timestamp_sha256
-        || value.inclusion_proof_sha256 != policy.expected_transparency_inclusion_proof_sha256
-        || value.checkpoint_sha256 != policy.expected_transparency_checkpoint_sha256
-        || value.audit_event_sha256 != policy.expected_audit_event_sha256
+    validate_transparency(transparency)?;
+    validate_evidence_manifest(evidence_manifest)?;
+    validate_audit_anchor(audit_anchor)?;
+    let transparency_evidence_sha256 = sha256_hex(&serde_json::to_vec(transparency)?);
+    let evidence_manifest_sha256 = sha256_hex(&serde_json::to_vec(evidence_manifest)?);
+    if transparency.envelope_sha256 != envelope_sha256
+        || transparency.log_identity != requirement.log_identity
+        || transparency.attestation_key_id != requirement.attestation_key_id
+        || transparency.attestation_public_key_sha256 != requirement.attestation_public_key_sha256
+        || transparency != &policy.expected_transparency
+        || evidence_manifest.release_id != manifest.release_id
+        || evidence_manifest.manifest_sha256 != manifest_sha256
+        || evidence_manifest.envelope_sha256 != envelope_sha256
+        || evidence_manifest.signing_policy_sha256
+            != sha256_hex(&serde_json::to_vec(&policy.signing)?)
+        || evidence_manifest.transparency_evidence_sha256 != transparency_evidence_sha256
+        || evidence_manifest.sbom_sha256 != sha256_hex(sbom_bytes)
+        || evidence_manifest.bundle_sha256 != sha256_hex(bundle_bytes)
+        || evidence_manifest.cargo_lock_sha256 != sha256_hex(cargo_lock_bytes)
+        || evidence_manifest != &policy.expected_evidence_manifest
+        || audit_anchor.evidence_manifest_sha256 != evidence_manifest_sha256
+        || audit_anchor.anchor_identity != requirement.audit_anchor_identity
+        || audit_anchor != &policy.expected_audit_anchor
     {
         return Err(ReleaseError::TransparencyDenied);
     }
@@ -1113,7 +1361,7 @@ fn valid_rollback_shape(value: &RollbackTarget) -> bool {
         && is_sha1(&value.source_commit_sha1)
 }
 
-fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), ReleaseError> {
+fn validate_signing_policy(policy: &SigningPolicy) -> Result<(), ReleaseError> {
     let mut key_digests = BTreeSet::new();
     if !is_sha1(&policy.expected_source_commit_sha1)
         || !is_sha1(&policy.expected_source_tree_sha1)
@@ -1137,11 +1385,9 @@ fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), Relea
         || policy.expected_bundle_size_bytes == 0
         || policy.expected_bundle_size_bytes > MAX_BUNDLE_BYTES
         || !valid_text(&policy.expected_transparency_log_identity)
-        || !valid_text(&policy.expected_transparency_entry_identity)
-        || !is_sha256(&policy.expected_transparency_signed_entry_timestamp_sha256)
-        || !is_sha256(&policy.expected_transparency_inclusion_proof_sha256)
-        || !is_sha256(&policy.expected_transparency_checkpoint_sha256)
-        || !is_sha256(&policy.expected_audit_event_sha256)
+        || !valid_text(&policy.expected_transparency_attestation_key_id)
+        || !is_sha256(&policy.expected_transparency_attestation_public_key_sha256)
+        || !valid_text(&policy.expected_audit_anchor_identity)
         || policy.required_policy_gates.is_empty()
         || policy.trusted_signer_keys.is_empty()
         || policy.trusted_signer_keys.iter().any(|(identity, key)| {
@@ -1160,6 +1406,41 @@ fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), Relea
             return Err(ReleaseError::InvalidManifest);
         }
         prior = Some(gate.name.as_str());
+    }
+    Ok(())
+}
+
+fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), ReleaseError> {
+    validate_signing_policy(&policy.signing)?;
+    validate_transparency(&policy.expected_transparency)?;
+    validate_evidence_manifest(&policy.expected_evidence_manifest)?;
+    validate_audit_anchor(&policy.expected_audit_anchor)?;
+    if policy.expected_transparency.log_identity
+        != policy.signing.expected_transparency_log_identity
+        || policy.expected_transparency.attestation_key_id
+            != policy.signing.expected_transparency_attestation_key_id
+        || policy.expected_transparency.attestation_public_key_sha256
+            != policy
+                .signing
+                .expected_transparency_attestation_public_key_sha256
+        || policy.expected_audit_anchor.anchor_identity
+            != policy.signing.expected_audit_anchor_identity
+        || policy.expected_evidence_manifest.signing_policy_sha256
+            != sha256_hex(&serde_json::to_vec(&policy.signing)?)
+        || policy.expected_evidence_manifest.envelope_sha256
+            != policy.expected_transparency.envelope_sha256
+        || policy
+            .expected_evidence_manifest
+            .transparency_evidence_sha256
+            != sha256_hex(&serde_json::to_vec(&policy.expected_transparency)?)
+        || policy.expected_evidence_manifest.sbom_sha256 != policy.signing.expected_sbom_sha256
+        || policy.expected_evidence_manifest.bundle_sha256 != policy.signing.expected_bundle_sha256
+        || policy.expected_evidence_manifest.cargo_lock_sha256
+            != policy.signing.expected_cargo_lock_sha256
+        || policy.expected_audit_anchor.evidence_manifest_sha256
+            != sha256_hex(&serde_json::to_vec(&policy.expected_evidence_manifest)?)
+    {
+        return Err(ReleaseError::TransparencyDenied);
     }
     Ok(())
 }

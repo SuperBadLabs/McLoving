@@ -1,4 +1,4 @@
-# Release provenance v1
+# Release provenance v2
 
 Status: REL-001 implementation contract. The contained build and verification
 boundary is implemented. No production signing key, release, deployment,
@@ -21,8 +21,17 @@ The versioned objects are:
   package;
 - `mcloving.release-bundle/v1`, the deterministic self-hashing component
   archive;
-- `mcloving.release-provenance/v1`, the Ed25519-signed release manifest; and
-- `mcloving.release-deployment/v1`, serialization-only audit evidence emitted
+- `mcloving.release-provenance/v2`, the Ed25519-signed release manifest and its
+  predeclared transparency requirements;
+- `mcloving.release-transparency/v1`, post-sign Rekor evidence bound to the
+  canonical signed-envelope SHA-256;
+- `mcloving.release-evidence-manifest/v1`, the canonical release/SBOM/bundle,
+  policy and transparency digest join;
+- `mcloving.release-audit-anchor/v1`, the independent timestamp proof bound to
+  the canonical evidence-manifest SHA-256;
+- `mcloving.release-key-info/v1`, the public half and digest of an owner-private
+  Ed25519 key; and
+- `mcloving.release-deployment/v2`, serialization-only audit evidence emitted
   from the private-field `VerifiedRelease` type.
 
 Unknown JSON fields, unknown schema versions, noncanonical encodings, empty
@@ -119,7 +128,7 @@ registry metadata.
 
 `mcloving-release-provenance sign-build` is the production signing entrypoint.
 It does not accept a preassembled manifest. It requires the independently
-provisioned verification policy at signing time and, before producing a
+provisioned signing policy at signing time and, before producing a
 signature, requires the unsigned build receipt's complete source, builder,
 canonical component-list, SBOM, bundle and bundle-size tuple to equal that
 policy exactly. The policy's artifact tuple comes from the authenticated
@@ -134,26 +143,52 @@ JSON, and reconstructs the complete canonical SBOM from the supplied
 Cargo.lock and the release executable digest named by the receipt before
 signing. That digest is carried in the signed builder identity and must exactly
 match the same independently supplied policy. The requested protected gates,
-transparency tuple and release profile must match policy, and the signing key's
-public half must already be present in the policy's trusted signer registry.
+release profile, transparency-log identity, secondary-attestation key
+identity/public-key digest and independent-anchor identity must match signing
+policy, and the primary signing key's public half must already be present in
+the policy's trusted signer registry.
 
 The release request supplies only the release ID/version/profile, signer key
-identity, sorted exact protected policy gates, externally validated
-transparency evidence, and optional rollback target. The command derives the
-source, builder, artifact and signer-public-key identities itself, while the
-separately provisioned policy authorizes their exact expected values. The
-release request, trusted policy and private PKCS#8 key must all be absolute
+identity, sorted exact protected policy gates, predeclared transparency
+requirements and optional rollback target. It cannot contain a Rekor entry,
+inclusion proof, checkpoint or timestamp proof because those facts do not
+exist until after the final envelope is signed. The command derives the source,
+builder, artifact and signer-public-key identities itself, while the separately
+provisioned signing policy authorizes their exact expected values. The release
+request, signing policy and private PKCS#8 key must all be absolute
 owner-private, owner-owned, single-link regular files. Symlinks, hardlinks,
 group/other access, relative paths and oversized keys are denied. Inputs are
 opened once with `O_NOFOLLOW` and verified through that same file descriptor.
-Key bytes are zeroized after the signing attempt.
+Key bytes are zeroized after every generation, inspection or signing attempt.
 Every output requires an owner-private directory, uses create-new mode, is
 synchronized, and is never overwritten.
 
-Verification pins the complete transparency tuple to policy: log and entry
-identity, log index, signed-entry timestamp, inclusion proof, checkpoint and
-independent audit event. The deployment receipt carries the same tuple so a
-downstream operator can audit the exact evidence that authorized placement.
+`generate-key` creates a new Ed25519 PKCS#8 key through the operating-system
+random source and writes it to a create-new `0600` file; `key-info` emits only its
+key identity, 32-byte public key and public-key SHA-256. Neither command prints
+private bytes.
+
+After signing, a secondary key signs the canonical envelope digest and only
+that digest, secondary signature and public key are submitted to Rekor. The
+resulting `mcloving.release-transparency/v1` object binds the exact envelope
+digest, log/entry identity, log index and integrated time, secondary key
+identity/public-key/signature digests, signed-entry timestamp, inclusion proof
+and checkpoint. The canonical evidence manifest then binds the release ID,
+manifest and envelope, signing policy, Rekor evidence, SBOM, bundle and
+Cargo.lock digests. The independent timestamp client anchors that evidence-
+manifest digest; its proof, verifier-statement digest, notary reference and
+verification time form `mcloving.release-audit-anchor/v1`.
+
+The final verification policy contains the original signing policy plus exact
+copies of the post-sign evidence objects. Verification requires every
+predeclared identity to match, the Rekor evidence to name the canonical
+envelope SHA-256, the evidence manifest to name every exact input digest, and
+the audit anchor to name the canonical evidence-manifest SHA-256. This
+two-phase construction is intentional: embedding a
+Rekor entry for the final envelope inside that same signed envelope would be an
+impossible self-reference. The deployment receipt carries the complete linked
+tuple so a downstream operator can audit the exact evidence that authorized
+placement.
 Its fields are private and it does not implement deserialization, so stored JSON
 cannot be converted back into deployment authority or forged as a typed
 receipt. Any authority-bearing deployment function must consume the live
@@ -171,8 +206,9 @@ The signer host must separately establish:
 5. the component-list, SBOM and bundle digest/size tuple in that policy was
    retrieved from the authenticated exact-head protected builder run rather
    than derived from the downloaded unsigned artifact;
-6. transparency inclusion, checkpoint and audit evidence were validated by an
-   independent transparency client; and
+6. the secondary signature, Rekor inclusion/SET/checkpoint and independent
+   timestamp proof were validated against the exact final envelope, Rekor
+   evidence and canonical evidence-manifest digests; and
 7. the release request contains the exact previously verified rollback target,
    or the independently approved genesis policy.
 
@@ -186,8 +222,9 @@ single system.
 ## Verification before deployment
 
 `mcloving-release-provenance verify-chain` accepts one or more groups of exact
-signed envelope, independently provisioned policy, canonical SBOM, bundle and
-Cargo.lock. For every group it verifies:
+signed envelope, independently provisioned final verification policy,
+transparency evidence, canonical evidence manifest, independent audit anchor,
+canonical SBOM, bundle and Cargo.lock. For every group it verifies:
 
 - the Ed25519 signature against a nonempty, unambiguous startup-pinned signer
   registry and the manifest's public-key digest;
@@ -201,8 +238,9 @@ Cargo.lock. For every group it verifies:
 - a complete canonical SBOM reconstructed from the supplied exact Cargo.lock
   and policy-pinned release-tool identity;
 - bundle size/digest and exact self-verified component equality;
-- transparency log identity, independently pinned checkpoint and audit anchor;
-  and
+- the predeclared secondary-key/log/anchor identities, exact envelope-bound
+  Rekor evidence, exact evidence-manifest joins, and exact manifest-bound
+  timestamp anchor; and
 - exact rollback identity against the immediately supplied prior
   `VerifiedRelease`.
 

@@ -4,8 +4,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use mcloving_release_provenance::{
-    ComponentArtifact, ReleaseBuildReceipt, ReleaseError, ReleaseRequest, SignedReleaseEnvelope,
-    VerificationPolicy, build_bundle, sbom_from_cargo_lock, sign_build_outputs, verify_release,
+    AuditAnchorEvidence, ComponentArtifact, ReleaseBuildReceipt, ReleaseError,
+    ReleaseEvidenceManifest, ReleaseRequest, SignedReleaseEnvelope, SigningPolicy,
+    TransparencyEvidence, VerificationPolicy, build_bundle, generate_signing_key,
+    sbom_from_cargo_lock, sign_build_outputs, signing_key_info, verify_release,
 };
 use zeroize::Zeroize as _;
 
@@ -25,6 +27,18 @@ fn main() -> ExitCode {
 
 fn run(arguments: Vec<String>) -> Result<(), CliError> {
     match arguments.as_slice() {
+        [command, output] if command == "generate-key" => {
+            let mut key = generate_signing_key()?;
+            let result = write_new_private(Path::new(output), &key);
+            key.zeroize();
+            result
+        }
+        [command, key_id, signing_key, output] if command == "key-info" => {
+            let mut signing_key = read_signing_key(Path::new(signing_key))?;
+            let result = signing_key_info(key_id, &signing_key);
+            signing_key.zeroize();
+            write_new_private(Path::new(output), &serde_json::to_vec(&result?)?)
+        }
         [command, lock, generator, output] if command == "sbom" => {
             let lock_bytes = read_public(Path::new(lock))?;
             let lock_text = std::str::from_utf8(&lock_bytes).map_err(|_| CliError::InvalidInput)?;
@@ -55,8 +69,7 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
                 serde_json::from_slice(&read_public(Path::new(build_receipt))?)?;
             let release_request: ReleaseRequest =
                 serde_json::from_slice(&read_trusted(Path::new(release_request))?)?;
-            let policy: VerificationPolicy =
-                serde_json::from_slice(&read_trusted(Path::new(policy))?)?;
+            let policy: SigningPolicy = serde_json::from_slice(&read_trusted(Path::new(policy))?)?;
             let components = read_public(Path::new(components))?;
             let sbom = read_public(Path::new(sbom))?;
             let bundle = read_bundle(Path::new(bundle))?;
@@ -88,24 +101,33 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
             output,
             chain @ ..,
         ] if command == "verify-chain" => {
-            if chain.is_empty() || chain.len() % 5 != 0 {
+            if chain.is_empty() || chain.len() % 8 != 0 {
                 return Err(CliError::Usage);
             }
             let deployed_at = deployed_at
                 .parse::<i64>()
                 .map_err(|_| CliError::InvalidInput)?;
             let mut verified = None;
-            for group in chain.chunks_exact(5) {
+            for group in chain.chunks_exact(8) {
                 let envelope: SignedReleaseEnvelope =
                     serde_json::from_slice(&read_public(Path::new(&group[0]))?)?;
                 let policy: VerificationPolicy =
                     serde_json::from_slice(&read_trusted(Path::new(&group[1]))?)?;
-                let sbom = read_public(Path::new(&group[2]))?;
-                let bundle = read_bundle(Path::new(&group[3]))?;
-                let cargo_lock = read_public(Path::new(&group[4]))?;
+                let transparency: TransparencyEvidence =
+                    serde_json::from_slice(&read_public(Path::new(&group[2]))?)?;
+                let evidence_manifest: ReleaseEvidenceManifest =
+                    serde_json::from_slice(&read_public(Path::new(&group[3]))?)?;
+                let audit_anchor: AuditAnchorEvidence =
+                    serde_json::from_slice(&read_public(Path::new(&group[4]))?)?;
+                let sbom = read_public(Path::new(&group[5]))?;
+                let bundle = read_bundle(Path::new(&group[6]))?;
+                let cargo_lock = read_public(Path::new(&group[7]))?;
                 verified = Some(verify_release(
                     &envelope,
                     &policy,
+                    &transparency,
+                    &evidence_manifest,
+                    &audit_anchor,
                     &sbom,
                     &bundle,
                     &cargo_lock,
@@ -213,7 +235,7 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: mcloving-release-provenance sbom LOCK GENERATOR_SHA256 OUTPUT | bundle ROOT COMPONENTS_JSON OUTPUT | sign-build BUILD_RECEIPT RELEASE_REQUEST POLICY COMPONENTS SBOM BUNDLE SOURCE_ARCHIVE CARGO_LOCK TOOLCHAIN PRIVATE_PKCS8 OUTPUT | verify-chain ENV CONFIG_SHA256 DEPLOYED_AT_MS OUTPUT ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK [ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK ...]"
+        "usage: mcloving-release-provenance generate-key PRIVATE_PKCS8 | key-info KEY_ID PRIVATE_PKCS8 OUTPUT | sbom LOCK GENERATOR_SHA256 OUTPUT | bundle ROOT COMPONENTS_JSON OUTPUT | sign-build BUILD_RECEIPT RELEASE_REQUEST SIGNING_POLICY COMPONENTS SBOM BUNDLE SOURCE_ARCHIVE CARGO_LOCK TOOLCHAIN PRIVATE_PKCS8 OUTPUT | verify-chain ENV CONFIG_SHA256 DEPLOYED_AT_MS OUTPUT ENVELOPE VERIFICATION_POLICY TRANSPARENCY_EVIDENCE EVIDENCE_MANIFEST AUDIT_ANCHOR SBOM BUNDLE CARGO_LOCK [ENVELOPE VERIFICATION_POLICY TRANSPARENCY_EVIDENCE EVIDENCE_MANIFEST AUDIT_ANCHOR SBOM BUNDLE CARGO_LOCK ...]"
     )]
     Usage,
     #[error("release input is invalid")]

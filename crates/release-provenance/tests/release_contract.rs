@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use mcloving_release_provenance::{
-    BUILD_SCHEMA, BUNDLE_SCHEMA, BuilderIdentity, ComponentArtifact, ComponentRole,
-    PolicyExpectation, PolicyGate, RELEASE_SCHEMA, ReleaseBuildReceipt, ReleaseError,
-    ReleaseManifest, ReleaseRequest, RollbackTarget, SourceIdentity, TransparencyEvidence,
-    VerificationPolicy, build_bundle, inspect_bundle, sbom_from_cargo_lock, sign_release,
-    verify_release,
+    AUDIT_ANCHOR_SCHEMA, AuditAnchorEvidence, BUILD_SCHEMA, BUNDLE_SCHEMA, BuilderIdentity,
+    ComponentArtifact, ComponentRole, EVIDENCE_MANIFEST_SCHEMA, PolicyExpectation, PolicyGate,
+    RELEASE_SCHEMA, ReleaseBuildReceipt, ReleaseError, ReleaseEvidenceManifest, ReleaseManifest,
+    ReleaseRequest, RollbackTarget, SigningPolicy, SourceIdentity, TRANSPARENCY_SCHEMA,
+    TransparencyEvidence, TransparencyRequirement, VerificationPolicy, build_bundle,
+    inspect_bundle, sbom_from_cargo_lock, sign_release, verify_release as core_verify_release,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
@@ -29,6 +30,7 @@ struct Fixture {
     lock: Vec<u8>,
     sbom: Vec<u8>,
     manifest: ReleaseManifest,
+    signing_policy: SigningPolicy,
     policy: VerificationPolicy,
 }
 
@@ -132,18 +134,15 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         bundle_size_bytes: bundle.len() as u64,
         signer_key_id: "release-key:production:v1".to_owned(),
         signer_public_key_sha256: sha256(&public_key),
-        transparency: TransparencyEvidence {
+        transparency_requirement: TransparencyRequirement {
             log_identity: "rekor:production".to_owned(),
-            entry_identity: "entry:12345".to_owned(),
-            log_index: 12_345,
-            signed_entry_timestamp_sha256: DIGEST_A.to_owned(),
-            inclusion_proof_sha256: DIGEST_B.to_owned(),
-            checkpoint_sha256: DIGEST_C.to_owned(),
-            audit_event_sha256: DIGEST_A.to_owned(),
+            attestation_key_id: "rekor-attestation:production:v1".to_owned(),
+            attestation_public_key_sha256: DIGEST_C.to_owned(),
+            audit_anchor_identity: "opentimestamps:bitcoin".to_owned(),
         },
         rollback_target: None,
     };
-    let policy = VerificationPolicy {
+    let signing_policy = SigningPolicy {
         expected_source_commit_sha1: commit.to_owned(),
         expected_source_tree_sha1: tree.to_owned(),
         expected_source_archive_sha256: DIGEST_C.to_owned(),
@@ -164,12 +163,9 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         expected_bundle_sha256: manifest.bundle_sha256.clone(),
         expected_bundle_size_bytes: manifest.bundle_size_bytes,
         expected_transparency_log_identity: "rekor:production".to_owned(),
-        expected_transparency_entry_identity: "entry:12345".to_owned(),
-        expected_transparency_log_index: 12_345,
-        expected_transparency_signed_entry_timestamp_sha256: DIGEST_A.to_owned(),
-        expected_transparency_inclusion_proof_sha256: DIGEST_B.to_owned(),
-        expected_transparency_checkpoint_sha256: DIGEST_C.to_owned(),
-        expected_audit_event_sha256: DIGEST_A.to_owned(),
+        expected_transparency_attestation_key_id: "rekor-attestation:production:v1".to_owned(),
+        expected_transparency_attestation_public_key_sha256: DIGEST_C.to_owned(),
+        expected_audit_anchor_identity: "opentimestamps:bitcoin".to_owned(),
         required_policy_gates: vec![
             PolicyExpectation {
                 name: "foundation".to_owned(),
@@ -188,6 +184,9 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         )]),
         allow_genesis_release: true,
     };
+    let envelope = sign_release(manifest.clone(), &signing_key_pkcs8).expect("fixture envelope");
+    let (_, _, _, policy) =
+        verification_material_from(&signing_policy, &envelope, &sbom, &bundle, lock.as_bytes());
     Fixture {
         _root: root,
         signing_key_pkcs8,
@@ -196,12 +195,114 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         lock: lock.into_bytes(),
         sbom,
         manifest,
+        signing_policy,
         policy,
     }
 }
 
 fn signed(fixture: &Fixture) -> mcloving_release_provenance::SignedReleaseEnvelope {
     sign_release(fixture.manifest.clone(), &fixture.signing_key_pkcs8).expect("sign release")
+}
+
+fn verification_material(
+    fixture: &Fixture,
+    envelope: &mcloving_release_provenance::SignedReleaseEnvelope,
+) -> (
+    TransparencyEvidence,
+    ReleaseEvidenceManifest,
+    AuditAnchorEvidence,
+    VerificationPolicy,
+) {
+    verification_material_from(
+        &fixture.signing_policy,
+        envelope,
+        &fixture.sbom,
+        &fixture.bundle,
+        &fixture.lock,
+    )
+}
+
+fn verification_material_from(
+    signing_policy: &SigningPolicy,
+    envelope: &mcloving_release_provenance::SignedReleaseEnvelope,
+    sbom: &[u8],
+    bundle: &[u8],
+    lock: &[u8],
+) -> (
+    TransparencyEvidence,
+    ReleaseEvidenceManifest,
+    AuditAnchorEvidence,
+    VerificationPolicy,
+) {
+    let transparency = TransparencyEvidence {
+        schema_version: TRANSPARENCY_SCHEMA.to_owned(),
+        envelope_sha256: sha256(&serde_json::to_vec(envelope).expect("canonical envelope")),
+        log_identity: "rekor:production".to_owned(),
+        entry_identity: "entry:12345".to_owned(),
+        log_index: 12_345,
+        integrated_time_unix_seconds: 1_786_000_100,
+        attestation_key_id: "rekor-attestation:production:v1".to_owned(),
+        attestation_public_key_sha256: DIGEST_C.to_owned(),
+        attestation_signature_sha256: DIGEST_A.to_owned(),
+        signed_entry_timestamp_sha256: DIGEST_A.to_owned(),
+        inclusion_proof_sha256: DIGEST_B.to_owned(),
+        checkpoint_sha256: DIGEST_C.to_owned(),
+    };
+    let evidence_manifest = ReleaseEvidenceManifest {
+        schema_version: EVIDENCE_MANIFEST_SCHEMA.to_owned(),
+        release_id: envelope.manifest.release_id,
+        manifest_sha256: envelope.manifest_sha256.clone(),
+        envelope_sha256: transparency.envelope_sha256.clone(),
+        signing_policy_sha256: sha256(
+            &serde_json::to_vec(signing_policy).expect("canonical signing policy"),
+        ),
+        transparency_evidence_sha256: sha256(
+            &serde_json::to_vec(&transparency).expect("canonical transparency evidence"),
+        ),
+        sbom_sha256: sha256(sbom),
+        bundle_sha256: sha256(bundle),
+        cargo_lock_sha256: sha256(lock),
+    };
+    let audit_anchor = AuditAnchorEvidence {
+        schema_version: AUDIT_ANCHOR_SCHEMA.to_owned(),
+        evidence_manifest_sha256: sha256(
+            &serde_json::to_vec(&evidence_manifest).expect("canonical evidence manifest"),
+        ),
+        anchor_identity: "opentimestamps:bitcoin".to_owned(),
+        proof_sha256: DIGEST_A.to_owned(),
+        verifier_statement_sha256: DIGEST_B.to_owned(),
+        notary_reference:
+            "bitcoin:0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
+        verified_at_unix_ms: 1_786_000_200_000,
+    };
+    let policy = VerificationPolicy {
+        signing: signing_policy.clone(),
+        expected_transparency: transparency.clone(),
+        expected_evidence_manifest: evidence_manifest.clone(),
+        expected_audit_anchor: audit_anchor.clone(),
+    };
+    (transparency, evidence_manifest, audit_anchor, policy)
+}
+
+fn verify_release(
+    envelope: &mcloving_release_provenance::SignedReleaseEnvelope,
+    policy: &VerificationPolicy,
+    sbom: &[u8],
+    bundle: &[u8],
+    lock: &[u8],
+    rollback: Option<&mcloving_release_provenance::VerifiedRelease>,
+) -> Result<mcloving_release_provenance::VerifiedRelease, ReleaseError> {
+    core_verify_release(
+        envelope,
+        policy,
+        &policy.expected_transparency,
+        &policy.expected_evidence_manifest,
+        &policy.expected_audit_anchor,
+        sbom,
+        bundle,
+        lock,
+        rollback,
+    )
 }
 
 #[test]
@@ -234,7 +335,17 @@ fn exact_release_verifies_before_deployment_receipt() {
     );
     assert_eq!(receipt.transparency_inclusion_proof_sha256(), DIGEST_B);
     assert_eq!(receipt.transparency_checkpoint_sha256(), DIGEST_C);
-    assert_eq!(receipt.transparency_audit_event_sha256(), DIGEST_A);
+    assert_eq!(
+        receipt.transparency_attestation_key_id(),
+        "rekor-attestation:production:v1"
+    );
+    assert_eq!(
+        receipt.transparency_attestation_signature_sha256(),
+        DIGEST_A
+    );
+    assert_eq!(receipt.audit_anchor_identity(), "opentimestamps:bitcoin");
+    assert_eq!(receipt.audit_anchor_proof_sha256(), DIGEST_A);
+    assert_eq!(receipt.audit_anchor_verifier_statement_sha256(), DIGEST_B);
     assert!(receipt.rollback_manifest_sha256().is_none());
 }
 
@@ -501,15 +612,18 @@ fn signer_signature_and_transparency_substitution_are_denied() {
     ));
 
     let mut transparency = fixture.manifest.clone();
-    transparency.transparency.checkpoint_sha256 = "not-a-digest".to_owned();
+    transparency
+        .transparency_requirement
+        .attestation_public_key_sha256 = "not-a-digest".to_owned();
     assert!(matches!(
         sign_release(transparency, &fixture.signing_key_pkcs8),
         Err(ReleaseError::InvalidManifest)
     ));
 
     let mut transparency = fixture.manifest.clone();
-    transparency.transparency.checkpoint_sha256 = DIGEST_B.to_owned();
-    transparency.transparency.audit_event_sha256 = DIGEST_C.to_owned();
+    transparency
+        .transparency_requirement
+        .attestation_public_key_sha256 = DIGEST_B.to_owned();
     let transparency =
         sign_release(transparency, &fixture.signing_key_pkcs8).expect("resign transparency");
     assert!(matches!(
@@ -524,6 +638,9 @@ fn signer_signature_and_transparency_substitution_are_denied() {
         Err(ReleaseError::TransparencyDenied)
     ));
 
+    let envelope = signed(&fixture);
+    let (evidence, evidence_manifest, audit_anchor, policy) =
+        verification_material(&fixture, &envelope);
     for mutate in [
         |evidence: &mut TransparencyEvidence| evidence.entry_identity = "entry:54321".to_owned(),
         |evidence: &mut TransparencyEvidence| evidence.log_index = 54_321,
@@ -532,14 +649,15 @@ fn signer_signature_and_transparency_substitution_are_denied() {
         },
         |evidence: &mut TransparencyEvidence| evidence.inclusion_proof_sha256 = DIGEST_C.to_owned(),
     ] {
-        let mut substituted = fixture.manifest.clone();
-        mutate(&mut substituted.transparency);
-        let substituted =
-            sign_release(substituted, &fixture.signing_key_pkcs8).expect("resign transparency");
+        let mut substituted = evidence.clone();
+        mutate(&mut substituted);
         assert!(matches!(
-            verify_release(
+            core_verify_release(
+                &envelope,
+                &policy,
                 &substituted,
-                &fixture.policy,
+                &evidence_manifest,
+                &audit_anchor,
                 &fixture.sbom,
                 &fixture.bundle,
                 &fixture.lock,
@@ -548,6 +666,57 @@ fn signer_signature_and_transparency_substitution_are_denied() {
             Err(ReleaseError::TransparencyDenied)
         ));
     }
+
+    let mut wrong_envelope = evidence;
+    wrong_envelope.envelope_sha256 = DIGEST_B.to_owned();
+    assert!(matches!(
+        core_verify_release(
+            &envelope,
+            &policy,
+            &wrong_envelope,
+            &evidence_manifest,
+            &audit_anchor,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None
+        ),
+        Err(ReleaseError::TransparencyDenied)
+    ));
+
+    let mut wrong_evidence_manifest = evidence_manifest.clone();
+    wrong_evidence_manifest.bundle_sha256 = DIGEST_C.to_owned();
+    assert!(matches!(
+        core_verify_release(
+            &envelope,
+            &policy,
+            &policy.expected_transparency,
+            &wrong_evidence_manifest,
+            &audit_anchor,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None
+        ),
+        Err(ReleaseError::TransparencyDenied)
+    ));
+
+    let mut wrong_anchor = audit_anchor;
+    wrong_anchor.proof_sha256 = DIGEST_C.to_owned();
+    assert!(matches!(
+        core_verify_release(
+            &envelope,
+            &policy,
+            &policy.expected_transparency,
+            &evidence_manifest,
+            &wrong_anchor,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None
+        ),
+        Err(ReleaseError::TransparencyDenied)
+    ));
 }
 
 #[test]
@@ -565,7 +734,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
     .expect("verify rollback release");
 
     let mut second = fixture(SHA1_B, SHA1_A, 6);
-    second.policy.allow_genesis_release = false;
+    second.policy.signing.allow_genesis_release = false;
     second.manifest.rollback_target = Some(RollbackTarget {
         release_id: first_verified.manifest().release_id,
         manifest_sha256: first_verified.manifest_sha256().to_owned(),
@@ -574,6 +743,14 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         source_commit_sha1: first_verified.manifest().source.commit_sha1.clone(),
     });
     let second_envelope = signed(&second);
+    let (_, _, _, second_policy) = verification_material_from(
+        &second.policy.signing,
+        &second_envelope,
+        &second.sbom,
+        &second.bundle,
+        &second.lock,
+    );
+    second.policy = second_policy;
     verify_release(
         &second_envelope,
         &second.policy,
@@ -667,7 +844,7 @@ fn repository_lockfile_has_a_complete_canonical_sbom_projection() {
 
 #[test]
 fn public_schema_constants_are_versioned() {
-    assert_eq!(RELEASE_SCHEMA, "mcloving.release-provenance/v1");
+    assert_eq!(RELEASE_SCHEMA, "mcloving.release-provenance/v2");
     assert_eq!(BUNDLE_SCHEMA, "mcloving.release-bundle/v1");
 }
 
@@ -685,13 +862,19 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
     let build_receipt_path = root_path.join("build-receipt.json");
     let release_request_path = root_path.join("release-request.json");
     let components_path = root_path.join("components.json");
-    let policy_path = root_path.join("policy.json");
+    let signing_policy_path = root_path.join("signing-policy.json");
+    let verification_policy_path = root_path.join("verification-policy.json");
+    let transparency_path = root_path.join("transparency-evidence.json");
+    let evidence_manifest_path = root_path.join("evidence-manifest.json");
+    let audit_anchor_path = root_path.join("audit-anchor.json");
     let sbom_path = root_path.join("sbom.json");
     let bundle_path = root_path.join("release.bundle");
     let source_archive_path = root_path.join("source.tar");
     let cargo_lock_path = root_path.join("Cargo.lock");
     let toolchain_path = root_path.join("toolchain.txt");
     let key_path = root_path.join("release.pk8");
+    let generated_key_path = root_path.join("generated-release.pk8");
+    let generated_key_info_path = root_path.join("generated-release-key-info.json");
     let envelope_path = root_path.join("release-envelope.json");
     let receipt_path = root_path.join("deployment-receipt.json");
     let source_archive = b"exact source archive";
@@ -722,12 +905,12 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
         profile: fixture.manifest.profile.clone(),
         signer_key_id: fixture.manifest.signer_key_id.clone(),
         policy_gates: fixture.manifest.policy_gates.clone(),
-        transparency: fixture.manifest.transparency.clone(),
+        transparency_requirement: fixture.manifest.transparency_requirement.clone(),
         rollback_target: None,
     };
-    let mut policy = fixture.policy.clone();
-    policy.expected_source_archive_sha256 = build_receipt.source_archive_sha256.clone();
-    policy.expected_rust_toolchain_manifest_sha256 =
+    let mut signing_policy = fixture.signing_policy.clone();
+    signing_policy.expected_source_archive_sha256 = build_receipt.source_archive_sha256.clone();
+    signing_policy.expected_rust_toolchain_manifest_sha256 =
         build_receipt.rust_toolchain_manifest_sha256.clone();
     std::fs::write(
         &build_receipt_path,
@@ -745,12 +928,12 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
     )
     .expect("restrict release request");
     std::fs::write(
-        &policy_path,
-        serde_json::to_vec(&policy).expect("policy JSON"),
+        &signing_policy_path,
+        serde_json::to_vec(&signing_policy).expect("signing policy JSON"),
     )
-    .expect("write policy");
-    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
-        .expect("restrict policy");
+    .expect("write signing policy");
+    std::fs::set_permissions(&signing_policy_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict signing policy");
     std::fs::write(&components_path, &components).expect("write components");
     std::fs::write(&sbom_path, &fixture.sbom).expect("write SBOM");
     std::fs::write(&bundle_path, &fixture.bundle).expect("write bundle");
@@ -762,13 +945,61 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
         .expect("restrict key");
 
     let binary = env!("CARGO_BIN_EXE_mcloving-release-provenance");
+    let generated = Command::new(binary)
+        .args([
+            "generate-key",
+            generated_key_path.to_str().expect("generated key path"),
+        ])
+        .output()
+        .expect("generate signing key");
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_metadata =
+        std::fs::metadata(&generated_key_path).expect("generated key metadata");
+    assert_eq!(generated_metadata.permissions().mode() & 0o777, 0o600);
+    let generated_key_info = Command::new(binary)
+        .args([
+            "key-info",
+            "release-key:test:v1",
+            generated_key_path.to_str().expect("generated key path"),
+            generated_key_info_path
+                .to_str()
+                .expect("generated key info path"),
+        ])
+        .output()
+        .expect("derive signing key info");
+    assert!(
+        generated_key_info.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated_key_info.stderr)
+    );
+    let key_info: mcloving_release_provenance::SigningKeyInfo = serde_json::from_slice(
+        &std::fs::read(&generated_key_info_path).expect("read generated key info"),
+    )
+    .expect("parse generated key info");
+    assert_eq!(key_info.key_id, "release-key:test:v1");
+    assert_eq!(key_info.public_key.len(), 32);
+    assert_eq!(key_info.public_key_sha256, sha256(&key_info.public_key));
+    assert!(
+        !Command::new(binary)
+            .args([
+                "generate-key",
+                generated_key_path.to_str().expect("generated key path"),
+            ])
+            .status()
+            .expect("deny generated key overwrite")
+            .success()
+    );
     let run_sign = |key: &std::path::Path, output: &std::path::Path| {
         Command::new(binary)
             .args([
                 "sign-build",
                 build_receipt_path.to_str().expect("build receipt path"),
                 release_request_path.to_str().expect("release request path"),
-                policy_path.to_str().expect("policy path"),
+                signing_policy_path.to_str().expect("signing policy path"),
                 components_path.to_str().expect("components path"),
                 sbom_path.to_str().expect("SBOM path"),
                 bundle_path.to_str().expect("bundle path"),
@@ -788,6 +1019,43 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
         String::from_utf8_lossy(&sign.stderr)
     );
 
+    let envelope: mcloving_release_provenance::SignedReleaseEnvelope =
+        serde_json::from_slice(&std::fs::read(&envelope_path).expect("read envelope"))
+            .expect("parse envelope");
+    let (transparency, evidence_manifest, audit_anchor, verification_policy) =
+        verification_material_from(
+            &signing_policy,
+            &envelope,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+        );
+    for (path, bytes) in [
+        (
+            &verification_policy_path,
+            serde_json::to_vec(&verification_policy).expect("verification policy JSON"),
+        ),
+        (
+            &transparency_path,
+            serde_json::to_vec(&transparency).expect("transparency JSON"),
+        ),
+        (
+            &evidence_manifest_path,
+            serde_json::to_vec(&evidence_manifest).expect("evidence manifest JSON"),
+        ),
+        (
+            &audit_anchor_path,
+            serde_json::to_vec(&audit_anchor).expect("audit anchor JSON"),
+        ),
+    ] {
+        std::fs::write(path, bytes).expect("write verification material");
+    }
+    std::fs::set_permissions(
+        &verification_policy_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("restrict verification policy");
+
     let verify = Command::new(binary)
         .args([
             "verify-chain",
@@ -796,7 +1064,14 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
             "10000",
             receipt_path.to_str().expect("receipt path"),
             envelope_path.to_str().expect("envelope path"),
-            policy_path.to_str().expect("policy path"),
+            verification_policy_path
+                .to_str()
+                .expect("verification policy path"),
+            transparency_path.to_str().expect("transparency path"),
+            evidence_manifest_path
+                .to_str()
+                .expect("evidence manifest path"),
+            audit_anchor_path.to_str().expect("audit anchor path"),
             sbom_path.to_str().expect("SBOM path"),
             bundle_path.to_str().expect("bundle path"),
             cargo_lock_path.to_str().expect("Cargo.lock path"),
@@ -811,9 +1086,6 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&receipt_path).expect("read receipt"))
             .expect("parse serialized audit evidence");
-    let envelope: mcloving_release_provenance::SignedReleaseEnvelope =
-        serde_json::from_slice(&std::fs::read(&envelope_path).expect("read envelope"))
-            .expect("parse envelope");
     assert_eq!(receipt["manifest_sha256"], envelope.manifest_sha256);
     assert_eq!(receipt["bundle_sha256"], fixture.manifest.bundle_sha256);
 
