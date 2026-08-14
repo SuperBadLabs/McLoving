@@ -107,12 +107,16 @@ cargo run --locked -p mcloving-state-policy-differential -- \
 a new immutable evidence directory and an internal-only Podman network, and
 starts the pinned Jenkins and PostgreSQL images plus a pinned Rust runner.
 Jenkins boots with a private synthetic realm and a built-in persisted
-authorization strategy. An authenticated, crumb-protected runtime probe keeps
-the fixture ACL transient, evaluates the exact Jenkins permission objects for
-the active and deleted-name-reuse identities, and drives a real freestyle job
-through enabled, disabled, and rollback-as-new-enabled generations. The probe
-also proves disabled pre-queue denial and post-rollback admission. A negative
-socket probe proves the Jenkins container cannot reach a public address.
+authorization strategy. The fixture password is generated per run, passed only
+through the contained Jenkins environment, used through a temporary netrc file,
+and deleted with the temporary home. An authenticated, crumb-protected runtime
+probe verifies the exact realm and strategy classes, keeps the fixture ACL
+transient, evaluates the exact Jenkins permission objects for the active and
+deleted-name-reuse identities, and drives a real freestyle job through enabled,
+disabled, and rollback-as-new-enabled generations. The probe also proves
+disabled pre-queue denial and post-rollback admission. All Jenkins HTTP calls
+have finite connect and total timeouts. A negative socket probe proves the
+Jenkins container cannot reach a public address.
 
 The Rust runner has all default capabilities dropped, no-new-privileges, and
 finite CPU, memory, and PID ceilings. With Cargo network access disabled it
@@ -133,8 +137,8 @@ its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`b45bc5038fa0cad19e889198f383b909770a96d8`, tree
-`c856726b054302ef7f01427c2409b13032df234c`. It passed eight sealed-bundle and
+`f6c22efbbd9a362c2478da5232262db614afe893`, tree
+`087dc02f4dee99a048168be53fc300b7391cbb05`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
 authorization-mapping tests, four operational-state/race tests, and the final
 independent bundle verification. The two ignored identity and two ignored
@@ -159,12 +163,12 @@ capabilities, all default capabilities dropped, no-new-privileges, a read-only
 Cargo registry mount, and finite per-container CPU, memory, and PID ceilings.
 The repository mount remained writable only for Cargo build output; no
 production credential or endpoint was present. The sealed external evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T085011Z`; its
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T090010Z`; its
 self-excluding 17-file manifest SHA-256 is
-`ce061a5e0f73b49828be3a283360b723f5d8ef4e56b97552bf77dad92a599198`.
+`785e5b7880dd44329aac1e6514058cb37b69e69f032d0f159a4d0222db7c7947`.
 Independent re-verification of every manifest entry passed.
 
-Six preserved predecessors contribute no authority. The first,
+Eight preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -187,6 +191,15 @@ decision matrix and its clean-tree requirement was enforced only before, not
 after, test execution. The accepted runner also rejects evidence output inside
 the source repository before creating it and refuses to seal if the source tree
 changes during execution.
+The successful `diff002-state-policy-20260814T085011Z` receipt was superseded
+because its Jenkins authentication used a static synthetic credential that
+failed the protected secret scan and its probe did not assert the installed
+realm and strategy classes. `diff002-state-policy-20260814T085550Z` was
+interrupted and preserved without authority after the pinned Jenkins log
+exposed an invalid strategy constructor and the HTTP probe stalled. The
+accepted run uses a per-run credential, the pinned-version constructor/setter
+API, exact class assertions, and finite HTTP timeouts; its Jenkins log contains
+no bootstrap-script or boot-failure error.
 
 ## Non-authority and limitations
 
