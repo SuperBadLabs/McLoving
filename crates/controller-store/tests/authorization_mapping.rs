@@ -329,6 +329,7 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
     let project_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0002);
     let provider_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0003);
     let identity_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0004);
+    let deleted_reuse_identity_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0005);
     admin
         .create_project(
             organization_id,
@@ -375,6 +376,22 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         })
         .await
         .expect("bind immutable source principal");
+    admin
+        .provision_human_identity(&NewHumanIdentity {
+            organization_id,
+            identity_id: deleted_reuse_identity_id,
+            subject: "principal:authz-deleted-name-reuse".to_owned(),
+            provider_id,
+            external_subject: "jenkins-user-deleted-reuse-2042".to_owned(),
+            source_realm_digest: digest("authz-source-realm-v1"),
+            source_identity_id: "jenkins-user-deleted-reuse-2042".to_owned(),
+            source_membership_generation: 20,
+            alias_history: vec!["alice".to_owned()],
+            provenance_digest: digest("authz-mig000-deleted-reuse-provenance"),
+            actor_subject: "reviewer:authz-owner".to_owned(),
+        })
+        .await
+        .expect("bind the distinct deleted-name-reuse principal");
     sqlx::query(
         "INSERT INTO project_memberships(identity_id, organization_id, project_id, role)
          VALUES ($1, $2, $3, 'owner')",
@@ -449,6 +466,35 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         .await
         .expect("authenticate first mapped session")
         .principal;
+    let deleted_reuse_token = digest("authz-deleted-reuse-token-generation-1");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                organization_id,
+                provider_id,
+                issuer: provider.issuer.clone(),
+                external_subject: "jenkins-user-deleted-reuse-2042".to_owned(),
+                groups: vec!["release-viewers".to_owned()],
+                provider_configuration_generation: 1,
+                provider_jwks_generation: 1,
+                id_token_digest: digest("authz-deleted-reuse-id-token-generation-1"),
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: deleted_reuse_token,
+                refresh_token_digest: None,
+                issued_at_unix_ms: 10_000,
+                expires_at_unix_ms: 100_000,
+                refresh_expires_at_unix_ms: None,
+            },
+        )
+        .await
+        .expect("issue the distinct deleted-name-reuse session");
+    let deleted_reuse_principal = runtime
+        .authenticate_api_token(organization_id, deleted_reuse_token, 20_000)
+        .await
+        .expect("authenticate the distinct deleted-name-reuse principal")
+        .principal;
     assert!(
         authorize(
             &principal,
@@ -468,6 +514,55 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
             authorize(&principal, organization_id, Some(project_id), action).is_err(),
             "deny wins and a broader legacy owner role cannot fill missing mapped permission"
         );
+    }
+    for action in [
+        Action::ProjectView,
+        Action::BuildTrigger,
+        Action::BuildCancel,
+        Action::ProjectConfigure,
+    ] {
+        assert!(
+            authorize(
+                &deleted_reuse_principal,
+                organization_id,
+                Some(project_id),
+                action
+            )
+            .is_err(),
+            "the distinct deleted-name-reuse principal has no inherited authority"
+        );
+    }
+    if let Ok(path) = std::env::var("MCLOVING_DIFF002_AUTHZ_OUTPUT") {
+        let decision = |subject, action| {
+            if authorize(subject, organization_id, Some(project_id), action).is_ok() {
+                "allow"
+            } else {
+                "deny"
+            }
+        };
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({
+                "schema": "mcloving.diff002.target-authorization/v1",
+                "immutable_id": "jenkins-user-immutable-1042",
+                "policy_generation": receipt.generation,
+                "decisions": {
+                    "project_view": decision(&principal, Action::ProjectView),
+                    "build_trigger": decision(&principal, Action::BuildTrigger),
+                    "build_cancel": decision(&principal, Action::BuildCancel),
+                    "project_configure": decision(&principal, Action::ProjectConfigure),
+                },
+                "deleted_reuse_immutable_id": "jenkins-user-deleted-reuse-2042",
+                "deleted_reuse_decisions": {
+                    "project_view": decision(&deleted_reuse_principal, Action::ProjectView),
+                    "build_trigger": decision(&deleted_reuse_principal, Action::BuildTrigger),
+                    "build_cancel": decision(&deleted_reuse_principal, Action::BuildCancel),
+                    "project_configure": decision(&deleted_reuse_principal, Action::ProjectConfigure),
+                }
+            }))
+            .expect("serialize DIFF-002 target authorization observation"),
+        )
+        .expect("write DIFF-002 target authorization observation");
     }
 
     let mut substituted = policy(
