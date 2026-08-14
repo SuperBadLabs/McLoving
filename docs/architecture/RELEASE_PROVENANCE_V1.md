@@ -111,7 +111,10 @@ recomputes and compares the build receipt against the exact component JSON,
 SBOM, bundle, source archive, Cargo.lock and toolchain record. It also reparses
 the bundle, requires exact component equivalence and canonical JSON, and
 reconstructs the complete canonical SBOM from the supplied Cargo.lock and the
-release executable digest named by the receipt before signing.
+release executable digest named by the receipt before signing. That digest is
+also carried in the signed builder identity and must exactly match the
+independently supplied verification policy; changing the receipt and
+regenerating the SBOM cannot change the trusted generator identity.
 
 The release request supplies only the release ID/version/profile, signer key
 identity, sorted exact protected policy gates, externally validated
@@ -186,6 +189,7 @@ The focused contract suite proves:
 - source commit, source archive and Cargo.lock substitution denial, including
   re-signing by the otherwise trusted test key;
 - builder image and source-epoch substitution denial;
+- release-tool/SBOM-generator substitution denial even when re-signed;
 - protected-gate run substitution denial;
 - SBOM, bundle bytes and component-role substitution denial;
 - attacker key, malformed signature, malformed transparency and valid but

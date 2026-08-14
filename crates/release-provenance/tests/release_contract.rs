@@ -120,6 +120,7 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
             image_digest: BUILDER_DIGEST.to_owned(),
             rust_toolchain: "1.97.1".to_owned(),
             rust_toolchain_manifest_sha256: DIGEST_A.to_owned(),
+            release_tool_sha256: DIGEST_B.to_owned(),
             workflow_sha256: DIGEST_B.to_owned(),
             target_triple: "x86_64-unknown-linux-gnu".to_owned(),
             source_date_epoch: 1_786_000_000,
@@ -152,6 +153,7 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         expected_builder_image_digest: BUILDER_DIGEST.to_owned(),
         expected_rust_toolchain: "1.97.1".to_owned(),
         expected_rust_toolchain_manifest_sha256: DIGEST_A.to_owned(),
+        expected_release_tool_sha256: DIGEST_B.to_owned(),
         expected_workflow_sha256: DIGEST_B.to_owned(),
         expected_target_triple: "x86_64-unknown-linux-gnu".to_owned(),
         expected_source_date_epoch: 1_786_000_000,
@@ -215,6 +217,7 @@ fn exact_release_verifies_before_deployment_receipt() {
     assert_eq!(receipt.bundle_sha256, fixture.manifest.bundle_sha256);
     assert_eq!(receipt.source_commit_sha1, SHA1_A);
     assert_eq!(receipt.builder_image_digest, BUILDER_DIGEST);
+    assert_eq!(receipt.release_tool_sha256, DIGEST_B);
     assert_eq!(receipt.transparency_log_identity, "rekor:production");
     assert_eq!(receipt.transparency_entry_identity, "entry:12345");
     assert_eq!(receipt.transparency_log_index, 12_345);
@@ -275,6 +278,29 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &builder,
             &fixture.policy,
             &fixture.sbom,
+            &fixture.bundle,
+            None
+        ),
+        Err(ReleaseError::BuilderDenied)
+    ));
+
+    let mut release_tool = fixture.manifest.clone();
+    release_tool.builder.release_tool_sha256 = DIGEST_C.to_owned();
+    let substituted_sbom = sbom_from_cargo_lock(
+        std::str::from_utf8(&fixture.lock).expect("UTF-8 lockfile"),
+        DIGEST_C,
+    )
+    .expect("substituted SBOM")
+    .canonical_bytes()
+    .expect("canonical substituted SBOM");
+    release_tool.sbom_sha256 = sha256(&substituted_sbom);
+    let release_tool =
+        sign_release(release_tool, &fixture.signing_key_pkcs8).expect("resign release tool");
+    assert!(matches!(
+        verify_release(
+            &release_tool,
+            &fixture.policy,
+            &substituted_sbom,
             &fixture.bundle,
             None
         ),

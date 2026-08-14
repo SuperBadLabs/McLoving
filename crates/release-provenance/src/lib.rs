@@ -48,6 +48,7 @@ pub struct BuilderIdentity {
     pub image_digest: String,
     pub rust_toolchain: String,
     pub rust_toolchain_manifest_sha256: String,
+    pub release_tool_sha256: String,
     pub workflow_sha256: String,
     pub target_triple: String,
     pub source_date_epoch: u64,
@@ -213,6 +214,7 @@ pub struct VerificationPolicy {
     pub expected_builder_image_digest: String,
     pub expected_rust_toolchain: String,
     pub expected_rust_toolchain_manifest_sha256: String,
+    pub expected_release_tool_sha256: String,
     pub expected_workflow_sha256: String,
     pub expected_target_triple: String,
     pub expected_source_date_epoch: u64,
@@ -238,6 +240,7 @@ pub struct DeploymentReceipt {
     pub source_commit_sha1: String,
     pub source_tree_sha1: String,
     pub builder_image_digest: String,
+    pub release_tool_sha256: String,
     pub signer_key_id: String,
     pub transparency_log_identity: String,
     pub transparency_entry_identity: String,
@@ -296,6 +299,7 @@ impl VerifiedRelease {
             source_commit_sha1: self.manifest.source.commit_sha1.clone(),
             source_tree_sha1: self.manifest.source.tree_sha1.clone(),
             builder_image_digest: self.manifest.builder.image_digest.clone(),
+            release_tool_sha256: self.manifest.builder.release_tool_sha256.clone(),
             signer_key_id: self.manifest.signer_key_id.clone(),
             transparency_log_identity: self.manifest.transparency.log_identity.clone(),
             transparency_entry_identity: self.manifest.transparency.entry_identity.clone(),
@@ -428,6 +432,7 @@ pub fn sign_build_outputs(
             image_digest: receipt.builder_image_digest,
             rust_toolchain: receipt.rust_toolchain,
             rust_toolchain_manifest_sha256: receipt.rust_toolchain_manifest_sha256,
+            release_tool_sha256: receipt.release_tool_sha256,
             workflow_sha256: receipt.workflow_sha256,
             target_triple: receipt.target_triple,
             source_date_epoch: receipt.source_date_epoch,
@@ -708,6 +713,7 @@ fn verify_builder(
         || builder.image_digest != policy.expected_builder_image_digest
         || builder.rust_toolchain != policy.expected_rust_toolchain
         || builder.rust_toolchain_manifest_sha256 != policy.expected_rust_toolchain_manifest_sha256
+        || builder.release_tool_sha256 != policy.expected_release_tool_sha256
         || builder.workflow_sha256 != policy.expected_workflow_sha256
         || builder.target_triple != policy.expected_target_triple
         || builder.source_date_epoch != policy.expected_source_date_epoch
@@ -829,6 +835,7 @@ fn valid_builder(builder: &BuilderIdentity) -> bool {
         && is_digest(&builder.image_digest)
         && valid_text(&builder.rust_toolchain)
         && is_sha256(&builder.rust_toolchain_manifest_sha256)
+        && is_sha256(&builder.release_tool_sha256)
         && is_sha256(&builder.workflow_sha256)
         && valid_text(&builder.target_triple)
         && builder.source_date_epoch > 0
@@ -964,6 +971,7 @@ fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), Relea
             .ends_with(&format!("@{}", policy.expected_builder_image_digest))
         || !valid_text(&policy.expected_rust_toolchain)
         || !is_sha256(&policy.expected_rust_toolchain_manifest_sha256)
+        || !is_sha256(&policy.expected_release_tool_sha256)
         || !is_sha256(&policy.expected_workflow_sha256)
         || !valid_text(&policy.expected_target_triple)
         || policy.expected_source_date_epoch == 0
