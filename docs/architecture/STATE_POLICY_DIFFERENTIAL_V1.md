@@ -17,6 +17,11 @@ The repository bundle is
 canonical JSON observation and a canonical self-excluding manifest. The JSON
 SHA-256 is compiled into the independent Rust verifier, so rewriting the
 observation and resealing its adjacent manifest cannot grant authority.
+The contained runtime comparison loads that same exact observation and binds
+its active, deleted-predecessor, replacement, authorization, operational-state,
+disabled-ingress, and zero-build fields to the live Jenkins and McLoving
+observations. The static certificate and live comparison therefore cannot pass
+for different fixtures.
 
 This boundary binds the already accepted exact-profile `MIG-005A` receipts:
 
@@ -152,8 +157,8 @@ its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`e969b21aedd9bdb69ec3c9546b5d0411d7222d11`, tree
-`1bf4fb4e5c4e8cbaed4e294cae5e3589b157244c`. It passed eight sealed-bundle and
+`422995cba057de05e8c78b9451f1bea8c7de1455`, tree
+`a6edeaab17bcc7b249c8fae939f490c8d10eb9c7`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
 authorization-mapping tests, four operational-state/race tests, five typed
 trigger-ingress tests, and the final independent bundle verification. The two
@@ -176,8 +181,9 @@ PostgreSQL-backed principals, their returned immutable identity IDs, an actual
 lifecycle transition, and calls to the product authorization engine, not
 prefilled expected values. The five ingress results come from the distinct
 product admission paths. The resulting
-`mcloving.diff002.runtime-comparison/v1` verdict reports all fifteen comparison
-dimensions and aggregate parity as true.
+`mcloving.diff002.runtime-comparison/v1` verdict reports all sixteen comparison
+dimensions, including the sealed-certificate binding, and aggregate parity as
+true.
 
 The runner exited zero with empty source status on an internal Podman network,
 the exact Jenkins, Rust, and PostgreSQL image digests above, no added
@@ -185,12 +191,12 @@ capabilities, all default capabilities dropped, no-new-privileges, a read-only
 Cargo registry mount, and finite per-container CPU, memory, and PID ceilings.
 The repository mount remained writable only for Cargo build output; no
 production credential or endpoint was present. The sealed external evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T093947Z`; its
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T094859Z`; its
 self-excluding 19-file manifest SHA-256 is
-`998cfb1d748fa5fec9d1b3ba8b79def7b196ae035d71f5ad6c447de04bdcc88e`.
+`d4d2b8f778282435ca782e3021eaa49192f6247bbab0b56bf66abbb4f71d2908`.
 Independent re-verification of every manifest entry passed.
 
-Seventeen preserved predecessors contribute no authority. The first,
+Eighteen preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -244,9 +250,17 @@ through retained Jenkins authentication with four fresh McLoving token
 authentication-plus-authorization attempts.
 The `diff002-state-policy-20260814T093916Z` run proved the expanded Jenkins
 five-ingress matrix but ended transiently before PostgreSQL startup and has no
-sealed manifest. The unchanged accepted run derives the target identity change
-from the two authenticated identity IDs and drives each typed target ingress
-through its production admission path while proving zero builds were created.
+sealed manifest. The subsequent successful run derived the target identity
+change from the two authenticated identity IDs and drove each typed target
+ingress through its production admission path while proving zero builds were
+created.
+The successful `diff002-state-policy-20260814T093947Z` receipt was superseded
+because its live runtime comparison and sealed certificate described different
+fixture identity labels and were only independently verified. The accepted run
+binds the exact compiled-digest certificate to the active, predecessor, and
+replacement runtime IDs and decisions, all three state generations, all five
+disabled ingress outcomes, and both zero-build counts; its
+`certificate_binding_equal` result is true.
 
 ## Non-authority and limitations
 
