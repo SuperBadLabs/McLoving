@@ -189,9 +189,10 @@ PostgreSQL-backed principals, their returned immutable identity IDs, an actual
 lifecycle transition, and calls to the product authorization engine, not
 prefilled expected values. The five ingress results come from the distinct
 product admission paths. The resulting
-`mcloving.diff002.runtime-comparison/v1` verdict reports all seventeen
-comparison dimensions, including stable source authentication and the sealed
-certificate binding, and aggregate parity as true.
+`mcloving.diff002.runtime-comparison/v1` verdict reports all eighteen
+comparison dimensions, including exact observation-schema compatibility,
+stable source authentication, and the sealed certificate binding, with
+aggregate parity true only when every dimension is true.
 
 The runner exited zero with empty source status on an internal Podman network,
 the exact Jenkins, Rust, and PostgreSQL image digests above, no added

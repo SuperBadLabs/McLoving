@@ -290,6 +290,14 @@ jq -n \
     operational_schema: $operational[0].schema,
     ingress_schema: $ingress[0].schema,
     certificate_schema: $cert.schema,
+    observation_schemas_equal:
+      ($source[0].schema == "mcloving.diff002.jenkins-runtime/v1"
+       and $authorization[0].schema
+          == "mcloving.diff002.target-authorization/v1"
+       and $operational[0].schema
+          == "mcloving.diff002.target-operational/v1"
+       and $ingress[0].schema
+          == "mcloving.diff002.target-ingress/v1"),
     immutable_identity_equal:
       ($source[0].immutable_id == $authorization[0].immutable_id),
     decisions_equal:
@@ -378,6 +386,7 @@ jq -n \
        and $operational[0].states == $certificate_target_states)
   }
   | .parity = ([
+      .observation_schemas_equal,
       .immutable_identity_equal,
       .decisions_equal,
       .stable_source_authentication_equal,
