@@ -157,6 +157,12 @@ fn fixture(commit: &str, tree: &str, release_id: u128) -> Fixture {
         expected_workflow_sha256: DIGEST_B.to_owned(),
         expected_target_triple: "x86_64-unknown-linux-gnu".to_owned(),
         expected_source_date_epoch: 1_786_000_000,
+        expected_components_sha256: sha256(
+            &serde_json::to_vec(&components).expect("canonical components"),
+        ),
+        expected_sbom_sha256: manifest.sbom_sha256.clone(),
+        expected_bundle_sha256: manifest.bundle_sha256.clone(),
+        expected_bundle_size_bytes: manifest.bundle_size_bytes,
         expected_transparency_log_identity: "rekor:production".to_owned(),
         expected_transparency_entry_identity: "entry:12345".to_owned(),
         expected_transparency_log_index: 12_345,
@@ -730,11 +736,18 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
         serde_json::to_vec(&release_request).expect("release request JSON"),
     )
     .expect("write release request");
+    std::fs::set_permissions(
+        &release_request_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("restrict release request");
     std::fs::write(
         &policy_path,
         serde_json::to_vec(&policy).expect("policy JSON"),
     )
     .expect("write policy");
+    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict policy");
     std::fs::write(&components_path, &components).expect("write components");
     std::fs::write(&sbom_path, &fixture.sbom).expect("write SBOM");
     std::fs::write(&bundle_path, &fixture.bundle).expect("write bundle");
@@ -752,6 +765,7 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
                 "sign-build",
                 build_receipt_path.to_str().expect("build receipt path"),
                 release_request_path.to_str().expect("release request path"),
+                policy_path.to_str().expect("policy path"),
                 components_path.to_str().expect("components path"),
                 sbom_path.to_str().expect("SBOM path"),
                 bundle_path.to_str().expect("bundle path"),
@@ -825,6 +839,61 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
     assert!(!incomplete.status.success());
     assert!(!incomplete_output.exists());
     std::fs::write(&sbom_path, &fixture.sbom).expect("restore SBOM");
+    std::fs::write(
+        &build_receipt_path,
+        serde_json::to_vec(&build_receipt).expect("build receipt JSON"),
+    )
+    .expect("restore build receipt");
+
+    let attacker_root = root_path.join("attacker-components");
+    std::fs::create_dir(&attacker_root).expect("create attacker component root");
+    std::fs::set_permissions(&attacker_root, std::fs::Permissions::from_mode(0o700))
+        .expect("restrict attacker component root");
+    let attacker_agent = b"attacker-selected-agent";
+    let attacker_controller = b"attacker-selected-controller";
+    write_component(&attacker_root, "bin/mcloving-agent", attacker_agent);
+    write_component(
+        &attacker_root,
+        "bin/mcloving-controller",
+        attacker_controller,
+    );
+    let attacker_components = vec![
+        ComponentArtifact {
+            path: "bin/mcloving-agent".to_owned(),
+            role: ComponentRole::Agent,
+            sha256: sha256(attacker_agent),
+            size_bytes: attacker_agent.len() as u64,
+            executable: true,
+        },
+        ComponentArtifact {
+            path: "bin/mcloving-controller".to_owned(),
+            role: ComponentRole::Controller,
+            sha256: sha256(attacker_controller),
+            size_bytes: attacker_controller.len() as u64,
+            executable: true,
+        },
+    ];
+    let attacker_components_json =
+        serde_json::to_vec(&attacker_components).expect("attacker components JSON");
+    let attacker_bundle =
+        build_bundle(&attacker_root, &attacker_components).expect("attacker bundle");
+    let mut attacker_receipt = build_receipt.clone();
+    attacker_receipt.components_sha256 = sha256(&attacker_components_json);
+    attacker_receipt.bundle_sha256 = sha256(&attacker_bundle);
+    attacker_receipt.bundle_size_bytes = attacker_bundle.len() as u64;
+    std::fs::write(&components_path, &attacker_components_json).expect("replace components JSON");
+    std::fs::write(&bundle_path, &attacker_bundle).expect("replace bundle");
+    std::fs::write(
+        &build_receipt_path,
+        serde_json::to_vec(&attacker_receipt).expect("attacker receipt JSON"),
+    )
+    .expect("replace build receipt");
+    let attacker_output = root_path.join("attacker-envelope.json");
+    let attacker_sign = run_sign(&key_path, &attacker_output);
+    assert!(!attacker_sign.status.success());
+    assert!(!attacker_output.exists());
+    std::fs::write(&components_path, &components).expect("restore components JSON");
+    std::fs::write(&bundle_path, &fixture.bundle).expect("restore bundle");
     std::fs::write(
         &build_receipt_path,
         serde_json::to_vec(&build_receipt).expect("build receipt JSON"),

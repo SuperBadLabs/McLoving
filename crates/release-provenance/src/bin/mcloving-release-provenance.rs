@@ -41,6 +41,7 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
             command,
             build_receipt,
             release_request,
+            policy,
             components,
             sbom,
             bundle,
@@ -53,7 +54,9 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
             let build_receipt: ReleaseBuildReceipt =
                 serde_json::from_slice(&read_public(Path::new(build_receipt))?)?;
             let release_request: ReleaseRequest =
-                serde_json::from_slice(&read_public(Path::new(release_request))?)?;
+                serde_json::from_slice(&read_trusted(Path::new(release_request))?)?;
+            let policy: VerificationPolicy =
+                serde_json::from_slice(&read_trusted(Path::new(policy))?)?;
             let components = read_public(Path::new(components))?;
             let sbom = read_public(Path::new(sbom))?;
             let bundle = read_bundle(Path::new(bundle))?;
@@ -64,6 +67,7 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
             let result = sign_build_outputs(
                 build_receipt,
                 release_request,
+                &policy,
                 &components,
                 &sbom,
                 &bundle,
@@ -95,7 +99,7 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
                 let envelope: SignedReleaseEnvelope =
                     serde_json::from_slice(&read_public(Path::new(&group[0]))?)?;
                 let policy: VerificationPolicy =
-                    serde_json::from_slice(&read_public(Path::new(&group[1]))?)?;
+                    serde_json::from_slice(&read_trusted(Path::new(&group[1]))?)?;
                 let sbom = read_public(Path::new(&group[2]))?;
                 let bundle = read_bundle(Path::new(&group[3]))?;
                 let cargo_lock = read_public(Path::new(&group[4]))?;
@@ -125,6 +129,10 @@ fn read_public(path: &Path) -> Result<Vec<u8>, CliError> {
 
 fn read_bundle(path: &Path) -> Result<Vec<u8>, CliError> {
     read_bounded_regular(path, MAX_BUNDLE_INPUT_BYTES, false)
+}
+
+fn read_trusted(path: &Path) -> Result<Vec<u8>, CliError> {
+    read_bounded_regular(path, MAX_PUBLIC_INPUT_BYTES, true)
 }
 
 fn read_signing_key(path: &Path) -> Result<Vec<u8>, CliError> {
@@ -205,7 +213,7 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: mcloving-release-provenance sbom LOCK GENERATOR_SHA256 OUTPUT | bundle ROOT COMPONENTS_JSON OUTPUT | sign-build BUILD_RECEIPT RELEASE_REQUEST COMPONENTS SBOM BUNDLE SOURCE_ARCHIVE CARGO_LOCK TOOLCHAIN PRIVATE_PKCS8 OUTPUT | verify-chain ENV CONFIG_SHA256 DEPLOYED_AT_MS OUTPUT ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK [ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK ...]"
+        "usage: mcloving-release-provenance sbom LOCK GENERATOR_SHA256 OUTPUT | bundle ROOT COMPONENTS_JSON OUTPUT | sign-build BUILD_RECEIPT RELEASE_REQUEST POLICY COMPONENTS SBOM BUNDLE SOURCE_ARCHIVE CARGO_LOCK TOOLCHAIN PRIVATE_PKCS8 OUTPUT | verify-chain ENV CONFIG_SHA256 DEPLOYED_AT_MS OUTPUT ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK [ENVELOPE POLICY SBOM BUNDLE CARGO_LOCK ...]"
     )]
     Usage,
     #[error("release input is invalid")]

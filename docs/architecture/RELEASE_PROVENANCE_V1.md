@@ -93,6 +93,11 @@ Any missing, additional, symlinked, hardlinked, unexpectedly owned,
 group/other-accessible, or otherwise unexpected output denies the build. The
 workflow packages those outputs into a deterministic tar and uploads it as one
 immutable unsigned workflow artifact. CI has no production signing key.
+Before upload, the protected workflow log records the exact source/tree,
+canonical component-list SHA-256, SBOM SHA-256, bundle SHA-256 and bundle size.
+The signer-policy authority retrieves that tuple from the authenticated exact
+protected-main workflow run, not from the downloadable artifact, and provisions
+it through the separate owner-private verification-policy channel.
 
 ## Bundle and SBOM
 
@@ -112,24 +117,35 @@ registry metadata.
 ## Signing boundary
 
 `mcloving-release-provenance sign-build` is the production signing entrypoint.
-It does not accept a preassembled manifest. Before producing a signature it
-recomputes and compares the build receipt against the exact component JSON,
-SBOM, bundle, source archive, Cargo.lock and toolchain record. It also reparses
-the bundle, requires exact component equivalence and canonical JSON, and
-reconstructs the complete canonical SBOM from the supplied Cargo.lock and the
-release executable digest named by the receipt before signing. That digest is
-also carried in the signed builder identity and must exactly match the
-independently supplied verification policy; changing the receipt and
-regenerating the SBOM cannot change the trusted generator identity.
+It does not accept a preassembled manifest. It requires the independently
+provisioned verification policy at signing time and, before producing a
+signature, requires the unsigned build receipt's complete source, builder,
+canonical component-list, SBOM, bundle and bundle-size tuple to equal that
+policy exactly. The policy's artifact tuple comes from the authenticated
+protected-builder run rather than from the unsigned artifact presented to the
+signer. Replacing component bytes, regenerating a self-consistent component
+list/bundle and editing the receipt therefore cannot obtain a signature.
+
+The command also recomputes and compares the build receipt against the exact
+component JSON, SBOM, bundle, source archive, Cargo.lock and toolchain record.
+It reparses the bundle, requires exact component equivalence and canonical
+JSON, and reconstructs the complete canonical SBOM from the supplied
+Cargo.lock and the release executable digest named by the receipt before
+signing. That digest is carried in the signed builder identity and must exactly
+match the same independently supplied policy. The requested protected gates,
+transparency tuple and release profile must match policy, and the signing key's
+public half must already be present in the policy's trusted signer registry.
 
 The release request supplies only the release ID/version/profile, signer key
 identity, sorted exact protected policy gates, externally validated
 transparency evidence, and optional rollback target. The command derives the
-source, builder, artifact and signer-public-key identities itself. The private
-PKCS#8 key must be an absolute owner-private, owner-owned, single-link regular
-file. Symlinks, hardlinks, group/other access, relative paths and oversized
-keys are denied. Inputs are opened once with `O_NOFOLLOW` and verified through
-that same file descriptor. Key bytes are zeroized after the signing attempt.
+source, builder, artifact and signer-public-key identities itself, while the
+separately provisioned policy authorizes their exact expected values. The
+release request, trusted policy and private PKCS#8 key must all be absolute
+owner-private, owner-owned, single-link regular files. Symlinks, hardlinks,
+group/other access, relative paths and oversized keys are denied. Inputs are
+opened once with `O_NOFOLLOW` and verified through that same file descriptor.
+Key bytes are zeroized after the signing attempt.
 Every output requires an owner-private directory, uses create-new mode, is
 synchronized, and is never overwritten.
 
@@ -146,9 +162,12 @@ The signer host must separately establish:
 3. the source commit is the reviewed protected-main commit;
 4. the builder workflow and platform image match the independently retained
    policy;
-5. transparency inclusion, checkpoint and audit evidence were validated by an
+5. the component-list, SBOM and bundle digest/size tuple in that policy was
+   retrieved from the authenticated exact-head protected builder run rather
+   than derived from the downloaded unsigned artifact;
+6. transparency inclusion, checkpoint and audit evidence were validated by an
    independent transparency client; and
-6. the release request contains the exact previously verified rollback target,
+7. the release request contains the exact previously verified rollback target,
    or the independently approved genesis policy.
 
 The repository deliberately does not treat a private GitHub workflow artifact
@@ -169,6 +188,8 @@ Cargo.lock. For every group it verifies:
 - exact source commit/tree/archive/lock and release profile pins;
 - exact builder image reference/digest, Rust version, toolchain record,
   workflow, target and source epoch pins;
+- exact independently pinned canonical component-list, SBOM and bundle
+  digest/size tuple;
 - the complete sorted protected-gate set, successful conclusion, run IDs,
   evidence digests and exact source head;
 - a complete canonical SBOM reconstructed from the supplied exact Cargo.lock
@@ -200,6 +221,8 @@ The focused contract suite proves:
 - re-signed SBOM generator mismatch against the signed builder identity;
 - re-signed incomplete SBOM denial during independent verification from the
   exact supplied Cargo.lock;
+- replacement component bytes plus attacker-regenerated canonical component
+  JSON, bundle and edited unsigned receipt denial at the signing boundary;
 - protected-gate run substitution denial;
 - SBOM, bundle bytes and component-role substitution denial;
 - attacker key, malformed signature, malformed transparency and valid but

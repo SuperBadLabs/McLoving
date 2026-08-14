@@ -120,7 +120,10 @@ expected_directories="$(find "${output_root}" -mindepth 1 -type d -printf '%P\n'
   deny "builder emitted a node owned by another user"
 [[ -z "$(find "${output_root}" -mindepth 1 -perm /077 -print -quit)" ]] ||
   deny "builder emitted a node accessible by group or others"
-printf 'release_builder_complete source=%s tree=%s bundle=%s\n' \
+printf 'release_builder_complete source=%s tree=%s components=%s sbom=%s bundle=%s bundle_size=%s\n' \
   "${source_commit}" \
   "${source_tree}" \
-  "$(sha256sum "${output_root}/release.bundle" | cut -d' ' -f1)"
+  "$(sha256sum "${output_root}/components.json" | cut -d' ' -f1)" \
+  "$(sha256sum "${output_root}/sbom.json" | cut -d' ' -f1)" \
+  "$(sha256sum "${output_root}/release.bundle" | cut -d' ' -f1)" \
+  "$(stat -c '%s' "${output_root}/release.bundle")"

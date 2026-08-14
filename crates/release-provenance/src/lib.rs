@@ -218,6 +218,10 @@ pub struct VerificationPolicy {
     pub expected_workflow_sha256: String,
     pub expected_target_triple: String,
     pub expected_source_date_epoch: u64,
+    pub expected_components_sha256: String,
+    pub expected_sbom_sha256: String,
+    pub expected_bundle_sha256: String,
+    pub expected_bundle_size_bytes: u64,
     pub expected_transparency_log_identity: String,
     pub expected_transparency_entry_identity: String,
     pub expected_transparency_log_index: u64,
@@ -385,6 +389,7 @@ pub fn sign_release(
 pub fn sign_build_outputs(
     receipt: ReleaseBuildReceipt,
     request: ReleaseRequest,
+    policy: &VerificationPolicy,
     components_bytes: &[u8],
     sbom_bytes: &[u8],
     bundle_bytes: &[u8],
@@ -394,6 +399,7 @@ pub fn sign_build_outputs(
     signer_pkcs8: &[u8],
 ) -> Result<SignedReleaseEnvelope, ReleaseError> {
     validate_build_receipt(&receipt)?;
+    authenticate_build_receipt(&receipt, policy)?;
     let components: Vec<ComponentArtifact> = serde_json::from_slice(components_bytes)?;
     validate_components(&components)?;
     if serde_json::to_vec(&components)? != components_bytes
@@ -447,6 +453,18 @@ pub fn sign_build_outputs(
         transparency: request.transparency,
         rollback_target: request.rollback_target,
     };
+    verify_source(&manifest, policy)?;
+    verify_builder(&manifest.builder, policy)?;
+    verify_policy_gates(&manifest, policy)?;
+    verify_transparency(&manifest.transparency, policy)?;
+    verify_artifact_policy(&manifest, policy)?;
+    let trusted_signer_key = policy
+        .trusted_signer_keys
+        .get(&manifest.signer_key_id)
+        .ok_or(ReleaseError::SignatureDenied)?;
+    if trusted_signer_key.as_slice() != key.public_key().as_ref() {
+        return Err(ReleaseError::SignatureDenied);
+    }
     sign_release(manifest, signer_pkcs8)
 }
 
@@ -486,6 +504,7 @@ pub fn verify_release(
     verify_builder(&envelope.manifest.builder, policy)?;
     verify_policy_gates(&envelope.manifest, policy)?;
     verify_transparency(&envelope.manifest.transparency, policy)?;
+    verify_artifact_policy(&envelope.manifest, policy)?;
 
     let cargo_lock =
         std::str::from_utf8(cargo_lock_bytes).map_err(|_| ReleaseError::ArtifactDenied)?;
@@ -726,6 +745,48 @@ fn verify_builder(
         || builder.source_date_epoch != policy.expected_source_date_epoch
     {
         return Err(ReleaseError::BuilderDenied);
+    }
+    Ok(())
+}
+
+fn authenticate_build_receipt(
+    receipt: &ReleaseBuildReceipt,
+    policy: &VerificationPolicy,
+) -> Result<(), ReleaseError> {
+    validate_verification_policy(policy)?;
+    if receipt.source_commit_sha1 != policy.expected_source_commit_sha1
+        || receipt.source_tree_sha1 != policy.expected_source_tree_sha1
+        || receipt.source_archive_sha256 != policy.expected_source_archive_sha256
+        || receipt.cargo_lock_sha256 != policy.expected_cargo_lock_sha256
+        || receipt.builder_image_reference != policy.expected_builder_image_reference
+        || receipt.builder_image_digest != policy.expected_builder_image_digest
+        || receipt.rust_toolchain != policy.expected_rust_toolchain
+        || receipt.rust_toolchain_manifest_sha256 != policy.expected_rust_toolchain_manifest_sha256
+        || receipt.release_tool_sha256 != policy.expected_release_tool_sha256
+        || receipt.workflow_sha256 != policy.expected_workflow_sha256
+        || receipt.target_triple != policy.expected_target_triple
+        || receipt.source_date_epoch != policy.expected_source_date_epoch
+        || receipt.components_sha256 != policy.expected_components_sha256
+        || receipt.sbom_sha256 != policy.expected_sbom_sha256
+        || receipt.bundle_sha256 != policy.expected_bundle_sha256
+        || receipt.bundle_size_bytes != policy.expected_bundle_size_bytes
+    {
+        return Err(ReleaseError::BuildDenied);
+    }
+    Ok(())
+}
+
+fn verify_artifact_policy(
+    manifest: &ReleaseManifest,
+    policy: &VerificationPolicy,
+) -> Result<(), ReleaseError> {
+    let components = serde_json::to_vec(&manifest.components)?;
+    if sha256_hex(&components) != policy.expected_components_sha256
+        || manifest.sbom_sha256 != policy.expected_sbom_sha256
+        || manifest.bundle_sha256 != policy.expected_bundle_sha256
+        || manifest.bundle_size_bytes != policy.expected_bundle_size_bytes
+    {
+        return Err(ReleaseError::ArtifactDenied);
     }
     Ok(())
 }
@@ -982,6 +1043,11 @@ fn validate_verification_policy(policy: &VerificationPolicy) -> Result<(), Relea
         || !is_sha256(&policy.expected_workflow_sha256)
         || !valid_text(&policy.expected_target_triple)
         || policy.expected_source_date_epoch == 0
+        || !is_sha256(&policy.expected_components_sha256)
+        || !is_sha256(&policy.expected_sbom_sha256)
+        || !is_sha256(&policy.expected_bundle_sha256)
+        || policy.expected_bundle_size_bytes == 0
+        || policy.expected_bundle_size_bytes > MAX_BUNDLE_BYTES
         || !valid_text(&policy.expected_transparency_log_identity)
         || !valid_text(&policy.expected_transparency_entry_identity)
         || !is_sha256(&policy.expected_transparency_signed_entry_timestamp_sha256)
