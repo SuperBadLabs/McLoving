@@ -192,6 +192,8 @@ def timerTrigger = new TimerTrigger('@daily')
 job.addTrigger(timerTrigger)
 def scmTrigger = new SCMTrigger('@daily', false)
 job.addTrigger(scmTrigger)
+def originalScm = job.scm
+job.disable()
 def scmField = AbstractProject.class.getDeclaredField('scm')
 scmField.accessible = true
 scmField.set(job, new Diff002Scm())
@@ -200,7 +202,6 @@ def synchronousPollingField = scmTrigger.descriptor.class
 synchronousPollingField.accessible = true
 synchronousPollingField.setBoolean(scmTrigger.descriptor, true)
 
-job.disable()
 def disabledIngress = [:]
 def disabledIngressDetails = [:]
 def targetActivity = {
@@ -288,6 +289,7 @@ def disabledPrequeueDenied = disabledIngress.values().every { it == 'deny' }
 def disabledQueuedBuilds = job.builds.size() +
   jenkins.queue.items.count { item -> item.task == job }
 states.add([state: job.disabled ? 'disabled' : 'enabled', generation: 2])
+scmField.set(job, originalScm)
 job.enable()
 states.add([state: job.disabled ? 'disabled' : 'enabled', generation: 3])
 def admitted = job.scheduleBuild2(0)
