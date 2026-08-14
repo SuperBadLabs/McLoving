@@ -50,8 +50,9 @@ output path beneath an owner-owned directory that denies group and other
 access, and a canonical Cargo cache. It archives the exact commit rather than
 bind-mounting a mutable worktree. The container runs with no network, a
 read-only root, no capabilities, `no-new-privileges`, the Docker default
-AppArmor profile, bounded CPU, memory and process count, and fixed-size private
-tmpfs filesystems. Only the dedicated build-target and ephemeral Cargo-home
+AppArmor profile, a hosted-runner-compatible fixed two-CPU cap, bounded memory
+and process count, and fixed-size private tmpfs filesystems. Only the dedicated
+build-target and ephemeral Cargo-home
 tmpfs filesystems are executable, because Cargo must run freshly compiled build
 scripts, procedural macros, and checksum-pinned vendored tools such as
 `protoc`; both remain `nosuid` and `nodev`. The only writable persistent mount

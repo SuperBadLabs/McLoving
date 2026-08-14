@@ -83,7 +83,7 @@ docker run --rm --pull never --platform linux/amd64 \
   --security-opt apparmor=docker-default \
   --pids-limit 512 \
   --memory 8g \
-  --cpus 4 \
+  --cpus 2 \
   --user "$(id -u):$(id -g)" \
   --tmpfs /build-src:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid="$(id -u)",gid="$(id -g)" \
   --tmpfs /cargo-home:rw,exec,nosuid,nodev,size=2g,mode=0700,uid="$(id -u)",gid="$(id -g)" \
