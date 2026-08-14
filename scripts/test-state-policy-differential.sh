@@ -132,6 +132,8 @@ jq --exit-status '
   and .authorization_strategy == "Diff002AuthorizationStrategy"
   and .installed_acl == "Diff002Acl"
   and (.decisions | length) == 4
+  and .fresh_authentication_decisions == .decisions
+  and .authentication_identity_stable
   and .deleted_reuse_name == "alice-reused"
   and .deleted_predecessor_immutable_id == "jenkins-user-deleted-2041"
   and .deleted_predecessor_decisions == {
@@ -292,6 +294,9 @@ jq -n \
       ($source[0].immutable_id == $authorization[0].immutable_id),
     decisions_equal:
       ($source[0].decisions == $authorization[0].decisions),
+    stable_source_authentication_equal:
+      ($source[0].authentication_identity_stable
+       and $source[0].fresh_authentication_decisions == $source[0].decisions),
     deleted_reuse_name_equal:
       ($source[0].deleted_reuse_name
        == $authorization[0].deleted_reuse_name),
@@ -375,6 +380,7 @@ jq -n \
   | .parity = ([
       .immutable_identity_equal,
       .decisions_equal,
+      .stable_source_authentication_equal,
       .deleted_reuse_name_equal,
       .deleted_predecessor_identity_equal,
       .deleted_predecessor_decisions_equal,
