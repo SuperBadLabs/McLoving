@@ -1127,13 +1127,14 @@ the unchanged McLoving v33 capture in v44; all predecessors
 contribute no authority.
 `DIFF-002` is dependency-ready and active. Its standalone state/policy
 differential and contained exact-profile implementation receipt are complete.
-The accepted clean-head run at `422995cba057de05e8c78b9451f1bea8c7de1455`
+The accepted clean-head run at `6cf024a6a57ae1add43d428c63c359e5521649cd`
 compared live pinned-Jenkins observations with PostgreSQL-backed McLoving
 authorization and operational-state observations, including all five typed
 disabled ingress paths and authenticated replacement IDs. The runtime join also
-binds those observations directly to the exact compiled-digest certificate and
-sealed the 19-file evidence manifest as
-`d4d2b8f778282435ca782e3021eaa49192f6247bbab0b56bf66abbb4f71d2908`.
+binds that scoped observation slice directly to the exact compiled-digest
+certificate. The contained runner mounted source read-only, compiled into a
+fresh temporary target, and sealed the 19-file evidence manifest as
+`33ad04efb61e5d1baef6a281a0250e440954cbc8e744de7a67168005fa63bff6`.
 Independent exact-head review and the protected merge gate remain in progress.
 It does not inherit authority from the completed DIFF-001 or MIG-005A receipts.
 

@@ -20,8 +20,13 @@ observation and resealing its adjacent manifest cannot grant authority.
 The contained runtime comparison loads that same exact observation and binds
 its active, deleted-predecessor, replacement, authorization, operational-state,
 disabled-ingress, and zero-build fields to the live Jenkins and McLoving
-observations. The static certificate and live comparison therefore cannot pass
-for different fixtures.
+observations. This prevents substitution within that live-compared slice.
+Alias history, membership and ACL metadata, issuer/subject metadata, lifecycle
+and group generations, provenance, enabled-ingress counts, and persistent
+history remain protected by the compiled digest and strict static verifier but
+are not all independently live-derived by this receipt. Accordingly,
+`certificate_binding_equal` is a scoped runtime join, not a claim that every
+static certificate field was re-observed live.
 
 This boundary binds the already accepted exact-profile `MIG-005A` receipts:
 
@@ -157,8 +162,8 @@ its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`422995cba057de05e8c78b9451f1bea8c7de1455`, tree
-`a6edeaab17bcc7b249c8fae939f490c8d10eb9c7`. It passed eight sealed-bundle and
+`6cf024a6a57ae1add43d428c63c359e5521649cd`, tree
+`892f8d6182edb9e7343ab424e91a366099ba9fab`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
 authorization-mapping tests, four operational-state/race tests, five typed
 trigger-ingress tests, and the final independent bundle verification. The two
@@ -189,14 +194,16 @@ The runner exited zero with empty source status on an internal Podman network,
 the exact Jenkins, Rust, and PostgreSQL image digests above, no added
 capabilities, all default capabilities dropped, no-new-privileges, a read-only
 Cargo registry mount, and finite per-container CPU, memory, and PID ceilings.
-The repository mount remained writable only for Cargo build output; no
-production credential or endpoint was present. The sealed external evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T094859Z`; its
+The repository mount was read-only; Cargo used a fresh writable target directory
+inside the mode-restricted temporary runtime, which cleanup removed after the
+run. No production credential or endpoint was present. The sealed external
+evidence is
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T095456Z`; its
 self-excluding 19-file manifest SHA-256 is
-`d4d2b8f778282435ca782e3021eaa49192f6247bbab0b56bf66abbb4f71d2908`.
+`33ad04efb61e5d1baef6a281a0250e440954cbc8e744de7a67168005fa63bff6`.
 Independent re-verification of every manifest entry passed.
 
-Eighteen preserved predecessors contribute no authority. The first,
+Nineteen preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -261,6 +268,12 @@ binds the exact compiled-digest certificate to the active, predecessor, and
 replacement runtime IDs and decisions, all three state generations, all five
 disabled ingress outcomes, and both zero-build counts; its
 `certificate_binding_equal` result is true.
+The successful `diff002-state-policy-20260814T094859Z` receipt was superseded
+because its writable whole-repository mount exposed ignored host Cargo output
+to the contained runner. The accepted run mounts source and the dependency
+registry read-only, compiles into a new temporary writable target directory,
+records those mount modes in sealed inspection, and deletes the target during
+cleanup.
 
 ## Non-authority and limitations
 
