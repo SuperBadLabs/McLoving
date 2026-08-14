@@ -192,7 +192,8 @@ impossible self-reference. The deployment receipt carries the complete linked
 tuple so a downstream operator can audit the exact evidence that authorized
 placement. Receipt creation also requires chronological authorization: Rekor
 integration must not postdate independent-anchor verification, and anchor
-verification must not postdate deployment.
+verification for the release and every verified rollback predecessor must not
+postdate deployment.
 Its fields are private and it does not implement deserialization, so stored JSON
 cannot be converted back into deployment authority or forged as a typed
 receipt. Any authority-bearing deployment function must consume the live

@@ -365,10 +365,8 @@ fn exact_release_verifies_before_deployment_receipt() {
             &fixture.bundle,
             &fixture.lock,
             None,
-        )
-        .expect("cryptographically valid but chronologically inverted evidence")
-        .deployment_receipt("production", DIGEST_A, 1_786_000_200_000),
-        Err(ReleaseError::DeploymentDenied)
+        ),
+        Err(ReleaseError::TransparencyDenied)
     ));
 }
 
@@ -744,7 +742,8 @@ fn signer_signature_and_transparency_substitution_are_denied() {
 
 #[test]
 fn rollback_target_must_match_a_previously_verified_release_exactly() {
-    let first = fixture(SHA1_A, SHA1_B, 5);
+    let mut first = fixture(SHA1_A, SHA1_B, 5);
+    first.policy.expected_audit_anchor.verified_at_unix_ms = 1_786_000_300_000;
     let first_envelope = signed(&first);
     let first_verified = verify_release(
         &first_envelope,
@@ -774,7 +773,7 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         &second.lock,
     );
     second.policy = second_policy;
-    verify_release(
+    let second_verified = verify_release(
         &second_envelope,
         &second.policy,
         &second.sbom,
@@ -783,6 +782,13 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         Some(&first_verified),
     )
     .expect("exact rollback ancestry");
+    assert!(matches!(
+        second_verified.deployment_receipt("production", DIGEST_A, 1_786_000_299_999),
+        Err(ReleaseError::DeploymentDenied)
+    ));
+    second_verified
+        .deployment_receipt("production", DIGEST_A, 1_786_000_300_000)
+        .expect("deployment follows every rollback-chain authorization");
 
     let unrelated = fixture(SHA1_A, SHA1_B, 7);
     let unrelated_envelope = signed(&unrelated);
