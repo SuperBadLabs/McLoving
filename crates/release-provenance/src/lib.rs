@@ -489,9 +489,15 @@ impl VerifiedRelease {
         deployment_configuration_sha256: &str,
         deployed_at_unix_ms: i64,
     ) -> Result<DeploymentReceipt, ReleaseError> {
+        let integrated_at_unix_ms = self
+            .transparency
+            .integrated_time_unix_seconds
+            .checked_mul(1_000)
+            .ok_or(ReleaseError::DeploymentDenied)?;
         if !valid_text(deployment_environment)
             || !is_sha256(deployment_configuration_sha256)
-            || deployed_at_unix_ms < 0
+            || integrated_at_unix_ms > self.audit_anchor.verified_at_unix_ms
+            || self.audit_anchor.verified_at_unix_ms > deployed_at_unix_ms
         {
             return Err(ReleaseError::DeploymentDenied);
         }

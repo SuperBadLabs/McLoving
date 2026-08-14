@@ -9,6 +9,7 @@ use mcloving_release_provenance::{
     TransparencyEvidence, VerificationPolicy, build_bundle, generate_signing_key,
     sbom_from_cargo_lock, sign_build_outputs, signing_key_info, verify_release,
 };
+use serde::{Serialize, de::DeserializeOwned};
 use zeroize::Zeroize as _;
 
 const MAX_PUBLIC_INPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -66,10 +67,10 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
             output,
         ] if command == "sign-build" => {
             let build_receipt: ReleaseBuildReceipt =
-                serde_json::from_slice(&read_public(Path::new(build_receipt))?)?;
+                read_canonical_public(Path::new(build_receipt))?;
             let release_request: ReleaseRequest =
-                serde_json::from_slice(&read_trusted(Path::new(release_request))?)?;
-            let policy: SigningPolicy = serde_json::from_slice(&read_trusted(Path::new(policy))?)?;
+                read_canonical_trusted(Path::new(release_request))?;
+            let policy: SigningPolicy = read_canonical_trusted(Path::new(policy))?;
             let components = read_public(Path::new(components))?;
             let sbom = read_public(Path::new(sbom))?;
             let bundle = read_bundle(Path::new(bundle))?;
@@ -109,16 +110,14 @@ fn run(arguments: Vec<String>) -> Result<(), CliError> {
                 .map_err(|_| CliError::InvalidInput)?;
             let mut verified = None;
             for group in chain.chunks_exact(8) {
-                let envelope: SignedReleaseEnvelope =
-                    serde_json::from_slice(&read_public(Path::new(&group[0]))?)?;
-                let policy: VerificationPolicy =
-                    serde_json::from_slice(&read_trusted(Path::new(&group[1]))?)?;
+                let envelope: SignedReleaseEnvelope = read_canonical_public(Path::new(&group[0]))?;
+                let policy: VerificationPolicy = read_canonical_trusted(Path::new(&group[1]))?;
                 let transparency: TransparencyEvidence =
-                    serde_json::from_slice(&read_public(Path::new(&group[2]))?)?;
+                    read_canonical_public(Path::new(&group[2]))?;
                 let evidence_manifest: ReleaseEvidenceManifest =
-                    serde_json::from_slice(&read_public(Path::new(&group[3]))?)?;
+                    read_canonical_public(Path::new(&group[3]))?;
                 let audit_anchor: AuditAnchorEvidence =
-                    serde_json::from_slice(&read_public(Path::new(&group[4]))?)?;
+                    read_canonical_public(Path::new(&group[4]))?;
                 let sbom = read_public(Path::new(&group[5]))?;
                 let bundle = read_bundle(Path::new(&group[6]))?;
                 let cargo_lock = read_public(Path::new(&group[7]))?;
@@ -159,6 +158,31 @@ fn read_trusted(path: &Path) -> Result<Vec<u8>, CliError> {
 
 fn read_signing_key(path: &Path) -> Result<Vec<u8>, CliError> {
     read_bounded_regular(path, MAX_SIGNING_KEY_BYTES, true)
+}
+
+fn read_canonical_public<T>(path: &Path) -> Result<T, CliError>
+where
+    T: DeserializeOwned + Serialize,
+{
+    parse_canonical_json(read_public(path)?)
+}
+
+fn read_canonical_trusted<T>(path: &Path) -> Result<T, CliError>
+where
+    T: DeserializeOwned + Serialize,
+{
+    parse_canonical_json(read_trusted(path)?)
+}
+
+fn parse_canonical_json<T>(bytes: Vec<u8>) -> Result<T, CliError>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let value = serde_json::from_slice(&bytes)?;
+    if serde_json::to_vec(&value)? != bytes {
+        return Err(CliError::InvalidInput);
+    }
+    Ok(value)
 }
 
 fn read_bounded_regular(path: &Path, maximum: u64, private: bool) -> Result<Vec<u8>, CliError> {
@@ -229,6 +253,9 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let mut output = options.open(path)?;
     output.write_all(bytes)?;
     output.sync_all()?;
+    drop(output);
+    #[cfg(unix)]
+    std::fs::File::open(&canonical_parent)?.sync_all()?;
     Ok(())
 }
 

@@ -161,7 +161,9 @@ group/other access, relative paths and oversized keys are denied. Inputs are
 opened once with `O_NOFOLLOW` and verified through that same file descriptor.
 Key bytes are zeroized after every generation, inspection or signing attempt.
 Every output requires an owner-private directory, uses create-new mode, is
-synchronized, and is never overwritten.
+synchronized together with its containing directory on Unix, and is never
+overwritten. Structured signing and verification inputs must use their exact
+canonical JSON encoding; alternate whitespace or member ordering is denied.
 
 `generate-key` creates a new Ed25519 PKCS#8 key through the operating-system
 random source and writes it to a create-new `0600` file; `key-info` emits only its
@@ -188,7 +190,9 @@ two-phase construction is intentional: embedding a
 Rekor entry for the final envelope inside that same signed envelope would be an
 impossible self-reference. The deployment receipt carries the complete linked
 tuple so a downstream operator can audit the exact evidence that authorized
-placement.
+placement. Receipt creation also requires chronological authorization: Rekor
+integration must not postdate independent-anchor verification, and anchor
+verification must not postdate deployment.
 Its fields are private and it does not implement deserialization, so stored JSON
 cannot be converted back into deployment authority or forged as a typed
 receipt. Any authority-bearing deployment function must consume the live

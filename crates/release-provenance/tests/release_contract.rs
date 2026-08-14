@@ -319,7 +319,7 @@ fn exact_release_verifies_before_deployment_receipt() {
     )
     .expect("verify exact release");
     let receipt = verified
-        .deployment_receipt("production", DIGEST_A, 10_000)
+        .deployment_receipt("production", DIGEST_A, 1_786_000_200_000)
         .expect("verified deployment receipt");
     assert_eq!(receipt.manifest_sha256(), envelope.manifest_sha256);
     assert_eq!(receipt.bundle_sha256(), fixture.manifest.bundle_sha256);
@@ -347,6 +347,29 @@ fn exact_release_verifies_before_deployment_receipt() {
     assert_eq!(receipt.audit_anchor_proof_sha256(), DIGEST_A);
     assert_eq!(receipt.audit_anchor_verifier_statement_sha256(), DIGEST_B);
     assert!(receipt.rollback_manifest_sha256().is_none());
+    assert!(matches!(
+        verified.deployment_receipt("production", DIGEST_A, 1_786_000_199_999),
+        Err(ReleaseError::DeploymentDenied)
+    ));
+
+    let mut inverted_anchor = fixture.policy.clone();
+    inverted_anchor.expected_audit_anchor.verified_at_unix_ms = 1_786_000_099_999;
+    assert!(matches!(
+        core_verify_release(
+            &envelope,
+            &inverted_anchor,
+            &inverted_anchor.expected_transparency,
+            &inverted_anchor.expected_evidence_manifest,
+            &inverted_anchor.expected_audit_anchor,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None,
+        )
+        .expect("cryptographically valid but chronologically inverted evidence")
+        .deployment_receipt("production", DIGEST_A, 1_786_000_200_000),
+        Err(ReleaseError::DeploymentDenied)
+    ));
 }
 
 #[test]
@@ -1056,28 +1079,31 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
     )
     .expect("restrict verification policy");
 
-    let verify = Command::new(binary)
-        .args([
-            "verify-chain",
-            "production",
-            DIGEST_A,
-            "10000",
-            receipt_path.to_str().expect("receipt path"),
-            envelope_path.to_str().expect("envelope path"),
-            verification_policy_path
-                .to_str()
-                .expect("verification policy path"),
-            transparency_path.to_str().expect("transparency path"),
-            evidence_manifest_path
-                .to_str()
-                .expect("evidence manifest path"),
-            audit_anchor_path.to_str().expect("audit anchor path"),
-            sbom_path.to_str().expect("SBOM path"),
-            bundle_path.to_str().expect("bundle path"),
-            cargo_lock_path.to_str().expect("Cargo.lock path"),
-        ])
-        .output()
-        .expect("run verification CLI");
+    let run_verify = |output: &std::path::Path| {
+        Command::new(binary)
+            .args([
+                "verify-chain",
+                "production",
+                DIGEST_A,
+                "1786000200000",
+                output.to_str().expect("receipt path"),
+                envelope_path.to_str().expect("envelope path"),
+                verification_policy_path
+                    .to_str()
+                    .expect("verification policy path"),
+                transparency_path.to_str().expect("transparency path"),
+                evidence_manifest_path
+                    .to_str()
+                    .expect("evidence manifest path"),
+                audit_anchor_path.to_str().expect("audit anchor path"),
+                sbom_path.to_str().expect("SBOM path"),
+                bundle_path.to_str().expect("bundle path"),
+                cargo_lock_path.to_str().expect("Cargo.lock path"),
+            ])
+            .output()
+            .expect("run verification CLI")
+    };
+    let verify = run_verify(&receipt_path);
     assert!(
         verify.status.success(),
         "{}",
@@ -1088,6 +1114,26 @@ fn cli_sign_and_verify_chain_enforces_private_keys_and_create_new_outputs() {
             .expect("parse serialized audit evidence");
     assert_eq!(receipt["manifest_sha256"], envelope.manifest_sha256);
     assert_eq!(receipt["bundle_sha256"], fixture.manifest.bundle_sha256);
+
+    for (index, path) in [
+        &envelope_path,
+        &verification_policy_path,
+        &transparency_path,
+        &evidence_manifest_path,
+        &audit_anchor_path,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let canonical = std::fs::read(path).expect("read canonical verification input");
+        let mut noncanonical = canonical.clone();
+        noncanonical.push(b'\n');
+        std::fs::write(path, noncanonical).expect("write noncanonical verification input");
+        let denied_receipt = root_path.join(format!("noncanonical-{index}-receipt.json"));
+        assert!(!run_verify(&denied_receipt).status.success());
+        assert!(!denied_receipt.exists());
+        std::fs::write(path, canonical).expect("restore canonical verification input");
+    }
 
     std::fs::write(&source_archive_path, b"substituted source archive")
         .expect("substitute source archive");
