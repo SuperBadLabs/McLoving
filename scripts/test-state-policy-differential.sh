@@ -165,8 +165,8 @@ if rg --fixed-strings --quiet "${jenkins_password}" "${evidence}"; then
 fi
 podman rm --force "${jenkins}" >/dev/null
 jenkins=''
-podman unshare chown 0:0 "${jenkins_password_file}"
-rm -f -- "${jenkins_password_file}" "${jenkins_netrc}" "${jenkins_runtime}/cookies"
+printf 'jenkins-controller-destroyed-before-target-phase\n' \
+  >"${evidence}/jenkins-credential-lifecycle.txt"
 jenkins_password=''
 
 podman run --detach --name "${postgres}" \
