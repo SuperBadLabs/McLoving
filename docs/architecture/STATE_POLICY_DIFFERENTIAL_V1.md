@@ -118,12 +118,15 @@ An authenticated, crumb-protected runtime probe installs the fixture strategy
 into the running Jenkins instance without persisting its script class. Every
 decision is then evaluated through the real freestyle job's `getACL()` result,
 not by calling a detached fixture ACL. The probe grants view to an account,
-deletes it, recreates the exact same Jenkins login, proves the authentication
-object changed, and proves the replacement inherited no action. The
-PostgreSQL-backed target test performs the corresponding explicit imported
-grant, lifecycle deletion/session revocation, same-alias replacement with a
-distinct immutable identity, and four replacement denies. The probe also drives
-the job through enabled, disabled, and rollback-as-new-enabled generations and
+deletes it, revokes the retained predecessor authentication inside the
+installed ACL, and records four post-delete denies. It then recreates the exact
+same Jenkins login, proves the authentication object changed, and proves the
+replacement inherited no action. The PostgreSQL-backed target test performs
+the corresponding explicit imported grant, lifecycle deletion/session
+revocation, same-alias replacement with a distinct immutable identity, four
+authenticated post-delete predecessor denies, and four replacement denies. The
+probe also drives the job through enabled, disabled, and
+rollback-as-new-enabled generations and
 proves disabled pre-queue denial and post-rollback admission. All Jenkins HTTP
 calls have finite connect and total timeouts. A negative socket probe proves the
 Jenkins container cannot reach a public address.
@@ -147,8 +150,8 @@ its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`7ab9adb752dae77fc169efef724c44bdb58d1f90`, tree
-`8a92db2d12f0aa3b8bb88739e91c03768a748e21`. It passed eight sealed-bundle and
+`44f4dac18b1e0b20746ab4273f0e062f5122fc29`, tree
+`7ee7afe01cfa2448fc79af381a10cb0a4be4689e`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
 authorization-mapping tests, four operational-state/race tests, and the final
 independent bundle verification. The two ignored identity and two ignored
@@ -160,14 +163,14 @@ The live Jenkins and PostgreSQL-backed target observations matched the immutable
 active identity `jenkins-user-immutable-1042`; allow/deny decisions for project
 view, build trigger, build cancel, and project configure; the reused login
 `alice-reused`; predecessor identity `jenkins-user-deleted-2041`, its view-only
-decisions, and deletion; replacement identity
+decisions, deletion, and four post-delete denies; replacement identity
 `jenkins-user-deleted-reuse-2042`, its changed authentication, and its four deny
 decisions; enabled generation 1, disabled generation 2, and enabled generation
 3; disabled pre-queue denial; and rollback admission. The target predecessor
 and replacement results come from real authenticated PostgreSQL-backed
 principals, an actual lifecycle transition, and calls to the product
 authorization engine, not prefilled expected values. The resulting
-`mcloving.diff002.runtime-comparison/v1` verdict reports all twelve comparison
+`mcloving.diff002.runtime-comparison/v1` verdict reports all thirteen comparison
 dimensions and aggregate parity as true.
 
 The runner exited zero with empty source status on an internal Podman network,
@@ -176,12 +179,12 @@ capabilities, all default capabilities dropped, no-new-privileges, a read-only
 Cargo registry mount, and finite per-container CPU, memory, and PID ceilings.
 The repository mount remained writable only for Cargo build output; no
 production credential or endpoint was present. The sealed external evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T092206Z`; its
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T093009Z`; its
 self-excluding 18-file manifest SHA-256 is
-`49999beaee531614c4aa9e07aad524879da4a3cffa080b6162cac18149a0b08f`.
+`809ea6bb8d32427c91d1f38f4066b27280f147a4fc285dcfc6772ab870692bc8`.
 Independent re-verification of every manifest entry passed.
 
-Fourteen preserved predecessors contribute no authority. The first,
+Sixteen preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -225,6 +228,14 @@ grant were corrected. None has a sealed manifest. The accepted run evaluates
 the installed job ACL, performs the lifecycle on both sides, retains no secret
 value, destroys Jenkins before target execution, and rejects any commit, tree,
 or status change both after execution and immediately before sealing.
+The successful `diff002-state-policy-20260814T092206Z` receipt was superseded
+because the installed ACL retained view authority for the predecessor
+authentication after account deletion. The
+`diff002-state-policy-20260814T092907Z` run proved corrected Jenkins
+post-delete denies but ended transiently before target startup and has no
+sealed manifest. The accepted run compares four post-delete denies derived
+through retained Jenkins authentication with four fresh McLoving token
+authentication-plus-authorization attempts.
 
 ## Non-authority and limitations
 
