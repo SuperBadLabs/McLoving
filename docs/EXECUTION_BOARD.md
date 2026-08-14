@@ -1127,17 +1127,20 @@ the unchanged McLoving v33 capture in v44; all predecessors
 contribute no authority.
 `DIFF-002` is dependency-ready and active. Its standalone state/policy
 differential and contained exact-profile implementation receipt are complete.
-The accepted clean-head run at `3e7f13f6b8da776cfe3f26a648a75aa4aa046b96`
+The accepted clean-head run at `f0b3f6dced45f33e9ef6d0ea88af013912cb76bd`
 compared live pinned-Jenkins observations with PostgreSQL-backed McLoving
-authorization and operational-state observations, including all five typed
-disabled ingress paths, authenticated replacement IDs, and stable Jenkins
-user-seed authorization across distinct authentication objects. All four live
-observation schemas are required to match their exact v1 contracts before
-parity can be true. The runtime join also binds that scoped observation slice
-directly to the exact compiled-digest certificate. The contained runner mounted
-source read-only, compiled into a fresh temporary target, and sealed the 19-file
-evidence manifest as
-`d4bbe9dc792c2dccb8941c1b5966b84c3cd032be17337b0f470083f19b2429dc`.
+authorization and operational-state observations. Jenkins drives distinct
+manual, build-API, completed-upstream, post-commit SCM-hook, and timer-trigger
+paths; McLoving drives its five corresponding typed admission paths. Both sides
+deny all five while creating zero target builds. The run also proves
+authenticated replacement IDs and stable Jenkins user-seed authorization
+across distinct authentication objects. All four live observation schemas are
+required to match their exact v1 contracts before parity can be true. The
+runtime join also binds that scoped observation slice directly to the exact
+compiled-digest certificate. The contained runner mounted source read-only,
+compiled into a fresh temporary target, and sealed the 19-file evidence
+manifest as
+`10fbbaed1d819ad9ec6962710de3f557e35c834fb6741f7cb08b085526a81786`.
 Independent exact-head review and the protected merge gate remain in progress.
 It does not inherit authority from the completed DIFF-001 or MIG-005A receipts.
 

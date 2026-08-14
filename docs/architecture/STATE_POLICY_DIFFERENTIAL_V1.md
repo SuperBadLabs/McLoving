@@ -165,8 +165,8 @@ its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`3e7f13f6b8da776cfe3f26a648a75aa4aa046b96`, tree
-`4095d47ef5477f5c2592ebf7e115b1adc2344ff2`. It passed eight sealed-bundle and
+`f0b3f6dced45f33e9ef6d0ea88af013912cb76bd`, tree
+`8ca30fa8f0d3a9320ac2bec5a4ffcb2b2eb65379`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
 authorization-mapping tests, four operational-state/race tests, five typed
 trigger-ingress tests, and the final independent bundle verification. The two
@@ -187,8 +187,13 @@ zero queued builds; disabled pre-queue denial; and rollback admission. The
 target predecessor and replacement results come from real authenticated
 PostgreSQL-backed principals, their returned immutable identity IDs, an actual
 lifecycle transition, and calls to the product authorization engine, not
-prefilled expected values. The five ingress results come from the distinct
-product admission paths. The resulting
+prefilled expected values. The five target ingress results come from distinct
+product admission paths. Their source counterparts exercise Jenkins manual
+scheduling with `UserIdCause`, the `doBuild` API handler, a successfully
+completed upstream build observed by `ReverseBuildTrigger`, the post-commit
+`SCMTrigger.run(Action[])` path, and `TimerTrigger.run()`; every path is recorded
+in the live observation and all five produce denial with zero target builds.
+The resulting
 `mcloving.diff002.runtime-comparison/v1` verdict reports all eighteen
 comparison dimensions, including exact observation-schema compatibility,
 stable source authentication, and the sealed certificate binding, with
@@ -202,12 +207,12 @@ The repository mount was read-only; Cargo used a fresh writable target directory
 inside the mode-restricted temporary runtime, which cleanup removed after the
 run. No production credential or endpoint was present. The sealed external
 evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T101528Z`; its
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T103536Z`; its
 self-excluding 19-file manifest SHA-256 is
-`d4bbe9dc792c2dccb8941c1b5966b84c3cd032be17337b0f470083f19b2429dc`.
+`10fbbaed1d819ad9ec6962710de3f557e35c834fb6741f7cb08b085526a81786`.
 Independent re-verification of every manifest entry passed.
 
-Twenty-one preserved predecessors contribute no authority. The first,
+Twenty-seven preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -290,6 +295,19 @@ their exact v1 values before aggregate parity could be true. The accepted run
 adds `observation_schemas_equal` as an eighteenth required comparison dimension
 covering the Jenkins, target-authorization, target-operational, and
 target-ingress observation contracts.
+The successful `diff002-state-policy-20260814T101528Z` receipt was superseded
+because all five Jenkins ingress labels called the same generic
+`scheduleBuild2(0)` path. The accepted run invokes the five distinct Jenkins
+paths listed above and asserts their unique runtime path records. The `102853Z`
+attempt failed safely when Jenkins refused to persist the temporary scripted
+SCM fixture; the accepted run installs it only after the disabled-state save
+and restores the original SCM before re-enabling. The `102937Z` attempt timed
+out on an in-controller HTTP callback and the `103156Z` and `103302Z` attempts
+timed out waiting for an upstream executor while the synthetic ACL denied
+Jenkins system authority. The `103449Z` attempt rejected an invalid synthetic
+run-result transition. None has a sealed manifest. The accepted run calls the
+real API entry handler directly, preserves Jenkins `SYSTEM2` authority, and
+completes a real upstream build before the reverse trigger observes it.
 
 ## Non-authority and limitations
 
