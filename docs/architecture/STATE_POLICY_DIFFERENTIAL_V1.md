@@ -165,8 +165,8 @@ its pinned PostgreSQL service; previously that suite was present in the local
 PostgreSQL harness but absent from the hosted protected job.
 
 The accepted contained implementation run used clean pushed head
-`cfe82a9870c04f06173d3bc5ab52ea005d653800`, tree
-`7006406b033ea3d62520209fa126ec85f7829689`. It passed eight sealed-bundle and
+`3e7f13f6b8da776cfe3f26a648a75aa4aa046b96`, tree
+`4095d47ef5477f5c2592ebf7e115b1adc2344ff2`. It passed eight sealed-bundle and
 mutation tests, three ordinary identity-lifecycle tests, four ordinary
 authorization-mapping tests, four operational-state/race tests, five typed
 trigger-ingress tests, and the final independent bundle verification. The two
@@ -202,12 +202,12 @@ The repository mount was read-only; Cargo used a fresh writable target directory
 inside the mode-restricted temporary runtime, which cleanup removed after the
 run. No production credential or endpoint was present. The sealed external
 evidence is
-`/sn8100/runs/mcloving/diff002-state-policy-20260814T100550Z`; its
+`/sn8100/runs/mcloving/diff002-state-policy-20260814T101528Z`; its
 self-excluding 19-file manifest SHA-256 is
-`710817c5f0571f9f20a128c35705cfbf8159bd42aad064a3230bb0cdab171e94`.
+`d4bbe9dc792c2dccb8941c1b5966b84c3cd032be17337b0f470083f19b2429dc`.
 Independent re-verification of every manifest entry passed.
 
-Twenty preserved predecessors contribute no authority. The first,
+Twenty-one preserved predecessors contribute no authority. The first,
 `diff002-state-policy-20260814T081748Z`, failed before test execution when the
 Rust shim attempted a forbidden channel refresh. The second,
 `diff002-state-policy-20260814T081844Z`, failed before compilation because the
@@ -284,6 +284,12 @@ references. The accepted run keys grants to the stable Jenkins `UserSeedProperty
 identity, proves a fresh active authentication retains the same view-only
 decisions, and proves same-login recreation changes the seed and inherits no
 authority. No seed value enters retained evidence.
+The successful `diff002-state-policy-20260814T100550Z` receipt was superseded
+because it recorded the three target observation schemas but did not require
+their exact v1 values before aggregate parity could be true. The accepted run
+adds `observation_schemas_equal` as an eighteenth required comparison dimension
+covering the Jenkins, target-authorization, target-operational, and
+target-ingress observation contracts.
 
 ## Non-authority and limitations
 
