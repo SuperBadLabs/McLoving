@@ -114,7 +114,7 @@ read -r crumb_field crumb_value < <(
     | jq --raw-output '[.crumbRequestField, .crumb] | @tsv'
 )
 curl --fail --silent --show-error \
-  --connect-timeout 2 --max-time 30 \
+  --connect-timeout 2 --max-time 90 \
   --netrc-file "${jenkins_netrc}" \
   --cookie "${jenkins_runtime}/cookies" \
   --header "${crumb_field}: ${crumb_value}" \
