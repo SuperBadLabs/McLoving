@@ -57,6 +57,12 @@ scripts, procedural macros, and checksum-pinned vendored tools such as
 `protoc`; both remain `nosuid` and `nodev`. The only writable persistent mount
 is the newly created output directory.
 
+The workflow fails closed unless GitHub's runner-supplied
+`github.workflow_sha` (the commit containing the executing workflow file)
+equals the protected Foundation head being released. The build receipt's
+workflow identity hashes that workflow file together with both builder
+scripts, all from the same exact checkout.
+
 Only the registry index and packaged crate archive directories enter the
 container as separate read-only mounts. Before copying them, the inner builder
 rejects symlinks, hardlinked files, and special filesystem nodes. Cargo
@@ -190,6 +196,7 @@ The focused contract suite proves:
   re-signing by the otherwise trusted test key;
 - builder image and source-epoch substitution denial;
 - release-tool/SBOM-generator substitution denial even when re-signed;
+- re-signed SBOM generator mismatch against the signed builder identity;
 - protected-gate run substitution denial;
 - SBOM, bundle bytes and component-role substitution denial;
 - attacker key, malformed signature, malformed transparency and valid but

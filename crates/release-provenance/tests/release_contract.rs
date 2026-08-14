@@ -347,6 +347,28 @@ fn sbom_bundle_and_component_substitution_are_denied() {
         Err(ReleaseError::Encoding(_)) | Err(ReleaseError::ArtifactDenied)
     ));
 
+    let substituted_sbom = sbom_from_cargo_lock(
+        std::str::from_utf8(&fixture.lock).expect("UTF-8 lockfile"),
+        DIGEST_C,
+    )
+    .expect("substituted generator SBOM")
+    .canonical_bytes()
+    .expect("canonical substituted generator SBOM");
+    let mut substituted_generator = fixture.manifest.clone();
+    substituted_generator.sbom_sha256 = sha256(&substituted_sbom);
+    let substituted_generator = sign_release(substituted_generator, &fixture.signing_key_pkcs8)
+        .expect("resign substituted generator");
+    assert!(matches!(
+        verify_release(
+            &substituted_generator,
+            &fixture.policy,
+            &substituted_sbom,
+            &fixture.bundle,
+            None
+        ),
+        Err(ReleaseError::ArtifactDenied)
+    ));
+
     let mut bundle = fixture.bundle.clone();
     *bundle.last_mut().expect("bundle byte") ^= 1;
     assert!(matches!(

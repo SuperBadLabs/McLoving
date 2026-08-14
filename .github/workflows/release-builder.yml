@@ -39,8 +39,10 @@ jobs:
       - name: Build the immutable release inputs
         env:
           RELEASE_HEAD: ${{ github.event.workflow_run.head_sha }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "${RELEASE_HEAD}"
+          test "${EXECUTING_WORKFLOW_SHA}" = "${RELEASE_HEAD}"
           release_parent="${RUNNER_TEMP}/mcloving-release-private-${RELEASE_HEAD}"
           install -d -m 0700 "${release_parent}"
           release_output="${release_parent}/output"

@@ -490,6 +490,7 @@ pub fn verify_release(
     validate_sbom(&sbom)?;
     if sha256_hex(sbom_bytes) != envelope.manifest.sbom_sha256
         || sbom.cargo_lock_sha256 != envelope.manifest.source.cargo_lock_sha256
+        || sbom.generator_sha256 != envelope.manifest.builder.release_tool_sha256
         || serde_json::to_vec(&sbom)? != sbom_bytes
     {
         return Err(ReleaseError::ArtifactDenied);

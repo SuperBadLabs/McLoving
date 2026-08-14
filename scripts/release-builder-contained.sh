@@ -58,7 +58,8 @@ source_date_epoch="$(git -C "${source_root}" show -s --format=%ct "${source_comm
 
 outer_digest="$(sha256sum "${source_root}/scripts/release-builder-contained.sh" | cut -d' ' -f1)"
 inner_digest="$(sha256sum "${source_root}/scripts/release-build-inner.sh" | cut -d' ' -f1)"
-workflow_digest="$(printf 'mcloving-release-workflow-v1\0%s\0%s\n' "${outer_digest}" "${inner_digest}" | sha256sum | cut -d' ' -f1)"
+workflow_file_digest="$(sha256sum "${source_root}/.github/workflows/release-builder.yml" | cut -d' ' -f1)"
+workflow_digest="$(printf 'mcloving-release-workflow-v1\0%s\0%s\0%s\n' "${outer_digest}" "${inner_digest}" "${workflow_file_digest}" | sha256sum | cut -d' ' -f1)"
 
 scratch_root="$(mktemp -d /tmp/mcloving-release-builder.XXXXXX)"
 archive_path="${scratch_root}/source.tar"
