@@ -127,7 +127,7 @@ jq --exit-status '
   and .authorization_strategy == "Diff002AuthorizationStrategy"
   and .installed_acl == "Diff002Acl"
   and (.decisions | length) == 4
-  and .deleted_reuse_name == "alice.reused"
+  and .deleted_reuse_name == "alice-reused"
   and .deleted_predecessor_immutable_id == "jenkins-user-deleted-2041"
   and .deleted_predecessor_decisions == {
     "project_view":"allow",

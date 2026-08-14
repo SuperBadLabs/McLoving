@@ -408,7 +408,7 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
             source_realm_digest: digest("authz-source-realm-v1"),
             source_identity_id: "jenkins-user-deleted-2041".to_owned(),
             source_membership_generation: 20,
-            alias_history: vec!["alice.reused".to_owned()],
+            alias_history: vec!["alice-reused".to_owned()],
             provenance_digest: digest("authz-mig000-deleted-predecessor-provenance"),
             actor_subject: "reviewer:authz-owner".to_owned(),
         })
@@ -584,7 +584,7 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
             source_realm_digest: digest("authz-source-realm-v1"),
             source_identity_id: "jenkins-user-deleted-reuse-2042".to_owned(),
             source_membership_generation: 21,
-            alias_history: vec!["alice.reused".to_owned()],
+            alias_history: vec!["alice-reused".to_owned()],
             provenance_digest: digest("authz-mig000-deleted-reuse-provenance"),
             actor_subject: "reviewer:authz-owner".to_owned(),
         })
@@ -664,7 +664,7 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
                 "immutable_id": "jenkins-user-immutable-1042",
                 "policy_generation": receipt.generation,
                 "decisions": observed_decisions(&principal, organization_id, project_id),
-                "deleted_reuse_name": "alice.reused",
+                "deleted_reuse_name": "alice-reused",
                 "deleted_predecessor_immutable_id": "jenkins-user-deleted-2041",
                 "deleted_predecessor_decisions": deleted_predecessor_decisions,
                 "deleted_predecessor_deleted": deleted_predecessor_generation == 2,

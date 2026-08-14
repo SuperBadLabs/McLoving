@@ -10,7 +10,7 @@ if (fixturePassword == null || fixturePassword.isEmpty()) {
 def realm = new HudsonPrivateSecurityRealm(false)
 realm.createAccount('diff002-admin', fixturePassword)
 realm.createAccount('jenkins-user-immutable-1042', fixturePassword)
-realm.createAccount('alice.reused', fixturePassword)
+realm.createAccount('alice-reused', fixturePassword)
 jenkins.securityRealm = realm
 def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
 strategy.setAllowAnonymousRead(false)

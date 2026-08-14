@@ -56,7 +56,7 @@ if (job == null) {
 job.enable()
 
 def active = User.getById('jenkins-user-immutable-1042', false).impersonate2()
-def reusedName = 'alice.reused'
+def reusedName = 'alice-reused'
 def deletedPredecessorUser = User.getById(reusedName, false)
 def deletedPredecessor = deletedPredecessorUser.impersonate2()
 def strategy = new Diff002AuthorizationStrategy(active, deletedPredecessor)
