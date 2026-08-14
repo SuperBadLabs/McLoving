@@ -14,7 +14,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.state-policy-differential/v1";
 pub const CASE: &str = "mig005a-state-policy-exact-profile";
 pub const EVIDENCE_FILE: &str = "state-policy.json";
 pub const EVIDENCE_SHA256: &str =
-    "06b0c6302b234c8dbdf94c28583edafd41d065b3aafa8d230c2639e1b20ea31b";
+    "70607ab0b64cb35c5b875dea7b1f94db14e6df7e931671e2f96828e1c7a52a78";
 pub const JENKINS_IMAGE_SHA256: &str =
     "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02";
 pub const POSTGRES_IMAGE_SHA256: &str =
@@ -143,6 +143,7 @@ struct SourceIdentity {
     acl_entry_id: String,
     acl_scope: String,
     acl_generation: String,
+    replacement_immutable_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +156,8 @@ struct TargetIdentity {
     lifecycle_generation: u64,
     group_generation: u64,
     provenance_digest: String,
+    replacement_external_subject: Option<String>,
+    replacement_principal_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -566,6 +569,67 @@ fn verify_principals(principals: &[PrincipalMapping]) -> Result<usize, Verificat
                 "E_LIFECYCLE",
                 "principal lifecycle does not match its case",
             ));
+        }
+        match index {
+            0 => {
+                if principal.source.replacement_immutable_id.is_some()
+                    || principal.target.replacement_external_subject.is_some()
+                    || principal.target.replacement_principal_id.is_some()
+                {
+                    return Err(VerificationError::new(
+                        "E_PRINCIPAL_IDENTITY",
+                        "active principal cannot carry replacement identity bindings",
+                    ));
+                }
+            }
+            1 => {
+                let replacement_source = principal
+                    .source
+                    .replacement_immutable_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        VerificationError::new(
+                            "E_PRINCIPAL_IDENTITY",
+                            "deleted-name-reuse source replacement binding is missing",
+                        )
+                    })?;
+                let replacement_subject = principal
+                    .target
+                    .replacement_external_subject
+                    .as_deref()
+                    .ok_or_else(|| {
+                        VerificationError::new(
+                            "E_PRINCIPAL_IDENTITY",
+                            "deleted-name-reuse replacement subject binding is missing",
+                        )
+                    })?;
+                let replacement_target = principal
+                    .target
+                    .replacement_principal_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        VerificationError::new(
+                            "E_PRINCIPAL_IDENTITY",
+                            "deleted-name-reuse target replacement binding is missing",
+                        )
+                    })?;
+                require_text(replacement_source, "replacement source identity")?;
+                require_text(replacement_subject, "replacement external subject")?;
+                require_text(replacement_target, "replacement target identity")?;
+                if replacement_source == principal.source.immutable_id
+                    || replacement_source == principals[0].source.immutable_id
+                    || replacement_subject == principal.target.external_subject
+                    || replacement_subject == principals[0].target.external_subject
+                    || replacement_target == principal.target.principal_id
+                    || replacement_target == principals[0].target.principal_id
+                {
+                    return Err(VerificationError::new(
+                        "E_PRINCIPAL_IDENTITY",
+                        "replacement identity must be distinct from its deleted predecessor",
+                    ));
+                }
+            }
+            _ => unreachable!("principal denominator was checked before iteration"),
         }
         let expected_decisions = if index == 0 {
             [
@@ -1040,6 +1104,11 @@ mod tests {
                 vec!["principals", "1", "decisions", "0", "target"],
                 Value::String("allow".to_owned()),
                 "E_AUTHORIZATION",
+            ),
+            (
+                vec!["principals", "1", "source", "replacement_immutable_id"],
+                Value::String("jenkins-user-deleted-2041".to_owned()),
+                "E_PRINCIPAL_IDENTITY",
             ),
         ] {
             assert_mutation_fails(

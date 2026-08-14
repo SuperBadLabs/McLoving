@@ -243,13 +243,47 @@ jq -n \
   --slurpfile source "${evidence}/jenkins-runtime.json" \
   --slurpfile authorization "${evidence}/target-authorization.json" \
   --slurpfile operational "${evidence}/target-operational.json" \
-  --slurpfile ingress "${evidence}/target-ingress.json" '
-  {
+  --slurpfile ingress "${evidence}/target-ingress.json" \
+  --slurpfile certificate \
+    "${repo_root}/migration/state-policy-differential-v1/state-policy.json" '
+  def decision_map($principal; $side):
+    reduce $principal.decisions[] as $item
+      ({}; .[$item.action] = $item[$side]);
+  def ingress_map($observation):
+    reduce $observation.ingress[] as $item
+      ({}; .[$item.kind] =
+        (if $item.outcome == "rejected_before_queue" then "deny"
+         else "allow" end));
+  ($certificate[0]) as $cert
+  | ($cert.principals[0]) as $active_cert
+  | ($cert.principals[1]) as $deleted_cert
+  | ($cert.operational_cases
+     | map(select(.name == "disabled_generation_2"))[0]) as $disabled_cert
+  | ([
+      ($cert.operational_cases
+       | map(select(.name == "enabled_generation_1"))[0].source
+       | {state, generation}),
+      ($disabled_cert.source | {state, generation}),
+      ($cert.operational_cases
+       | map(select(.name == "rollback_enabled_generation_3"))[0].source
+       | {state, generation})
+    ]) as $certificate_source_states
+  | ([
+      ($cert.operational_cases
+       | map(select(.name == "enabled_generation_1"))[0].target
+       | {state, generation}),
+      ($disabled_cert.target | {state, generation}),
+      ($cert.operational_cases
+       | map(select(.name == "rollback_enabled_generation_3"))[0].target
+       | {state, generation})
+    ]) as $certificate_target_states
+  | {
     schema: "mcloving.diff002.runtime-comparison/v1",
     source_schema: $source[0].schema,
     authorization_schema: $authorization[0].schema,
     operational_schema: $operational[0].schema,
     ingress_schema: $ingress[0].schema,
+    certificate_schema: $cert.schema,
     immutable_identity_equal:
       ($source[0].immutable_id == $authorization[0].immutable_id),
     decisions_equal:
@@ -290,34 +324,68 @@ jq -n \
        == $ingress[0].disabled_queued_builds),
     rollback_admission_equal:
       ($source[0].rollback_admitted == $operational[0].rollback_admitted),
-    parity:
-      ($source[0].immutable_id == $authorization[0].immutable_id
-       and $source[0].decisions == $authorization[0].decisions
-       and $source[0].deleted_reuse_name
-          == $authorization[0].deleted_reuse_name
+    certificate_binding_equal:
+      ($cert.schema == "mcloving.jenkins.state-policy-differential/v1"
+       and $source[0].immutable_id == $active_cert.source.immutable_id
+       and $authorization[0].immutable_id
+          == $active_cert.source.immutable_id
+       and $authorization[0].authenticated_identity_id
+          == $active_cert.target.principal_id
+       and $source[0].decisions
+          == decision_map($active_cert; "source")
+       and $authorization[0].decisions
+          == decision_map($active_cert; "target")
        and $source[0].deleted_predecessor_immutable_id
-          == $authorization[0].deleted_predecessor_immutable_id
-       and $source[0].deleted_predecessor_decisions
-          == $authorization[0].deleted_predecessor_decisions
-       and $source[0].deleted_predecessor_deleted
-          == $authorization[0].deleted_predecessor_deleted
+          == $deleted_cert.source.immutable_id
+       and $authorization[0].deleted_predecessor_immutable_id
+          == $deleted_cert.source.immutable_id
+       and $authorization[0].deleted_predecessor_authenticated_identity_id
+          == $deleted_cert.target.principal_id
+       and $source[0].deleted_reuse_name
+          == $deleted_cert.source.aliases[0]
        and $source[0].deleted_predecessor_post_delete_decisions
-          == $authorization[0].deleted_predecessor_post_delete_decisions
+          == decision_map($deleted_cert; "source")
+       and $authorization[0].deleted_predecessor_post_delete_decisions
+          == decision_map($deleted_cert; "target")
        and $source[0].deleted_reuse_immutable_id
-          == $authorization[0].deleted_reuse_immutable_id
+          == $deleted_cert.source.replacement_immutable_id
+       and $authorization[0].deleted_reuse_immutable_id
+          == $deleted_cert.source.replacement_immutable_id
+       and $authorization[0].deleted_reuse_authenticated_identity_id
+          == $deleted_cert.target.replacement_principal_id
        and $source[0].deleted_reuse_decisions
-          == $authorization[0].deleted_reuse_decisions
-       and $source[0].deleted_reuse_authentication_changed
-          == $authorization[0].deleted_reuse_authentication_changed
-       and $source[0].states == $operational[0].states
-       and $source[0].disabled_prequeue_denied
-          == $operational[0].disabled_prequeue_denied
-       and $source[0].disabled_ingress == $ingress[0].disabled_ingress
+          == decision_map($deleted_cert; "source")
+       and $authorization[0].deleted_reuse_decisions
+          == decision_map($deleted_cert; "target")
+       and $source[0].disabled_ingress
+          == ingress_map($disabled_cert.source)
+       and $ingress[0].disabled_ingress
+          == ingress_map($disabled_cert.target)
        and $source[0].disabled_queued_builds
-          == $ingress[0].disabled_queued_builds
-       and $source[0].rollback_admitted
-          == $operational[0].rollback_admitted)
+          == $disabled_cert.source.queued_builds
+       and $ingress[0].disabled_queued_builds
+          == $disabled_cert.target.queued_builds
+       and $source[0].states == $certificate_source_states
+       and $operational[0].states == $certificate_target_states)
   }
+  | .parity = ([
+      .immutable_identity_equal,
+      .decisions_equal,
+      .deleted_reuse_name_equal,
+      .deleted_predecessor_identity_equal,
+      .deleted_predecessor_decisions_equal,
+      .deleted_predecessor_deleted_equal,
+      .deleted_predecessor_post_delete_decisions_equal,
+      .deleted_reuse_identity_equal,
+      .deleted_reuse_decisions_equal,
+      .deleted_reuse_authentication_changed_equal,
+      .operational_states_equal,
+      .disabled_prequeue_equal,
+      .disabled_ingress_equal,
+      .disabled_queued_builds_equal,
+      .rollback_admission_equal,
+      .certificate_binding_equal
+    ] | all)
 ' >"${evidence}/runtime-comparison.json"
 jq --exit-status '.parity == true' \
   "${evidence}/runtime-comparison.json" >/dev/null
@@ -351,6 +419,7 @@ for path in \
   crates/state-policy-differential/src/main.rs \
   crates/controller-store/tests/authorization_mapping.rs \
   crates/controller-store/tests/pipeline_operational_state.rs \
+  crates/controller-store/tests/trigger_ingress.rs \
   migration/state-policy-differential-v1/SHA256SUMS \
   migration/state-policy-differential-v1/state-policy.json \
   migration/state-policy-runtime-v1/init.groovy \

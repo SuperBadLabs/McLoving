@@ -16,23 +16,23 @@
     {
       "name": "active-renamed-human",
       "source": {
-        "realm_digest": "83ba057d99f3f2a4b2b049d8a5a3f049e92565e897ea99b8ef886418d9eeef7a",
-        "immutable_id": "jenkins-user-001",
-        "aliases": ["alice", "alice.renamed"],
+        "realm_digest": "3eb4dcfd3b3bc1105995cce02ec50855210b4d3e4d934f2889dc4c03e29094dd",
+        "immutable_id": "jenkins-user-immutable-1042",
+        "aliases": ["alice", "alice.legacy"],
         "membership_generation": 19,
         "lifecycle": "active",
-        "acl_entry_id": "acl-entry-alice-001",
-        "acl_scope": "job:stateful",
+        "acl_entry_id": "folder/release:user/jenkins-user-immutable-1042",
+        "acl_scope": "folder/release/job/deploy",
         "acl_generation": "acl-generation-12"
       },
       "target": {
-        "issuer": "https://idp.diff002.example.test",
-        "external_subject": "oidc-subject-alice-001",
-        "principal_id": "principal-alice-001",
+        "issuer": "https://idp.authz.test",
+        "external_subject": "jenkins-user-immutable-1042",
+        "principal_id": "4d634c6f-7669-6e67-2000-000000000004",
         "lifecycle": "active",
         "lifecycle_generation": 1,
-        "group_generation": 3,
-        "provenance_digest": "ae60417c99db64d81c15aa3ba9607b24f2ff36a257ae0a84ad1ffee9a5f7bb88"
+        "group_generation": 1,
+        "provenance_digest": "4653bfac75baba4b9c3f7799a2a4fc17ceda0ffc0ce8d8528c9e3592d7e51bb4"
       },
       "decisions": [
         {"action": "project_view", "source": "allow", "target": "allow"},
@@ -44,23 +44,26 @@
     {
       "name": "deleted-name-reuse",
       "source": {
-        "realm_digest": "83ba057d99f3f2a4b2b049d8a5a3f049e92565e897ea99b8ef886418d9eeef7a",
-        "immutable_id": "jenkins-user-deleted-002",
-        "aliases": ["alice.reused"],
+        "realm_digest": "3eb4dcfd3b3bc1105995cce02ec50855210b4d3e4d934f2889dc4c03e29094dd",
+        "immutable_id": "jenkins-user-deleted-2041",
+        "aliases": ["alice-reused"],
         "membership_generation": 20,
         "lifecycle": "deleted",
-        "acl_entry_id": "acl-entry-deleted-002",
-        "acl_scope": "job:stateful",
-        "acl_generation": "acl-generation-13"
+        "acl_entry_id": "folder/release:user/jenkins-user-deleted-2041",
+        "acl_scope": "folder/release/job/deploy",
+        "acl_generation": "acl-generation-12",
+        "replacement_immutable_id": "jenkins-user-deleted-reuse-2042"
       },
       "target": {
-        "issuer": "https://idp.diff002.example.test",
-        "external_subject": "oidc-subject-reused-002",
-        "principal_id": "principal-deleted-002",
+        "issuer": "https://idp.authz.test",
+        "external_subject": "jenkins-user-deleted-2041",
+        "principal_id": "4d634c6f-7669-6e67-2000-000000000005",
         "lifecycle": "deleted",
         "lifecycle_generation": 2,
         "group_generation": 1,
-        "provenance_digest": "9088afd561d0c450014bbea78bbda4f70304c7081925747d839178a4370dd33f"
+        "provenance_digest": "34b860a485cf48627215eb169e9fa6bf92cac02bb37e032899a898351181ae46",
+        "replacement_external_subject": "jenkins-user-deleted-reuse-2042",
+        "replacement_principal_id": "4d634c6f-7669-6e67-2000-000000000006"
       },
       "decisions": [
         {"action": "project_view", "source": "deny", "target": "deny"},

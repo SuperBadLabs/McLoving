@@ -605,11 +605,16 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
     assert_eq!(receipt.mapping_count, 3);
     assert_eq!(receipt.grant_count, 5);
 
-    let principal = runtime
+    let authenticated = runtime
         .authenticate_api_token(organization_id, first_token, 20_000)
         .await
-        .expect("authenticate first mapped session")
-        .principal;
+        .expect("authenticate first mapped session");
+    let authenticated_identity_id = authenticated.identity_id;
+    assert_eq!(
+        authenticated_identity_id, identity_id,
+        "active authentication resolves to its provisioned immutable identity"
+    );
+    let principal = authenticated.principal;
     let deleted_predecessor_authenticated = runtime
         .authenticate_api_token(organization_id, deleted_predecessor_token, 20_000)
         .await
@@ -778,6 +783,7 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
             serde_json::to_vec_pretty(&json!({
                 "schema": "mcloving.diff002.target-authorization/v1",
                 "immutable_id": "jenkins-user-immutable-1042",
+                "authenticated_identity_id": authenticated_identity_id,
                 "policy_generation": receipt.generation,
                 "decisions": observed_decisions(&principal, organization_id, project_id),
                 "deleted_reuse_name": "alice-reused",
