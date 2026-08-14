@@ -68,6 +68,7 @@ mkdir -p "${jenkins_home}/init.groovy.d"
 cp "${repo_root}/migration/state-policy-runtime-v1/init.groovy" \
   "${jenkins_home}/init.groovy.d/10-diff002.groovy"
 podman unshare chown -R 1000:1000 "${jenkins_home}"
+podman unshare chown 1000:1000 "${jenkins_password_file}"
 podman network create --internal "${network}" >/dev/null
 podman run --detach --name "${jenkins}" \
   --network "${network}" \
@@ -119,6 +120,8 @@ curl --fail --silent --show-error \
     "script@${repo_root}/migration/state-policy-runtime-v1/probe.groovy" \
   "http://127.0.0.1:${jenkins_port}/scriptText" \
   >"${evidence}/jenkins-probe.txt"
+podman logs "${jenkins}" >"${evidence}/jenkins-controller.log" 2>&1
+podman inspect "${jenkins}" >"${evidence}/jenkins-inspect.json"
 sed -n 's/^DIFF002=//p' "${evidence}/jenkins-probe.txt" \
   >"${evidence}/jenkins-runtime.json"
 jq --exit-status '
