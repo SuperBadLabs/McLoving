@@ -196,7 +196,10 @@ verification for the release and every verified rollback predecessor must not
 postdate deployment. A successor is accepted only when its complete predecessor
 chain was independently anchored no later than the successor's Rekor integration
 time, proving that the rollback target was already verified when the successor
-became transparent.
+became transparent. The serialized deployment receipt retains both the Rekor
+integration time and independent-anchor verification time alongside their
+complete evidence identifiers so downstream auditors can reconstruct the exact
+ordering that authorized placement.
 Its fields are private and it does not implement deserialization, so stored JSON
 cannot be converted back into deployment authority or forged as a typed
 receipt. Any authority-bearing deployment function must consume the live

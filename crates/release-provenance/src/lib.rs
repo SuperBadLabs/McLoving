@@ -316,6 +316,7 @@ pub struct DeploymentReceipt {
     transparency_log_identity: String,
     transparency_entry_identity: String,
     transparency_log_index: u64,
+    transparency_integrated_time_unix_seconds: i64,
     transparency_signed_entry_timestamp_sha256: String,
     transparency_inclusion_proof_sha256: String,
     transparency_checkpoint_sha256: String,
@@ -327,6 +328,7 @@ pub struct DeploymentReceipt {
     audit_anchor_proof_sha256: String,
     audit_anchor_verifier_statement_sha256: String,
     audit_anchor_notary_reference: String,
+    audit_anchor_verified_at_unix_ms: i64,
     rollback_manifest_sha256: Option<String>,
     deployed_at_unix_ms: i64,
     deployment_environment: String,
@@ -386,6 +388,10 @@ impl DeploymentReceipt {
         self.transparency_log_index
     }
 
+    pub fn transparency_integrated_time_unix_seconds(&self) -> i64 {
+        self.transparency_integrated_time_unix_seconds
+    }
+
     pub fn transparency_signed_entry_timestamp_sha256(&self) -> &str {
         &self.transparency_signed_entry_timestamp_sha256
     }
@@ -428,6 +434,10 @@ impl DeploymentReceipt {
 
     pub fn audit_anchor_notary_reference(&self) -> &str {
         &self.audit_anchor_notary_reference
+    }
+
+    pub fn audit_anchor_verified_at_unix_ms(&self) -> i64 {
+        self.audit_anchor_verified_at_unix_ms
     }
 
     pub fn rollback_manifest_sha256(&self) -> Option<&str> {
@@ -510,6 +520,9 @@ impl VerifiedRelease {
             transparency_log_identity: self.transparency.log_identity.clone(),
             transparency_entry_identity: self.transparency.entry_identity.clone(),
             transparency_log_index: self.transparency.log_index,
+            transparency_integrated_time_unix_seconds: self
+                .transparency
+                .integrated_time_unix_seconds,
             transparency_signed_entry_timestamp_sha256: self
                 .transparency
                 .signed_entry_timestamp_sha256
@@ -533,6 +546,7 @@ impl VerifiedRelease {
                 .verifier_statement_sha256
                 .clone(),
             audit_anchor_notary_reference: self.audit_anchor.notary_reference.clone(),
+            audit_anchor_verified_at_unix_ms: self.audit_anchor.verified_at_unix_ms,
             rollback_manifest_sha256: self
                 .manifest
                 .rollback_target

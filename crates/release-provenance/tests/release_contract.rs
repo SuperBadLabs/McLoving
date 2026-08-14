@@ -356,6 +356,10 @@ fn exact_release_verifies_before_deployment_receipt() {
     assert_eq!(receipt.transparency_entry_identity(), "entry:12345");
     assert_eq!(receipt.transparency_log_index(), 12_345);
     assert_eq!(
+        receipt.transparency_integrated_time_unix_seconds(),
+        1_786_000_100
+    );
+    assert_eq!(
         receipt.transparency_signed_entry_timestamp_sha256(),
         DIGEST_A
     );
@@ -372,6 +376,10 @@ fn exact_release_verifies_before_deployment_receipt() {
     assert_eq!(receipt.audit_anchor_identity(), "opentimestamps:bitcoin");
     assert_eq!(receipt.audit_anchor_proof_sha256(), DIGEST_A);
     assert_eq!(receipt.audit_anchor_verifier_statement_sha256(), DIGEST_B);
+    assert_eq!(
+        receipt.audit_anchor_verified_at_unix_ms(),
+        1_786_000_200_000
+    );
     assert!(receipt.rollback_manifest_sha256().is_none());
     assert!(matches!(
         verified.deployment_receipt("production", DIGEST_A, 1_786_000_199_999),
