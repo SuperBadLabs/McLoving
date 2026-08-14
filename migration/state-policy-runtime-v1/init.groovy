@@ -12,6 +12,8 @@ realm.createAccount('diff002-admin', fixturePassword)
 realm.createAccount('jenkins-user-immutable-1042', fixturePassword)
 realm.createAccount('jenkins-user-deleted-reuse-2042', fixturePassword)
 jenkins.securityRealm = realm
-jenkins.authorizationStrategy = new FullControlOnceLoggedInAuthorizationStrategy(false)
+def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+strategy.setAllowAnonymousRead(false)
+jenkins.authorizationStrategy = strategy
 jenkins.save()
 println('diff002_runtime_fixture_ready')

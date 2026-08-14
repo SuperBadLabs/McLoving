@@ -75,6 +75,7 @@ podman run --detach --name "${jenkins}" \
 jenkins_ready=false
 for _ in $(seq 1 180); do
   if curl --fail --silent --show-error \
+    --connect-timeout 1 --max-time 2 \
     "http://127.0.0.1:${jenkins_port}/login" >/dev/null 2>&1; then
     jenkins_ready=true
     break
@@ -95,12 +96,14 @@ if [[ "${jenkins_ready}" != true ]]; then
 fi
 read -r crumb_field crumb_value < <(
   curl --fail --silent --show-error \
+    --connect-timeout 2 --max-time 10 \
     --netrc-file "${jenkins_netrc}" \
     --cookie-jar "${jenkins_runtime}/cookies" \
     "http://127.0.0.1:${jenkins_port}/crumbIssuer/api/json" \
     | jq --raw-output '[.crumbRequestField, .crumb] | @tsv'
 )
 curl --fail --silent --show-error \
+  --connect-timeout 2 --max-time 30 \
   --netrc-file "${jenkins_netrc}" \
   --cookie "${jenkins_runtime}/cookies" \
   --header "${crumb_field}: ${crumb_value}" \
@@ -112,6 +115,9 @@ sed -n 's/^DIFF002=//p' "${evidence}/jenkins-probe.txt" \
   >"${evidence}/jenkins-runtime.json"
 jq --exit-status '
   .schema == "mcloving.diff002.jenkins-runtime/v1"
+  and .security_realm == "hudson.security.HudsonPrivateSecurityRealm"
+  and .authorization_strategy
+      == "hudson.security.FullControlOnceLoggedInAuthorizationStrategy"
   and (.decisions | length) == 4
   and .deleted_reuse_immutable_id == "jenkins-user-deleted-reuse-2042"
   and ([.deleted_reuse_decisions[]] | all(. == "deny"))

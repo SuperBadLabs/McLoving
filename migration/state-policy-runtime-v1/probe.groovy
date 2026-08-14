@@ -53,6 +53,8 @@ if (admitted != null) {
 
 def observation = [
   schema: 'mcloving.diff002.jenkins-runtime/v1',
+  security_realm: jenkins.securityRealm.class.name,
+  authorization_strategy: jenkins.authorizationStrategy.class.name,
   immutable_id: 'jenkins-user-immutable-1042',
   decisions: decisions(active),
   deleted_reuse_immutable_id: 'jenkins-user-deleted-reuse-2042',
