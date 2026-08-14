@@ -12,6 +12,7 @@ import org.springframework.security.core.Authentication
 class Diff002Acl extends ACL {
   private final Authentication active
   private final Authentication deletedPredecessor
+  private boolean deletedPredecessorRevoked = false
 
   Diff002Acl(Authentication active, Authentication deletedPredecessor) {
     this.active = active
@@ -23,10 +24,15 @@ class Diff002Acl extends ACL {
     if (authentication == null) {
       return false
     }
-    if (authentication.is(active) || authentication.is(deletedPredecessor)) {
+    if (authentication.is(active)
+        || (authentication.is(deletedPredecessor) && !deletedPredecessorRevoked)) {
       return permission == Jenkins.READ || permission == Item.READ
     }
     return false
+  }
+
+  void revokeDeletedPredecessor() {
+    deletedPredecessorRevoked = true
   }
 }
 
@@ -45,6 +51,10 @@ class Diff002AuthorizationStrategy extends AuthorizationStrategy {
   @Override
   Collection<String> getGroups() {
     return Collections.emptySet()
+  }
+
+  void revokeDeletedPredecessor() {
+    (rootAcl as Diff002Acl).revokeDeletedPredecessor()
   }
 }
 
@@ -75,6 +85,8 @@ def decisions = { authentication ->
 def deletedPredecessorDecisions = decisions(deletedPredecessor)
 deletedPredecessorUser.delete()
 def deletedPredecessorRemoved = User.getById(reusedName, false) == null
+strategy.revokeDeletedPredecessor()
+def deletedPredecessorPostDeleteDecisions = decisions(deletedPredecessor)
 def realm = jenkins.securityRealm as HudsonPrivateSecurityRealm
 def fixturePassword = new File('/run/secrets/diff002-admin-password').text.trim()
 realm.createAccount(reusedName, fixturePassword)
@@ -105,6 +117,7 @@ def observation = [
   deleted_predecessor_immutable_id: 'jenkins-user-deleted-2041',
   deleted_predecessor_decisions: deletedPredecessorDecisions,
   deleted_predecessor_deleted: deletedPredecessorRemoved,
+  deleted_predecessor_post_delete_decisions: deletedPredecessorPostDeleteDecisions,
   deleted_reuse_immutable_id: 'jenkins-user-deleted-reuse-2042',
   deleted_reuse_decisions: decisions(deletedReuse),
   deleted_reuse_authentication_changed: reuseIdentityChanged,

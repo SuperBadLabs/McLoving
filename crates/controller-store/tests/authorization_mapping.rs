@@ -81,6 +81,77 @@ fn observed_decisions(
     })
 }
 
+async fn observed_token_decisions(
+    store: &Store,
+    organization_id: Uuid,
+    token_digest: [u8; 32],
+    now_unix_ms: i64,
+    project_id: Uuid,
+) -> serde_json::Value {
+    let project_view = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::ProjectView,
+            )
+            .ok()
+        })
+        .is_some();
+    let build_trigger = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::BuildTrigger,
+            )
+            .ok()
+        })
+        .is_some();
+    let build_cancel = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::BuildCancel,
+            )
+            .ok()
+        })
+        .is_some();
+    let project_configure = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::ProjectConfigure,
+            )
+            .ok()
+        })
+        .is_some();
+    json!({
+        "project_view": if project_view { "allow" } else { "deny" },
+        "build_trigger": if build_trigger { "allow" } else { "deny" },
+        "build_cancel": if build_cancel { "allow" } else { "deny" },
+        "project_configure": if project_configure { "allow" } else { "deny" },
+    })
+}
+
 fn policy(
     organization_id: Uuid,
     project_id: Uuid,
@@ -591,6 +662,23 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
             .is_err(),
         "the deleted predecessor session cannot authenticate"
     );
+    let deleted_predecessor_post_delete_decisions = observed_token_decisions(
+        &runtime,
+        organization_id,
+        deleted_predecessor_token,
+        20_001,
+        project_id,
+    )
+    .await;
+    assert_eq!(
+        deleted_predecessor_post_delete_decisions,
+        json!({
+            "project_view": "deny",
+            "build_trigger": "deny",
+            "build_cancel": "deny",
+            "project_configure": "deny",
+        })
+    );
     admin
         .provision_human_identity(&NewHumanIdentity {
             organization_id,
@@ -685,6 +773,8 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
                 "deleted_predecessor_immutable_id": "jenkins-user-deleted-2041",
                 "deleted_predecessor_decisions": deleted_predecessor_decisions,
                 "deleted_predecessor_deleted": deleted_predecessor_generation == 2,
+                "deleted_predecessor_post_delete_decisions":
+                    deleted_predecessor_post_delete_decisions,
                 "deleted_reuse_immutable_id": "jenkins-user-deleted-reuse-2042",
                 "deleted_reuse_authentication_changed":
                     deleted_predecessor_identity_id != deleted_reuse_identity_id,

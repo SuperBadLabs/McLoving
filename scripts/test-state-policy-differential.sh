@@ -139,6 +139,7 @@ jq --exit-status '
     "project_configure":"deny"
   }
   and .deleted_predecessor_deleted
+  and ([.deleted_predecessor_post_delete_decisions[]] | all(. == "deny"))
   and .deleted_reuse_immutable_id == "jenkins-user-deleted-reuse-2042"
   and ([.deleted_reuse_decisions[]] | all(. == "deny"))
   and .deleted_reuse_authentication_changed
@@ -252,6 +253,9 @@ jq -n \
     deleted_predecessor_deleted_equal:
       ($source[0].deleted_predecessor_deleted
        == $authorization[0].deleted_predecessor_deleted),
+    deleted_predecessor_post_delete_decisions_equal:
+      ($source[0].deleted_predecessor_post_delete_decisions
+       == $authorization[0].deleted_predecessor_post_delete_decisions),
     deleted_reuse_identity_equal:
       ($source[0].deleted_reuse_immutable_id
        == $authorization[0].deleted_reuse_immutable_id),
@@ -279,6 +283,8 @@ jq -n \
           == $authorization[0].deleted_predecessor_decisions
        and $source[0].deleted_predecessor_deleted
           == $authorization[0].deleted_predecessor_deleted
+       and $source[0].deleted_predecessor_post_delete_decisions
+          == $authorization[0].deleted_predecessor_post_delete_decisions
        and $source[0].deleted_reuse_immutable_id
           == $authorization[0].deleted_reuse_immutable_id
        and $source[0].deleted_reuse_decisions
