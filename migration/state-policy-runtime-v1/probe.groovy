@@ -1,5 +1,4 @@
 import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
 import hudson.FilePath
 import hudson.Launcher
 import hudson.model.AbstractProject
@@ -25,6 +24,10 @@ import hudson.triggers.TimerTrigger
 import jenkins.model.Jenkins
 import jenkins.security.seed.UserSeedProperty
 import jenkins.triggers.ReverseBuildTrigger
+import jenkins.util.TimeDuration
+import org.kohsuke.stapler.HttpResponses
+import org.kohsuke.stapler.StaplerRequest2
+import org.kohsuke.stapler.StaplerResponse2
 import org.springframework.security.core.Authentication
 
 class Diff002Scm extends SCM {
@@ -218,40 +221,22 @@ disabledIngressDetails.manual = [
   result: disabledIngress.manual
 ]
 
-def basicAuthorization = 'Basic ' +
-  "${administratorUser.id}:${fixturePassword}".bytes.encodeBase64().toString()
-def openJenkins = { String path, String method, Map<String, String> headers ->
-  def connection = new URL("http://127.0.0.1:8080${path}").openConnection()
-  connection.connectTimeout = 2_000
-  connection.readTimeout = 10_000
-  connection.requestMethod = method
-  headers.each { name, value -> connection.setRequestProperty(name, value) }
-  if (method == 'POST') {
-    connection.doOutput = true
-    connection.outputStream.withCloseable { output -> output.write(new byte[0]) }
-  }
-  return connection
-}
-def crumbConnection = openJenkins('/crumbIssuer/api/json', 'GET',
-  [Authorization: basicAuthorization])
-def crumbDocument = new JsonSlurper().parse(crumbConnection.inputStream)
-crumbConnection.disconnect()
-def apiConnection = openJenkins('/job/diff002-stateful/build?delay=0sec', 'POST', [
-  Authorization: basicAuthorization,
-  (crumbDocument.crumbRequestField.toString()): crumbDocument.crumb.toString()
-])
-def apiStatus = apiConnection.responseCode
+def apiRejected = false
+def apiException = null
 try {
-  (apiStatus >= 400 ? apiConnection.errorStream : apiConnection.inputStream)?.close()
-} finally {
-  apiConnection.disconnect()
+  job.doBuild((StaplerRequest2) null, (StaplerResponse2) null,
+    new TimeDuration(0))
+} catch (HttpResponses.HttpResponseException exception) {
+  apiRejected = true
+  apiException = exception.class.name
 }
 def activityAfterApi = targetActivity()
-disabledIngress.api = apiStatus >= 400 && activityAfterApi == activityBefore ?
+disabledIngress.api = apiRejected && activityAfterApi == activityBefore ?
   'deny' : 'allow'
 disabledIngressDetails.api = [
-  path: 'POST /job/diff002-stateful/build',
-  http_status: apiStatus,
+  path: 'FreeStyleProject.doBuild(StaplerRequest2,StaplerResponse2,TimeDuration)',
+  rejected: apiRejected,
+  rejection: apiException,
   result: disabledIngress.api
 ]
 
