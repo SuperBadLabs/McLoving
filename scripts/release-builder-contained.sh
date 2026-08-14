@@ -100,7 +100,11 @@ docker run --rm --pull never --platform linux/amd64 \
 expected_files="$(find "${output_root}" -mindepth 1 -type f -printf '%P\n' | LC_ALL=C sort)"
 [[ "${expected_files}" == $'Cargo.lock\nbuild-receipt.json\ncomponents.json\ncomponents/bin/mcloving-agent\ncomponents/bin/mcloving-cli\ncomponents/bin/mcloving-controller\nrelease.bundle\nsbom.json\nsource.tar\ntoolchain.txt' ]] ||
   deny "builder emitted an unexpected release file set"
-[[ -z "$(find "${output_root}" -type l -print -quit)" ]] || deny "builder emitted a symlink"
+expected_directories="$(find "${output_root}" -mindepth 1 -type d -printf '%P\n' | LC_ALL=C sort)"
+[[ "${expected_directories}" == $'components\ncomponents/bin' ]] ||
+  deny "builder emitted an unexpected release directory set"
+[[ -z "$(find "${output_root}" -mindepth 1 ! -type f ! -type d -print -quit)" ]] ||
+  deny "builder emitted an unsupported filesystem node"
 printf 'release_builder_complete source=%s tree=%s bundle=%s\n' \
   "${source_commit}" \
   "${source_tree}" \
