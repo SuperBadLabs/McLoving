@@ -1683,6 +1683,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-release-provenance"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "nix",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "mcloving-secret-broker"
 version = "0.0.0"
 dependencies = [

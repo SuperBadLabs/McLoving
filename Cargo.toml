@@ -23,6 +23,7 @@ members = [
   "crates/object-store",
   "crates/pipeline-ir",
   "crates/provisioner",
+  "crates/release-provenance",
   "crates/secret-broker",
   "crates/source-acquirer",
   "crates/state-machine",
