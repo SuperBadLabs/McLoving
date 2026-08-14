@@ -55,9 +55,9 @@ if (job == null) {
 }
 job.enable()
 
-def active = User.getById('jenkins-user-immutable-1042', false).impersonate2()
+def active = User.getById('jenkins-user-immutable-1042', true).impersonate2()
 def reusedName = 'alice-reused'
-def deletedPredecessorUser = User.getById(reusedName, false)
+def deletedPredecessorUser = User.getById(reusedName, true)
 def deletedPredecessor = deletedPredecessorUser.impersonate2()
 def strategy = new Diff002AuthorizationStrategy(active, deletedPredecessor)
 def strategyField = Jenkins.class.getDeclaredField('authorizationStrategy')
@@ -78,7 +78,7 @@ def deletedPredecessorRemoved = User.getById(reusedName, false) == null
 def realm = jenkins.securityRealm as HudsonPrivateSecurityRealm
 def fixturePassword = new File('/run/secrets/diff002-admin-password').text.trim()
 realm.createAccount(reusedName, fixturePassword)
-def deletedReuseUser = User.getById(reusedName, false)
+def deletedReuseUser = User.getById(reusedName, true)
 def deletedReuse = deletedReuseUser.impersonate2()
 def reuseIdentityChanged = !deletedPredecessor.is(deletedReuse)
 
