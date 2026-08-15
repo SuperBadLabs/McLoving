@@ -103,7 +103,9 @@ shared live transaction or manufacture equality from shared constants:
 - later source revision to dependency resolution;
 - secret grant to its connector consumer;
 - input capture to control flow;
-- dependency resolution to cache;
+- dependency resolution to the exact cache request, namespace, key, policy, and
+  generation, including receipt, tenant/project/pipeline/trust, artifact,
+  resolver-toolchain, and configuration bindings;
 - discovery to trigger installation;
 - provisioner identity to the admitted source transport;
 - connector outcome to independent observer state;

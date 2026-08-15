@@ -173,11 +173,29 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
 ' "${receipt_dir}/DEP-001.json" >/dev/null || fail "DEP-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
+  . as $cache |
   .cold.status == "miss" and .published.status == "published" and .hit.status == "hit"
   and (.hit.content_sha256 | test($d)) and .audit_events == 3
+  and (.dependency_binding.receipt_sha256 | test($d))
+  and (.dependency_binding.request_sha256 | test($d))
+  and (.dependency_binding.resolution_id | type == "string" and length > 0)
+  and (.dependency_binding.artifact_node_id | type == "string" and length > 0)
+  and .dependency_binding.artifact_sha256 == .hit.content_sha256
+  and .cache_binding.request.cache_kind == "dependency"
+  and .cache_binding.request.policy_id == "dependency-resolution-v1"
+  and (.cache_binding.request.generation_sha256 | test($d))
+  and (.cache_binding.namespace_sha256 | test($d))
+  and (.cache_binding.key_sha256 | test($d))
+  and (.cache_binding.policy_sha256 | test($d))
+  and .cache_binding.generation_sha256 == .cache_binding.request.generation_sha256
   and ([.cold.receipts[],.published.receipts[],.hit.receipts[]]
     | all(.event.schema_version == "mcloving.cache-event/v1"
-      and (.event_sha256 | test($d)) and (.signature | test($s))))
+      and (.event_sha256 | test($d)) and (.signature | test($s))
+      and .event.policy_id == "dependency-resolution-v1"
+      and .event.namespace_sha256 == $cache.cache_binding.namespace_sha256
+      and .event.key_sha256 == $cache.cache_binding.key_sha256
+      and .event.policy_sha256 == $cache.cache_binding.policy_sha256
+      and .event.generation_sha256 == $cache.cache_binding.generation_sha256))
 ' "${receipt_dir}/CACHE-001.json" >/dev/null || fail "CACHE-001 contract"
 
 for client in CONSUMER-001 ADMIN-001; do
@@ -440,6 +458,31 @@ while IFS=$'\t' read -r name source target rule expected_effects \
       pair_filter='.[0].request.expected_generation == 7
         and .[1].cold.status == "miss" and .[1].published.status == "published"
         and .[1].hit.status == "hit" and .[1].audit_events == 3
+        and .[1].dependency_binding.receipt_sha256 == $source_sha
+        and .[1].dependency_binding.resolution_id == .[0].resolution_id
+        and .[1].dependency_binding.request_sha256 == .[0].request_sha256
+        and .[1].dependency_binding.artifact_node_id == .[0].artifacts[0].node_id
+        and .[1].dependency_binding.artifact_sha256 == .[0].artifacts[0].sha256
+        and .[1].cache_binding.request.logical_key_sha256 == $source_sha
+        and .[1].cache_binding.request.input_sha256 == .[0].artifacts[0].sha256
+        and .[1].cache_binding.request.toolchain_sha256
+          == .[0].request.expected_resolver_toolchain_sha256
+        and .[1].cache_binding.request.platform_sha256 == .[0].configuration_sha256
+        and .[1].cache_binding.request.tenant_id == .[0].request.tenant_id
+        and .[1].cache_binding.request.project_id == .[0].request.project_id
+        and .[1].cache_binding.request.pipeline_id == .[0].request.pipeline_id
+        and .[1].cache_binding.request.trust_class == .[0].request.source_trust_class
+        and .[1].cache_binding.request.restore_epoch == .[0].request.expected_generation
+        and .[1].cache_binding.request.policy_id == "dependency-resolution-v1"
+        and .[1].cache_binding.request.cache_kind == "dependency"
+        and .[1].cache_binding.generation_sha256
+          == .[1].cache_binding.request.generation_sha256
+        and (. as $pair
+          | ([$pair[1].cold.receipts[],$pair[1].published.receipts[],$pair[1].hit.receipts[]]
+            | all(.event.namespace_sha256 == $pair[1].cache_binding.namespace_sha256
+              and .event.key_sha256 == $pair[1].cache_binding.key_sha256
+              and .event.policy_sha256 == $pair[1].cache_binding.policy_sha256
+              and .event.generation_sha256 == $pair[1].cache_binding.generation_sha256)))
         and .[0].artifacts[0].sha256 == .[1].hit.content_sha256'
       ;;
     discovery_to_trigger)
