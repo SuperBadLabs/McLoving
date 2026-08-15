@@ -757,7 +757,7 @@ fn canonical_direct_directory(
     let lexical = lexical_absolute(path)?;
     let canonical = fs::canonicalize(path)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
-    if lexical != canonical {
+    if lexical != canonical_comparison_path(&canonical)? {
         return Err(VerificationError::new(
             error_code,
             "root path contains a symlink or alias component",
@@ -772,6 +772,24 @@ fn canonical_direct_directory(
         ));
     }
     Ok(canonical)
+}
+
+#[cfg(windows)]
+fn canonical_comparison_path(path: &Path) -> Result<std::path::PathBuf, VerificationError> {
+    let text = path.to_str().ok_or_else(|| {
+        VerificationError::new("E_INPUT_SUBSTITUTION", "canonical root is not UTF-8")
+    })?;
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return Ok(std::path::PathBuf::from(format!(r"\\{unc}")));
+    }
+    Ok(std::path::PathBuf::from(
+        text.strip_prefix(r"\\?\").unwrap_or(text),
+    ))
+}
+
+#[cfg(not(windows))]
+fn canonical_comparison_path(path: &Path) -> Result<std::path::PathBuf, VerificationError> {
+    Ok(path.to_path_buf())
 }
 
 #[cfg(unix)]
