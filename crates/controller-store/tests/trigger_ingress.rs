@@ -487,7 +487,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     let mut stale_generation = input.clone();
     stale_generation.delivery_id = "delivery-stale-generation".to_owned();
     stale_generation.event_id = "event-stale-generation".to_owned();
-    stale_generation.expected_trigger_generation = 0;
+    stale_generation.expected_trigger_generation = 2;
     let stale_generation_result = store.accept_trigger_delivery(&stale_generation).await;
     let stale_generation_denied = matches!(
         stale_generation_result,
