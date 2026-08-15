@@ -1,10 +1,8 @@
 # External-boundary differential v1
 
-Status: DIFF-003 implementation candidate. The repository certificate and
-contained gate are implemented; no production authority is claimed. An
-accepted exact-head HeMan receipt, independent review, protected checks, merge,
-and post-merge verification remain required before the execution board can mark
-DIFF-003 complete.
+Status: accepted DIFF-003 implementation receipt; independent PR review,
+protected checks, merge, and post-merge verification remain required before the
+execution board can mark DIFF-003 complete. No production authority is claimed.
 
 ## Claim boundary
 
@@ -185,3 +183,18 @@ Run the contained gate on a clean pushed head with:
 scripts/test-boundary-differential.sh \
   /sn8100/runs/mcloving/diff003-boundary-YYYYMMDDTHHMMSSZ
 ```
+
+## Accepted implementation receipt
+
+Exact head `061fb8d324f7cd4cc29a41d2672363776ffacab6`, tree
+`e23c3bf02fb71ab7e18d5d37aca5c5910a9f6155`, sealed
+`/sn8100/runs/mcloving/diff003-boundary-20260815T045125Z`. The independently
+rechecked self-excluding evidence-manifest SHA-256 is
+`9a403938462b163b4693940b81cddc2c2c36c4a6a7267ccdea431e389eece009`.
+
+The receipt contains the exact 15 component-suite entries, 13 actual public
+boundary receipts, 12 live-derived joins, and the certified 48-scenario
+denominator. It reports zero production mappings, production effects, duplicate
+effects, production cutover claims, and secret-marker disclosures. The source
+tree was clean and unchanged at seal time. Detailed review and failed-attempt
+dispositions are in `docs/evidence/DIFF-003_SECURITY_REVIEW.md`.

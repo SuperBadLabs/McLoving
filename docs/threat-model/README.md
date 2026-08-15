@@ -114,6 +114,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-041 | A missing, forged, stale, replayed, cross-tenant, cross-attempt, misclassified, overbroad, rotated, revoked, or secret-disclosing Jenkins credential mapping grants authority to a runner, wrong consumer, or later fence | Exact sealed-inventory reconciliation; closed consumer/taint types with controller/workload visibility permanently ineligible; startup-pinned nonempty and unambiguous Ed25519 owner-key registry plus owner approval over tenant/scope/provider/consumer/classification truth; exact provider and consumer implementation/configuration digests; monotonic mapping generations; trusted-time fifteen-minute grants; permanent per-generation attempt/fence/consumer scope uniqueness; atomic one-time redemption; rotation and emergency-revocation fencing; nonserializable zeroizing secret material; raw/Base64/Base64URL/hex/percent public-evidence scan; owner-private single-link SQLite and hash-chained audit; runners and shadows receive only SCM or connector receipts | Exact/missing inventory, owner registry/payload/key/expiry, taint/disposition, provider-version, cross-tenant/project/build/attempt/fence/consumer, trusted-time, renamed-grant, replay, rotation, emergency-revocation, public-evidence encoding, audit-tamper, state-path, typed connector/source binding, and sealed zero-authority Mario tests; protocol in `docs/architecture/SECRET_MAPPING_V1.md` | SECRET/SEC | Trusted host/deployment operator, owner signing key and owner decision, provider adapter/service and clock; transformed secrets beyond scanned representations; no production provider, credential, canary, cutover, rollback, or decommission authority is claimed |
 | TM-042 | A source, dependency, builder, toolchain, policy result, component, bundle, signer, final-envelope binding, transparency proof, evidence manifest, timestamp anchor, deployment configuration, or rollback target is substituted before a production deployment | Exact protected source archive; digest-pinned isolated networkless read-only builder with ephemeral dependency reconstruction; canonical lock-derived SBOM; deterministic self-hashing bundle; signer-side recomputation of every build output; owner-private Ed25519 signing key; independently pinned source, builder, gate and signer policy; predeclared secondary-key/log/anchor requirements; post-sign Rekor evidence bound to the canonical envelope digest; canonical evidence-manifest join across release/policy/Rekor/SBOM/bundle/lock; independent timestamp proof bound to the canonical evidence-manifest digest; exact verified rollback ancestry; private `VerifiedRelease` deployment capability and create-new synchronized receipts | Source/archive/lock, builder/epoch, policy, SBOM/bundle/component, signer/signature, envelope digest, valid and malformed Rekor evidence, evidence-manifest and independent-anchor substitution, rollback ancestry, bundle traversal/trailing data, canonical repository SBOM, generated/private/symlink signing-key and overwrite-denial tests; protected-main isolated build and external ceremony defined in `docs/architecture/RELEASE_PROVENANCE_V2.md`; REL-001 closure receipt `094276689d6cec9fbb63b1abd51f5b9a3f9b588c52e32be5e264fb20822af237` | REL/SEC | Trusted kernel, Docker and signer hosts, protected-branch/workflow administrators, image/dependency reviewers, signer operator, transparency validator, independent policy/audit store and deployment operator; upstream compromise at an approved digest and joint builder-policy compromise remain possible; v0.1.0 private-release provenance is verified, while binary placement, production deployment, canary, cutover, and public binary publication remain unclaimed |
 | TM-043 | A forward or reverse migration omits, substitutes, reorders, prematurely deletes, or incorrectly rebinds build numbers, prior results, SCM baselines/changelogs, cross-build artifacts, retained workspace or state, retention deadlines, legal holds, approvals, retry lineage, or first-authoritative-run truth | Versioned deterministic idempotent forward/reverse transforms bound to immutable source and target identities; exact record-level digests and provenance; contiguous build and SCM/change baselines; artifact/workspace/state content binding; retention never weakened and active-hold union preserved with explicit release authority; approval identity/value/expiry and retry lineage binding; restart and rollback digests; effect-free first-authoritative run | `MIG-005A` seeded four-build forward/reverse rehearsal and `DIFF-002` two-sided build 1-4, next-number, prior-result, four-SCM-revision and false/true/true/false predicate sequence, artifact/workspace/state digest, retention/three-hold, unauthorized release, approval-expiry, retry/fail-fast lineage, restart/rollback, reverse-reconciliation, history-gap/hold-omission mutation, and immutable receipt `10fbbaed1d819ad9ec6962710de3f557e35c834fb6741f7cb08b085526a81786` | MIG/OPS/SEC | The closed denominator is the synthetic accepted `MIG-005A` fixture; exact live production record populations, current holds/deadlines, drift, and every case-specific rehearsal remain mandatory `MIG-007`, `SHADOW-001`, and `CANARY-001` gates before authority |
+| TM-044 | A static external-boundary certificate, colluding component and test, missing public receipt, stale or substituted receipt identity, replayed owner client, residual Jenkins access, shadow endpoint, secret disclosure, ambiguous effect, or duplicate effect falsely claims DIFF-003 parity | Fail-closed independent certificate verifier; exact component source manifests and implementation identities; isolated Jenkins and target stacks on distinct internal-only networks; distinct runner, connector, observer, and verifier roles; exact 15-suite ledger; 13 actual public receipts and 12 live-derived joins; owner client remains `jenkins_source`; target marker scan; exact clean-head evidence seal | `DIFF-003` 48-scenario certified denominator, feature-enabled observer and exact-capacity resolver suites, 13 live receipts, 12 derived joins, zero production mappings/effects/cutover claims/duplicates/marker disclosures, and exact receipt manifest `9a403938462b163b4693940b81cddc2c2c36c4a6a7267ccdea431e389eece009`; review in `docs/evidence/DIFF-003_SECURITY_REVIEW.md` | DIFF/SEC | A jointly flawed boundary implementation and focused test can still agree; contained fixtures are not live production observation. `MIG-006`, `MIG-007`, `SHADOW-001`, `CANARY-001`, cutover, rollback, and decommission gates remain mandatory before authority |
 | TM-021 | Malformed protocol message crashes controller or agent | Protobuf contract and fail-closed major/minor negotiation; message bounds at transport integration | Version/range tests now; protocol fuzzing and oversize E2E next | AGENT/CTRL | Runtime-library vulnerability |
 | TM-022 | Audit history is silently altered | Append-only API, hash segments, external export | Mutation denial and export verification | SEC/OPS | DB and external sink collusion |
 | TM-023 | Unauthorized tool version enters validation or release | Versioned downloads, SHA-256 verification, OCI digests | Empty-cache validation and manifest check | FOUND/REL | Compromised upstream plus digest update |
@@ -203,6 +204,38 @@ placement occurred. Production deployment, canary and cutover authority,
 public binary publication, and the later release-readiness decision remain
 separate gates.
 
+## DIFF-003 threat-model closure review
+
+Reviewed: 2026-08-15
+Reviewer: McLoving security architecture
+Binding: exact implementation `061fb8d324f7cd4cc29a41d2672363776ffacab6`,
+tree `e23c3bf02fb71ab7e18d5d37aca5c5910a9f6155`, and independently rechecked
+receipt manifest
+`9a403938462b163b4693940b81cddc2c2c36c4a6a7267ccdea431e389eece009`.
+
+The closure review adds TM-044 for the cross-component external-boundary
+differential: a static certificate alone is insufficient. The accepted gate
+executes the exact 15-suite ledger and requires the 13 actual public boundary
+receipts, derives all 12 join identities from the live receipt digests, and
+independently verifies the 48-scenario denominator. The contained client retains
+Jenkins source authority; the target side reports zero production mappings,
+production effects, duplicate effects, production cutover claims, and marker
+disclosures.
+
+TM-010, TM-037, TM-039, TM-040, TM-041, and TM-042 were reviewed with no
+mitigation change. Their connector ambiguity, independent observation, trigger,
+discovery, credential, and provenance controls are exercised or compared by the
+new boundary gate, but remain authoritative within their existing scopes.
+TM-016, TM-023, TM-025, TM-030, TM-038, and TM-043 were also reviewed with no
+mitigation change: DIFF-003 binds exact sources and prerequisite evidence, but
+does not replace dependency locking, tool pinning, inventory reconciliation,
+authorization, operational-state, or persistent-history migration controls.
+
+No reviewed threat-model change grants production identity, data, trigger,
+scheduler, credential, effect, deployment, canary, cutover, rollback, or
+decommission authority. Live inventory reconciliation, migration packaging,
+shadow replay, per-job canary, and later authority gates remain mandatory.
+
 ## Data-flow rules
 
 - Compatibility workers receive source and metadata, never execution secrets.
@@ -227,6 +260,7 @@ separate gates.
 | Artifact integrity, retention, and restore | OPS-001 / OPS-002 |
 | Windows service, journal, and Job Object containment | WIN-001 / WIN-002 |
 | Supply-chain release evidence | REL-001 |
+| External-boundary differential and non-collusion | DIFF-003 |
 | Jenkins inventory integrity and reconciliation | INV-001 / INV-002 / INV-003 / INV-004 / MIG-000 |
 | Human and service authentication lifecycle | IDP-001 |
 | Jenkins authorization mapping lifecycle | AUTHZ-001 |
