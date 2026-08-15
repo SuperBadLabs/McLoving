@@ -59,7 +59,7 @@
     {
       "id": "TRIG-001",
       "protocol": "mcloving.trigger-ingress/v1",
-      "implementation_source_manifest_sha256": "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
       "configuration_sha256": "e154c5381047ec6d77f21f321ec3bbbf54c66fd5f45f4c1d60751234df9d6e5a",
       "account_identity": "diff003-account/trig-001",
       "resource_identity": "diff003-resource/trig-001",
@@ -72,7 +72,7 @@
     {
       "id": "SCM-001",
       "protocol": "mcloving.source-acquirer/v1",
-      "implementation_source_manifest_sha256": "0a76b6633f58b036ce5bfac7cab3a938089bf1f97743946f57ce615eae0348d7",
+      "implementation_source_manifest_sha256": "e207d718da8a5da11306b2d4e4c8919b1846b66ccf97400fb0fd3928d78c54b1",
       "configuration_sha256": "3c6d55e6b12f900d8800b927f38d2d6068e004797a6cc1e6cef5d501288c0e59",
       "account_identity": "diff003-account/scm-001",
       "resource_identity": "diff003-resource/scm-001",
@@ -85,7 +85,7 @@
     {
       "id": "SECRET-001",
       "protocol": "mcloving.secret-grant/v1",
-      "implementation_source_manifest_sha256": "41fde0a426e9e594e83d7875b25b1bc92e9bf924d671e9608c13489b29b0d929",
+      "implementation_source_manifest_sha256": "3b487832b2c5ca0aa2442fc369b0fa5ef323fdc25f8e44ef1d4cb6aea2140067",
       "configuration_sha256": "cd100128c5738a0895f1c9e0cc01551d12990fe5bcb86ae9561688ef40ac1685",
       "account_identity": "diff003-account/secret-001",
       "resource_identity": "diff003-resource/secret-001",
@@ -98,7 +98,7 @@
     {
       "id": "INPUT-001",
       "protocol": "mcloving.input-adapter/v1",
-      "implementation_source_manifest_sha256": "585f4117fe76e849c865e5e63e85023ebdc12829a47905fc98da4a01bc189e9d",
+      "implementation_source_manifest_sha256": "886c3f4c86823e7b29ae9aa2a426b93628256a897ec4ac985970dc9fbdfe40e6",
       "configuration_sha256": "a2a07c012c43a4b9ce53c1ceffbedda5f8bfe476273b8a816532760cc51a6946",
       "account_identity": "diff003-account/input-001",
       "resource_identity": "diff003-resource/input-001",
@@ -111,7 +111,7 @@
     {
       "id": "PROV-001",
       "protocol": "mcloving.provisioner.v1",
-      "implementation_source_manifest_sha256": "3b23b374e00e55fc56f20d45fd0c71e1d81a2cfe80fc702c026a395d1ea94841",
+      "implementation_source_manifest_sha256": "f5c0eb2656d82bd73aaae1b27c4dc80dc179bb969fa78eb6948c67e633cffa83",
       "configuration_sha256": "ac6db663eac19a2b32a328594dc7026aff47d70f86e026e8ae57608fd7fbe9e3",
       "account_identity": "diff003-account/prov-001",
       "resource_identity": "diff003-resource/prov-001",
@@ -124,7 +124,7 @@
     {
       "id": "EXT-001",
       "protocol": "mcloving.external-connector/v1",
-      "implementation_source_manifest_sha256": "0388359b192f28a3031f651703f64f9d404ea3a1a2ca55e0ffafe88000f64ef7",
+      "implementation_source_manifest_sha256": "5faf31230c3e28247164680ad21fe2e7d836753f84d7ef2b6a782a4e39ed2b97",
       "configuration_sha256": "4461c18123789610f43dd626491419d96bd40ed51f372c46ef81f353c0a9b016",
       "account_identity": "diff003-account/ext-001",
       "resource_identity": "diff003-resource/ext-001",
@@ -137,7 +137,7 @@
     {
       "id": "OBS-001",
       "protocol": "mcloving.destination-observer/v1",
-      "implementation_source_manifest_sha256": "da1545a7a9edb67dc0588813c3721c36a3daf2831cb9fa2bc05eb1fdc946f5ec",
+      "implementation_source_manifest_sha256": "cef86b1ad041a9b1a12ad7ee09dde6365445b8e2fc82aa9833d297a672574a4c",
       "configuration_sha256": "0401dae5ab4d39ab84c9c704c6f569cd90ba20a61ba5e0fd9029329c5a3fe62e",
       "account_identity": "diff003-account/obs-001",
       "resource_identity": "diff003-resource/obs-001",
@@ -150,7 +150,7 @@
     {
       "id": "DISC-001",
       "protocol": "mcloving.discovery/v1",
-      "implementation_source_manifest_sha256": "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
       "configuration_sha256": "f89459ef255e2939d9f724341a63a8c2e930772af2c40821f668a289463f4965",
       "account_identity": "diff003-account/disc-001",
       "resource_identity": "diff003-resource/disc-001",
@@ -163,7 +163,7 @@
     {
       "id": "DEP-001",
       "protocol": "mcloving.dependency-resolver/v1",
-      "implementation_source_manifest_sha256": "17b1c3f023ee538f181cafad3801b5f64a22d5e8839eeae36e99e9bfec0f518f",
+      "implementation_source_manifest_sha256": "f50f0f2c54fbf96bf9bb9797c3846042764dec2ff139dbffac39abbda128c037",
       "configuration_sha256": "666c67464d09107f82d1b362c32bca8f8e8efcce2b84a589f3c862794b39888d",
       "account_identity": "diff003-account/dep-001",
       "resource_identity": "diff003-resource/dep-001",
@@ -176,7 +176,7 @@
     {
       "id": "CACHE-001",
       "protocol": "mcloving.cache/v1",
-      "implementation_source_manifest_sha256": "42af2ab0a25b4fff6243422e2af8d2e728a9998baa787044f2ffba86f81f73d2",
+      "implementation_source_manifest_sha256": "f7bcc30ee6c76104784cbef56b8d8f1b8e5e7ad13ed6647733b681b244d4fce4",
       "configuration_sha256": "3645d5c697d5159dc5ec6ac88725f5ad1a4c1354f7ee1cd62a07253f234ef5ef",
       "account_identity": "diff003-account/cache-001",
       "resource_identity": "diff003-resource/cache-001",
@@ -189,7 +189,7 @@
     {
       "id": "CONSUMER-001",
       "protocol": "mcloving.external-read-consumer/v1",
-      "implementation_source_manifest_sha256": "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
       "configuration_sha256": "ef9e96f6eb70311d227a1e69cfa42e0461d90536a06e66784fdb15712caf9c8d",
       "account_identity": "diff003-account/consumer-001",
       "resource_identity": "diff003-resource/consumer-001",
@@ -202,7 +202,7 @@
     {
       "id": "ADMIN-001",
       "protocol": "mcloving.external-admin-client/v1",
-      "implementation_source_manifest_sha256": "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
       "configuration_sha256": "ebbd27e590f57015e8cbe7234d1ad8e4566e4b610ceb90d37238c9e00e8decf4",
       "account_identity": "diff003-account/admin-001",
       "resource_identity": "diff003-resource/admin-001",
@@ -215,7 +215,7 @@
     {
       "id": "REL-001",
       "protocol": "mcloving.release-provenance/v2",
-      "implementation_source_manifest_sha256": "68460048755a3090a6616e7643801c7a7bd5aa41b5a3b5d564f20d7a77695ca2",
+      "implementation_source_manifest_sha256": "5feb5e0f072c74a9fdd61e4aab257880c6e11708cdbc9fff8ad338214780b7fd",
       "configuration_sha256": "6bf81d0a75004e575798c54dad683f05abcf3d1c8420efa523332fcc773b540a",
       "account_identity": "diff003-account/rel-001",
       "resource_identity": "diff003-resource/rel-001",
@@ -277,18 +277,18 @@
     {"name":"release_timestamp_outage_denied","boundary":"REL-001","source_outcome":"denied","target_outcome":"denied","expected_outcome":"denied","effect_intents":0,"effects":0,"duplicate_effects":0,"secret_marker_disclosures":0,"fresh_observation":false,"rollback_restored":false,"cleanup_confirmed":false}
   ],
   "joins": [
-    {"name":"trigger_capture_to_source","source_boundary":"TRIG-001","target_boundary":"SCM-001","shared_input_sha256":"fb7094bfb37582d9f36b49b9fec7d304684216436be474f3bca1b3e569d11c3e","source_trace_sha256":"fb7094bfb37582d9f36b49b9fec7d304684216436be474f3bca1b3e569d11c3e","target_trace_sha256":"fb7094bfb37582d9f36b49b9fec7d304684216436be474f3bca1b3e569d11c3e","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"source_later_revision_to_dependency","source_boundary":"SCM-001","target_boundary":"DEP-001","shared_input_sha256":"72d3c9239a91ab1734fe0f4429a6562bd976be908da85818affd9d63d005c442","source_trace_sha256":"72d3c9239a91ab1734fe0f4429a6562bd976be908da85818affd9d63d005c442","target_trace_sha256":"72d3c9239a91ab1734fe0f4429a6562bd976be908da85818affd9d63d005c442","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"secret_grant_to_source","source_boundary":"SECRET-001","target_boundary":"SCM-001","shared_input_sha256":"9965bbd23d3ddefa5d207761c5b9c809fa242bb1dbda1f1217800dbf2826051e","source_trace_sha256":"9965bbd23d3ddefa5d207761c5b9c809fa242bb1dbda1f1217800dbf2826051e","target_trace_sha256":"9965bbd23d3ddefa5d207761c5b9c809fa242bb1dbda1f1217800dbf2826051e","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"input_capture_to_control_flow","source_boundary":"INPUT-001","target_boundary":"TRIG-001","shared_input_sha256":"309e9ae8b00b166dcef869b65f61af5583bcad18e912ec3fbb1f94eaf2c2ec57","source_trace_sha256":"309e9ae8b00b166dcef869b65f61af5583bcad18e912ec3fbb1f94eaf2c2ec57","target_trace_sha256":"309e9ae8b00b166dcef869b65f61af5583bcad18e912ec3fbb1f94eaf2c2ec57","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"dependency_to_cache","source_boundary":"DEP-001","target_boundary":"CACHE-001","shared_input_sha256":"0c427f5c5ce96f8a6b647cf4d1cf69bd3fa51d225d3966bf3f94f0f2bb0f2058","source_trace_sha256":"0c427f5c5ce96f8a6b647cf4d1cf69bd3fa51d225d3966bf3f94f0f2bb0f2058","target_trace_sha256":"0c427f5c5ce96f8a6b647cf4d1cf69bd3fa51d225d3966bf3f94f0f2bb0f2058","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"discovery_to_trigger","source_boundary":"DISC-001","target_boundary":"TRIG-001","shared_input_sha256":"f264a47394d982d147cb20b08a34722edb45ad11d5a8792e81ca6289f7397cef","source_trace_sha256":"f264a47394d982d147cb20b08a34722edb45ad11d5a8792e81ca6289f7397cef","target_trace_sha256":"f264a47394d982d147cb20b08a34722edb45ad11d5a8792e81ca6289f7397cef","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"provisioner_to_runner","source_boundary":"PROV-001","target_boundary":"SCM-001","shared_input_sha256":"cd141db85fd1d565dafb397fe54f64bdaec2e2265329a6f97489481f6abc64e9","source_trace_sha256":"cd141db85fd1d565dafb397fe54f64bdaec2e2265329a6f97489481f6abc64e9","target_trace_sha256":"cd141db85fd1d565dafb397fe54f64bdaec2e2265329a6f97489481f6abc64e9","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"dry_run_intent_to_connector","source_boundary":"TRIG-001","target_boundary":"EXT-001","shared_input_sha256":"5c8484d8769cd064162b088a50c89fd6ff40b20ef34a72ace757baff7c74f849","source_trace_sha256":"5c8484d8769cd064162b088a50c89fd6ff40b20ef34a72ace757baff7c74f849","target_trace_sha256":"5c8484d8769cd064162b088a50c89fd6ff40b20ef34a72ace757baff7c74f849","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"connector_to_observer","source_boundary":"EXT-001","target_boundary":"OBS-001","shared_input_sha256":"b6f87afec41323b66c98fb8ad62dafd141dd8e2912c4498ec7d7d418fba89e73","source_trace_sha256":"b6f87afec41323b66c98fb8ad62dafd141dd8e2912c4498ec7d7d418fba89e73","target_trace_sha256":"b6f87afec41323b66c98fb8ad62dafd141dd8e2912c4498ec7d7d418fba89e73","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":1,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"consumer_cutover_rollback","source_boundary":"CONSUMER-001","target_boundary":"TRIG-001","shared_input_sha256":"6ab8e332b21c362ea772ad0368773da877b01437567d167ef686ebdf0a350ec1","source_trace_sha256":"6ab8e332b21c362ea772ad0368773da877b01437567d167ef686ebdf0a350ec1","target_trace_sha256":"6ab8e332b21c362ea772ad0368773da877b01437567d167ef686ebdf0a350ec1","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":true},
-    {"name":"admin_cutover_rollback","source_boundary":"ADMIN-001","target_boundary":"TRIG-001","shared_input_sha256":"3b7f93c39e3caaebaffdd1a11b5f3ebb4c95c9d0f684fdea92aa7542c2761ee1","source_trace_sha256":"3b7f93c39e3caaebaffdd1a11b5f3ebb4c95c9d0f684fdea92aa7542c2761ee1","target_trace_sha256":"3b7f93c39e3caaebaffdd1a11b5f3ebb4c95c9d0f684fdea92aa7542c2761ee1","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":true},
-    {"name":"release_to_runtime","source_boundary":"REL-001","target_boundary":"PROV-001","shared_input_sha256":"05a4a89c24e0d10ae41913db85c2ce9efd3d69b0514f26841ffe7dab7fe660e7","source_trace_sha256":"05a4a89c24e0d10ae41913db85c2ce9efd3d69b0514f26841ffe7dab7fe660e7","target_trace_sha256":"05a4a89c24e0d10ae41913db85c2ce9efd3d69b0514f26841ffe7dab7fe660e7","control_flow_equal":true,"effect_intent_equal":true,"outcome_equal":true,"content_equal":true,"generation_equal":true,"retry_ambiguity_equal":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false}
+    {"name":"trigger_capture_to_source","source_boundary":"TRIG-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/trigger_capture_to_source/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"source_later_revision_to_dependency","source_boundary":"SCM-001","target_boundary":"DEP-001","compatibility_rule":"mcloving.diff003.compatibility/source_later_revision_to_dependency/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"secret_grant_to_source","source_boundary":"SECRET-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/secret_grant_to_source/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"input_capture_to_control_flow","source_boundary":"INPUT-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/input_capture_to_control_flow/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"dependency_to_cache","source_boundary":"DEP-001","target_boundary":"CACHE-001","compatibility_rule":"mcloving.diff003.compatibility/dependency_to_cache/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"discovery_to_trigger","source_boundary":"DISC-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/discovery_to_trigger/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"provisioner_to_runner","source_boundary":"PROV-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/provisioner_to_runner/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"dry_run_intent_to_connector","source_boundary":"TRIG-001","target_boundary":"EXT-001","compatibility_rule":"mcloving.diff003.compatibility/dry_run_intent_to_connector/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"connector_to_observer","source_boundary":"EXT-001","target_boundary":"OBS-001","compatibility_rule":"mcloving.diff003.compatibility/connector_to_observer/v2","independent_live_observations":true,"fresh_observation":true,"effects":1,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"consumer_cutover_rollback","source_boundary":"CONSUMER-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/consumer_cutover_rollback/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":true},
+    {"name":"admin_cutover_rollback","source_boundary":"ADMIN-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/admin_cutover_rollback/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":true},
+    {"name":"release_to_runtime","source_boundary":"REL-001","target_boundary":"PROV-001","compatibility_rule":"mcloving.diff003.compatibility/release_to_runtime/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false}
   ],
   "clients": {
     "inventory_sha256": "a4227af8021c7d5fb6f7cc72be84af756ce1f95d33cd2ec9bad721beab587549",

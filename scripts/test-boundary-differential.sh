@@ -610,15 +610,29 @@ for private_marker in \
       echo "DIFF-003 retained evidence disclosed a raw or encoded contained marker" >&2
       exit 1
     fi
+    while IFS= read -r -d '' retained_name; do
+      if [[ "${retained_name}" == *"${marker_variant}"* ]]; then
+        echo "DIFF-003 retained evidence pathname disclosed a contained marker" >&2
+        exit 1
+      fi
+    done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
   done
   for case_insensitive_variant in "${marker_hex}" "${marker_percent}"; do
     if grep -R -F -i -- "${case_insensitive_variant}" "${evidence}" >/dev/null; then
       echo "DIFF-003 retained evidence disclosed a case-varied encoded marker" >&2
       exit 1
     fi
+    folded_variant=$(printf '%s' "${case_insensitive_variant}" | tr '[:upper:]' '[:lower:]')
+    while IFS= read -r -d '' retained_name; do
+      folded_name=$(printf '%s' "${retained_name}" | tr '[:upper:]' '[:lower:]')
+      if [[ "${folded_name}" == *"${folded_variant}"* ]]; then
+        echo "DIFF-003 retained evidence pathname disclosed a case-varied marker" >&2
+        exit 1
+      fi
+    done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
   done
 done
-printf 'raw-base64-base64url-hex-all-case-percent-all-case-nested-base64-clean\n' \
+printf 'contents-and-pathnames-raw-base64-base64url-hex-all-case-percent-all-case-nested-base64-clean\n' \
   >"${evidence}/encoded-marker-scan.txt"
 comparison_update="${runtime_root}/runtime-comparison.json"
 jq '.secret_marker_disclosures = 0 | .encoded_marker_scan_passed = true' \

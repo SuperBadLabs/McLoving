@@ -419,6 +419,40 @@ fn exact_release_verifies_before_deployment_receipt() {
 }
 
 #[test]
+fn timestamp_anchor_outage_is_denied() {
+    let fixture = fixture(SHA1_A, SHA1_B, 2);
+    let envelope = signed(&fixture);
+    let (transparency, evidence_manifest, audit_anchor, policy) =
+        verification_material(&fixture, &envelope);
+    let mut unavailable_anchor = audit_anchor;
+    unavailable_anchor.proof_sha256.clear();
+    unavailable_anchor.verifier_statement_sha256.clear();
+    unavailable_anchor.notary_reference.clear();
+    let result = core_verify_release(
+        &envelope,
+        &policy,
+        &transparency,
+        &evidence_manifest,
+        &unavailable_anchor,
+        &fixture.sbom,
+        &fixture.bundle,
+        &fixture.lock,
+        None,
+    );
+    let timestamp_outage_denied = matches!(result, Err(ReleaseError::TransparencyDenied));
+    diff003::record_assertion(
+        "release_timestamp_outage_denied",
+        "denied",
+        serde_json::json!({
+            "timestamp_anchor_evidence_complete": false,
+            "required_anchor_identity": policy.signing.expected_audit_anchor_identity,
+            "result": "transparency_denied",
+        }),
+        timestamp_outage_denied,
+    );
+}
+
+#[test]
 fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
     let fixture = fixture(SHA1_A, SHA1_B, 2);
     let mut source = fixture.manifest.clone();
@@ -426,27 +460,17 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
     source.policy_gates[0].head_sha1 = SHA1_B.to_owned();
     source.policy_gates[1].head_sha1 = SHA1_B.to_owned();
     let source = sign_release(source, &fixture.signing_key_pkcs8).expect("resign source");
-    let source_result = verify_release(
-        &source,
-        &fixture.policy,
-        &fixture.sbom,
-        &fixture.bundle,
-        &fixture.lock,
-        None,
-    );
-    let timestamp_chain_denied = matches!(source_result, Err(ReleaseError::SourceDenied));
-    assert!(timestamp_chain_denied);
-    diff003::record_assertion(
-        "release_timestamp_outage_denied",
-        "denied",
-        serde_json::json!({
-            "source_commit_presented": SHA1_B,
-            "source_commit_authorized": SHA1_A,
-            "result": "source_denied",
-            "signed_policy_gates": source.manifest.policy_gates.len(),
-        }),
-        timestamp_chain_denied,
-    );
+    assert!(matches!(
+        verify_release(
+            &source,
+            &fixture.policy,
+            &fixture.sbom,
+            &fixture.bundle,
+            &fixture.lock,
+            None,
+        ),
+        Err(ReleaseError::SourceDenied)
+    ));
 
     let mut archive = fixture.manifest.clone();
     archive.source.source_archive_sha256 = DIGEST_B.to_owned();

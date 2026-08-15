@@ -230,7 +230,7 @@ admin_rollback_restored|ADMIN-001|cutover_requires_zero_writes_complete_disposit
 release_artifact_substitution_denied|REL-001|sbom_bundle_and_component_substitution_are_denied
 release_replay_denied|REL-001|rollback_target_must_match_a_previously_verified_release_exactly
 release_untrusted_key_denied|REL-001|signer_signature_and_transparency_substitution_are_denied
-release_timestamp_outage_denied|REL-001|source_builder_and_policy_substitution_are_denied_even_when_resigned
+release_timestamp_outage_denied|REL-001|timestamp_anchor_outage_is_denied
 MAP
 )
 
@@ -296,12 +296,13 @@ jq --exit-status 'length == 48 and all(
 )' \
   "${output_dir}/executed-scenarios.json" >/dev/null || fail "scenario denominator"
 
-# Joins compare the same authenticated live projection from both receipts.
-# Compatibility is emitted only after every declared join dimension agrees.
+# Joins independently project each authenticated live receipt, compare each
+# projection back to its own receipt, then apply a pair-specific compatibility
+# rule. The fixtures do not claim to be one shared live transaction.
 joins_jsonl="${output_dir}/validated-joins.jsonl"
 : >"${joins_jsonl}"
-while IFS=$'\t' read -r name source target input source_trace target_trace \
-  expected_effects expected_duplicates expected_rollback; do
+while IFS=$'\t' read -r name source target rule expected_effects \
+  expected_duplicates expected_rollback; do
   source_file="${receipt_dir}/${source}.json"
   target_file="${receipt_dir}/${target}.json"
   source_sha=$(sha256sum "${source_file}" | awk '{print $1}')
@@ -320,73 +321,115 @@ while IFS=$'\t' read -r name source target input source_trace target_trace \
     '._diff003.joins[] | select(.name == $name)' "${source_file}")
   target_claim=$(jq -c --arg name "${name}" \
     '._diff003.joins[] | select(.name == $name)' "${target_file}")
-  [[ "${source_claim}" == "${target_claim}" ]] \
-    || fail "join ${name} live projections disagree"
-  jq --exit-status --arg input "${input}" --arg trace "${source_trace}" \
-    --argjson effects "${expected_effects}" \
-    --argjson duplicates "${expected_duplicates}" \
-    --argjson rollback "${expected_rollback}" '
-    .shared_input_sha256 == $input
-    and .trace_sha256 == $trace
-    and .control_flow_sha256 == $input
-    and .effect_intent_sha256 == $input
-    and .outcome_sha256 == $input
-    and .content_sha256 == $input
-    and .generation == 1
-    and (.retry_ambiguity | not)
-    and .effects == $effects
-    and .duplicate_effects == $duplicates
-    and .rollback_restored == $rollback
+  jq --exit-status --arg name "${name}" --arg boundary "${source}" \
+    --slurpfile receipt "${source_file}" '
+    .schema == "mcloving.diff003.live-join-projection/v2"
+    and .name == $name and .boundary == $boundary
+    and .observation == ($receipt[0] | del(._diff003))
   ' <<<"${source_claim}" >/dev/null || fail "join ${name} source projection mismatch"
-  jq --exit-status --arg input "${input}" --arg trace "${target_trace}" \
-    --argjson effects "${expected_effects}" \
-    --argjson duplicates "${expected_duplicates}" \
-    --argjson rollback "${expected_rollback}" '
-    .shared_input_sha256 == $input and .trace_sha256 == $trace
-    and .control_flow_sha256 == $input and .effect_intent_sha256 == $input
-    and .outcome_sha256 == $input and .content_sha256 == $input
-    and .generation == 1 and (.retry_ambiguity | not)
-    and .effects == $effects and .duplicate_effects == $duplicates
-    and .rollback_restored == $rollback
+  jq --exit-status --arg name "${name}" --arg boundary "${target}" \
+    --slurpfile receipt "${target_file}" '
+    .schema == "mcloving.diff003.live-join-projection/v2"
+    and .name == $name and .boundary == $boundary
+    and .observation == ($receipt[0] | del(._diff003))
   ' <<<"${target_claim}" >/dev/null || fail "join ${name} target projection mismatch"
-  effects=$(jq -r '.effects' <<<"${source_claim}")
-  duplicate_effects=$(jq -r '.duplicate_effects' <<<"${source_claim}")
-  rollback_observed=$(jq -r '.rollback_restored' <<<"${source_claim}")
-  [[ "${effects}" == "${expected_effects}" ]] || fail "join ${name} effect mismatch"
-  [[ "${duplicate_effects}" == "${expected_duplicates}" ]] \
-    || fail "join ${name} duplicate-effect mismatch"
-  [[ "${rollback_observed}" == "${expected_rollback}" ]] \
-    || fail "join ${name} rollback mismatch"
-  claim_sha=$(printf '%s' "${source_claim}" | sha256sum | awk '{print $1}')
-  join_sha=$(printf 'join=%s\nsource=%s\ntarget=%s\nclaim=%s\ninput=%s\neffects=%s\nrollback=%s\n' \
-    "${name}" "${source_sha}" "${target_sha}" "${claim_sha}" "${input}" "${effects}" \
-    "${rollback_observed}" | sha256sum | awk '{print $1}')
+  [[ "${rule}" == "mcloving.diff003.compatibility/${name}/v2" ]] \
+    || fail "join ${name} compatibility rule mismatch"
+
+  case "${name}" in
+    trigger_capture_to_source)
+      pair_filter='.[0].trigger_generation == 1 and .[0].status == "pending"
+        and .[1].initial.generation == 7 and .[1].later_revision.generation == 7
+        and .[1].initial.content_sha256 != .[1].later_revision.content_sha256'
+      ;;
+    source_later_revision_to_dependency)
+      pair_filter='.[0].later_revision.generation == .[1].request.expected_generation
+        and .[0].initial.content_sha256 != .[0].later_revision.content_sha256'
+      ;;
+    secret_grant_to_source)
+      pair_filter='.[0].provider_calls == 1
+        and .[0].redemption.grant_receipt_sha256 == .[0].grant.receipt_sha256
+        and .[1].initial.generation == .[1].later_revision.generation'
+      ;;
+    input_capture_to_control_flow)
+      pair_filter='.[0].generation == .[1].trigger_generation
+        and .[1].status == "pending"'
+      ;;
+    dependency_to_cache)
+      pair_filter='.[0].request.expected_generation == 7
+        and .[1].cold.status == "miss" and .[1].published.status == "published"
+        and .[1].hit.status == "hit" and .[1].audit_events == 3'
+      ;;
+    discovery_to_trigger)
+      pair_filter='.[0].initial.parent_generation == .[1].trigger_generation
+        and .[0].reconfigured.parent_generation > .[1].trigger_generation'
+      ;;
+    provisioner_to_runner)
+      pair_filter='.[0].ready.outcome == "ready"
+        and .[0].cancelled.outcome == "cancelled" and .[0].cancelled.cleanup_confirmed
+        and .[0].next_generation.fence_token == 2
+        and .[1].initial.protocol_version == "mcloving.source-acquirer/v1"'
+      ;;
+    dry_run_intent_to_connector)
+      pair_filter='.[0].status == "pending"
+        and .[1].status == "succeeded" and .[1].attempt_count == 1'
+      ;;
+    connector_to_observer)
+      pair_filter='.[0].status == "succeeded" and .[0].attempt_count == 1
+        and .[1].pre.phase == "pre_action" and .[1].post.phase == "post_action"
+        and .[1].reconciliation.phase == "reconciliation"
+        and .[1].pre.destination_cursor < .[1].post.destination_cursor
+        and .[1].post.destination_cursor < .[1].reconciliation.destination_cursor'
+      ;;
+    consumer_cutover_rollback|admin_cutover_rollback)
+      pair_filter='.[0].source.authority == "jenkins_source"
+        and .[0].target.authority == "mc_loving_target"
+        and .[0].rollback.authority == "jenkins_source"
+        and .[0].rollback.binding_digest == .[0].source.binding_digest
+        and .[1].trigger_generation == 1 and .[1].status == "pending"'
+      ;;
+    release_to_runtime)
+      pair_filter='.[0].deployment_environment == "production"
+        and .[0].rollback_manifest_sha256 == null
+        and .[1].ready.outcome == "ready" and .[1].cancelled.cleanup_confirmed'
+      ;;
+    *) fail "unsupported join compatibility rule ${name}" ;;
+  esac
+  jq --exit-status --slurp "${pair_filter}" "${source_file}" "${target_file}" \
+    >/dev/null || fail "join ${name} independent compatibility rule"
+
+  source_projection_sha=$(printf '%s' "${source_claim}" | sha256sum | awk '{print $1}')
+  target_projection_sha=$(printf '%s' "${target_claim}" | sha256sum | awk '{print $1}')
+  join_sha=$(printf 'join=%s\nsource=%s\ntarget=%s\nsource_projection=%s\ntarget_projection=%s\nrule=%s\neffects=%s\nrollback=%s\n' \
+    "${name}" "${source_sha}" "${target_sha}" "${source_projection_sha}" \
+    "${target_projection_sha}" "${rule}" "${expected_effects}" \
+    "${expected_rollback}" | sha256sum | awk '{print $1}')
   jq -cn --arg name "${name}" --arg source "${source}" --arg target "${target}" \
-    --arg input "${input}" --arg source_sha "${source_sha}" --arg target_sha "${target_sha}" \
-    --arg claim_sha "${claim_sha}" --arg join_sha "${join_sha}" \
-    --argjson effects "${effects}" --argjson duplicates "${duplicate_effects}" \
-    --argjson rollback "${rollback_observed}" \
+    --arg rule "${rule}" --arg source_sha "${source_sha}" --arg target_sha "${target_sha}" \
+    --arg source_projection_sha "${source_projection_sha}" \
+    --arg target_projection_sha "${target_projection_sha}" --arg join_sha "${join_sha}" \
+    --argjson effects "${expected_effects}" --argjson duplicates "${expected_duplicates}" \
+    --argjson rollback "${expected_rollback}" \
     '{name:$name,source_boundary:$source,target_boundary:$target,
-      shared_input_sha256:$input,source_receipt_sha256:$source_sha,
-      target_receipt_sha256:$target_sha,live_projection_sha256:$claim_sha,
+      compatibility_rule:$rule,source_receipt_sha256:$source_sha,
+      target_receipt_sha256:$target_sha,
+      source_live_projection_sha256:$source_projection_sha,
+      target_live_projection_sha256:$target_projection_sha,
       validated_join_sha256:$join_sha,
       source_contract_valid:true,target_contract_valid:true,
-      trace_equal:true,control_flow_equal:true,effect_intent_equal:true,
-      outcome_equal:true,content_equal:true,generation_equal:true,
-      retry_ambiguity_equal:true,compatible:true,
-      effects:$effects,duplicate_effects:$duplicates,
-      rollback_restored:$rollback}' >>"${joins_jsonl}"
+      independent_live_observations:true,compatible:true,
+      effects:$effects,duplicate_effects:$duplicates,rollback_restored:$rollback}' \
+    >>"${joins_jsonl}"
 done < <(jq -r '.joins[] | [
-  .name,.source_boundary,.target_boundary,.shared_input_sha256,
-  .source_trace_sha256,.target_trace_sha256,
+  .name,.source_boundary,.target_boundary,.compatibility_rule,
   (.effects|tostring),(.duplicate_effects|tostring),(.rollback_restored|tostring)
 ] | @tsv' "${certificate}")
 jq --slurp '.' "${joins_jsonl}" >"${output_dir}/validated-joins.json"
 jq --exit-status 'length == 12 and all(
   .source_contract_valid and .target_contract_valid and .compatible
-  and .trace_equal and .control_flow_equal and .effect_intent_equal
-  and .outcome_equal and .content_equal and .generation_equal
-  and .retry_ambiguity_equal
+  and .independent_live_observations
+  and (.source_live_projection_sha256 | test("^[0-9a-f]{64}$"))
+  and (.target_live_projection_sha256 | test("^[0-9a-f]{64}$"))
   and .duplicate_effects == 0
 )' "${output_dir}/validated-joins.json" >/dev/null || fail "join denominator"
 

@@ -94,9 +94,10 @@ reconciled, cleaned, and restored cases require a fresh observation.
 
 ## Cross-boundary joins
 
-Twelve ordered contract joins bind the same canonical input and require equal
-source and target traces, control flow, effect intent, outcome, content,
-generation, and retry/ambiguity truth:
+Twelve ordered contract joins apply pair-specific compatibility rules to
+independently produced, authenticated live receipts. Each projection must equal
+its own receipt payload; the gate does not claim the contained fixtures are one
+shared live transaction or manufacture equality from shared constants:
 
 - trigger capture to source acquisition;
 - later source revision to dependency resolution;
@@ -181,7 +182,8 @@ certificate, requires all 13 live public receipts and all 12 derived live
 joins, verifies the exact suite ledger and verifier receipt, records all
 container/image/network inspections and transcripts, rejects private-key
 material, private-key paths, and every contained private marker—including
-case-varied hexadecimal and percent encodings—rechecks the exact source
+markers in retained pathnames and file contents and case-varied hexadecimal
+and percent encodings—rechecks the exact source
 commit/tree/status, rejects every nonregular or multiply-linked retained entry,
 and seals a self-excluding evidence manifest.
 Failed attempts remain unsealed and grant no authority.
@@ -197,17 +199,20 @@ Run the contained gate on a clean pushed head with:
 
 ```text
 scripts/test-boundary-differential.sh \
-  /sn8100/runs/mcloving/diff003-boundary-YYYYMMDDTHHMMSSZ
+  "${OWNER_PRIVATE_DIFF003_RUN}"
 ```
+
+`OWNER_PRIVATE_DIFF003_RUN` resolves only inside owner-controlled operations;
+the private filesystem root is never published in repository documentation.
 
 ## Exact-head acceptance receipt
 
 The accepted receipt must bind the final reviewed PR head and tree after all
 code, documentation, and board changes. To avoid a self-invalidating metadata
-commit, its HeMan run path, source head/tree, public receipt-authentication-key
-digest, and independently rechecked self-excluding manifest digest are
-published in PR #59's closure comment after the final run. The private HeMan
-path is retained only in the owner-controlled execution record and is not
+commit, its source head/tree, public receipt-authentication-key digest, and
+independently rechecked self-excluding manifest digest are published in PR
+#59's closure comment after the final run. The private HeMan run path is
+retained only in the owner-controlled execution record and is not
 posted publicly. No repository change may follow that run before merge.
 Earlier receipts are diagnostic only.
 

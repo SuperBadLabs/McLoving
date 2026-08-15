@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "e6cecc8f9110ca35263c21aa73ecb053d66bc1818a0e4d7688177110f91be9d4";
+    "0d5b1c486a738c573551fbdb3daa7a694374b317a4bdcfe9245d0e025ee148ee";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -40,67 +40,67 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "TRIG-001",
         "mcloving.trigger-ingress/v1",
-        "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
     ),
     (
         "SCM-001",
         "mcloving.source-acquirer/v1",
-        "0a76b6633f58b036ce5bfac7cab3a938089bf1f97743946f57ce615eae0348d7",
+        "e207d718da8a5da11306b2d4e4c8919b1846b66ccf97400fb0fd3928d78c54b1",
     ),
     (
         "SECRET-001",
         "mcloving.secret-grant/v1",
-        "41fde0a426e9e594e83d7875b25b1bc92e9bf924d671e9608c13489b29b0d929",
+        "3b487832b2c5ca0aa2442fc369b0fa5ef323fdc25f8e44ef1d4cb6aea2140067",
     ),
     (
         "INPUT-001",
         "mcloving.input-adapter/v1",
-        "585f4117fe76e849c865e5e63e85023ebdc12829a47905fc98da4a01bc189e9d",
+        "886c3f4c86823e7b29ae9aa2a426b93628256a897ec4ac985970dc9fbdfe40e6",
     ),
     (
         "PROV-001",
         "mcloving.provisioner.v1",
-        "3b23b374e00e55fc56f20d45fd0c71e1d81a2cfe80fc702c026a395d1ea94841",
+        "f5c0eb2656d82bd73aaae1b27c4dc80dc179bb969fa78eb6948c67e633cffa83",
     ),
     (
         "EXT-001",
         "mcloving.external-connector/v1",
-        "0388359b192f28a3031f651703f64f9d404ea3a1a2ca55e0ffafe88000f64ef7",
+        "5faf31230c3e28247164680ad21fe2e7d836753f84d7ef2b6a782a4e39ed2b97",
     ),
     (
         "OBS-001",
         "mcloving.destination-observer/v1",
-        "da1545a7a9edb67dc0588813c3721c36a3daf2831cb9fa2bc05eb1fdc946f5ec",
+        "cef86b1ad041a9b1a12ad7ee09dde6365445b8e2fc82aa9833d297a672574a4c",
     ),
     (
         "DISC-001",
         "mcloving.discovery/v1",
-        "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
     ),
     (
         "DEP-001",
         "mcloving.dependency-resolver/v1",
-        "17b1c3f023ee538f181cafad3801b5f64a22d5e8839eeae36e99e9bfec0f518f",
+        "f50f0f2c54fbf96bf9bb9797c3846042764dec2ff139dbffac39abbda128c037",
     ),
     (
         "CACHE-001",
         "mcloving.cache/v1",
-        "42af2ab0a25b4fff6243422e2af8d2e728a9998baa787044f2ffba86f81f73d2",
+        "f7bcc30ee6c76104784cbef56b8d8f1b8e5e7ad13ed6647733b681b244d4fce4",
     ),
     (
         "CONSUMER-001",
         "mcloving.external-read-consumer/v1",
-        "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
     ),
     (
         "ADMIN-001",
         "mcloving.external-admin-client/v1",
-        "cc2dbeff7f31a3f4d0435fa9893ae2641c7a9a62fd4b1dfb1e2c26ba6c89e05c",
+        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
     ),
     (
         "REL-001",
         "mcloving.release-provenance/v2",
-        "68460048755a3090a6616e7643801c7a7bd5aa41b5a3b5d564f20d7a77695ca2",
+        "5feb5e0f072c74a9fdd61e4aab257880c6e11708cdbc9fff8ad338214780b7fd",
     ),
 ];
 
@@ -497,15 +497,8 @@ struct Join {
     name: String,
     source_boundary: String,
     target_boundary: String,
-    shared_input_sha256: String,
-    source_trace_sha256: String,
-    target_trace_sha256: String,
-    control_flow_equal: bool,
-    effect_intent_equal: bool,
-    outcome_equal: bool,
-    content_equal: bool,
-    generation_equal: bool,
-    retry_ambiguity_equal: bool,
+    compatibility_rule: String,
+    independent_live_observations: bool,
     fresh_observation: bool,
     effects: u64,
     duplicate_effects: u64,
@@ -919,26 +912,15 @@ fn verify_joins(joins: &[Join]) -> Result<(), VerificationError> {
                 format!("{} identity or outcome mismatch", join.name),
             ));
         }
-        for (value, name) in [
-            (&join.shared_input_sha256, "join input"),
-            (&join.source_trace_sha256, "source trace"),
-            (&join.target_trace_sha256, "target trace"),
-        ] {
-            require_digest(value, name)?;
-        }
-        if join.source_trace_sha256 != join.target_trace_sha256
-            || !join.control_flow_equal
-            || !join.effect_intent_equal
-            || !join.outcome_equal
-            || !join.content_equal
-            || !join.generation_equal
-            || !join.retry_ambiguity_equal
+        let expected_rule = format!("mcloving.diff003.compatibility/{}/v2", join.name);
+        if join.compatibility_rule != expected_rule
+            || !join.independent_live_observations
             || !join.fresh_observation
             || join.duplicate_effects != 0
         {
             return Err(VerificationError::new(
                 "E_JOIN_PARITY",
-                format!("{} failed exact parity", join.name),
+                format!("{} failed independent compatibility declaration", join.name),
             ));
         }
     }
@@ -1091,7 +1073,7 @@ mod tests {
             "E_SCENARIO_AUTHORITY",
         );
         assert_mutation_fails(
-            |value| value["joins"][8]["target_trace_sha256"] = Value::String("0".repeat(64)),
+            |value| value["joins"][8]["independent_live_observations"] = Value::Bool(false),
             "E_JOIN_PARITY",
         );
     }
