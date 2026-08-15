@@ -118,10 +118,13 @@ The exact-head gate does not treat those repository assertions as runtime
 observations. Each of the 13 focused positive tests exports the actual public
 receipt produced by the exercised implementation into a new evidence
 directory. The host requires the exact receipt set, hashes every receipt, and
-derives each of the 12 live join identities from the two observed receipt
-digests plus the certified contract input. `runtime-boundaries.json` and
-`runtime-joins.json` therefore bind the static differential contract to the
-code that ran; prefilled trace values alone cannot satisfy the gate.
+validates every boundary-specific schema, protocol, signature or authenticated
+digest, generation, transition, and outcome shape. It binds every certified
+scenario to an exact focused test that reported `ok`, then applies an explicit
+compatibility rule to both validated receipts in each of the 12 joins.
+`runtime-boundaries.json`, `executed-scenarios.json`, and `runtime-joins.json`
+therefore bind the static differential contract to the code that ran; a
+nonempty object or two unrelated receipt hashes cannot satisfy the gate.
 
 ## Secret and client truth
 
@@ -186,14 +189,14 @@ scripts/test-boundary-differential.sh \
 
 ## Accepted implementation receipt
 
-Exact head `061fb8d324f7cd4cc29a41d2672363776ffacab6`, tree
-`e23c3bf02fb71ab7e18d5d37aca5c5910a9f6155`, sealed
-`/sn8100/runs/mcloving/diff003-boundary-20260815T045125Z`. The independently
+Exact head `01d548c510dc84b10576c0fd0c9a4524a18835e4`, tree
+`d5ef1ce12f152a48ffc683537978f4549756693d`, sealed
+`/sn8100/runs/mcloving/diff003-boundary-20260815T060147Z`. The independently
 rechecked self-excluding evidence-manifest SHA-256 is
-`9a403938462b163b4693940b81cddc2c2c36c4a6a7267ccdea431e389eece009`.
+`cd8a43e08b7e2a3c3e1ed0a2cbc961818c27b3daa5e2eba0f23b1a140521dff7`.
 
 The receipt contains the exact 15 component-suite entries, 13 actual public
-boundary receipts, 12 live-derived joins, and the certified 48-scenario
+boundary receipts, 12 validated joins, and 48 executed scenario bindings
 denominator. It reports zero production mappings, production effects, duplicate
 effects, production cutover claims, and secret-marker disclosures. The source
 tree was clean and unchanged at seal time. Detailed review and failed-attempt
