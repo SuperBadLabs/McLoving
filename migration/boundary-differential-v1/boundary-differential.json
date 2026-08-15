@@ -137,7 +137,7 @@
     {
       "id": "OBS-001",
       "protocol": "mcloving.destination-observer/v1",
-      "implementation_source_manifest_sha256": "3f6b70066f98be56d19b08f46aea09e7a982351901446f8053176a8c5953f4e1",
+      "implementation_source_manifest_sha256": "67c8346072891cf7a1c082b147210db1a6bd23cfda93addf04485d7cd7bbbd58",
       "configuration_sha256": "0401dae5ab4d39ab84c9c704c6f569cd90ba20a61ba5e0fd9029329c5a3fe62e",
       "account_identity": "diff003-account/obs-001",
       "resource_identity": "diff003-resource/obs-001",

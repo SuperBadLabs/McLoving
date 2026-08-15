@@ -69,7 +69,7 @@ property and is also exercised by the focused `EXT-001` and `OBS-001` suites.
 
 The 48 ordered cases cover:
 
-- trigger substitution, replay, stale generation, and outage;
+- trigger substitution, replay, stale generation, and attempt-budget exhaustion;
 - source revision substitution, later revision preservation, and outage;
 - secret consumer substitution, taint ineligibility, and marker disclosure;
 - input endpoint substitution, replay, stale response, and outage;
