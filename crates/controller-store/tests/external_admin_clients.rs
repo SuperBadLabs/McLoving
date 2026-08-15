@@ -406,6 +406,36 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
             .iter()
             .any(|event| event.action == "external_admin_client.rolled_back")
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("ADMIN-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "source": {
+                    "client_id": source_receipt.client_id,
+                    "generation": source_receipt.generation,
+                    "authority": source_receipt.authority,
+                    "binding_digest": source_receipt.binding_digest,
+                    "contract_digest": source_receipt.contract_digest,
+                },
+                "target": {
+                    "client_id": target_receipt.client_id,
+                    "generation": target_receipt.generation,
+                    "authority": target_receipt.authority,
+                    "binding_digest": target_receipt.binding_digest,
+                    "contract_digest": target_receipt.contract_digest,
+                },
+                "rollback": {
+                    "client_id": rollback_receipt.client_id,
+                    "generation": rollback_receipt.generation,
+                    "authority": rollback_receipt.authority,
+                    "binding_digest": rollback_receipt.binding_digest,
+                    "contract_digest": rollback_receipt.contract_digest,
+                },
+            }))
+            .expect("serialize DIFF-003 admin receipts"),
+        )
+        .expect("write DIFF-003 admin receipts");
+    }
 }
 
 #[tokio::test]

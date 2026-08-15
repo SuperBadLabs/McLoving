@@ -565,6 +565,17 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
         context.acquirer.acquire(&stale).await,
         Err(SourceError::RevisionMismatch)
     ));
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("SCM-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "initial": receipt,
+                "later_revision": later_receipt,
+            }))
+            .expect("serialize DIFF-003 source receipts"),
+        )
+        .expect("write DIFF-003 source receipts");
+    }
 }
 
 #[tokio::test]

@@ -813,6 +813,17 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     assert_eq!(reconfigured_receipt.observation_count, 1);
     assert_eq!(reconfigured_receipt.selected_count, 0);
     assert_eq!(reconfigured_receipt.retired_count, 4);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("DISC-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "initial": receipt,
+                "reconfigured": reconfigured_receipt,
+            }))
+            .expect("serialize DIFF-003 discovery receipts"),
+        )
+        .expect("write DIFF-003 discovery receipts");
+    }
 }
 
 #[tokio::test]

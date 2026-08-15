@@ -558,6 +558,13 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         accepted.expires_at_unix_ms,
         accepted.accepted_at_unix_ms + 7_200_000
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("TRIG-001.json"),
+            serde_json::to_vec_pretty(accepted).expect("serialize DIFF-003 trigger receipt"),
+        )
+        .expect("write DIFF-003 trigger receipt");
+    }
     assert_eq!(
         concurrent_outcomes
             .iter()

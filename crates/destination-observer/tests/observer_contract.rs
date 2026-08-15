@@ -673,6 +673,18 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     assert_eq!(reconciliation.destination_cursor, 12);
     assert_eq!(reconciliation.evidence_sequence, 3);
     verify_observation_receipt(&reconciliation, &rig.receipt_public_key).unwrap();
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("OBS-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "pre": pre,
+                "post": post,
+                "reconciliation": reconciliation,
+            }))
+            .expect("serialize DIFF-003 observer receipts"),
+        )
+        .expect("write DIFF-003 observer receipts");
+    }
 }
 
 #[tokio::test]

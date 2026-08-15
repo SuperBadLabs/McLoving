@@ -386,6 +386,13 @@ fn exact_release_verifies_before_deployment_receipt() {
         verified.deployment_receipt("production", DIGEST_A, 1_786_000_199_999),
         Err(ReleaseError::DeploymentDenied)
     ));
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("REL-001.json"),
+            serde_json::to_vec_pretty(&receipt).expect("serialize DIFF-003 release receipt"),
+        )
+        .expect("write DIFF-003 release receipt");
+    }
 
     let mut inverted_anchor = fixture.policy.clone();
     inverted_anchor.expected_audit_anchor.verified_at_unix_ms = 1_786_000_099_999;

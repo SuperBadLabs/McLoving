@@ -406,6 +406,13 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
     let replay = rig.restart().execute_at(request, NOW + 10).await.unwrap();
     assert_eq!(replay, first);
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("EXT-001.json"),
+            serde_json::to_vec_pretty(&first).expect("serialize DIFF-003 connector receipt"),
+        )
+        .expect("write DIFF-003 connector receipt");
+    }
 }
 
 #[tokio::test]

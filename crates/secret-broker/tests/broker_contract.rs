@@ -373,6 +373,18 @@ fn exact_connector_grant_redeems_once_without_disclosing_secret_in_receipts_or_a
             .expect("public evidence is UTF-8")
             .contains("unique-secret-marker")
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("SECRET-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "grant": grant_receipt,
+                "redemption": redeemed.receipt,
+                "provider_calls": *provider.calls.borrow(),
+            }))
+            .expect("serialize DIFF-003 secret receipts"),
+        )
+        .expect("write DIFF-003 secret receipts");
+    }
 }
 
 #[test]

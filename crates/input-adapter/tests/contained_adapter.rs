@@ -591,6 +591,13 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         duplicate.expect("full-window duplicate waiter")
     );
     assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 2);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("INPUT-001.json"),
+            serde_json::to_vec_pretty(&main_receipt).expect("serialize DIFF-003 input receipt"),
+        )
+        .expect("write DIFF-003 input receipt");
+    }
 }
 
 #[tokio::test]

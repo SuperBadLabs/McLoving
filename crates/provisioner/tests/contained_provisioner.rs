@@ -1005,6 +1005,18 @@ async fn ready_replay_cancel_and_fences_are_exact() {
         .expect("newer fence after cleanup");
     assert_eq!(next.body.fence_token, 2);
     assert_eq!(context.fixture.counts().0, 2);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("PROV-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "ready": ready,
+                "cancelled": cancelled,
+                "next_generation": next,
+            }))
+            .expect("serialize DIFF-003 provisioner receipts"),
+        )
+        .expect("write DIFF-003 provisioner receipts");
+    }
 }
 
 #[tokio::test]

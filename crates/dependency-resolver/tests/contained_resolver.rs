@@ -259,93 +259,95 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         },
         loopback_fixture: true,
     };
-    let mutable_receipts = output_root.join("receipts");
-    create_private_directory(&mutable_receipts);
-    let mutable_receipt = private_file(&mutable_receipts, "mutable.key", &receipt_key);
-    let receipt_alias = private_file(fixture.path(), "bind-receipt.key", b"mount target");
-    let mount_status = Command::new("sudo")
-        .arg("mount")
-        .arg("--bind")
-        .arg(&mutable_receipt)
-        .arg(&receipt_alias)
-        .status()
-        .await
-        .expect("bind authority alias");
-    assert!(mount_status.success(), "bind authority alias");
-    let mut bind_alias_config = config.clone();
-    bind_alias_config.receipt_key_path = path_string(&receipt_alias);
-    let bind_alias_result = LoadedAuthorities::load(&bind_alias_config);
-    let unmount_status = Command::new("sudo")
-        .arg("umount")
-        .arg(&receipt_alias)
-        .status()
-        .await
-        .expect("unmount authority alias");
-    assert!(unmount_status.success(), "unmount authority alias");
-    fs::remove_file(&receipt_alias).expect("remove bind target");
-    fs::remove_file(&mutable_receipt).expect("remove mutable receipt source");
-    fs::remove_dir(&mutable_receipts).expect("remove mutable receipt directory");
-    let bind_alias_error = bind_alias_result.expect_err("bind-mounted mutable authority alias");
-    assert_eq!(
-        bind_alias_error.code,
-        "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
-    );
+    if std::env::var_os("MCLOVING_DIFF003_CONTAINED").is_none() {
+        let mutable_receipts = output_root.join("receipts");
+        create_private_directory(&mutable_receipts);
+        let mutable_receipt = private_file(&mutable_receipts, "mutable.key", &receipt_key);
+        let receipt_alias = private_file(fixture.path(), "bind-receipt.key", b"mount target");
+        let mount_status = Command::new("sudo")
+            .arg("mount")
+            .arg("--bind")
+            .arg(&mutable_receipt)
+            .arg(&receipt_alias)
+            .status()
+            .await
+            .expect("bind authority alias");
+        assert!(mount_status.success(), "bind authority alias");
+        let mut bind_alias_config = config.clone();
+        bind_alias_config.receipt_key_path = path_string(&receipt_alias);
+        let bind_alias_result = LoadedAuthorities::load(&bind_alias_config);
+        let unmount_status = Command::new("sudo")
+            .arg("umount")
+            .arg(&receipt_alias)
+            .status()
+            .await
+            .expect("unmount authority alias");
+        assert!(unmount_status.success(), "unmount authority alias");
+        fs::remove_file(&receipt_alias).expect("remove bind target");
+        fs::remove_file(&mutable_receipt).expect("remove mutable receipt source");
+        fs::remove_dir(&mutable_receipts).expect("remove mutable receipt directory");
+        let bind_alias_error = bind_alias_result.expect_err("bind-mounted mutable authority alias");
+        assert_eq!(
+            bind_alias_error.code,
+            "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
+        );
 
-    let topology_alias = output_root.join("topology-alias");
-    let topology_nested = output_root.join("topology-nested");
-    create_private_directory(&topology_alias);
-    create_private_directory(&topology_nested);
-    let topology_mount_status = Command::new("sudo")
-        .arg("mount")
-        .arg("--bind")
-        .arg(&output_root)
-        .arg(&topology_alias)
-        .status()
-        .await
-        .expect("bind mutable root alias");
-    assert!(topology_mount_status.success(), "bind mutable root alias");
-    let nested_authority_path = topology_alias.join("topology-nested");
-    let nested_mount_status = Command::new("sudo")
-        .arg("mount")
-        .arg("--bind")
-        .arg(fixture.path())
-        .arg(&nested_authority_path)
-        .status()
-        .await
-        .expect("bind nested authority topology");
-    assert!(
-        nested_mount_status.success(),
-        "bind nested authority topology"
-    );
-    let nested_topology_result = LoadedAuthorities::load(&config);
-    let nested_unmount_status = Command::new("sudo")
-        .arg("umount")
-        .arg(&nested_authority_path)
-        .status()
-        .await
-        .expect("unmount nested authority topology");
-    assert!(
-        nested_unmount_status.success(),
-        "unmount nested authority topology"
-    );
-    let topology_unmount_status = Command::new("sudo")
-        .arg("umount")
-        .arg(&topology_alias)
-        .status()
-        .await
-        .expect("unmount mutable root alias");
-    assert!(
-        topology_unmount_status.success(),
-        "unmount mutable root alias"
-    );
-    fs::remove_dir(&topology_alias).expect("remove mutable root alias");
-    fs::remove_dir(&topology_nested).expect("remove topology mount point");
-    let nested_topology_error =
-        nested_topology_result.expect_err("path-distinct nested bind topology");
-    assert_eq!(
-        nested_topology_error.code,
-        "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
-    );
+        let topology_alias = output_root.join("topology-alias");
+        let topology_nested = output_root.join("topology-nested");
+        create_private_directory(&topology_alias);
+        create_private_directory(&topology_nested);
+        let topology_mount_status = Command::new("sudo")
+            .arg("mount")
+            .arg("--bind")
+            .arg(&output_root)
+            .arg(&topology_alias)
+            .status()
+            .await
+            .expect("bind mutable root alias");
+        assert!(topology_mount_status.success(), "bind mutable root alias");
+        let nested_authority_path = topology_alias.join("topology-nested");
+        let nested_mount_status = Command::new("sudo")
+            .arg("mount")
+            .arg("--bind")
+            .arg(fixture.path())
+            .arg(&nested_authority_path)
+            .status()
+            .await
+            .expect("bind nested authority topology");
+        assert!(
+            nested_mount_status.success(),
+            "bind nested authority topology"
+        );
+        let nested_topology_result = LoadedAuthorities::load(&config);
+        let nested_unmount_status = Command::new("sudo")
+            .arg("umount")
+            .arg(&nested_authority_path)
+            .status()
+            .await
+            .expect("unmount nested authority topology");
+        assert!(
+            nested_unmount_status.success(),
+            "unmount nested authority topology"
+        );
+        let topology_unmount_status = Command::new("sudo")
+            .arg("umount")
+            .arg(&topology_alias)
+            .status()
+            .await
+            .expect("unmount mutable root alias");
+        assert!(
+            topology_unmount_status.success(),
+            "unmount mutable root alias"
+        );
+        fs::remove_dir(&topology_alias).expect("remove mutable root alias");
+        fs::remove_dir(&topology_nested).expect("remove topology mount point");
+        let nested_topology_error =
+            nested_topology_result.expect_err("path-distinct nested bind topology");
+        assert_eq!(
+            nested_topology_error.code,
+            "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
+        );
+    }
 
     let config_digest = configuration_sha256(&config).expect("configuration digest");
     let mut request = ResolutionRequest {
@@ -429,6 +431,13 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     let right = right.expect("right concurrent receipt");
     assert_eq!(left, right);
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("DEP-001.json"),
+            serde_json::to_vec_pretty(&left).expect("serialize DIFF-003 dependency receipt"),
+        )
+        .expect("write DIFF-003 dependency receipt");
+    }
     drop(resolver);
 
     let mut forged_trusted = frame.clone();

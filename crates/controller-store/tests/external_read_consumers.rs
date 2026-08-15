@@ -585,6 +585,37 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
             .iter()
             .any(|event| event.action == "external_read_consumer.rolled_back")
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("CONSUMER-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "source": {
+                    "consumer_id": source_receipt.consumer_id,
+                    "generation": source_receipt.generation,
+                    "authority": source_receipt.authority,
+                    "binding_digest": source_receipt.binding_digest,
+                    "contract_digest": source_receipt.contract_digest,
+                },
+                "target": {
+                    "consumer_id": target_receipt.consumer_id,
+                    "generation": target_receipt.generation,
+                    "authority": target_receipt.authority,
+                    "binding_digest": target_receipt.binding_digest,
+                    "contract_digest": target_receipt.contract_digest,
+                },
+                "rollback": {
+                    "consumer_id": receipt.consumer_id,
+                    "generation": receipt.generation,
+                    "authority": receipt.authority,
+                    "binding_digest": receipt.binding_digest,
+                    "contract_digest": receipt.contract_digest,
+                },
+                "current": {"generation": current.0, "authority": current.1},
+            }))
+            .expect("serialize DIFF-003 consumer receipts"),
+        )
+        .expect("write DIFF-003 consumer receipts");
+    }
 }
 
 #[tokio::test]

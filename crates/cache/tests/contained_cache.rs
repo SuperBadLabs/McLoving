@@ -157,6 +157,26 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
         Some(b"sealed-dependency".as_slice())
     );
     assert_eq!(store.verify_audit_chain().unwrap(), 3);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("CACHE-001.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "cold": {"status": cold.status, "receipts": cold.receipts},
+                "published": {
+                    "status": published.status,
+                    "receipts": published.receipts,
+                },
+                "hit": {
+                    "status": hit.status,
+                    "content_sha256": hit.content.as_deref().map(digest),
+                    "receipts": hit.receipts,
+                },
+                "audit_events": 3,
+            }))
+            .expect("serialize DIFF-003 cache receipts"),
+        )
+        .expect("write DIFF-003 cache receipts");
+    }
 }
 
 #[test]
