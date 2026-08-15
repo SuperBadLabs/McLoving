@@ -94,6 +94,23 @@ impl std::error::Error for JobError {}
 /// Keeping this Win32 query in the audited FFI capsule lets safe callers
 /// detect workload rename-and-replace attacks without reopening mutable paths.
 pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
+    let information = file_information(file)?;
+    Ok(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+/// Returns the kernel-maintained hardlink count for an open file handle.
+///
+/// Callers use this safe wrapper to reject multiply linked security-boundary
+/// files without duplicating Win32 FFI outside this audited capsule.
+pub fn file_link_count(file: &File) -> Result<u32, JobError> {
+    Ok(file_information(file)?.nNumberOfLinks)
+}
+
+fn file_information(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION, JobError> {
     // SAFETY: zero is the documented initial state for this POD structure.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
     let handle: HANDLE = file.as_raw_handle().cast();
@@ -102,11 +119,7 @@ pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
     if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0 {
         return Err(JobError::last("GetFileInformationByHandle"));
     }
-    Ok(FileIdentity {
-        volume_serial_number: information.dwVolumeSerialNumber,
-        file_index: (u64::from(information.nFileIndexHigh) << 32)
-            | u64::from(information.nFileIndexLow),
-    })
+    Ok(information)
 }
 
 /// Creates a non-inheritable anonymous pipe owned by safe `File` handles.
@@ -831,6 +844,18 @@ mod tests {
         assert_ne!(flags & CREATE_SUSPENDED, 0);
         assert_ne!(flags & CREATE_UNICODE_ENVIRONMENT, 0);
         assert_ne!(flags & EXTENDED_STARTUPINFO_PRESENT, 0);
+    }
+
+    #[test]
+    fn file_link_count_comes_from_the_open_kernel_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("primary");
+        let alias = directory.path().join("alias");
+        std::fs::write(&primary, b"evidence").unwrap();
+        let file = File::open(&primary).unwrap();
+        assert_eq!(file_link_count(&file).unwrap(), 1);
+        std::fs::hard_link(&primary, &alias).unwrap();
+        assert_eq!(file_link_count(&file).unwrap(), 2);
     }
 
     #[test]

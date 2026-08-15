@@ -19,14 +19,21 @@ detached SHA-256 manifest and a digest compiled into
 - the sole compiler-admission receipt and mapping catalog plus lock; and
 - the immutable DIFF-001, DIFF-002, and DIFF-003 evidence sets.
 
-Every relative path is fixed, traversal and symlink components are denied, and
-every input is a bounded, singly linked regular file with an exact compiled
-digest. The aggregate then calls these existing verifiers exactly once:
+Every relative path is fixed, repository-root/traversal/symlink aliases are
+denied, and every input is a bounded, singly linked regular file with an exact
+compiled digest on Linux and Windows. Semantic TSV checks parse the same bytes
+that passed digest verification; they never reopen those paths. The aggregate
+then calls these existing verifiers exactly once:
 
 1. `mcloving-jenkins-differential` for native execution parity;
 2. `mcloving-state-policy-differential` for identity, authorization,
    operational state, and persistent-history parity; and
 3. `mcloving-boundary-differential` for contained external-boundary parity.
+
+The receipt field named `evidence_sha256` is the canonical result digest for
+each verifier: DIFF-001 supplies its derived trace digest, while DIFF-002 and
+DIFF-003 supply their evidence JSON digests. The distinction is explicit so a
+future change cannot silently substitute a different DIFF-001 digest source.
 
 No alternative parser, compiler, transform, runtime, connector, or observer is
 an aggregate acceptance path. The future MIG-007 migration package is not an
@@ -77,8 +84,12 @@ cross-evidence interpretation after DIFF-001.
 The public aggregate categories are:
 
 - deterministic rejection: `E_SOURCE_NOT_ADMITTED`;
-- aggregate mismatch: `E_INPUT_SUBSTITUTION`, `E_IDENTITY_MISMATCH`,
-  `E_RECEIPT_MISMATCH`, and `E_DENOMINATOR_BORROWING`; and
+- aggregate mismatch: every public local-verifier failure (`E_AUTHORITY`,
+  `E_CASE_COVERAGE`, `E_DENOMINATOR_BORROWING`, `E_EVIDENCE_DIGEST`,
+  `E_IDENTITY_MISMATCH`, `E_INPUT_DENOMINATOR`, `E_INPUT_SUBSTITUTION`,
+  `E_IO`, `E_MANIFEST`, `E_POPULATION_COVERAGE`, `E_RECEIPT_MISMATCH`,
+  `E_SCHEMA`, `E_SIZE`, `E_TAXONOMY`, `E_TREE`, and
+  `E_UNCLASSIFIED_CASE`); and
 - upstream regression: `E_DIFF001_REGRESSION`, `E_DIFF002_REGRESSION`, and
   `E_DIFF003_REGRESSION`.
 

@@ -1535,6 +1535,7 @@ dependencies = [
  "mcloving-boundary-differential",
  "mcloving-jenkins-differential",
  "mcloving-state-policy-differential",
+ "mcloving-windows-job",
  "serde",
  "serde_json",
  "sha2",

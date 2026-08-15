@@ -16,11 +16,10 @@ pub const SCHEMA: &str = "mcloving.jenkins.differential-aggregate/v1";
 pub const CASE: &str = "mario-230-corpus-228-immutable-closure";
 pub const EVIDENCE_FILE: &str = "differential-aggregate.json";
 pub const EVIDENCE_SHA256: &str =
-    "c668659ce87bee7b34686c936492b22232e9ba3a7283b986b271a4e54d3f66bc";
+    "90ef410114812982f7dc98cabafea8215a1f87739023f0636853f77b1f9a77a9";
 
 const MAX_EVIDENCE_BYTES: u64 = 32_768;
 const MAX_BOUND_INPUT_BYTES: u64 = 2_097_152;
-const CORPUS_ROOT: &str = "migration/mario-jenkins-oracle-228/corpus-v1";
 const DIFF001_ROOT: &str = "migration/mario-jenkins-oracle-228/corpus-v1/differential-v1";
 const DIFF002_ROOT: &str = "migration/state-policy-differential-v1";
 const DIFF003_ROOT: &str = "migration/boundary-differential-v1";
@@ -103,6 +102,8 @@ struct DifferentialReceipt {
     root: String,
     schema: String,
     case: String,
+    // DIFF-001 binds its canonical derived trace digest here; DIFF-002 and
+    // DIFF-003 bind their canonical evidence JSON digests.
     evidence_sha256: String,
     verified_records: u64,
     mismatches: u64,
@@ -225,7 +226,7 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
             .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
-            || has_multiple_hard_links(&metadata)
+            || has_multiple_hard_links(&entry.path(), &metadata)?
         {
             return Err(VerificationError::new(
                 "E_TREE",
@@ -276,7 +277,7 @@ fn verify_aggregate(
             "aggregate schema or case mismatch",
         ));
     }
-    verify_bound_inputs(&aggregate.inputs, repository_root)?;
+    let verified_inputs = verify_bound_inputs(&aggregate.inputs, repository_root)?;
     let native = mcloving_jenkins_differential::verify_bundle(&repository_root.join(DIFF001_ROOT))
         .map_err(|error| VerificationError::new("E_DIFF001_REGRESSION", error.to_string()))?;
     let state =
@@ -287,15 +288,26 @@ fn verify_aggregate(
             .map_err(|error| VerificationError::new("E_DIFF003_REGRESSION", error.to_string()))?;
     verify_receipts(&aggregate.differential_receipts, &native, &state, &boundary)?;
     verify_identity_joins(&aggregate.identity_joins)?;
-    let corpus_sources = verify_corpus_index(repository_root)?;
-    verify_source_job_map(repository_root, &corpus_sources)?;
+    let corpus_sources =
+        verify_corpus_index(verified_inputs.get("corpus_index").ok_or_else(|| {
+            VerificationError::new("E_INPUT_DENOMINATOR", "missing corpus index")
+        })?)?;
+    verify_source_job_map(
+        verified_inputs.get("source_job_map").ok_or_else(|| {
+            VerificationError::new("E_INPUT_DENOMINATOR", "missing source/job map")
+        })?,
+        &corpus_sources,
+    )?;
     verify_coverage(&aggregate.coverage)?;
     verify_taxonomy(&aggregate.taxonomy)?;
     verify_authority(&aggregate.authority)?;
     Ok(())
 }
 
-fn verify_bound_inputs(inputs: &[BoundInput], root: &Path) -> Result<(), VerificationError> {
+fn verify_bound_inputs(
+    inputs: &[BoundInput],
+    root: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, VerificationError> {
     let expected: BTreeMap<&str, (&str, &str)> = [
         ("corpus_manifest", ("migration/mario-jenkins-oracle-228/corpus-v1/SHA256SUMS", "a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2")),
         ("source_manifest", ("migration/mario-jenkins-oracle-228/corpus-v1/SOURCE_SHA256SUMS", "3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06")),
@@ -317,6 +329,7 @@ fn verify_bound_inputs(inputs: &[BoundInput], root: &Path) -> Result<(), Verific
         ));
     }
     let mut seen = BTreeSet::new();
+    let mut verified = BTreeMap::new();
     for input in inputs {
         if !seen.insert(input.name.as_str()) {
             return Err(VerificationError::new(
@@ -343,8 +356,9 @@ fn verify_bound_inputs(inputs: &[BoundInput], root: &Path) -> Result<(), Verific
                 format!("{} content mismatch", input.name),
             ));
         }
+        verified.insert(input.name.clone(), bytes);
     }
-    Ok(())
+    Ok(verified)
 }
 
 fn verify_receipts(
@@ -379,11 +393,11 @@ fn verify_receipts(
             72,
         ),
     ];
-    for (receipt, root, schema, case, digest, classified) in expected {
+    for (receipt, root, schema, case, canonical_result_sha256, classified) in expected {
         if receipt.root != root
             || receipt.schema != schema
             || receipt.case != case
-            || receipt.evidence_sha256 != *digest
+            || receipt.evidence_sha256 != *canonical_result_sha256
             || receipt.verified_records != classified
             || receipt.mismatches != 0
         {
@@ -461,10 +475,8 @@ fn verify_identity_joins(joins: &IdentityJoins) -> Result<(), VerificationError>
     Ok(())
 }
 
-fn verify_corpus_index(root: &Path) -> Result<BTreeSet<String>, VerificationError> {
-    let path = format!("{CORPUS_ROOT}/corpus-index.tsv");
-    let bytes = read_regular_beneath(root, &path)?;
-    let text = String::from_utf8(bytes)
+fn verify_corpus_index(bytes: &[u8]) -> Result<BTreeSet<String>, VerificationError> {
+    let text = String::from_utf8(bytes.to_vec())
         .map_err(|error| VerificationError::new("E_CASE_COVERAGE", error.to_string()))?;
     let mut lines = text.lines();
     let header = lines
@@ -526,12 +538,10 @@ fn verify_corpus_index(root: &Path) -> Result<BTreeSet<String>, VerificationErro
 }
 
 fn verify_source_job_map(
-    root: &Path,
+    bytes: &[u8],
     corpus_sources: &BTreeSet<String>,
 ) -> Result<(), VerificationError> {
-    let path = format!("{CORPUS_ROOT}/source-job-map.tsv");
-    let bytes = read_regular_beneath(root, &path)?;
-    let text = String::from_utf8(bytes)
+    let text = String::from_utf8(bytes.to_vec())
         .map_err(|error| VerificationError::new("E_POPULATION_COVERAGE", error.to_string()))?;
     let mut lines = text.lines();
     if lines.next()
@@ -648,10 +658,22 @@ fn verify_taxonomy(taxonomy: &Taxonomy) -> Result<(), VerificationError> {
     if taxonomy.deterministic_rejection != ["E_SOURCE_NOT_ADMITTED"]
         || taxonomy.aggregate_mismatch
             != [
-                "E_INPUT_SUBSTITUTION",
-                "E_IDENTITY_MISMATCH",
-                "E_RECEIPT_MISMATCH",
+                "E_AUTHORITY",
+                "E_CASE_COVERAGE",
                 "E_DENOMINATOR_BORROWING",
+                "E_EVIDENCE_DIGEST",
+                "E_IDENTITY_MISMATCH",
+                "E_INPUT_DENOMINATOR",
+                "E_INPUT_SUBSTITUTION",
+                "E_IO",
+                "E_MANIFEST",
+                "E_POPULATION_COVERAGE",
+                "E_RECEIPT_MISMATCH",
+                "E_SCHEMA",
+                "E_SIZE",
+                "E_TAXONOMY",
+                "E_TREE",
+                "E_UNCLASSIFIED_CASE",
             ]
         || taxonomy.regression
             != [
@@ -699,15 +721,33 @@ fn safe_relative(path: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn has_multiple_hard_links(metadata: &fs::Metadata) -> bool {
+fn has_multiple_hard_links(
+    _path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<bool, VerificationError> {
     use std::os::unix::fs::MetadataExt as _;
 
-    metadata.nlink() != 1
+    Ok(metadata.nlink() != 1)
 }
 
-#[cfg(not(unix))]
-fn has_multiple_hard_links(_metadata: &fs::Metadata) -> bool {
-    false
+#[cfg(windows)]
+fn has_multiple_hard_links(
+    path: &Path,
+    _metadata: &fs::Metadata,
+) -> Result<bool, VerificationError> {
+    let file =
+        fs::File::open(path).map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    let count = mcloving_windows_job::file_link_count(&file)
+        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    Ok(count != 1)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn has_multiple_hard_links(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+) -> Result<bool, VerificationError> {
+    Ok(true)
 }
 
 fn read_bounded(
@@ -763,7 +803,7 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
     }
     let metadata = fs::symlink_metadata(&current)
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if !metadata.is_file() || has_multiple_hard_links(&metadata) {
+    if !metadata.is_file() || has_multiple_hard_links(&current, &metadata)? {
         return Err(VerificationError::new(
             "E_INPUT_SUBSTITUTION",
             "bound input is not an unaliased regular file",
@@ -857,7 +897,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn multiply_linked_bound_input_fails_closed() {
         let temporary = tempfile::tempdir().expect("temporary repository");

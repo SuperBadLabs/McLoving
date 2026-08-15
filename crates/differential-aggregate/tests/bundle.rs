@@ -91,7 +91,7 @@ fn symlinked_evidence_fails_closed() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn hardlinked_evidence_fails_closed() {
     let temporary = copy_fixture();
