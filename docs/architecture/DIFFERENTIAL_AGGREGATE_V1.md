@@ -37,10 +37,13 @@ DIFF-002 and DIFF-003 use their authenticated evidence bytes and compiled
 canonical manifests. Each snapshot remains alive through verifier completion
 and is then removed. On Windows, the aggregate additionally retains every
 snapshot directory and file handle without write/delete sharing, preventing
-replacement regardless of an inherited temporary-directory ACL. A mutable
-repository or concurrent local process therefore cannot replace a file between
-aggregate authentication and canonical semantic verification. The aggregate
-then calls these existing verifiers exactly once against those snapshots:
+replacement regardless of an inherited temporary-directory ACL. It then
+rehashes the manifest and every snapshot file from those exact retained handles
+against the original authenticated bytes, closing the materialization-to-anchor
+window. A mutable repository or concurrent local process therefore cannot
+replace a file between aggregate authentication and canonical semantic
+verification. The aggregate then calls these existing verifiers exactly once
+against those snapshots:
 
 1. `mcloving-jenkins-differential` for native execution parity;
 2. `mcloving-state-policy-differential` for identity, authorization,

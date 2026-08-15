@@ -1134,7 +1134,10 @@ fn materialize_snapshot(
     set_private_directory(snapshot.path())?;
     write_private_snapshot_file(snapshot.path(), "SHA256SUMS", manifest)?;
     #[cfg(windows)]
-    let snapshot_paths = files.keys().cloned().collect::<Vec<_>>();
+    let snapshot_digests = files
+        .iter()
+        .map(|(relative, bytes)| (relative.clone(), sha256(bytes)))
+        .collect::<BTreeMap<_, _>>();
     for (relative, bytes) in files {
         let parent = Path::new(&relative).parent().ok_or_else(|| {
             VerificationError::new("E_INPUT_SUBSTITUTION", "snapshot path has no parent")
@@ -1148,7 +1151,7 @@ fn materialize_snapshot(
         write_private_snapshot_file(snapshot.path(), &relative, &bytes)?;
     }
     #[cfg(windows)]
-    let anchors = anchor_windows_snapshot(snapshot.path(), &snapshot_paths)?;
+    let anchors = anchor_windows_snapshot(snapshot.path(), &sha256(manifest), &snapshot_digests)?;
     Ok(VerifiedSnapshot {
         directory: snapshot,
         #[cfg(windows)]
@@ -1159,7 +1162,8 @@ fn materialize_snapshot(
 #[cfg(windows)]
 fn anchor_windows_snapshot(
     root: &Path,
-    files: &[String],
+    manifest_sha256: &str,
+    files: &BTreeMap<String, String>,
 ) -> Result<Vec<fs::File>, VerificationError> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
@@ -1199,7 +1203,7 @@ fn anchor_windows_snapshot(
     };
 
     let mut directories = BTreeSet::new();
-    for relative in files {
+    for relative in files.keys() {
         if let Some(parent) = Path::new(relative).parent()
             && !parent.as_os_str().is_empty()
         {
@@ -1210,11 +1214,36 @@ fn anchor_windows_snapshot(
     for directory in directories {
         anchors.push(open_anchor(&root.join(directory), true)?);
     }
-    anchors.push(open_anchor(&root.join("SHA256SUMS"), false)?);
-    for relative in files {
-        anchors.push(open_anchor(&root.join(relative), false)?);
+    let manifest = open_anchor(&root.join("SHA256SUMS"), false)?;
+    verify_windows_snapshot_anchor(&manifest, manifest_sha256)?;
+    anchors.push(manifest);
+    for (relative, expected_sha256) in files {
+        let file = open_anchor(&root.join(relative), false)?;
+        verify_windows_snapshot_anchor(&file, expected_sha256)?;
+        anchors.push(file);
     }
     Ok(anchors)
+}
+
+#[cfg(windows)]
+fn verify_windows_snapshot_anchor(
+    file: &fs::File,
+    expected_sha256: &str,
+) -> Result<(), VerificationError> {
+    let bytes = read_bounded_file(
+        file.try_clone()
+            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?,
+        MAX_SNAPSHOT_BYTES,
+        "E_INPUT_SUBSTITUTION",
+        "anchored snapshot file exceeds byte ceiling",
+    )?;
+    if sha256(&bytes) != expected_sha256 {
+        return Err(VerificationError::new(
+            "E_INPUT_SUBSTITUTION",
+            "anchored snapshot content changed during materialization",
+        ));
+    }
+    Ok(())
 }
 
 fn write_private_snapshot_file(
@@ -1308,6 +1337,25 @@ mod tests {
 
         assert!(fs::write(snapshot.path().join("evidence.json"), b"replacement\n").is_err());
         assert!(fs::remove_file(snapshot.path().join("SHA256SUMS")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_snapshot_anchor_rejects_pre_anchor_replacement() {
+        let snapshot = temporary_directory();
+        let manifest = b"manifest\n";
+        let evidence = b"authenticated\n";
+        fs::write(snapshot.path().join("SHA256SUMS"), manifest).expect("write manifest");
+        fs::write(snapshot.path().join("evidence.json"), b"replacement\n")
+            .expect("write substituted evidence");
+
+        let error = anchor_windows_snapshot(
+            snapshot.path(),
+            &sha256(manifest),
+            &BTreeMap::from([("evidence.json".to_owned(), sha256(evidence))]),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "E_INPUT_SUBSTITUTION");
     }
 
     #[test]
