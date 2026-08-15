@@ -172,9 +172,13 @@ podman run --detach --name "${postgres}" \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
   --env POSTGRES_DB=mcloving \
   "${MCLOVING_POSTGRES_IMAGE}" >/dev/null
+postgres_ready=false
 for _ in $(seq 1 120); do
-  if podman exec "${postgres}" pg_isready \
+  if podman run --rm --network "${target_network}" \
+    --security-opt no-new-privileges --cap-drop all \
+    "${MCLOVING_POSTGRES_IMAGE}" pg_isready --host postgres \
     --username mcloving --dbname mcloving >/dev/null 2>&1; then
+    postgres_ready=true
     break
   fi
   if [[ "$(podman inspect --format '{{.State.Running}}' "${postgres}")" != true ]]; then
@@ -185,8 +189,7 @@ for _ in $(seq 1 120); do
   fi
   sleep 0.25
 done
-if ! podman exec "${postgres}" pg_isready \
-  --username mcloving --dbname mcloving >/dev/null 2>&1; then
+if [[ "${postgres_ready}" != true ]]; then
   podman logs "${postgres}" >"${evidence}/postgres.log" 2>&1
   podman inspect "${postgres}" >"${evidence}/postgres-inspect.json"
   echo "DIFF-003 PostgreSQL fixture did not become ready" >&2
