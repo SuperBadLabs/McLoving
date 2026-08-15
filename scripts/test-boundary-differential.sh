@@ -590,6 +590,24 @@ if grep -R -E -- 'BEGIN (OPENSSH |EC |RSA )?PRIVATE KEY|BEGIN PRIVATE KEY|releas
   echo "DIFF-003 retained evidence contains private-key material or a private-key path" >&2
   exit 1
 fi
+mixed_percent_pattern_for() {
+  local representation="$1"
+  local pattern=''
+  local character character_hex escaped_character
+  local character_index
+  for ((character_index = 0; character_index < ${#representation}; character_index++)); do
+    character="${representation:character_index:1}"
+    printf -v character_hex '%02x' "'${character}"
+    case "${character}" in
+      '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|'\')
+        escaped_character="\\${character}"
+        ;;
+      *) escaped_character="${character}" ;;
+    esac
+    pattern+="(${escaped_character}|%${character_hex})"
+  done
+  printf '%s' "${pattern}"
+}
 for private_marker in \
   contained-source-credential-marker-00000001 \
   contained-source-receipt-signing-key-00000000000000000001 \
@@ -610,19 +628,6 @@ for private_marker in \
   marker_hex="$(printf '%s' "${private_marker}" | od -An -v -tx1 | tr -d ' \n')"
   marker_percent="$(printf '%s' "${marker_hex}" | sed 's/../%&/g')"
   marker_nested="$(printf '%s' "${marker_base64}" | base64 -w0)"
-  mixed_percent_pattern=''
-  for ((marker_index = 0; marker_index < ${#private_marker}; marker_index++)); do
-    marker_character="${private_marker:marker_index:1}"
-    printf -v marker_character_hex '%02x' "'${marker_character}"
-    mixed_percent_pattern+="(${marker_character}|%${marker_character_hex})"
-  done
-  printf -v first_marker_hex '%02x' "'${private_marker:0:1}"
-  partially_encoded_probe="%${first_marker_hex}${private_marker:1}"
-  printf '%s' "${partially_encoded_probe}" \
-    | grep -E -i -- "${mixed_percent_pattern}" >/dev/null || {
-      echo "DIFF-003 mixed percent marker scanner self-test failed" >&2
-      exit 1
-    }
   for marker_variant in \
     "${private_marker}" "${marker_base64}" "${marker_base64url}" \
     "${marker_hex}" "${marker_percent}" "${marker_nested}"; do
@@ -651,21 +656,33 @@ for private_marker in \
       fi
     done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
   done
-  if grep -R -E -i -- "${mixed_percent_pattern}" "${evidence}" >/dev/null; then
-    echo "DIFF-003 retained evidence disclosed a partially percent-encoded marker" >&2
-    exit 1
-  fi
-  folded_mixed_percent_pattern=$(printf '%s' "${mixed_percent_pattern}" \
-    | tr '[:upper:]' '[:lower:]')
-  while IFS= read -r -d '' retained_name; do
-    folded_name=$(printf '%s' "${retained_name}" | tr '[:upper:]' '[:lower:]')
-    if [[ "${folded_name}" =~ ${folded_mixed_percent_pattern} ]]; then
-      echo "DIFF-003 retained evidence pathname disclosed a partially percent-encoded marker" >&2
+  for percent_mixed_representation in \
+    "${private_marker}" "${marker_base64}" "${marker_base64url}" \
+    "${marker_hex}" "${marker_nested}"; do
+    mixed_percent_pattern="$(mixed_percent_pattern_for "${percent_mixed_representation}")"
+    printf -v first_representation_hex '%02x' "'${percent_mixed_representation:0:1}"
+    partially_encoded_probe="%${first_representation_hex}${percent_mixed_representation:1}"
+    printf '%s' "${partially_encoded_probe}" \
+      | grep -E -i -- "${mixed_percent_pattern}" >/dev/null || {
+        echo "DIFF-003 mixed percent encoded-form scanner self-test failed" >&2
+        exit 1
+      }
+    if grep -R -E -i -- "${mixed_percent_pattern}" "${evidence}" >/dev/null; then
+      echo "DIFF-003 retained evidence disclosed a partially percent-encoded marker form" >&2
       exit 1
     fi
-  done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
+    folded_mixed_percent_pattern=$(printf '%s' "${mixed_percent_pattern}" \
+      | tr '[:upper:]' '[:lower:]')
+    while IFS= read -r -d '' retained_name; do
+      folded_name=$(printf '%s' "${retained_name}" | tr '[:upper:]' '[:lower:]')
+      if [[ "${folded_name}" =~ ${folded_mixed_percent_pattern} ]]; then
+        echo "DIFF-003 retained evidence pathname disclosed a partially percent-encoded marker form" >&2
+        exit 1
+      fi
+    done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
+  done
 done
-printf 'contents-and-pathnames-raw-base64-base64url-hex-all-case-percent-mixed-all-case-nested-base64-clean\n' \
+printf 'contents-and-pathnames-raw-base64-base64url-hex-nested-base64-percent-mixed-all-forms-all-case-clean\n' \
   >"${evidence}/encoded-marker-scan.txt"
 comparison_update="${runtime_root}/runtime-comparison.json"
 jq '.secret_marker_disclosures = 0 | .encoded_marker_scan_passed = true' \
