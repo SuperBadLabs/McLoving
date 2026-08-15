@@ -1,5 +1,14 @@
 # Differential aggregate v1
 
+Status: `MIG-006` complete. Exact PR head
+`ab7c0061c9004c2e5cd33c50b55ddc35fb306d38` passed Foundation run
+`31912421075`, Windows run `31912421043`, strict local and HeMan verification,
+and clean exact-head review after all twenty-two review threads were fixed and
+resolved. PR #61 squash-merged as protected-main commit
+`2a8f983838b4bd063bd029b3e164f7ac36c20439`; protected-main Foundation run
+`31914011695` and Windows run `31914011627` passed as the post-merge
+verification receipts.
+
 MIG-006 closes one immutable, non-authoritative compatibility claim over the
 exact Mario inventory, corpus, and DIFF-001/002/003 receipts. It does not rerun
 Jenkins, McLoving, a state transform, or any external-boundary implementation.
