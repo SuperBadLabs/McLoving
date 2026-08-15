@@ -327,6 +327,7 @@ podman create --name "${connector_runner}" --network none \
   --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
   --env MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions \
   --env MCLOVING_DIFF003_RELEASE_RECEIPT=/release-receipt/REL-001.json \
+  --env MCLOVING_DIFF003_SECRET_GRANT_RECEIPT=/release-receipt/SECRET-001.json \
   --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target_connector}:/cargo-target:Z" \

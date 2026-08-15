@@ -131,6 +131,12 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
   and (.release_binding.envelope_sha256 | test($d))
   and (.release_binding.bundle_sha256 | test($d))
   and .release_binding.request_payload_sha256 == .request_payload_sha256
+  and (.secret_grant_binding.grant_receipt_sha256 | test($d))
+  and (.secret_grant_binding.grant_id | type == "string" and length > 0)
+  and (.secret_grant_binding.grant_version | type == "string" and length > 0)
+  and (.secret_grant_binding.grant_scope | type == "string" and length > 0)
+  and (.secret_grant_binding.configuration_sha256 | test($d))
+  and .secret_grant_binding.request_payload_sha256 == .request_payload_sha256
   and (.observer_receipt_signing_public_key_sha256 | test($d))
 ' "${receipt_dir}/EXT-001.json" >/dev/null || fail "EXT-001 contract"
 
@@ -391,6 +397,33 @@ while IFS=$'\t' read -r name source target rule expected_effects \
     secret_grant_to_connector)
       pair_filter='.[0].provider_calls == 1
         and .[0].redemption.grant_receipt_sha256 == .[0].grant.receipt_sha256
+        and .[1].secret_grant_binding.grant_receipt_sha256 == $source_sha
+        and .[0].grant.grant_id == .[1].credential_grant_id
+        and .[0].grant.protocol_version == .[1].credential_grant_version
+        and .[1].secret_grant_binding.grant_id == .[1].credential_grant_id
+        and .[1].secret_grant_binding.grant_version == .[1].credential_grant_version
+        and .[1].secret_grant_binding.grant_scope == .[1].credential_grant_scope
+        and .[1].secret_grant_binding.configuration_sha256
+          == .[0].grant.consumer.configuration_sha256
+        and .[1].secret_grant_binding.request_payload_sha256 == .[1].request_payload_sha256
+        and .[1].secret_grant_binding.organization_id == .[0].grant.organization_id
+        and .[1].secret_grant_binding.project_id == .[0].grant.project_id
+        and .[1].secret_grant_binding.build_id == .[0].grant.build_id
+        and .[1].secret_grant_binding.attempt_id == .[0].grant.attempt_id
+        and .[1].secret_grant_binding.fence == .[0].grant.fence
+        and .[1].tenant_id == .[0].grant.organization_id
+        and .[1].project_id == .[0].grant.project_id
+        and .[1].build_id == .[0].grant.build_id
+        and .[1].attempt_id == .[0].grant.attempt_id
+        and .[1].effect_fence == .[0].grant.fence
+        and .[1].credential_grant_scope == (
+          "organization/" + .[0].grant.organization_id
+          + "/project/" + .[0].grant.project_id
+          + "/build/" + .[0].grant.build_id
+          + "/attempt/" + .[0].grant.attempt_id
+          + "/environment/" + .[0].grant.environment
+          + "/action/" + .[0].grant.action
+          + "/fence/" + (.[0].grant.fence | tostring))
         and .[0].grant.consumer.connector_id == .[1].connector_id
         and .[0].grant.consumer.implementation_sha256 == .[1].connector_implementation_sha256
         and .[0].grant.fence == .[1].effect_fence

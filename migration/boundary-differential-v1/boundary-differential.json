@@ -124,7 +124,7 @@
     {
       "id": "EXT-001",
       "protocol": "mcloving.external-connector/v1",
-      "implementation_source_manifest_sha256": "51c28fe53f33041d271240fe3696257a938ef70d26ec21a32a53fffd9519656d",
+      "implementation_source_manifest_sha256": "c70e0a8d12e63bd44e53dab2621de95b447935cbe1306b3973bbd94d813859e0",
       "configuration_sha256": "4461c18123789610f43dd626491419d96bd40ed51f372c46ef81f353c0a9b016",
       "account_identity": "diff003-account/ext-001",
       "resource_identity": "diff003-resource/ext-001",

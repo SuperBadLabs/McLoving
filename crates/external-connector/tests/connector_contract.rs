@@ -62,6 +62,23 @@ struct Diff003ReleaseBinding {
     bundle_sha256: String,
 }
 
+#[derive(Clone)]
+struct Diff003SecretGrantBinding {
+    receipt_sha256: String,
+    grant_id: String,
+    grant_version: String,
+    grant_scope: String,
+    configuration_sha256: String,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    attempt_id: Uuid,
+    fence: u64,
+    rotation_generation: u64,
+    connector_id: String,
+    implementation_sha256: String,
+}
+
 struct Rig {
     _state: TempDir,
     config: ConnectorConfig,
@@ -72,11 +89,13 @@ struct Rig {
     connector: ExternalConnector,
     calls: Arc<AtomicUsize>,
     release_binding: Option<Diff003ReleaseBinding>,
+    secret_grant_binding: Option<Diff003SecretGrantBinding>,
 }
 
 impl Rig {
     async fn new(mode: Mode, _class: IdempotencyClass) -> Self {
         let release_binding = diff003_release_binding();
+        let secret_grant_binding = diff003_secret_grant_binding();
         let request_seed = vec![1; 32];
         let destination_seed = vec![2; 32];
         let outcome_seed = vec![3; 32];
@@ -98,11 +117,36 @@ impl Rig {
         make_private(state.path());
         let mut public_output_schema = BTreeMap::new();
         public_output_schema.insert("url".to_owned(), JsonKind::String);
+        let mut request_payload_schema = if release_binding.is_some() {
+            BTreeMap::from([
+                ("release_id".to_owned(), JsonKind::String),
+                ("release_receipt_sha256".to_owned(), JsonKind::String),
+                ("manifest_sha256".to_owned(), JsonKind::String),
+                ("envelope_sha256".to_owned(), JsonKind::String),
+                ("bundle_sha256".to_owned(), JsonKind::String),
+            ])
+        } else {
+            BTreeMap::from([("release".to_owned(), JsonKind::String)])
+        };
+        if secret_grant_binding.is_some() {
+            request_payload_schema
+                .insert("secret_grant_receipt_sha256".to_owned(), JsonKind::String);
+            request_payload_schema.insert(
+                "secret_grant_configuration_sha256".to_owned(),
+                JsonKind::String,
+            );
+        }
         let config = ConnectorConfig {
             schema_version: CONFIG_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            connector_id: "connector/release/v1".to_owned(),
-            implementation_sha256: "a".repeat(64),
+            connector_id: secret_grant_binding.as_ref().map_or_else(
+                || "connector/release/v1".to_owned(),
+                |binding| binding.connector_id.clone(),
+            ),
+            implementation_sha256: secret_grant_binding.as_ref().map_or_else(
+                || "a".repeat(64),
+                |binding| binding.implementation_sha256.clone(),
+            ),
             image_sha256: "b".repeat(64),
             runtime_attestation_authority_key_id: "key/runtime-attestation".to_owned(),
             runtime_attestation_authority_key_sha256: "9".repeat(64),
@@ -113,7 +157,9 @@ impl Rig {
             configuration_authority_identity: "authority/config".to_owned(),
             request_authority_identity: "authority/request".to_owned(),
             credential_issuance_path_identity: "issuer/connector".to_owned(),
-            generation: 1,
+            generation: secret_grant_binding
+                .as_ref()
+                .map_or(1, |binding| binding.rotation_generation),
             activation_mode: ActivationMode::Current,
             previous_generation: None,
             previous_config_sha256: None,
@@ -125,22 +171,21 @@ impl Rig {
             effect_class: "release_publication".to_owned(),
             action_name: "publish_release".to_owned(),
             action_schema_version: "release-publication/v1".to_owned(),
-            request_payload_schema: if release_binding.is_some() {
-                BTreeMap::from([
-                    ("release_id".to_owned(), JsonKind::String),
-                    ("release_receipt_sha256".to_owned(), JsonKind::String),
-                    ("manifest_sha256".to_owned(), JsonKind::String),
-                    ("envelope_sha256".to_owned(), JsonKind::String),
-                    ("bundle_sha256".to_owned(), JsonKind::String),
-                ])
-            } else {
-                BTreeMap::from([("release".to_owned(), JsonKind::String)])
-            },
+            request_payload_schema,
             public_output_schema,
             allowed_secret_taints: BTreeSet::from(["release-token".to_owned()]),
-            credential_grant_id: "grant/release".to_owned(),
-            credential_grant_version: "generation/7".to_owned(),
-            credential_grant_scope: "release:write".to_owned(),
+            credential_grant_id: secret_grant_binding.as_ref().map_or_else(
+                || "grant/release".to_owned(),
+                |binding| binding.grant_id.clone(),
+            ),
+            credential_grant_version: secret_grant_binding.as_ref().map_or_else(
+                || "generation/7".to_owned(),
+                |binding| binding.grant_version.clone(),
+            ),
+            credential_grant_scope: secret_grant_binding.as_ref().map_or_else(
+                || "release:write".to_owned(),
+                |binding| binding.grant_scope.clone(),
+            ),
             credential_grant_expires_unix_ms: NOW + 60_000,
             credential_token_sha256: content_sha256(TOKEN),
             request_authority_key_id: "key/request".to_owned(),
@@ -230,20 +275,59 @@ impl Rig {
             connector,
             calls,
             release_binding,
+            secret_grant_binding,
         }
     }
 
     fn request(&self, class: IdempotencyClass) -> ActionRequest {
+        let mut request_payload = self.release_binding.as_ref().map_or_else(
+            || json!({"release": "v1.0.0"}),
+            |binding| {
+                json!({
+                    "release_id": binding.release_id,
+                    "release_receipt_sha256": binding.receipt_sha256,
+                    "manifest_sha256": binding.manifest_sha256,
+                    "envelope_sha256": binding.envelope_sha256,
+                    "bundle_sha256": binding.bundle_sha256,
+                })
+            },
+        );
+        if let Some(binding) = &self.secret_grant_binding {
+            let payload = request_payload.as_object_mut().unwrap();
+            payload.insert(
+                "secret_grant_receipt_sha256".to_owned(),
+                json!(binding.receipt_sha256),
+            );
+            payload.insert(
+                "secret_grant_configuration_sha256".to_owned(),
+                json!(binding.configuration_sha256),
+            );
+        }
         let mut request = ActionRequest {
             schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             request_id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
-            project_id: Uuid::new_v4(),
+            tenant_id: self
+                .secret_grant_binding
+                .as_ref()
+                .map_or_else(Uuid::new_v4, |binding| binding.organization_id),
+            project_id: self
+                .secret_grant_binding
+                .as_ref()
+                .map_or_else(Uuid::new_v4, |binding| binding.project_id),
             pipeline_id: Uuid::new_v4(),
-            build_id: Uuid::new_v4(),
-            attempt_id: Uuid::new_v4(),
-            effect_fence: 9,
+            build_id: self
+                .secret_grant_binding
+                .as_ref()
+                .map_or_else(Uuid::new_v4, |binding| binding.build_id),
+            attempt_id: self
+                .secret_grant_binding
+                .as_ref()
+                .map_or_else(Uuid::new_v4, |binding| binding.attempt_id),
+            effect_fence: self
+                .secret_grant_binding
+                .as_ref()
+                .map_or(9, |binding| binding.fence),
             effect_key: "publish/release-1".to_owned(),
             connector_id: self.config.connector_id.clone(),
             expected_implementation_sha256: self.config.implementation_sha256.clone(),
@@ -257,18 +341,7 @@ impl Rig {
             idempotency_class: class,
             action_name: self.config.action_name.clone(),
             action_schema_version: self.config.action_schema_version.clone(),
-            request_payload: self.release_binding.as_ref().map_or_else(
-                || json!({"release": "v1.0.0"}),
-                |binding| {
-                    json!({
-                        "release_id": binding.release_id,
-                        "release_receipt_sha256": binding.receipt_sha256,
-                        "manifest_sha256": binding.manifest_sha256,
-                        "envelope_sha256": binding.envelope_sha256,
-                        "bundle_sha256": binding.bundle_sha256,
-                    })
-                },
-            ),
+            request_payload,
             credential_grant_id: self.config.credential_grant_id.clone(),
             credential_grant_version: self.config.credential_grant_version.clone(),
             credential_grant_scope: self.config.credential_grant_scope.clone(),
@@ -457,6 +530,29 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
                 "request_payload_sha256": first.request_payload_sha256,
             });
         }
+        if let Some(binding) = &rig.secret_grant_binding {
+            assert_eq!(
+                request.request_payload["secret_grant_receipt_sha256"],
+                binding.receipt_sha256
+            );
+            assert_eq!(
+                request.request_payload["secret_grant_configuration_sha256"],
+                binding.configuration_sha256
+            );
+            receipt["secret_grant_binding"] = json!({
+                "grant_receipt_sha256": binding.receipt_sha256,
+                "grant_id": binding.grant_id,
+                "grant_version": binding.grant_version,
+                "grant_scope": binding.grant_scope,
+                "configuration_sha256": binding.configuration_sha256,
+                "organization_id": binding.organization_id,
+                "project_id": binding.project_id,
+                "build_id": binding.build_id,
+                "attempt_id": binding.attempt_id,
+                "fence": binding.fence,
+                "request_payload_sha256": first.request_payload_sha256,
+            });
+        }
         receipt["observer_receipt_signing_public_key_sha256"] = json!(
             rig.config
                 .observer_binding
@@ -485,6 +581,38 @@ fn diff003_release_binding() -> Option<Diff003ReleaseBinding> {
         manifest_sha256: release["manifest_sha256"].as_str()?.to_owned(),
         envelope_sha256: release["envelope_sha256"].as_str()?.to_owned(),
         bundle_sha256: release["bundle_sha256"].as_str()?.to_owned(),
+    })
+}
+
+fn diff003_secret_grant_binding() -> Option<Diff003SecretGrantBinding> {
+    let path = std::env::var_os("MCLOVING_DIFF003_SECRET_GRANT_RECEIPT")?;
+    let bytes = std::fs::read(path).ok()?;
+    let receipt: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let grant = receipt.get("grant")?;
+    let consumer = grant.get("consumer")?;
+    let organization_id = Uuid::parse_str(grant["organization_id"].as_str()?).ok()?;
+    let project_id = Uuid::parse_str(grant["project_id"].as_str()?).ok()?;
+    let build_id = Uuid::parse_str(grant["build_id"].as_str()?).ok()?;
+    let attempt_id = Uuid::parse_str(grant["attempt_id"].as_str()?).ok()?;
+    let environment = grant["environment"].as_str()?;
+    let action = grant["action"].as_str()?;
+    let fence = grant["fence"].as_u64()?;
+    Some(Diff003SecretGrantBinding {
+        receipt_sha256: content_sha256(&bytes),
+        grant_id: grant["grant_id"].as_str()?.to_owned(),
+        grant_version: grant["protocol_version"].as_str()?.to_owned(),
+        grant_scope: format!(
+            "organization/{organization_id}/project/{project_id}/build/{build_id}/attempt/{attempt_id}/environment/{environment}/action/{action}/fence/{fence}"
+        ),
+        configuration_sha256: consumer["configuration_sha256"].as_str()?.to_owned(),
+        organization_id,
+        project_id,
+        build_id,
+        attempt_id,
+        fence,
+        rotation_generation: grant["rotation_generation"].as_u64()?,
+        connector_id: consumer["connector_id"].as_str()?.to_owned(),
+        implementation_sha256: consumer["implementation_sha256"].as_str()?.to_owned(),
     })
 }
 
