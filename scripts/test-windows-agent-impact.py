@@ -109,8 +109,21 @@ class WindowsAgentImpactTests(unittest.TestCase):
         self.assertTrue(run_windows)
         self.assertIn("dependency source", reason)
 
+    def test_windows_verifier_source_triggers(self) -> None:
+        run_windows, reason = IMPACT.classify(
+            {"crates/differential-aggregate/src/lib.rs"},
+            {Path("bins/agent"), Path("crates/domain")},
+            {Path("bins/agent"), Path("crates/domain")},
+            "same",
+            "same",
+            "same",
+            "same",
+        )
+        self.assertTrue(run_windows)
+        self.assertIn("Windows verifier source", reason)
+
     def test_repository_cargo_configuration_triggers(self) -> None:
-        for path in (".cargo/config", ".cargo/config.toml"):
+        for path in (".cargo/config", ".cargo/config.toml", ".gitattributes"):
             with self.subTest(path=path):
                 run_windows, reason = IMPACT.classify(
                     {path},

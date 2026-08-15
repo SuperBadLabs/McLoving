@@ -11,6 +11,7 @@ members = [
   "crates/controller-api",
   "crates/controller-store",
   "crates/dependency-resolver",
+  "crates/differential-aggregate",
   "crates/destination-observer",
   "crates/domain",
   "crates/external-connector",

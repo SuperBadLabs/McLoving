@@ -19,21 +19,22 @@ pub const EVIDENCE_SHA256: &str =
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
-const JENKINS_IMAGE_SHA256: &str =
+pub const JENKINS_IMAGE_SHA256: &str =
     "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02";
-const RUST_IMAGE_SHA256: &str = "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
-const POSTGRES_IMAGE_SHA256: &str =
+pub const RUST_IMAGE_SHA256: &str =
+    "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
+pub const POSTGRES_IMAGE_SHA256: &str =
     "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
-const RUNTIME_DEPENDENCY_MANIFEST_SHA256: &str =
+pub const RUNTIME_DEPENDENCY_MANIFEST_SHA256: &str =
     "238ed4cc59ff67bbb1dc40bb1bd3ec28dce914c4dffd701f1a8505d760ba11a4";
-const IDENTITY_CLIENT_MANIFEST_SHA256: &str =
+pub const IDENTITY_CLIENT_MANIFEST_SHA256: &str =
     "a4227af8021c7d5fb6f7cc72be84af756ce1f95d33cd2ec9bad721beab587549";
-const RELEASE_ID: &str = "3d38cc2c-a88b-4fac-aae2-7d9459c36ee5";
-const RELEASE_ENVELOPE_SHA256: &str =
+pub const RELEASE_ID: &str = "3d38cc2c-a88b-4fac-aae2-7d9459c36ee5";
+pub const RELEASE_ENVELOPE_SHA256: &str =
     "09fea3d02f5bdb55fd4835a6bf92339eb47cfbba9f33b8b4a3bc4925596e293e";
-const RELEASE_EVIDENCE_MANIFEST_SHA256: &str =
+pub const RELEASE_EVIDENCE_MANIFEST_SHA256: &str =
     "0ccc39a48217524efe681d984fea41f4f1afe1d3fa1be3177fa4598e6ddf8a41";
-const RELEASE_VERIFICATION_RECEIPT_SHA256: &str =
+pub const RELEASE_VERIFICATION_RECEIPT_SHA256: &str =
     "6c11cc651b1f4daab6647b43947a433ae565b1a11dfa09cf5cf48e9f789f139f";
 
 const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
@@ -539,20 +540,25 @@ pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationErr
     verify_tree(root)?;
     let bytes = fs::read(root.join(EVIDENCE_FILE))
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    verify_evidence_bytes(&bytes)
+}
+
+/// Verifies already authenticated evidence bytes without reopening a path.
+pub fn verify_evidence_bytes(bytes: &[u8]) -> Result<VerificationReceipt, VerificationError> {
     if bytes.len() as u64 > MAX_EVIDENCE_BYTES {
         return Err(VerificationError::new(
             "E_SIZE",
             "evidence exceeds byte ceiling",
         ));
     }
-    let evidence_sha256 = sha256(&bytes);
+    let evidence_sha256 = sha256(bytes);
     if evidence_sha256 != EVIDENCE_SHA256 {
         return Err(VerificationError::new(
             "E_EVIDENCE_DIGEST",
             "boundary evidence does not match the compiled detached digest",
         ));
     }
-    let evidence: Evidence = serde_json::from_slice(&bytes)
+    let evidence: Evidence = serde_json::from_slice(bytes)
         .map_err(|error| VerificationError::new("E_SCHEMA", error.to_string()))?;
     verify_evidence(&evidence)?;
     Ok(VerificationReceipt {

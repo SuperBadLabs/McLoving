@@ -25,6 +25,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Security::{SECURITY_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -94,6 +95,47 @@ impl std::error::Error for JobError {}
 /// Keeping this Win32 query in the audited FFI capsule lets safe callers
 /// detect workload rename-and-replace attacks without reopening mutable paths.
 pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
+    let information = file_information(file)?;
+    Ok(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+/// Compares two Windows path spellings with the kernel's ordinal,
+/// case-insensitive Unicode semantics.
+pub fn path_spelling_eq_ignore_case(left: &OsStr, right: &OsStr) -> Result<bool, JobError> {
+    let left = left.encode_wide().collect::<Vec<_>>();
+    let right = right.encode_wide().collect::<Vec<_>>();
+    let left_len = i32::try_from(left.len()).map_err(|_| JobError::invalid("path length"))?;
+    let right_len = i32::try_from(right.len()).map_err(|_| JobError::invalid("path length"))?;
+    // SAFETY: both pointers refer to initialized UTF-16 slices for the exact
+    // lengths supplied, and CompareStringOrdinal does not retain them.
+    let result =
+        unsafe { CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) };
+    if result == 0 {
+        return Err(JobError::last("CompareStringOrdinal"));
+    }
+    Ok(result == CSTR_EQUAL)
+}
+
+/// Returns the kernel-maintained hardlink count for an open file handle.
+///
+/// Callers use this safe wrapper to reject multiply linked security-boundary
+/// files without duplicating Win32 FFI outside this audited capsule.
+pub fn file_link_count(file: &File) -> Result<u32, JobError> {
+    Ok(file_information(file)?.nNumberOfLinks)
+}
+
+/// Reports whether an open handle names a Windows reparse point.
+pub fn file_is_reparse_point(file: &File) -> Result<bool, JobError> {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    Ok(file_information(file)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+fn file_information(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION, JobError> {
     // SAFETY: zero is the documented initial state for this POD structure.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
     let handle: HANDLE = file.as_raw_handle().cast();
@@ -102,11 +144,7 @@ pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
     if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0 {
         return Err(JobError::last("GetFileInformationByHandle"));
     }
-    Ok(FileIdentity {
-        volume_serial_number: information.dwVolumeSerialNumber,
-        file_index: (u64::from(information.nFileIndexHigh) << 32)
-            | u64::from(information.nFileIndexLow),
-    })
+    Ok(information)
 }
 
 /// Creates a non-inheritable anonymous pipe owned by safe `File` handles.
@@ -831,6 +869,30 @@ mod tests {
         assert_ne!(flags & CREATE_SUSPENDED, 0);
         assert_ne!(flags & CREATE_UNICODE_ENVIRONMENT, 0);
         assert_ne!(flags & EXTENDED_STARTUPINFO_PRESENT, 0);
+    }
+
+    #[test]
+    fn file_link_count_comes_from_the_open_kernel_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("primary");
+        let alias = directory.path().join("alias");
+        std::fs::write(&primary, b"evidence").unwrap();
+        let file = File::open(&primary).unwrap();
+        assert_eq!(file_link_count(&file).unwrap(), 1);
+        std::fs::hard_link(&primary, &alias).unwrap();
+        assert_eq!(file_link_count(&file).unwrap(), 2);
+        assert!(!file_is_reparse_point(&file).unwrap());
+    }
+
+    #[test]
+    fn path_spelling_comparison_uses_windows_unicode_case_semantics() {
+        assert!(
+            path_spelling_eq_ignore_case(OsStr::new(r"C:\RÉSUMÉ"), OsStr::new(r"c:\résumé"),)
+                .unwrap()
+        );
+        assert!(
+            !path_spelling_eq_ignore_case(OsStr::new(r"C:\one"), OsStr::new(r"C:\two")).unwrap()
+        );
     }
 
     #[test]
