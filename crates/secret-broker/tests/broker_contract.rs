@@ -589,35 +589,58 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
         percent,
     ];
     let representation_count = representations.len();
-    let mut confidentiality_denials = 0;
+    let mut pre_persistence_denials = 0;
+    let mut persisted_rows = 0_i64;
+    let mut persisted_marker_bytes = 0;
     for (index, representation) in representations.into_iter().enumerate() {
         let mut mapping = mapping(connector());
         mapping.mapping_id = Uuid::from_u128(100 + index as u128);
-        mapping.provider_reference = representation;
+        mapping.provider_reference = representation.clone();
         approve(&mut mapping);
-        let mut request = grant(&mapping);
-        request.grant_id = Uuid::from_u128(200 + index as u128);
-        request.mapping_id = mapping.mapping_id;
-        let (_root, mut broker) = broker();
-        install(&mut broker, &mapping, 900);
-        broker.issue_grant(&request, 1_000).expect("grant");
-        let provider = ExactProvider::new(provider_request(&mapping, &request));
-        let disclosure_result = broker.redeem_grant(&redemption(&request), &provider, 2_000);
-        let disclosure_denied =
-            matches!(disclosure_result, Err(BrokerError::ConfidentialityDenied));
-        assert!(disclosure_denied);
-        confidentiality_denials += usize::from(disclosure_denied);
-        assert_eq!(broker.verify_audit_chain().expect("valid audit"), 2);
+        let (root, mut broker) = broker();
+        let install_result = broker.install_mapping(&mapping, 900);
+        let denied_before_persistence = matches!(install_result, Err(BrokerError::InvalidMapping));
+        assert!(denied_before_persistence);
+        pre_persistence_denials += usize::from(denied_before_persistence);
+
+        let connection = rusqlite::Connection::open(root.path().join("broker.sqlite"))
+            .expect("inspect broker state");
+        for table in [
+            "mapping_versions",
+            "mapping_heads",
+            "grants",
+            "audit_events",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count persisted rows");
+            persisted_rows += count;
+            assert_eq!(count, 0, "{table} persisted a rejected marker mapping");
+        }
+        drop(connection);
+        drop(broker);
+        let database = std::fs::read(root.path().join("broker.sqlite")).expect("read broker state");
+        let marker_persisted = database
+            .windows(representation.len())
+            .any(|window| window == representation.as_bytes());
+        persisted_marker_bytes += usize::from(marker_persisted);
+        assert!(!marker_persisted);
     }
     diff003::record_assertion(
         "secret_marker_disclosure_denied",
         "denied",
         serde_json::json!({
             "representations_attempted": representation_count,
-            "confidentiality_denials": confidentiality_denials,
+            "pre_persistence_denials": pre_persistence_denials,
+            "persisted_rows": persisted_rows,
+            "persisted_marker_representations": persisted_marker_bytes,
             "representations": ["raw", "base64", "hex", "percent"],
         }),
-        confidentiality_denials == representation_count,
+        pre_persistence_denials == representation_count
+            && persisted_rows == 0
+            && persisted_marker_bytes == 0,
     );
 }
 

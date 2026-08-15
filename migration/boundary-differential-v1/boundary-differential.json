@@ -85,7 +85,7 @@
     {
       "id": "SECRET-001",
       "protocol": "mcloving.secret-grant/v1",
-      "implementation_source_manifest_sha256": "600deb4ee224353782f5b5c5c1a3b04075da4e1481c9b00e457c96297b5bea87",
+      "implementation_source_manifest_sha256": "77623dbc30c3fb8ae69c47fd0bd8fba97b3cb5367b934f9aac51d22ff46e5b1e",
       "configuration_sha256": "cd100128c5738a0895f1c9e0cc01551d12990fe5bcb86ae9561688ef40ac1685",
       "account_identity": "diff003-account/secret-001",
       "resource_identity": "diff003-resource/secret-001",
@@ -301,7 +301,7 @@
     "unsupported_operations_retired": false
   },
   "marker_scan": {
-    "injected_markers": 13,
+    "injected_markers": 14,
     "disclosed_markers": 0,
     "scanned_surfaces": [
       "artifact",

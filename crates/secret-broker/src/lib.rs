@@ -1274,7 +1274,7 @@ fn validate_mapping(mapping: &CredentialMapping) -> Result<(), BrokerError> {
         || !valid_text(&mapping.provider_version, MAX_TEXT_BYTES)
         || !is_sha256(&mapping.provider_implementation_sha256)
         || !is_sha256(&mapping.provider_configuration_sha256)
-        || !valid_text(&mapping.provider_reference, MAX_REFERENCE_BYTES)
+        || !valid_provider_reference(&mapping.provider_reference)
         || !valid_text(&mapping.secret_version, MAX_TEXT_BYTES)
         || mapping.rotation_generation == 0
         || mapping.declared_taint != mapping.consumer.taint_class()
@@ -1377,6 +1377,18 @@ fn valid_text(value: &str, maximum: usize) -> bool {
         && value.len() <= maximum
         && value == value.trim()
         && !value.chars().any(char::is_control)
+}
+
+fn valid_provider_reference(value: &str) -> bool {
+    valid_text(value, MAX_REFERENCE_BYTES)
+        && (value.contains('/') || value.contains(':'))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'.' | b'_' | b'-')
+        })
+        && !matches!(value.as_bytes().first(), Some(b'/' | b':'))
+        && !matches!(value.as_bytes().last(), Some(b'/' | b':'))
+        && !value.contains("//")
+        && !value.contains("::")
 }
 
 fn is_sha256(value: &str) -> bool {

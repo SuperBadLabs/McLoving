@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "97f2f52ea043cf609bbd5ed9ce4d2b2166b9c555f43a889eec9652e1e9fe10db";
+    "74eb2c88e25a2fac0b0012ced545e1214528dfec6a88e6391421491f4dae4243";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -50,7 +50,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "SECRET-001",
         "mcloving.secret-grant/v1",
-        "600deb4ee224353782f5b5c5c1a3b04075da4e1481c9b00e457c96297b5bea87",
+        "77623dbc30c3fb8ae69c47fd0bd8fba97b3cb5367b934f9aac51d22ff46e5b1e",
     ),
     (
         "INPUT-001",
@@ -956,7 +956,7 @@ fn verify_clients(clients: &ClientMigration) -> Result<(), VerificationError> {
 }
 
 fn verify_markers(markers: &MarkerScan) -> Result<(), VerificationError> {
-    if markers.injected_markers != 13
+    if markers.injected_markers != 14
         || markers.disclosed_markers != 0
         || markers
             .scanned_surfaces

@@ -140,7 +140,7 @@ nonempty object or two unrelated receipt hashes cannot satisfy the gate.
 
 ## Secret and client truth
 
-Thirteen synthetic markers exercise the declared artifact, audit, cache,
+Fourteen synthetic markers exercise the declared artifact, audit, cache,
 controller API, destination response, log, receipt, retained-state,
 reverse-transform, test-report, and workspace surfaces. The accepted shape is
 zero disclosure on every surface.
