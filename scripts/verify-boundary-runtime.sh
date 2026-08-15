@@ -117,6 +117,7 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
   and .ready.outcome == "ready"
   and .cancelled.outcome == "cancelled" and .cancelled.cleanup_confirmed
   and .next_generation.fence_token == 2
+  and (.source_acquisition_receipt_sha256 | test($d))
 ' "${receipt_dir}/PROV-001.json" >/dev/null || fail "PROV-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
@@ -137,12 +138,15 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
   and .pre.destination_cursor < .post.destination_cursor
   and .post.destination_cursor < .reconciliation.destination_cursor
   and .reconciliation.evidence_sequence == 3
+  and (.connector_receipt_sha256 | test($d))
 ' "${receipt_dir}/OBS-001.json" >/dev/null || fail "OBS-001 contract"
 
 jq --exit-status '
   .initial.parent_generation == 1 and .initial.source_cursor == 1
   and .reconfigured.parent_generation == 2 and .reconfigured.source_cursor == 4
   and .initial.observation_count > 0 and .reconfigured.retired_count > 0
+  and (.trigger_receipt_sha256 | test("^[0-9a-f]{64}$"))
+  and (.trigger_id | type == "string" and length > 0)
 ' "${receipt_dir}/DISC-001.json" >/dev/null || fail "DISC-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
@@ -393,20 +397,41 @@ while IFS=$'\t' read -r name source target rule expected_effects \
       ;;
     discovery_to_trigger)
       pair_filter='.[0].initial.parent_generation == .[1].trigger_generation
-        and .[0].reconfigured.parent_generation > .[1].trigger_generation'
+        and .[0].reconfigured.parent_generation > .[1].trigger_generation
+        and .[0].trigger_receipt_sha256 == $target_sha
+        and .[0].trigger_id == .[1].trigger_id
+        and .[0].initial.organization_id == .[1].organization_id
+        and .[0].initial.project_id == .[1].project_id
+        and .[0].initial.pipeline_id == .[1].pipeline_id'
       ;;
     provisioner_to_source_transport)
       pair_filter='.[0].ready.outcome == "ready"
         and .[0].cancelled.outcome == "cancelled" and .[0].cancelled.cleanup_confirmed
         and .[0].next_generation.fence_token == 2
         and .[0].ready.generation == .[1].initial.generation
+        and .[0].source_acquisition_receipt_sha256 == $target_sha
+        and .[0].ready.tenant_id == .[1].initial.organization_id
+        and .[0].ready.project_id == .[1].initial.project_id
+        and .[0].ready.build_id == .[1].initial.build_id
+        and .[0].ready.attempt_id == .[1].initial.attempt_id
         and (.[0].ready.agent.network.egress_allowlist
           | index("source.contained:443") != null)
         and .[1].initial.protocol_version == "mcloving.source-acquirer/v1"'
       ;;
     connector_to_observer)
       pair_filter='.[0].status == "succeeded" and .[0].attempt_count == 1
+        and .[1].connector_receipt_sha256 == $source_sha
+        and .[0].tenant_id == .[1].post.tenant_id
+        and .[0].project_id == .[1].post.project_id
+        and .[0].pipeline_id == .[1].post.pipeline_id
+        and .[0].build_id == .[1].post.build_id
+        and .[0].attempt_id == .[1].post.attempt_id
+        and .[0].effect_fence == .[1].post.effect_fence
+        and .[0].endpoint_identity == .[1].post.endpoint_identity
+        and .[0].account_identity == .[1].post.account_identity
+        and .[0].resource_identity == .[1].post.resource_identity
         and .[0].effect_class == .[1].post.effect_class
+        and .[0].external_ids.release_id == .[1].post.canonical_query.release_id
         and .[0].generation == .[1].post.generation
         and .[0].outcome_signing_public_key_sha256
           == .[1].post.receipt_signing_public_key_sha256
@@ -434,7 +459,8 @@ while IFS=$'\t' read -r name source target rule expected_effects \
       ;;
     *) fail "unsupported join compatibility rule ${name}" ;;
   esac
-  jq --exit-status --arg source_sha "${source_sha}" --slurp \
+  jq --exit-status --arg source_sha "${source_sha}" \
+    --arg target_sha "${target_sha}" --slurp \
     "${pair_filter}" "${source_file}" "${target_file}" \
     >/dev/null || fail "join ${name} independent compatibility rule"
 

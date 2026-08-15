@@ -944,7 +944,13 @@ fn reconcile_request(config: &ProvisionerConfig, implementation_sha256: &str) ->
 #[tokio::test]
 async fn ready_replay_cancel_and_fences_are_exact() {
     let context = Context::new(FixtureMode::Ready).await;
-    let request = context.request();
+    let mut request = context.request();
+    if let Some((tenant_id, project_id, build_id, attempt_id)) = diff003_source_workload() {
+        request.tenant_id = tenant_id;
+        request.project_id = project_id;
+        request.build_id = build_id;
+        request.attempt_id = attempt_id;
+    }
     let ready = context
         .provisioner
         .provision(&request)
@@ -1009,6 +1015,8 @@ async fn ready_replay_cancel_and_fences_are_exact() {
     assert_eq!(next.body.fence_token, 2);
     assert_eq!(context.fixture.counts().0, 2);
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let source_receipt = std::fs::read(std::path::Path::new(&root).join("SCM-001.json"))
+            .expect("read live DIFF-003 source receipt");
         std::fs::write(
             std::path::Path::new(&root).join("PROV-001.json"),
             diff003::receipt(
@@ -1017,11 +1025,26 @@ async fn ready_replay_cancel_and_fences_are_exact() {
                     "ready": ready,
                     "cancelled": cancelled,
                     "next_generation": next,
+                    "source_acquisition_receipt_sha256": digest(&source_receipt),
                 }),
             ),
         )
         .expect("write DIFF-003 provisioner receipts");
     }
+}
+
+fn diff003_source_workload() -> Option<(Uuid, Uuid, Uuid, Uuid)> {
+    let root = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR")?;
+    let source: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("SCM-001.json")).ok()?,
+    )
+    .ok()?;
+    Some((
+        Uuid::parse_str(source["initial"]["organization_id"].as_str()?).ok()?,
+        Uuid::parse_str(source["initial"]["project_id"].as_str()?).ok()?,
+        Uuid::parse_str(source["initial"]["build_id"].as_str()?).ok()?,
+        Uuid::parse_str(source["initial"]["attempt_id"].as_str()?).ok()?,
+    ))
 }
 
 #[tokio::test]

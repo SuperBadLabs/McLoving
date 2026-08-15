@@ -353,11 +353,13 @@ podman create --name "${observer_runner}" --network none \
   --env RUSTUP_TOOLCHAIN=1.97.1 \
   --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
   --env MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions \
+  --env MCLOVING_DIFF003_CONNECTOR_RECEIPT=/connector-receipt/EXT-001.json \
   --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target_observer}:/cargo-target:Z" \
   --volume "${observer_boundary_dir}:/receipt:Z" \
   --volume "${observer_assertion_dir}:/assertions:Z" \
+  --volume "${connector_boundary_dir}:/connector-receipt:ro,Z" \
   --volume "${repo_root}:/work:ro,Z" --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
   cargo test --locked --offline -p mcloving-destination-observer \

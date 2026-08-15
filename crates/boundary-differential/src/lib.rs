@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "d79047f200db9b96eaeecacb6419e9ff40f45fc1b7e26ceffab2393512fb7eb9";
+    "0681816f4ed67a9d283ad545255141c6e84c59a4c65e6ef7c6770cac3b42a3a7";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -40,7 +40,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "TRIG-001",
         "mcloving.trigger-ingress/v1",
-        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
+        "d06b6237c9ac6f4f1035ee97659519d689987e05ad927c06ad1f7ab01687a155",
     ),
     (
         "SCM-001",
@@ -60,7 +60,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "PROV-001",
         "mcloving.provisioner.v1",
-        "b87c420a8261a7890409e3039df62437580f2338b58da772e785eedc053c462f",
+        "8da1fb702618c9d18865578b3d7f86777891850d394eefa28a10c3b39e7fc39e",
     ),
     (
         "EXT-001",
@@ -70,12 +70,12 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "OBS-001",
         "mcloving.destination-observer/v1",
-        "430c64296388b64ee735b3594d88b37648ddee24fa2d094a7fbc07c35533a156",
+        "b2f86d5cbdff705089541323e67d75d45c1fc3f20ebb2ee89c79e29212e0ebef",
     ),
     (
         "DISC-001",
         "mcloving.discovery/v1",
-        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
+        "d06b6237c9ac6f4f1035ee97659519d689987e05ad927c06ad1f7ab01687a155",
     ),
     (
         "DEP-001",
@@ -90,12 +90,12 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "CONSUMER-001",
         "mcloving.external-read-consumer/v1",
-        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
+        "d06b6237c9ac6f4f1035ee97659519d689987e05ad927c06ad1f7ab01687a155",
     ),
     (
         "ADMIN-001",
         "mcloving.external-admin-client/v1",
-        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
+        "d06b6237c9ac6f4f1035ee97659519d689987e05ad927c06ad1f7ab01687a155",
     ),
     (
         "REL-001",

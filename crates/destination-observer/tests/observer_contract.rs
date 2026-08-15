@@ -96,6 +96,20 @@ struct DestinationState {
     reads: AtomicU64,
 }
 
+struct Diff003ConnectorBinding {
+    tenant_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    build_id: Uuid,
+    attempt_id: Uuid,
+    effect_fence: u64,
+    endpoint_identity: String,
+    account_identity: String,
+    resource_identity: String,
+    effect_class: String,
+    release_id: String,
+}
+
 struct Rig {
     directory: TempDir,
     observer: DestinationObserver,
@@ -108,6 +122,7 @@ struct Rig {
     receipt_seed: Vec<u8>,
     implementation_sha256: String,
     image_sha256: String,
+    connector_binding: Option<Diff003ConnectorBinding>,
 }
 
 impl Rig {
@@ -141,6 +156,7 @@ impl Rig {
         }
         let implementation_sha256 = "a".repeat(64);
         let image_sha256 = "b".repeat(64);
+        let connector_binding = diff003_connector_binding();
         let marker_digests = vec![content_sha256(TOKEN), content_sha256(SECRET)];
         let config = ObserverConfig {
             schema_version: CONFIG_SCHEMA_VERSION.to_owned(),
@@ -161,10 +177,22 @@ impl Rig {
             previous_config_sha256: None,
             rollback_from_generation: None,
             endpoint_url: format!("http://{address}/state"),
-            endpoint_identity: "endpoint/release-state".to_owned(),
-            account_identity: "account/customer-a".to_owned(),
-            resource_identity: "release/app-a".to_owned(),
-            effect_class: "release_publication".to_owned(),
+            endpoint_identity: connector_binding
+                .as_ref()
+                .map(|binding| binding.endpoint_identity.clone())
+                .unwrap_or_else(|| "endpoint/release-state".to_owned()),
+            account_identity: connector_binding
+                .as_ref()
+                .map(|binding| binding.account_identity.clone())
+                .unwrap_or_else(|| "account/customer-a".to_owned()),
+            resource_identity: connector_binding
+                .as_ref()
+                .map(|binding| binding.resource_identity.clone())
+                .unwrap_or_else(|| "release/app-a".to_owned()),
+            effect_class: connector_binding
+                .as_ref()
+                .map(|binding| binding.effect_class.clone())
+                .unwrap_or_else(|| "release_publication".to_owned()),
             state_schema_version: "release-state/v1".to_owned(),
             allowed_query_keys: vec!["release_id".to_owned()],
             response_schema: vec![StateFieldSchema {
@@ -233,22 +261,53 @@ impl Rig {
             receipt_seed,
             implementation_sha256,
             image_sha256,
+            connector_binding,
         }
     }
 
     fn request(&self, phase: ObservationPhase) -> ObservationRequest {
         let mut query = BTreeMap::new();
-        query.insert("release_id".to_owned(), "release-42".to_owned());
+        query.insert(
+            "release_id".to_owned(),
+            self.connector_binding
+                .as_ref()
+                .map(|binding| binding.release_id.clone())
+                .unwrap_or_else(|| "release-42".to_owned()),
+        );
         ObservationRequest {
             schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             observation_id: Uuid::new_v4(),
-            tenant_id: Uuid::from_u128(1),
-            project_id: Uuid::from_u128(2),
-            pipeline_id: Uuid::from_u128(3),
-            build_id: Uuid::from_u128(4),
-            attempt_id: Uuid::from_u128(5),
-            effect_fence: 17,
+            tenant_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.tenant_id)
+                .unwrap_or_else(|| Uuid::from_u128(1)),
+            project_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.project_id)
+                .unwrap_or_else(|| Uuid::from_u128(2)),
+            pipeline_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.pipeline_id)
+                .unwrap_or_else(|| Uuid::from_u128(3)),
+            build_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.build_id)
+                .unwrap_or_else(|| Uuid::from_u128(4)),
+            attempt_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.attempt_id)
+                .unwrap_or_else(|| Uuid::from_u128(5)),
+            effect_fence: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.effect_fence)
+                .unwrap_or(17),
             phase,
             observer_id: "observer-release-state".to_owned(),
             request_authority_identity: "authority/reconciler".to_owned(),
@@ -259,10 +318,10 @@ impl Rig {
             activation_mode: ActivationMode::Current,
             previous_generation: None,
             rollback_from_generation: None,
-            endpoint_identity: "endpoint/release-state".to_owned(),
-            account_identity: "account/customer-a".to_owned(),
-            resource_identity: "release/app-a".to_owned(),
-            effect_class: "release_publication".to_owned(),
+            endpoint_identity: self.config.endpoint_identity.clone(),
+            account_identity: self.config.account_identity.clone(),
+            resource_identity: self.config.resource_identity.clone(),
+            effect_class: self.config.effect_class.clone(),
             read_grant_id: "grant/observer".to_owned(),
             read_grant_version: "7".to_owned(),
             read_grant_scope: "release:read".to_owned(),
@@ -308,6 +367,24 @@ impl Rig {
             vec![TOKEN.to_vec(), SECRET.to_vec()],
         )
     }
+}
+
+fn diff003_connector_binding() -> Option<Diff003ConnectorBinding> {
+    let path = std::env::var_os("MCLOVING_DIFF003_CONNECTOR_RECEIPT")?;
+    let connector: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    Some(Diff003ConnectorBinding {
+        tenant_id: Uuid::parse_str(connector["tenant_id"].as_str()?).ok()?,
+        project_id: Uuid::parse_str(connector["project_id"].as_str()?).ok()?,
+        pipeline_id: Uuid::parse_str(connector["pipeline_id"].as_str()?).ok()?,
+        build_id: Uuid::parse_str(connector["build_id"].as_str()?).ok()?,
+        attempt_id: Uuid::parse_str(connector["attempt_id"].as_str()?).ok()?,
+        effect_fence: connector["effect_fence"].as_u64()?,
+        endpoint_identity: connector["endpoint_identity"].as_str()?.to_owned(),
+        account_identity: connector["account_identity"].as_str()?.to_owned(),
+        resource_identity: connector["resource_identity"].as_str()?.to_owned(),
+        effect_class: connector["effect_class"].as_str()?.to_owned(),
+        release_id: connector["external_ids"]["release_id"].as_str()?.to_owned(),
+    })
 }
 
 async fn destination_handler(
@@ -677,6 +754,11 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     assert_eq!(reconciliation.evidence_sequence, 3);
     verify_observation_receipt(&reconciliation, &rig.receipt_public_key).unwrap();
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let connector_receipt = fs::read(
+            std::env::var_os("MCLOVING_DIFF003_CONNECTOR_RECEIPT")
+                .expect("DIFF-003 connector receipt path"),
+        )
+        .expect("read live DIFF-003 connector receipt");
         std::fs::write(
             std::path::Path::new(&root).join("OBS-001.json"),
             diff003::receipt(
@@ -685,6 +767,7 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
                     "pre": pre,
                     "post": post,
                     "reconciliation": reconciliation,
+                    "connector_receipt_sha256": content_sha256(&connector_receipt),
                 }),
             ),
         )
