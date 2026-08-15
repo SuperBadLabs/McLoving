@@ -13,7 +13,9 @@ fn fixture() -> PathBuf {
 }
 
 fn copy_fixture() -> TempDir {
-    let temporary = tempfile::tempdir().expect("temporary directory");
+    let temporary_root = repository().join("target/differential-aggregate-bundle-tests");
+    fs::create_dir_all(&temporary_root).expect("temporary root");
+    let temporary = tempfile::tempdir_in(temporary_root).expect("temporary directory");
     for name in ["SHA256SUMS", EVIDENCE_FILE] {
         fs::copy(fixture().join(name), temporary.path().join(name)).expect("copy fixture file");
     }
@@ -101,6 +103,29 @@ fn hardlinked_evidence_fails_closed() {
         alias_directory.path().join("evidence-alias"),
     )
     .expect("hardlink evidence");
+    assert_eq!(
+        verify_bundle(temporary.path(), &repository())
+            .unwrap_err()
+            .code,
+        "E_TREE"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_evidence_fails_closed_without_waiting_for_a_writer() {
+    use std::process::Command;
+
+    let temporary = copy_fixture();
+    let evidence = temporary.path().join(EVIDENCE_FILE);
+    fs::remove_file(&evidence).expect("remove evidence");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&evidence)
+            .status()
+            .unwrap()
+            .success()
+    );
     assert_eq!(
         verify_bundle(temporary.path(), &repository())
             .unwrap_err()

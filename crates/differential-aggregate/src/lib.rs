@@ -168,7 +168,9 @@ pub fn verify_bundle(
     bundle_root: &Path,
     repository_root: &Path,
 ) -> Result<VerificationReceipt, VerificationError> {
-    let mut bundle = verify_bundle_tree(bundle_root)?;
+    let bundle_root = canonical_direct_directory(bundle_root, "E_TREE")?;
+    let repository_root = canonical_direct_directory(repository_root, "E_INPUT_SUBSTITUTION")?;
+    let mut bundle = verify_bundle_tree(&bundle_root)?;
     let manifest_file = bundle
         .remove("SHA256SUMS")
         .ok_or_else(|| VerificationError::new("E_TREE", "missing detached manifest"))?;
@@ -203,7 +205,7 @@ pub fn verify_bundle(
     }
     let aggregate: Aggregate = serde_json::from_slice(&bytes)
         .map_err(|error| VerificationError::new("E_SCHEMA", error.to_string()))?;
-    verify_aggregate(&aggregate, repository_root)?;
+    verify_aggregate(&aggregate, &repository_root)?;
     Ok(VerificationReceipt {
         schema: SCHEMA,
         case: CASE,
@@ -720,6 +722,58 @@ fn safe_relative(path: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+fn lexical_absolute(path: &Path) -> Result<std::path::PathBuf, VerificationError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
+            .join(path)
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(VerificationError::new(
+                        "E_INPUT_SUBSTITUTION",
+                        "root path escapes its filesystem root",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn canonical_direct_directory(
+    path: &Path,
+    error_code: &'static str,
+) -> Result<std::path::PathBuf, VerificationError> {
+    let lexical = lexical_absolute(path)?;
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    if lexical != canonical {
+        return Err(VerificationError::new(
+            error_code,
+            "root path contains a symlink or alias component",
+        ));
+    }
+    let metadata = fs::symlink_metadata(&canonical)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(VerificationError::new(
+            error_code,
+            "root path is not a direct directory",
+        ));
+    }
+    Ok(canonical)
+}
+
 #[cfg(unix)]
 fn has_multiple_hard_links(
     _file: &fs::File,
@@ -765,7 +819,7 @@ fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
 
     fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(path)
 }
 
@@ -808,15 +862,7 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
             "input path is not a safe relative path",
         ));
     }
-    let root_metadata = fs::symlink_metadata(root)
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        return Err(VerificationError::new(
-            "E_INPUT_SUBSTITUTION",
-            "repository root is not a direct directory",
-        ));
-    }
-    let mut current = root.to_path_buf();
+    let mut current = canonical_direct_directory(root, "E_INPUT_SUBSTITUTION")?;
     for component in Path::new(relative).components() {
         let Component::Normal(part) = component else {
             return Err(VerificationError::new(
@@ -881,6 +927,12 @@ mod tests {
         .expect("parse aggregate fixture")
     }
 
+    fn temporary_directory() -> tempfile::TempDir {
+        let root = repository().join("target/differential-aggregate-unit-tests");
+        fs::create_dir_all(&root).expect("temporary root");
+        tempfile::tempdir_in(root).expect("temporary directory")
+    }
+
     #[test]
     fn exact_aggregate_verifies_all_three_canonical_receipts() {
         verify_aggregate(&fixture(), &repository()).expect("verify aggregate");
@@ -939,7 +991,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn multiply_linked_bound_input_fails_closed() {
-        let temporary = tempfile::tempdir().expect("temporary repository");
+        let temporary = temporary_directory();
         let input = temporary.path().join("input.json");
         let alias_directory = tempfile::tempdir().expect("alias directory");
         fs::write(&input, b"{}\n").expect("write input");
@@ -958,7 +1010,7 @@ mod tests {
     fn symlinked_repository_root_fails_closed() {
         use std::os::unix::fs::symlink;
 
-        let parent = tempfile::tempdir().expect("parent directory");
+        let parent = temporary_directory();
         let repository = parent.path().join("repository");
         let alias = parent.path().join("repository-alias");
         fs::create_dir(&repository).expect("create repository");
@@ -971,9 +1023,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_repository_root_ancestor_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temporary_directory();
+        let real_parent = parent.path().join("real-parent");
+        let repository = real_parent.join("repository");
+        let alias_parent = parent.path().join("alias-parent");
+        fs::create_dir_all(&repository).expect("create repository");
+        fs::write(repository.join("input.json"), b"{}\n").expect("write input");
+        symlink(&real_parent, &alias_parent).expect("symlink ancestor");
+
+        assert_eq!(
+            read_regular_beneath(&alias_parent.join("repository"), "input.json")
+                .unwrap_err()
+                .code,
+            "E_INPUT_SUBSTITUTION"
+        );
+    }
+
     #[test]
     fn oversized_bound_input_fails_before_reading() {
-        let repository = tempfile::tempdir().expect("temporary repository");
+        let repository = temporary_directory();
         let input = fs::File::create(repository.path().join("input.json")).expect("create input");
         input
             .set_len(MAX_BOUND_INPUT_BYTES + 1)
@@ -990,7 +1063,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn validated_handle_preserves_bytes_across_path_replacement() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = temporary_directory();
         let path = directory.path().join("evidence");
         fs::write(&path, b"authenticated").expect("write evidence");
         let file = open_no_follow(&path).expect("open evidence once");

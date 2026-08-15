@@ -22,11 +22,12 @@ detached SHA-256 manifest and a digest compiled into
 Every relative path is fixed, repository-root/traversal/symlink aliases are
 denied, and every input is a bounded, singly linked regular file with an exact
 compiled digest on Linux and Windows. Semantic TSV checks parse the same bytes
-that passed digest verification; each boundary file is opened once with
-no-follow semantics, its regular-file/reparse/link identity is validated from
-that handle, and its bounded bytes are read from the same handle. Semantic
-checks never reopen those paths. The aggregate then calls these existing
-verifiers exactly once:
+that passed digest verification; each root is required to be its direct
+lexically normalized canonical path, and each boundary file is opened once
+with no-follow semantics. Unix opens are nonblocking so a FIFO cannot stall
+validation. Regular-file/reparse/link identity is validated from that handle,
+and bounded bytes are read from the same handle. Semantic checks never reopen
+those paths. The aggregate then calls these existing verifiers exactly once:
 
 1. `mcloving-jenkins-differential` for native execution parity;
 2. `mcloving-state-policy-differential` for identity, authorization,
