@@ -168,7 +168,6 @@ podman run --detach --name "${postgres}" \
   --network "${target_network}" --network-alias postgres \
   --cpus 2 --memory 2g --pids-limit 1024 \
   --security-opt no-new-privileges \
-  --cap-drop all \
   --env POSTGRES_USER=mcloving \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
   --env POSTGRES_DB=mcloving \
@@ -178,10 +177,21 @@ for _ in $(seq 1 120); do
     --username mcloving --dbname mcloving >/dev/null 2>&1; then
     break
   fi
+  if [[ "$(podman inspect --format '{{.State.Running}}' "${postgres}")" != true ]]; then
+    podman logs "${postgres}" >"${evidence}/postgres.log" 2>&1
+    podman inspect "${postgres}" >"${evidence}/postgres-inspect.json"
+    echo "DIFF-003 PostgreSQL fixture exited before readiness" >&2
+    exit 1
+  fi
   sleep 0.25
 done
-podman exec "${postgres}" pg_isready \
-  --username mcloving --dbname mcloving >/dev/null
+if ! podman exec "${postgres}" pg_isready \
+  --username mcloving --dbname mcloving >/dev/null 2>&1; then
+  podman logs "${postgres}" >"${evidence}/postgres.log" 2>&1
+  podman inspect "${postgres}" >"${evidence}/postgres-inspect.json"
+  echo "DIFF-003 PostgreSQL fixture did not become ready" >&2
+  exit 1
+fi
 
 podman create --name "${runner}" \
   --network "${target_network}" \
