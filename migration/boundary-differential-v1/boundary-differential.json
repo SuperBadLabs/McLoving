@@ -71,7 +71,7 @@
     {
       "id": "SCM-001",
       "protocol": "mcloving.source-acquirer/v1",
-      "implementation_source_manifest_sha256": "d7578b04c0ebcfd80e162e5e67a1477d350768710379b6d9f4c9fcc578eec9d8",
+      "implementation_source_manifest_sha256": "f20beb032434de570c899fae0a037441585c55b9cf5d6e49f0527ee2c43df361",
       "configuration_sha256": "3c6d55e6b12f900d8800b927f38d2d6068e004797a6cc1e6cef5d501288c0e59",
       "account_identity": "diff003-account/scm-001",
       "resource_identity": "diff003-resource/scm-001",

@@ -709,14 +709,17 @@ async fn untrusted_fork_is_denied_before_source_access() {
 }
 
 #[tokio::test]
-async fn repository_that_ignores_blob_filter_is_denied_without_publication() {
+async fn repository_transport_outage_is_denied_without_publication() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");
-    let root = RepositoryFixture::new(repositories.path(), "filter-refusal-root");
-    root.write("README.md", b"small unfiltered source\n");
-    let commit = root.commit("filter refusal");
-    run_git(&root.bare, ["config", "uploadpack.allowFilter", "false"]);
+    let root = RepositoryFixture::new(repositories.path(), "outage-root");
+    root.write("README.md", b"source available before outage\n");
+    let commit = root.commit("outage baseline");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let request = context.request(&commit);
+    let unavailable_repository = repositories.path().join("outage-root.offline");
+    std::fs::rename(&root.bare, &unavailable_repository).expect("inject repository outage");
+    assert!(!root.bare.exists());
+    assert!(unavailable_repository.is_dir());
     let unavailable_result = context.acquirer.acquire(&request).await;
     let stage_clean = std::fs::read_dir(&context.config.output_root)
         .unwrap()
@@ -740,7 +743,8 @@ async fn repository_that_ignores_blob_filter_is_denied_without_publication() {
         "source_outage_denied",
         "denied",
         serde_json::json!({
-            "transport_capability": "blob_filter_unavailable",
+            "transport_state": "repository_unavailable",
+            "repository_endpoint_present": root.bare.exists(),
             "staging_entries_remaining": usize::from(!stage_clean),
             "published": !unpublished,
             "result": "source_unavailable",
