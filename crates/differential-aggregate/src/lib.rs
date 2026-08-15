@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
@@ -20,8 +20,8 @@ pub const EVIDENCE_SHA256: &str =
 
 const MAX_EVIDENCE_BYTES: u64 = 32_768;
 const MAX_BOUND_INPUT_BYTES: u64 = 2_097_152;
-const MAX_SNAPSHOT_FILES: usize = 64;
-const MAX_SNAPSHOT_BYTES: u64 = 8_388_608;
+const MAX_MANIFEST_FILES: usize = 64;
+const MAX_MANIFEST_BUNDLE_BYTES: u64 = 8_388_608;
 const DIFF001_ROOT: &str = "migration/mario-jenkins-oracle-228/corpus-v1/differential-v1";
 const DIFF002_ROOT: &str = "migration/state-policy-differential-v1";
 const DIFF003_ROOT: &str = "migration/boundary-differential-v1";
@@ -166,18 +166,6 @@ struct HistoricalMetric {
     grants_runnable_or_equivalence_claim: bool,
 }
 
-struct VerifiedSnapshot {
-    directory: tempfile::TempDir,
-    #[cfg(windows)]
-    _anchors: Vec<fs::File>,
-}
-
-impl VerifiedSnapshot {
-    fn path(&self) -> &Path {
-        self.directory.path()
-    }
-}
-
 pub fn verify_bundle(
     bundle_root: &Path,
     repository_root: &Path,
@@ -294,41 +282,23 @@ fn verify_aggregate(
         ));
     }
     let verified_inputs = verify_bound_inputs(&aggregate.inputs, repository_root)?;
-    let diff001_snapshot = snapshot_manifest_bundle(
+    let diff001_bundle = authenticated_manifest_bundle(
         &repository_root.join(DIFF001_ROOT),
         verified_inputs.get("diff001_manifest").ok_or_else(|| {
             VerificationError::new("E_INPUT_DENOMINATOR", "missing DIFF-001 manifest")
         })?,
     )?;
-    let diff002_manifest = format!(
-        "{}  {}\n",
-        mcloving_state_policy_differential::EVIDENCE_SHA256,
-        mcloving_state_policy_differential::EVIDENCE_FILE
-    );
-    let diff002_snapshot = snapshot_single_file_bundle(
-        &diff002_manifest,
-        mcloving_state_policy_differential::EVIDENCE_FILE,
-        verified_inputs.get("diff002_evidence").ok_or_else(|| {
-            VerificationError::new("E_INPUT_DENOMINATOR", "missing DIFF-002 evidence")
-        })?,
-    )?;
-    let diff003_manifest = format!(
-        "{}  {}\n",
-        mcloving_boundary_differential::EVIDENCE_SHA256,
-        mcloving_boundary_differential::EVIDENCE_FILE
-    );
-    let diff003_snapshot = snapshot_single_file_bundle(
-        &diff003_manifest,
-        mcloving_boundary_differential::EVIDENCE_FILE,
-        verified_inputs.get("diff003_evidence").ok_or_else(|| {
-            VerificationError::new("E_INPUT_DENOMINATOR", "missing DIFF-003 evidence")
-        })?,
-    )?;
-    let native = mcloving_jenkins_differential::verify_bundle(diff001_snapshot.path())
+    let diff002_evidence = verified_inputs.get("diff002_evidence").ok_or_else(|| {
+        VerificationError::new("E_INPUT_DENOMINATOR", "missing DIFF-002 evidence")
+    })?;
+    let diff003_evidence = verified_inputs.get("diff003_evidence").ok_or_else(|| {
+        VerificationError::new("E_INPUT_DENOMINATOR", "missing DIFF-003 evidence")
+    })?;
+    let native = mcloving_jenkins_differential::verify_snapshot(&diff001_bundle)
         .map_err(|error| VerificationError::new("E_DIFF001_REGRESSION", error.to_string()))?;
-    let state = mcloving_state_policy_differential::verify_bundle(diff002_snapshot.path())
+    let state = mcloving_state_policy_differential::verify_evidence_bytes(diff002_evidence)
         .map_err(|error| VerificationError::new("E_DIFF002_REGRESSION", error.to_string()))?;
-    let boundary = mcloving_boundary_differential::verify_bundle(diff003_snapshot.path())
+    let boundary = mcloving_boundary_differential::verify_evidence_bytes(diff003_evidence)
         .map_err(|error| VerificationError::new("E_DIFF003_REGRESSION", error.to_string()))?;
     verify_receipts(&aggregate.differential_receipts, &native, &state, &boundary)?;
     verify_identity_joins(&aggregate.identity_joins)?;
@@ -799,7 +769,7 @@ fn canonical_direct_directory(
     let lexical = lexical_absolute(path)?;
     let canonical = fs::canonicalize(path)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
-    if lexical != canonical_comparison_path(&canonical)? {
+    if !canonical_root_matches(&lexical, &canonical, error_code)? {
         return Err(VerificationError::new(
             error_code,
             "root path contains a symlink or alias component",
@@ -817,21 +787,55 @@ fn canonical_direct_directory(
 }
 
 #[cfg(windows)]
-fn canonical_comparison_path(path: &Path) -> Result<std::path::PathBuf, VerificationError> {
-    let text = path.to_str().ok_or_else(|| {
-        VerificationError::new("E_INPUT_SUBSTITUTION", "canonical root is not UTF-8")
-    })?;
+fn canonical_root_matches(
+    lexical: &Path,
+    canonical: &Path,
+    error_code: &'static str,
+) -> Result<bool, VerificationError> {
+    let canonical = canonical_comparison_path(canonical, error_code)?;
+    let lexical_text = lexical
+        .to_str()
+        .ok_or_else(|| VerificationError::new(error_code, "lexical root is not UTF-8"))?;
+    let canonical_text = canonical
+        .to_str()
+        .ok_or_else(|| VerificationError::new(error_code, "canonical root is not UTF-8"))?;
+    if !lexical_text.eq_ignore_ascii_case(canonical_text) {
+        return Ok(false);
+    }
+    let lexical_handle = open_anchored_windows_directory(lexical)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    let canonical_handle = open_anchored_windows_directory(&canonical)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    let lexical_identity = mcloving_windows_job::file_identity(&lexical_handle)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    let canonical_identity = mcloving_windows_job::file_identity(&canonical_handle)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    Ok(lexical_identity == canonical_identity)
+}
+
+#[cfg(not(windows))]
+fn canonical_root_matches(
+    lexical: &Path,
+    canonical: &Path,
+    _error_code: &'static str,
+) -> Result<bool, VerificationError> {
+    Ok(lexical == canonical)
+}
+
+#[cfg(windows)]
+fn canonical_comparison_path(
+    path: &Path,
+    error_code: &'static str,
+) -> Result<std::path::PathBuf, VerificationError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| VerificationError::new(error_code, "canonical root is not UTF-8"))?;
     if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
         return Ok(std::path::PathBuf::from(format!(r"\\{unc}")));
     }
     Ok(std::path::PathBuf::from(
         text.strip_prefix(r"\\?\").unwrap_or(text),
     ))
-}
-
-#[cfg(not(windows))]
-fn canonical_comparison_path(path: &Path) -> Result<std::path::PathBuf, VerificationError> {
-    Ok(path.to_path_buf())
 }
 
 #[cfg(unix)]
@@ -1044,23 +1048,23 @@ fn open_regular_beneath_platform(
     ))
 }
 
-fn snapshot_manifest_bundle(
+fn authenticated_manifest_bundle(
     source_root: &Path,
     manifest: &[u8],
-) -> Result<VerifiedSnapshot, VerificationError> {
+) -> Result<BTreeMap<String, Vec<u8>>, VerificationError> {
     let text = std::str::from_utf8(manifest)
         .map_err(|error| VerificationError::new("E_INPUT_SUBSTITUTION", error.to_string()))?;
     if manifest.len() as u64 > MAX_BOUND_INPUT_BYTES || !text.ends_with('\n') {
         return Err(VerificationError::new(
             "E_INPUT_SUBSTITUTION",
-            "snapshot manifest is oversized or not newline terminated",
+            "DIFF-001 manifest is oversized or not newline terminated",
         ));
     }
     let mut files = BTreeMap::new();
     let mut total = manifest.len() as u64;
     for line in text.lines() {
         let (digest, relative) = line.split_once("  ").ok_or_else(|| {
-            VerificationError::new("E_INPUT_SUBSTITUTION", "invalid snapshot manifest line")
+            VerificationError::new("E_INPUT_SUBSTITUTION", "invalid DIFF-001 manifest line")
         })?;
         if digest.len() != 64
             || !digest
@@ -1068,20 +1072,20 @@ fn snapshot_manifest_bundle(
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || !safe_relative(relative)
             || relative == "SHA256SUMS"
-            || files.len() == MAX_SNAPSHOT_FILES
+            || files.len() == MAX_MANIFEST_FILES
             || files.contains_key(relative)
         {
             return Err(VerificationError::new(
                 "E_INPUT_SUBSTITUTION",
-                "snapshot manifest identity is unsafe or duplicated",
+                "DIFF-001 manifest identity is unsafe or duplicated",
             ));
         }
         let bytes = read_regular_beneath(source_root, relative)?;
         total = total.saturating_add(bytes.len() as u64);
-        if total > MAX_SNAPSHOT_BYTES || sha256(&bytes) != digest {
+        if total > MAX_MANIFEST_BUNDLE_BYTES || sha256(&bytes) != digest {
             return Err(VerificationError::new(
                 "E_INPUT_SUBSTITUTION",
-                format!("snapshot content mismatch for {relative}"),
+                format!("DIFF-001 content mismatch for {relative}"),
             ));
         }
         files.insert(relative.to_owned(), bytes);
@@ -1089,195 +1093,11 @@ fn snapshot_manifest_bundle(
     if files.is_empty() {
         return Err(VerificationError::new(
             "E_INPUT_SUBSTITUTION",
-            "snapshot manifest is empty",
+            "DIFF-001 manifest is empty",
         ));
     }
-    materialize_snapshot(manifest, files)
-}
-
-fn snapshot_single_file_bundle(
-    manifest: &str,
-    name: &str,
-    bytes: &[u8],
-) -> Result<VerifiedSnapshot, VerificationError> {
-    let expected_digest = manifest
-        .strip_suffix('\n')
-        .and_then(|line| line.split_once("  "))
-        .filter(|(_, path)| *path == name)
-        .map(|(digest, _)| digest)
-        .ok_or_else(|| {
-            VerificationError::new("E_INPUT_SUBSTITUTION", "single-file manifest mismatch")
-        })?;
-    if !safe_relative(name)
-        || bytes.len() as u64 + manifest.len() as u64 > MAX_SNAPSHOT_BYTES
-        || sha256(bytes) != expected_digest
-    {
-        return Err(VerificationError::new(
-            "E_INPUT_SUBSTITUTION",
-            "single-file snapshot identity mismatch",
-        ));
-    }
-    materialize_snapshot(
-        manifest.as_bytes(),
-        BTreeMap::from([(name.to_owned(), bytes.to_vec())]),
-    )
-}
-
-fn materialize_snapshot(
-    manifest: &[u8],
-    files: BTreeMap<String, Vec<u8>>,
-) -> Result<VerifiedSnapshot, VerificationError> {
-    let snapshot = tempfile::Builder::new()
-        .prefix("mcloving-differential-snapshot-")
-        .tempdir()
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    set_private_directory(snapshot.path())?;
-    write_private_snapshot_file(snapshot.path(), "SHA256SUMS", manifest)?;
-    #[cfg(windows)]
-    let snapshot_digests = files
-        .iter()
-        .map(|(relative, bytes)| (relative.clone(), sha256(bytes)))
-        .collect::<BTreeMap<_, _>>();
-    for (relative, bytes) in files {
-        let parent = Path::new(&relative).parent().ok_or_else(|| {
-            VerificationError::new("E_INPUT_SUBSTITUTION", "snapshot path has no parent")
-        })?;
-        if !parent.as_os_str().is_empty() {
-            let directory = snapshot.path().join(parent);
-            fs::create_dir_all(&directory)
-                .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-            set_private_directory(&directory)?;
-        }
-        write_private_snapshot_file(snapshot.path(), &relative, &bytes)?;
-    }
-    #[cfg(windows)]
-    let anchors = anchor_windows_snapshot(snapshot.path(), &sha256(manifest), &snapshot_digests)?;
-    Ok(VerifiedSnapshot {
-        directory: snapshot,
-        #[cfg(windows)]
-        _anchors: anchors,
-    })
-}
-
-#[cfg(windows)]
-fn anchor_windows_snapshot(
-    root: &Path,
-    manifest_sha256: &str,
-    files: &BTreeMap<String, String>,
-) -> Result<Vec<fs::File>, VerificationError> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    let open_anchor = |path: &Path, directory: bool| -> Result<fs::File, VerificationError> {
-        let flags = FILE_FLAG_OPEN_REPARSE_POINT
-            | if directory {
-                FILE_FLAG_BACKUP_SEMANTICS
-            } else {
-                0
-            };
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(flags)
-            .open(path)
-            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-        if metadata.is_dir() != directory
-            || mcloving_windows_job::file_is_reparse_point(&file)
-                .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
-            || (!directory
-                && mcloving_windows_job::file_link_count(&file)
-                    .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
-                    != 1)
-        {
-            return Err(VerificationError::new(
-                "E_INPUT_SUBSTITUTION",
-                "snapshot anchor identity mismatch",
-            ));
-        }
-        Ok(file)
-    };
-
-    let mut directories = BTreeSet::new();
-    for relative in files.keys() {
-        if let Some(parent) = Path::new(relative).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            directories.insert(parent.to_path_buf());
-        }
-    }
-    let mut anchors = vec![open_anchor(root, true)?];
-    for directory in directories {
-        anchors.push(open_anchor(&root.join(directory), true)?);
-    }
-    let manifest = open_anchor(&root.join("SHA256SUMS"), false)?;
-    verify_windows_snapshot_anchor(&manifest, manifest_sha256)?;
-    anchors.push(manifest);
-    for (relative, expected_sha256) in files {
-        let file = open_anchor(&root.join(relative), false)?;
-        verify_windows_snapshot_anchor(&file, expected_sha256)?;
-        anchors.push(file);
-    }
-    Ok(anchors)
-}
-
-#[cfg(windows)]
-fn verify_windows_snapshot_anchor(
-    file: &fs::File,
-    expected_sha256: &str,
-) -> Result<(), VerificationError> {
-    let bytes = read_bounded_file(
-        file.try_clone()
-            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?,
-        MAX_SNAPSHOT_BYTES,
-        "E_INPUT_SUBSTITUTION",
-        "anchored snapshot file exceeds byte ceiling",
-    )?;
-    if sha256(&bytes) != expected_sha256 {
-        return Err(VerificationError::new(
-            "E_INPUT_SUBSTITUTION",
-            "anchored snapshot content changed during materialization",
-        ));
-    }
-    Ok(())
-}
-
-fn write_private_snapshot_file(
-    root: &Path,
-    relative: &str,
-    bytes: &[u8],
-) -> Result<(), VerificationError> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(root.join(relative))
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    file.write_all(bytes)
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    file.sync_all()
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))
-}
-
-#[cfg(unix)]
-fn set_private_directory(path: &Path) -> Result<(), VerificationError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))
-}
-
-#[cfg(not(unix))]
-fn set_private_directory(_path: &Path) -> Result<(), VerificationError> {
-    Ok(())
+    files.insert("SHA256SUMS".to_owned(), manifest.to_vec());
+    Ok(files)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -1311,51 +1131,50 @@ mod tests {
     }
 
     #[test]
-    fn canonical_verifier_uses_authenticated_snapshot_after_source_mutation() {
+    fn canonical_verifier_uses_authenticated_bytes_after_source_mutation() {
         let source_root = repository().join(DIFF001_ROOT);
         let manifest = fs::read(source_root.join("SHA256SUMS")).expect("read manifest");
-        let mutable_source =
-            snapshot_manifest_bundle(&source_root, &manifest).expect("copy source bundle");
+        let source_bytes =
+            authenticated_manifest_bundle(&source_root, &manifest).expect("authenticate source");
+        let mutable_source = temporary_directory();
+        for (relative, bytes) in &source_bytes {
+            let path = mutable_source.path().join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create source directory");
+            }
+            fs::write(path, bytes).expect("copy source file");
+        }
         let mutable_root = fs::canonicalize(mutable_source.path()).expect("canonical source copy");
-        let authenticated = snapshot_manifest_bundle(&mutable_root, &manifest)
-            .expect("snapshot authenticated bundle");
+        let authenticated = authenticated_manifest_bundle(&mutable_root, &manifest)
+            .expect("capture authenticated bytes");
 
-        fs::write(mutable_source.path().join("README.md"), b"replacement\n")
-            .expect("replace original after snapshot");
-        assert!(mcloving_jenkins_differential::verify_bundle(mutable_source.path()).is_err());
-        mcloving_jenkins_differential::verify_bundle(authenticated.path())
-            .expect("verify immutable authenticated snapshot");
+        fs::write(mutable_root.join("README.md"), b"replacement\n")
+            .expect("replace original after authentication");
+        assert!(mcloving_jenkins_differential::verify_bundle(&mutable_root).is_err());
+        mcloving_jenkins_differential::verify_snapshot(&authenticated)
+            .expect("verify immutable authenticated bytes");
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_snapshot_anchors_deny_mutation_until_verification_finishes() {
-        let bytes = b"authenticated\n";
-        let manifest = format!("{}  evidence.json\n", sha256(bytes));
-        let snapshot = snapshot_single_file_bundle(&manifest, "evidence.json", bytes)
-            .expect("create anchored snapshot");
-
-        assert!(fs::write(snapshot.path().join("evidence.json"), b"replacement\n").is_err());
-        assert!(fs::remove_file(snapshot.path().join("SHA256SUMS")).is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_snapshot_anchor_rejects_pre_anchor_replacement() {
-        let snapshot = temporary_directory();
-        let manifest = b"manifest\n";
-        let evidence = b"authenticated\n";
-        fs::write(snapshot.path().join("SHA256SUMS"), manifest).expect("write manifest");
-        fs::write(snapshot.path().join("evidence.json"), b"replacement\n")
-            .expect("write substituted evidence");
-
-        let error = anchor_windows_snapshot(
-            snapshot.path(),
-            &sha256(manifest),
-            &BTreeMap::from([("evidence.json".to_owned(), sha256(evidence))]),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "E_INPUT_SUBSTITUTION");
+    fn windows_root_case_spelling_uses_directory_identity() {
+        let directory = temporary_directory();
+        let canonical = fs::canonicalize(directory.path()).expect("canonical directory");
+        let comparison = canonical_comparison_path(&canonical, "E_INPUT_SUBSTITUTION")
+            .expect("normalize canonical path");
+        let mut spelling = comparison.to_string_lossy().into_owned();
+        let drive = spelling.as_bytes()[0];
+        let alternate_drive = if drive.is_ascii_lowercase() {
+            (drive as char).to_ascii_uppercase()
+        } else {
+            (drive as char).to_ascii_lowercase()
+        };
+        spelling.replace_range(0..1, &alternate_drive.to_string());
+        let alternate = Path::new(&spelling);
+        assert!(
+            canonical_root_matches(alternate, &canonical, "E_INPUT_SUBSTITUTION")
+                .expect("compare root identity")
+        );
     }
 
     #[test]

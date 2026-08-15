@@ -30,20 +30,15 @@ no-follow directory-relative opens for every component. Windows retains
 no-reparse directory handles without delete sharing until the descendant file
 is open. Regular-file/reparse/link identity is validated from that file handle,
 and bounded bytes are read from the same handle. Semantic checks never reopen
-those paths. Before an upstream verifier runs, the aggregate materializes only
-digest-authenticated bytes into a new owner-private snapshot. DIFF-001's
-authenticated 30-file manifest selects and authenticates every snapshot file;
-DIFF-002 and DIFF-003 use their authenticated evidence bytes and compiled
-canonical manifests. Each snapshot remains alive through verifier completion
-and is then removed. On Windows, the aggregate additionally retains every
-snapshot directory and file handle without write/delete sharing, preventing
-replacement regardless of an inherited temporary-directory ACL. It then
-rehashes the manifest and every snapshot file from those exact retained handles
-against the original authenticated bytes, closing the materialization-to-anchor
-window. A mutable repository or concurrent local process therefore cannot
-replace a file between aggregate authentication and canonical semantic
-verification. The aggregate then calls these existing verifiers exactly once
-against those snapshots:
+those paths. DIFF-001's authenticated 30-file manifest selects and authenticates
+an exact in-memory map containing every bundle file and the manifest itself.
+DIFF-002 and DIFF-003 use the exact evidence bytes already authenticated against
+their compiled input digests. The canonical verifiers consume those maps and
+byte slices directly; no temporary filesystem object is created and no path is
+reopened after authentication. A mutable repository or concurrent local
+process therefore cannot replace a file between aggregate authentication and
+canonical semantic verification. The aggregate calls these existing verifiers
+exactly once over the authenticated bytes:
 
 1. `mcloving-jenkins-differential` for native execution parity;
 2. `mcloving-state-policy-differential` for identity, authorization,

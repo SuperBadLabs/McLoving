@@ -540,20 +540,25 @@ pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationErr
     verify_tree(root)?;
     let bytes = fs::read(root.join(EVIDENCE_FILE))
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    verify_evidence_bytes(&bytes)
+}
+
+/// Verifies already authenticated evidence bytes without reopening a path.
+pub fn verify_evidence_bytes(bytes: &[u8]) -> Result<VerificationReceipt, VerificationError> {
     if bytes.len() as u64 > MAX_EVIDENCE_BYTES {
         return Err(VerificationError::new(
             "E_SIZE",
             "evidence exceeds byte ceiling",
         ));
     }
-    let evidence_sha256 = sha256(&bytes);
+    let evidence_sha256 = sha256(bytes);
     if evidence_sha256 != EVIDENCE_SHA256 {
         return Err(VerificationError::new(
             "E_EVIDENCE_DIGEST",
             "boundary evidence does not match the compiled detached digest",
         ));
     }
-    let evidence: Evidence = serde_json::from_slice(&bytes)
+    let evidence: Evidence = serde_json::from_slice(bytes)
         .map_err(|error| VerificationError::new("E_SCHEMA", error.to_string()))?;
     verify_evidence(&evidence)?;
     Ok(VerificationReceipt {

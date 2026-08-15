@@ -26,6 +26,12 @@ ALWAYS_RUN_PATHS = {
     "scripts/test-windows-agent-impact.py",
     "scripts/windows-agent-war.ps1",
 }
+WINDOWS_VERIFIER_DIRECTORIES = {
+    Path("crates/boundary-differential"),
+    Path("crates/differential-aggregate"),
+    Path("crates/jenkins-differential"),
+    Path("crates/state-policy-differential"),
+}
 
 
 def run(*args: str, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
@@ -225,6 +231,9 @@ def classify(
         return True, f"gate definition changed: {always[0]}"
 
     for path in sorted(paths):
+        for directory in WINDOWS_VERIFIER_DIRECTORIES:
+            if path_is_within(path, directory):
+                return True, f"Windows verifier source changed: {path}"
         for directory in base_directories | head_directories:
             if path_is_within(path, directory):
                 return True, f"agent dependency source changed: {path}"
