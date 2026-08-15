@@ -766,11 +766,32 @@ fn canonical_direct_directory(
     path: &Path,
     error_code: &'static str,
 ) -> Result<std::path::PathBuf, VerificationError> {
-    validate_direct_root_components(path, error_code)?;
+    Ok(canonical_anchored_directory(path, error_code)?.path)
+}
+
+struct AnchoredDirectory {
+    path: std::path::PathBuf,
+    anchor: RootAnchor,
+}
+
+#[cfg(unix)]
+struct RootAnchor(fs::File);
+
+#[cfg(windows)]
+struct RootAnchor(Vec<fs::File>);
+
+#[cfg(not(any(unix, windows)))]
+struct RootAnchor;
+
+fn canonical_anchored_directory(
+    path: &Path,
+    error_code: &'static str,
+) -> Result<AnchoredDirectory, VerificationError> {
+    let anchor = validate_direct_root_components(path, error_code)?;
     let lexical = lexical_absolute(path)?;
     let canonical = fs::canonicalize(path)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
-    if !canonical_root_matches(&lexical, &canonical, error_code)? {
+    if !canonical_root_matches(&lexical, &canonical, &anchor, error_code)? {
         return Err(VerificationError::new(
             error_code,
             "root path contains a symlink or alias component",
@@ -784,14 +805,17 @@ fn canonical_direct_directory(
             "root path is not a direct directory",
         ));
     }
-    Ok(canonical)
+    Ok(AnchoredDirectory {
+        path: canonical,
+        anchor,
+    })
 }
 
 #[cfg(unix)]
 fn validate_direct_root_components(
     path: &Path,
     error_code: &'static str,
-) -> Result<(), VerificationError> {
+) -> Result<RootAnchor, VerificationError> {
     use rustix::fs::{Mode, OFlags, open, openat};
 
     let absolute = if path.is_absolute() {
@@ -815,14 +839,14 @@ fn validate_direct_root_components(
                 .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
         }
     }
-    Ok(())
+    Ok(RootAnchor(fs::File::from(directory)))
 }
 
 #[cfg(windows)]
 fn validate_direct_root_components(
     path: &Path,
     error_code: &'static str,
-) -> Result<(), VerificationError> {
+) -> Result<RootAnchor, VerificationError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -853,14 +877,18 @@ fn validate_direct_root_components(
             Component::CurDir => {}
         }
     }
-    Ok(())
+    anchors.push(
+        open_anchored_windows_directory(&current)
+            .map_err(|error| VerificationError::new(error_code, error.to_string()))?,
+    );
+    Ok(RootAnchor(anchors))
 }
 
 #[cfg(not(any(unix, windows)))]
 fn validate_direct_root_components(
     _path: &Path,
     error_code: &'static str,
-) -> Result<(), VerificationError> {
+) -> Result<RootAnchor, VerificationError> {
     Err(VerificationError::new(
         error_code,
         "direct root traversal is unsupported on this platform",
@@ -871,37 +899,63 @@ fn validate_direct_root_components(
 fn canonical_root_matches(
     lexical: &Path,
     canonical: &Path,
+    anchor: &RootAnchor,
     error_code: &'static str,
 ) -> Result<bool, VerificationError> {
     let lexical_comparison = canonical_comparison_path(lexical, error_code)?;
     let canonical_comparison = canonical_comparison_path(canonical, error_code)?;
-    let lexical_text = lexical_comparison
-        .to_str()
-        .ok_or_else(|| VerificationError::new(error_code, "lexical root is not UTF-8"))?;
-    let canonical_text = canonical_comparison
-        .to_str()
-        .ok_or_else(|| VerificationError::new(error_code, "canonical root is not UTF-8"))?;
-    if !lexical_text.eq_ignore_ascii_case(canonical_text) {
+    if !mcloving_windows_job::path_spelling_eq_ignore_case(
+        lexical_comparison.as_os_str(),
+        canonical_comparison.as_os_str(),
+    )
+    .map_err(|error| VerificationError::new(error_code, error.to_string()))?
+    {
         return Ok(false);
     }
-    let lexical_handle = open_anchored_windows_directory(lexical)
-        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
     let canonical_handle = open_anchored_windows_directory(canonical)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
-    let lexical_identity = mcloving_windows_job::file_identity(&lexical_handle)
-        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    let lexical_identity = mcloving_windows_job::file_identity(
+        anchor
+            .0
+            .last()
+            .ok_or_else(|| VerificationError::new(error_code, "root anchor is absent"))?,
+    )
+    .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
     let canonical_identity = mcloving_windows_job::file_identity(&canonical_handle)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
     Ok(lexical_identity == canonical_identity)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn canonical_root_matches(
     lexical: &Path,
     canonical: &Path,
+    anchor: &RootAnchor,
+    error_code: &'static str,
+) -> Result<bool, VerificationError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let anchored = anchor
+        .0
+        .metadata()
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    let resolved = fs::metadata(canonical)
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    Ok(
+        lexical == canonical
+            && anchored.dev() == resolved.dev()
+            && anchored.ino() == resolved.ino(),
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn canonical_root_matches(
+    _lexical: &Path,
+    _canonical: &Path,
+    _anchor: &RootAnchor,
     _error_code: &'static str,
 ) -> Result<bool, VerificationError> {
-    Ok(lexical == canonical)
+    Ok(false)
 }
 
 #[cfg(windows)]
@@ -1008,8 +1062,8 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
             "input path is not a safe relative path",
         ));
     }
-    let root = canonical_direct_directory(root, "E_INPUT_SUBSTITUTION")?;
-    let file = open_regular_beneath_platform(&root, relative)
+    let root = canonical_anchored_directory(root, "E_INPUT_SUBSTITUTION")?;
+    let file = open_regular_beneath_platform(&root.path, &root.anchor, relative)
         .map_err(|error| VerificationError::new("E_INPUT_SUBSTITUTION", error.to_string()))?;
     let metadata = file
         .metadata()
@@ -1038,8 +1092,12 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
 }
 
 #[cfg(unix)]
-fn open_regular_beneath_platform(root: &Path, relative: &str) -> Result<fs::File, std::io::Error> {
-    use rustix::fs::{Mode, OFlags, open, openat};
+fn open_regular_beneath_platform(
+    _root: &Path,
+    root_anchor: &RootAnchor,
+    relative: &str,
+) -> Result<fs::File, std::io::Error> {
+    use rustix::fs::{Mode, OFlags, openat};
 
     let components = Path::new(relative)
         .components()
@@ -1055,9 +1113,9 @@ fn open_regular_beneath_platform(root: &Path, relative: &str) -> Result<fs::File
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty relative path")
     })?;
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut directory = open(root, directory_flags, Mode::empty())?;
+    let mut directory = root_anchor.0.try_clone()?;
     for component in parents {
-        directory = openat(&directory, *component, directory_flags, Mode::empty())?;
+        directory = openat(&directory, *component, directory_flags, Mode::empty())?.into();
     }
     let file = openat(
         &directory,
@@ -1069,7 +1127,11 @@ fn open_regular_beneath_platform(root: &Path, relative: &str) -> Result<fs::File
 }
 
 #[cfg(windows)]
-fn open_regular_beneath_platform(root: &Path, relative: &str) -> Result<fs::File, std::io::Error> {
+fn open_regular_beneath_platform(
+    root: &Path,
+    _root_anchor: &RootAnchor,
+    relative: &str,
+) -> Result<fs::File, std::io::Error> {
     let components = Path::new(relative)
         .components()
         .map(|component| match component {
@@ -1122,6 +1184,7 @@ fn open_anchored_windows_directory(path: &Path) -> Result<fs::File, std::io::Err
 #[cfg(not(any(unix, windows)))]
 fn open_regular_beneath_platform(
     _root: &Path,
+    _root_anchor: &RootAnchor,
     _relative: &str,
 ) -> Result<fs::File, std::io::Error> {
     Err(std::io::Error::new(
@@ -1438,5 +1501,44 @@ mod tests {
             read_bounded_file(file, 64, "E_SIZE", "oversized").expect("read open handle"),
             b"authenticated"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_root_handle_anchors_descendant_open_after_path_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temporary_directory();
+        let root = parent.path().join("root");
+        let retained = parent.path().join("retained");
+        let substituted = parent.path().join("substituted");
+        fs::create_dir(&root).expect("create root");
+        fs::create_dir(&substituted).expect("create substituted root");
+        fs::write(root.join("input"), b"authenticated").expect("write authenticated input");
+        fs::write(substituted.join("input"), b"substituted").expect("write substituted input");
+        let anchored = canonical_anchored_directory(&root, "E_INPUT_SUBSTITUTION")
+            .expect("anchor original root");
+
+        fs::rename(&root, &retained).expect("rename original root");
+        symlink(&substituted, &root).expect("substitute root path");
+        let file = open_regular_beneath_platform(&anchored.path, &anchored.anchor, "input")
+            .expect("open relative to retained root handle");
+
+        assert_eq!(
+            read_bounded_file(file, 64, "E_SIZE", "oversized").expect("read anchored input"),
+            b"authenticated"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validated_windows_root_anchors_deny_path_replacement() {
+        let parent = temporary_directory();
+        let root = parent.path().join("root");
+        fs::create_dir(&root).expect("create root");
+        let _anchored = canonical_anchored_directory(&root, "E_INPUT_SUBSTITUTION")
+            .expect("anchor original root");
+
+        assert!(fs::rename(&root, parent.path().join("replacement")).is_err());
     }
 }

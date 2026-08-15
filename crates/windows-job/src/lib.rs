@@ -25,6 +25,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Security::{SECURITY_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -100,6 +101,23 @@ pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
         file_index: (u64::from(information.nFileIndexHigh) << 32)
             | u64::from(information.nFileIndexLow),
     })
+}
+
+/// Compares two Windows path spellings with the kernel's ordinal,
+/// case-insensitive Unicode semantics.
+pub fn path_spelling_eq_ignore_case(left: &OsStr, right: &OsStr) -> Result<bool, JobError> {
+    let left = left.encode_wide().collect::<Vec<_>>();
+    let right = right.encode_wide().collect::<Vec<_>>();
+    let left_len = i32::try_from(left.len()).map_err(|_| JobError::invalid("path length"))?;
+    let right_len = i32::try_from(right.len()).map_err(|_| JobError::invalid("path length"))?;
+    // SAFETY: both pointers refer to initialized UTF-16 slices for the exact
+    // lengths supplied, and CompareStringOrdinal does not retain them.
+    let result =
+        unsafe { CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) };
+    if result == 0 {
+        return Err(JobError::last("CompareStringOrdinal"));
+    }
+    Ok(result == CSTR_EQUAL as i32)
 }
 
 /// Returns the kernel-maintained hardlink count for an open file handle.
@@ -864,6 +882,17 @@ mod tests {
         std::fs::hard_link(&primary, &alias).unwrap();
         assert_eq!(file_link_count(&file).unwrap(), 2);
         assert!(!file_is_reparse_point(&file).unwrap());
+    }
+
+    #[test]
+    fn path_spelling_comparison_uses_windows_unicode_case_semantics() {
+        assert!(
+            path_spelling_eq_ignore_case(OsStr::new(r"C:\RÉSUMÉ"), OsStr::new(r"c:\résumé"),)
+                .unwrap()
+        );
+        assert!(
+            !path_spelling_eq_ignore_case(OsStr::new(r"C:\one"), OsStr::new(r"C:\two")).unwrap()
+        );
     }
 
     #[test]

@@ -31,7 +31,11 @@ lexical normalization. Unix opens are nonblocking so a FIFO cannot stall
 validation. Unix traversal starts from an open root descriptor and uses
 no-follow directory-relative opens for every component. Windows retains
 no-reparse directory handles without delete sharing until the descendant file
-is open. Regular-file/reparse/link identity is validated from that file handle,
+is open. The validated final root handle remains live and is the anchor for
+every descendant open, so a writable ancestor cannot redirect traversal after
+root validation. Windows spelling comparison uses the OS ordinal Unicode
+case-insensitive operation and then requires matching kernel directory
+identity. Regular-file/reparse/link identity is validated from that file handle,
 and bounded bytes are read from the same handle. Semantic checks never reopen
 those paths. DIFF-001's authenticated 30-file manifest selects and authenticates
 an exact in-memory map containing every bundle file and the manifest itself.
