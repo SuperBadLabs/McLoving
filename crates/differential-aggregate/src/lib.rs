@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
@@ -167,14 +168,21 @@ pub fn verify_bundle(
     repository_root: &Path,
 ) -> Result<VerificationReceipt, VerificationError> {
     verify_bundle_tree(bundle_root)?;
-    let bytes = fs::read(bundle_root.join(EVIDENCE_FILE))
+    let evidence_path = bundle_root.join(EVIDENCE_FILE);
+    let metadata = fs::symlink_metadata(&evidence_path)
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if bytes.len() as u64 > MAX_EVIDENCE_BYTES {
+    if metadata.len() > MAX_EVIDENCE_BYTES {
         return Err(VerificationError::new(
             "E_SIZE",
             "aggregate evidence exceeds byte ceiling",
         ));
     }
+    let bytes = read_bounded(
+        &evidence_path,
+        MAX_EVIDENCE_BYTES,
+        "E_SIZE",
+        "aggregate evidence exceeds byte ceiling",
+    )?;
     let evidence_sha256 = sha256(&bytes);
     if evidence_sha256 != EVIDENCE_SHA256 {
         return Err(VerificationError::new(
@@ -233,8 +241,22 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
             "bundle must contain exactly SHA256SUMS and differential-aggregate.json",
         ));
     }
-    let manifest = fs::read_to_string(root.join("SHA256SUMS"))
+    let manifest_path = root.join("SHA256SUMS");
+    let manifest_metadata = fs::symlink_metadata(&manifest_path)
         .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
+    if manifest_metadata.len() > 256 {
+        return Err(VerificationError::new(
+            "E_MANIFEST",
+            "detached manifest exceeds byte ceiling",
+        ));
+    }
+    let manifest = String::from_utf8(read_bounded(
+        &manifest_path,
+        256,
+        "E_MANIFEST",
+        "detached manifest exceeds byte ceiling",
+    )?)
+    .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
     if manifest != format!("{}  {}\n", EVIDENCE_SHA256, EVIDENCE_FILE) {
         return Err(VerificationError::new(
             "E_MANIFEST",
@@ -440,8 +462,10 @@ fn verify_identity_joins(joins: &IdentityJoins) -> Result<(), VerificationError>
 }
 
 fn verify_corpus_index(root: &Path) -> Result<BTreeSet<String>, VerificationError> {
-    let text = fs::read_to_string(root.join(CORPUS_ROOT).join("corpus-index.tsv"))
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    let path = format!("{CORPUS_ROOT}/corpus-index.tsv");
+    let bytes = read_regular_beneath(root, &path)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| VerificationError::new("E_CASE_COVERAGE", error.to_string()))?;
     let mut lines = text.lines();
     let header = lines
         .next()
@@ -505,8 +529,10 @@ fn verify_source_job_map(
     root: &Path,
     corpus_sources: &BTreeSet<String>,
 ) -> Result<(), VerificationError> {
-    let text = fs::read_to_string(root.join(CORPUS_ROOT).join("source-job-map.tsv"))
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    let path = format!("{CORPUS_ROOT}/source-job-map.tsv");
+    let bytes = read_regular_beneath(root, &path)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| VerificationError::new("E_POPULATION_COVERAGE", error.to_string()))?;
     let mut lines = text.lines();
     if lines.next()
         != Some(
@@ -684,11 +710,37 @@ fn has_multiple_hard_links(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+fn read_bounded(
+    path: &Path,
+    max_bytes: u64,
+    size_code: &'static str,
+    size_message: &'static str,
+) -> Result<Vec<u8>, VerificationError> {
+    let file =
+        fs::File::open(path).map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(VerificationError::new(size_code, size_message));
+    }
+    Ok(bytes)
+}
+
 fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, VerificationError> {
     if !safe_relative(relative) {
         return Err(VerificationError::new(
             "E_INPUT_SUBSTITUTION",
             "input path is not a safe relative path",
+        ));
+    }
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(VerificationError::new(
+            "E_INPUT_SUBSTITUTION",
+            "repository root is not a direct directory",
         ));
     }
     let mut current = root.to_path_buf();
@@ -717,7 +769,18 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
             "bound input is not an unaliased regular file",
         ));
     }
-    fs::read(current).map_err(|error| VerificationError::new("E_IO", error.to_string()))
+    if metadata.len() > MAX_BOUND_INPUT_BYTES {
+        return Err(VerificationError::new(
+            "E_INPUT_SUBSTITUTION",
+            "bound input exceeds byte ceiling",
+        ));
+    }
+    read_bounded(
+        &current,
+        MAX_BOUND_INPUT_BYTES,
+        "E_INPUT_SUBSTITUTION",
+        "bound input exceeds byte ceiling",
+    )
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -805,6 +868,40 @@ mod tests {
 
         assert_eq!(
             read_regular_beneath(temporary.path(), "input.json")
+                .unwrap_err()
+                .code,
+            "E_INPUT_SUBSTITUTION"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_repository_root_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent directory");
+        let repository = parent.path().join("repository");
+        let alias = parent.path().join("repository-alias");
+        fs::create_dir(&repository).expect("create repository");
+        fs::write(repository.join("input.json"), b"{}\n").expect("write input");
+        symlink(&repository, &alias).expect("symlink repository");
+
+        assert_eq!(
+            read_regular_beneath(&alias, "input.json").unwrap_err().code,
+            "E_INPUT_SUBSTITUTION"
+        );
+    }
+
+    #[test]
+    fn oversized_bound_input_fails_before_reading() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let input = fs::File::create(repository.path().join("input.json")).expect("create input");
+        input
+            .set_len(MAX_BOUND_INPUT_BYTES + 1)
+            .expect("size oversized input");
+
+        assert_eq!(
+            read_regular_beneath(repository.path(), "input.json")
                 .unwrap_err()
                 .code,
             "E_INPUT_SUBSTITUTION"

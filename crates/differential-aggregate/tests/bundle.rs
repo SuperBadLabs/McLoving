@@ -58,6 +58,19 @@ fn extra_missing_and_substituted_bundle_entries_fail_closed() {
     );
 }
 
+#[test]
+fn oversized_evidence_fails_before_digest_verification() {
+    let oversized = copy_fixture();
+    fs::write(oversized.path().join(EVIDENCE_FILE), vec![b'x'; 32_769])
+        .expect("write oversized evidence");
+    assert_eq!(
+        verify_bundle(oversized.path(), &repository())
+            .unwrap_err()
+            .code,
+        "E_SIZE"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinked_evidence_fails_closed() {
