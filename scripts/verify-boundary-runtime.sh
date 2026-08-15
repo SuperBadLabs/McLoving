@@ -74,10 +74,10 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
 ' "${receipt_dir}/INPUT-001.json" >/dev/null || fail "INPUT-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
-  [.ready,.cancelled,.next_generation] | all(
+  ([.ready,.cancelled,.next_generation] | all(
     .protocol_version == "mcloving.provisioner.v1"
     and (.request_sha256 | test($d)) and (.signature | test($s))
-  )
+  ))
   and .ready.outcome == "ready"
   and .cancelled.outcome == "cancelled" and .cancelled.cleanup_confirmed
   and .next_generation.fence_token == 2
@@ -91,11 +91,11 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
 ' "${receipt_dir}/EXT-001.json" >/dev/null || fail "EXT-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
-  [.pre,.post,.reconciliation] | all(
+  ([.pre,.post,.reconciliation] | all(
     .schema_version == "mcloving.destination-observation-receipt/v1"
     and .protocol_version == "mcloving.destination-observer/v1"
     and (.request_sha256 | test($d)) and (.signature_base64 | test($s))
-  )
+  ))
   and .pre.phase == "pre_action" and .post.phase == "post_action"
   and .reconciliation.phase == "reconciliation"
   and .pre.destination_cursor < .post.destination_cursor
