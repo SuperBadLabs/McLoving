@@ -25,9 +25,19 @@ compiled digest on Linux and Windows. Semantic TSV checks parse the same bytes
 that passed digest verification; each root is required to be its direct
 lexically normalized canonical path, and each boundary file is opened once
 with no-follow semantics. Unix opens are nonblocking so a FIFO cannot stall
-validation. Regular-file/reparse/link identity is validated from that handle,
+validation. Unix traversal starts from an open root descriptor and uses
+no-follow directory-relative opens for every component. Windows retains
+no-reparse directory handles without delete sharing until the descendant file
+is open. Regular-file/reparse/link identity is validated from that file handle,
 and bounded bytes are read from the same handle. Semantic checks never reopen
-those paths. The aggregate then calls these existing verifiers exactly once:
+those paths. Before an upstream verifier runs, the aggregate materializes only
+digest-authenticated bytes into a new owner-private snapshot. DIFF-001's
+authenticated 30-file manifest selects and authenticates every snapshot file;
+DIFF-002 and DIFF-003 use their authenticated evidence bytes and compiled
+canonical manifests. Each snapshot remains alive through verifier completion
+and is then removed, so a mutable repository cannot replace a file between
+aggregate authentication and canonical semantic verification. The aggregate
+then calls these existing verifiers exactly once against those snapshots:
 
 1. `mcloving-jenkins-differential` for native execution parity;
 2. `mcloving-state-policy-differential` for identity, authorization,

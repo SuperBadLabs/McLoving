@@ -12,15 +12,14 @@ mcloving-state-policy-differential = { version = "0.0.0", path = "../state-polic
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 sha2 = "=0.10.9"
+tempfile = "=3.27.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
+rustix = { version = "=1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 mcloving-windows-job = { version = "0.0.0", path = "../windows-job" }
-
-[dev-dependencies]
-tempfile = "=3.27.0"
 
 [lints]
 workspace = true
