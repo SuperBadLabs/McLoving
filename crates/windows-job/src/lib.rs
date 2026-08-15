@@ -117,7 +117,7 @@ pub fn path_spelling_eq_ignore_case(left: &OsStr, right: &OsStr) -> Result<bool,
     if result == 0 {
         return Err(JobError::last("CompareStringOrdinal"));
     }
-    Ok(result == CSTR_EQUAL as i32)
+    Ok(result == CSTR_EQUAL)
 }
 
 /// Returns the kernel-maintained hardlink count for an open file handle.
