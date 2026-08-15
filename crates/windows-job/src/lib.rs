@@ -110,6 +110,13 @@ pub fn file_link_count(file: &File) -> Result<u32, JobError> {
     Ok(file_information(file)?.nNumberOfLinks)
 }
 
+/// Reports whether an open handle names a Windows reparse point.
+pub fn file_is_reparse_point(file: &File) -> Result<bool, JobError> {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    Ok(file_information(file)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
 fn file_information(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION, JobError> {
     // SAFETY: zero is the documented initial state for this POD structure.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
@@ -856,6 +863,7 @@ mod tests {
         assert_eq!(file_link_count(&file).unwrap(), 1);
         std::fs::hard_link(&primary, &alias).unwrap();
         assert_eq!(file_link_count(&file).unwrap(), 2);
+        assert!(!file_is_reparse_point(&file).unwrap());
     }
 
     #[test]

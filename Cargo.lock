@@ -1532,6 +1532,7 @@ dependencies = [
 name = "mcloving-differential-aggregate"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "mcloving-boundary-differential",
  "mcloving-jenkins-differential",
  "mcloving-state-policy-differential",

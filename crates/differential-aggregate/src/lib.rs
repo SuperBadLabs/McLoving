@@ -168,18 +168,28 @@ pub fn verify_bundle(
     bundle_root: &Path,
     repository_root: &Path,
 ) -> Result<VerificationReceipt, VerificationError> {
-    verify_bundle_tree(bundle_root)?;
-    let evidence_path = bundle_root.join(EVIDENCE_FILE);
-    let metadata = fs::symlink_metadata(&evidence_path)
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if metadata.len() > MAX_EVIDENCE_BYTES {
+    let mut bundle = verify_bundle_tree(bundle_root)?;
+    let manifest_file = bundle
+        .remove("SHA256SUMS")
+        .ok_or_else(|| VerificationError::new("E_TREE", "missing detached manifest"))?;
+    let manifest = String::from_utf8(read_bounded_file(
+        manifest_file,
+        256,
+        "E_MANIFEST",
+        "detached manifest exceeds byte ceiling",
+    )?)
+    .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
+    if manifest != format!("{}  {}\n", EVIDENCE_SHA256, EVIDENCE_FILE) {
         return Err(VerificationError::new(
-            "E_SIZE",
-            "aggregate evidence exceeds byte ceiling",
+            "E_MANIFEST",
+            "detached manifest mismatch",
         ));
     }
-    let bytes = read_bounded(
-        &evidence_path,
+    let evidence_file = bundle
+        .remove(EVIDENCE_FILE)
+        .ok_or_else(|| VerificationError::new("E_TREE", "missing aggregate evidence"))?;
+    let bytes = read_bounded_file(
+        evidence_file,
         MAX_EVIDENCE_BYTES,
         "E_SIZE",
         "aggregate evidence exceeds byte ceiling",
@@ -204,7 +214,7 @@ pub fn verify_bundle(
     })
 }
 
-fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
+fn verify_bundle_tree(root: &Path) -> Result<BTreeMap<String, fs::File>, VerificationError> {
     let metadata = fs::symlink_metadata(root)
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -214,7 +224,7 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
         ));
     }
     let expected_names = BTreeSet::from(["SHA256SUMS".to_owned(), EVIDENCE_FILE.to_owned()]);
-    let mut names = BTreeSet::new();
+    let mut files = BTreeMap::new();
     for entry in
         fs::read_dir(root).map_err(|error| VerificationError::new("E_IO", error.to_string()))?
     {
@@ -223,56 +233,38 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
             .file_name()
             .into_string()
             .map_err(|_| VerificationError::new("E_TREE", "non-UTF-8 bundle entry"))?;
-        if names.len() == expected_names.len()
+        if files.len() == expected_names.len()
             || !expected_names.contains(name.as_str())
-            || !names.insert(name.clone())
+            || files.contains_key(&name)
         {
             return Err(VerificationError::new(
                 "E_TREE",
                 "bundle contains an unexpected or duplicate entry",
             ));
         }
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+        let file = open_no_follow(&entry.path())
+            .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
         if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || has_multiple_hard_links(&entry.path(), &metadata)?
+            || file_is_reparse_point(&file)?
+            || has_multiple_hard_links(&file, &metadata)?
         {
             return Err(VerificationError::new(
                 "E_TREE",
                 format!("unsafe bundle entry {name}"),
             ));
         }
+        files.insert(name, file);
     }
-    if names != expected_names {
+    if files.len() != expected_names.len() {
         return Err(VerificationError::new(
             "E_TREE",
             "bundle must contain exactly SHA256SUMS and differential-aggregate.json",
         ));
     }
-    let manifest_path = root.join("SHA256SUMS");
-    let manifest_metadata = fs::symlink_metadata(&manifest_path)
-        .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
-    if manifest_metadata.len() > 256 {
-        return Err(VerificationError::new(
-            "E_MANIFEST",
-            "detached manifest exceeds byte ceiling",
-        ));
-    }
-    let manifest = String::from_utf8(read_bounded(
-        &manifest_path,
-        256,
-        "E_MANIFEST",
-        "detached manifest exceeds byte ceiling",
-    )?)
-    .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
-    if manifest != format!("{}  {}\n", EVIDENCE_SHA256, EVIDENCE_FILE) {
-        return Err(VerificationError::new(
-            "E_MANIFEST",
-            "detached manifest mismatch",
-        ));
-    }
-    Ok(())
+    Ok(files)
 }
 
 fn verify_aggregate(
@@ -730,7 +722,7 @@ fn safe_relative(path: &str) -> bool {
 
 #[cfg(unix)]
 fn has_multiple_hard_links(
-    _path: &Path,
+    _file: &fs::File,
     metadata: &fs::Metadata,
 ) -> Result<bool, VerificationError> {
     use std::os::unix::fs::MetadataExt as _;
@@ -740,32 +732,65 @@ fn has_multiple_hard_links(
 
 #[cfg(windows)]
 fn has_multiple_hard_links(
-    path: &Path,
+    file: &fs::File,
     _metadata: &fs::Metadata,
 ) -> Result<bool, VerificationError> {
-    let file =
-        fs::File::open(path).map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    let count = mcloving_windows_job::file_link_count(&file)
+    let count = mcloving_windows_job::file_link_count(file)
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
     Ok(count != 1)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn has_multiple_hard_links(
-    _path: &Path,
+    _file: &fs::File,
     _metadata: &fs::Metadata,
 ) -> Result<bool, VerificationError> {
     Ok(true)
 }
 
-fn read_bounded(
-    path: &Path,
+#[cfg(windows)]
+fn file_is_reparse_point(file: &fs::File) -> Result<bool, VerificationError> {
+    mcloving_windows_job::file_is_reparse_point(file)
+        .map_err(|error| VerificationError::new("E_IO", error.to_string()))
+}
+
+#[cfg(not(windows))]
+fn file_is_reparse_point(_file: &fs::File) -> Result<bool, VerificationError> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
+    fs::File::open(path)
+}
+
+fn read_bounded_file(
+    file: fs::File,
     max_bytes: u64,
     size_code: &'static str,
     size_message: &'static str,
 ) -> Result<Vec<u8>, VerificationError> {
-    let file =
-        fs::File::open(path).map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
     let mut bytes = Vec::new();
     file.take(max_bytes + 1)
         .read_to_end(&mut bytes)
@@ -809,9 +834,15 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
             ));
         }
     }
-    let metadata = fs::symlink_metadata(&current)
+    let file = open_no_follow(&current)
+        .map_err(|error| VerificationError::new("E_INPUT_SUBSTITUTION", error.to_string()))?;
+    let metadata = file
+        .metadata()
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if !metadata.is_file() || has_multiple_hard_links(&current, &metadata)? {
+    if !metadata.is_file()
+        || file_is_reparse_point(&file)?
+        || has_multiple_hard_links(&file, &metadata)?
+    {
         return Err(VerificationError::new(
             "E_INPUT_SUBSTITUTION",
             "bound input is not an unaliased regular file",
@@ -823,8 +854,8 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
             "bound input exceeds byte ceiling",
         ));
     }
-    read_bounded(
-        &current,
+    read_bounded_file(
+        file,
         MAX_BOUND_INPUT_BYTES,
         "E_INPUT_SUBSTITUTION",
         "bound input exceeds byte ceiling",
@@ -953,6 +984,25 @@ mod tests {
                 .unwrap_err()
                 .code,
             "E_INPUT_SUBSTITUTION"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_handle_preserves_bytes_across_path_replacement() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("evidence");
+        fs::write(&path, b"authenticated").expect("write evidence");
+        let file = open_no_follow(&path).expect("open evidence once");
+        let metadata = file.metadata().expect("inspect open evidence");
+        assert!(!has_multiple_hard_links(&file, &metadata).expect("inspect link count"));
+
+        fs::rename(&path, directory.path().join("retained")).expect("rename original");
+        fs::write(&path, b"substituted").expect("write substitution");
+
+        assert_eq!(
+            read_bounded_file(file, 64, "E_SIZE", "oversized").expect("read open handle"),
+            b"authenticated"
         );
     }
 }
