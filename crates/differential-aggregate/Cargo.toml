@@ -6,9 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-mcloving-boundary-differential = { path = "../boundary-differential" }
-mcloving-jenkins-differential = { path = "../jenkins-differential" }
-mcloving-state-policy-differential = { path = "../state-policy-differential" }
+mcloving-boundary-differential = { version = "0.0.0", path = "../boundary-differential" }
+mcloving-jenkins-differential = { version = "0.0.0", path = "../jenkins-differential" }
+mcloving-state-policy-differential = { version = "0.0.0", path = "../state-policy-differential" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 sha2 = "=0.10.9"
