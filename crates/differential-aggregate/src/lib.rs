@@ -792,11 +792,12 @@ fn canonical_root_matches(
     canonical: &Path,
     error_code: &'static str,
 ) -> Result<bool, VerificationError> {
-    let canonical = canonical_comparison_path(canonical, error_code)?;
-    let lexical_text = lexical
+    let lexical_comparison = canonical_comparison_path(lexical, error_code)?;
+    let canonical_comparison = canonical_comparison_path(canonical, error_code)?;
+    let lexical_text = lexical_comparison
         .to_str()
         .ok_or_else(|| VerificationError::new(error_code, "lexical root is not UTF-8"))?;
-    let canonical_text = canonical
+    let canonical_text = canonical_comparison
         .to_str()
         .ok_or_else(|| VerificationError::new(error_code, "canonical root is not UTF-8"))?;
     if !lexical_text.eq_ignore_ascii_case(canonical_text) {
@@ -804,7 +805,7 @@ fn canonical_root_matches(
     }
     let lexical_handle = open_anchored_windows_directory(lexical)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
-    let canonical_handle = open_anchored_windows_directory(&canonical)
+    let canonical_handle = open_anchored_windows_directory(canonical)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
     let lexical_identity = mcloving_windows_job::file_identity(&lexical_handle)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
@@ -1232,9 +1233,8 @@ mod tests {
     fn multiply_linked_bound_input_fails_closed() {
         let temporary = temporary_directory();
         let input = temporary.path().join("input.json");
-        let alias_directory = tempfile::tempdir().expect("alias directory");
         fs::write(&input, b"{}\n").expect("write input");
-        fs::hard_link(&input, alias_directory.path().join("input-alias")).expect("hardlink input");
+        fs::hard_link(&input, temporary.path().join("input-alias")).expect("hardlink input");
 
         assert_eq!(
             read_regular_beneath(temporary.path(), "input.json")
