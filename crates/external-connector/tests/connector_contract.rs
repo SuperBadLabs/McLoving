@@ -307,27 +307,12 @@ impl Rig {
             schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             request_id: Uuid::new_v4(),
-            tenant_id: self
-                .secret_grant_binding
-                .as_ref()
-                .map_or_else(Uuid::new_v4, |binding| binding.organization_id),
-            project_id: self
-                .secret_grant_binding
-                .as_ref()
-                .map_or_else(Uuid::new_v4, |binding| binding.project_id),
+            tenant_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
             pipeline_id: Uuid::new_v4(),
-            build_id: self
-                .secret_grant_binding
-                .as_ref()
-                .map_or_else(Uuid::new_v4, |binding| binding.build_id),
-            attempt_id: self
-                .secret_grant_binding
-                .as_ref()
-                .map_or_else(Uuid::new_v4, |binding| binding.attempt_id),
-            effect_fence: self
-                .secret_grant_binding
-                .as_ref()
-                .map_or(9, |binding| binding.fence),
+            build_id: Uuid::new_v4(),
+            attempt_id: Uuid::new_v4(),
+            effect_fence: 9,
             effect_key: "publish/release-1".to_owned(),
             connector_id: self.config.connector_id.clone(),
             expected_implementation_sha256: self.config.implementation_sha256.clone(),
@@ -506,7 +491,15 @@ async fn destination(
 #[tokio::test]
 async fn success_is_signed_exactly_once_and_restart_replays_without_transport() {
     let rig = Rig::new(Mode::Success, IdempotencyClass::ExternallyIdempotent).await;
-    let request = rig.request(IdempotencyClass::ExternallyIdempotent);
+    let mut request = rig.request(IdempotencyClass::ExternallyIdempotent);
+    if let Some(binding) = &rig.secret_grant_binding {
+        request.tenant_id = binding.organization_id;
+        request.project_id = binding.project_id;
+        request.build_id = binding.build_id;
+        request.attempt_id = binding.attempt_id;
+        request.effect_fence = binding.fence;
+        sign_action_request(&mut request, &rig.request_seed).unwrap();
+    }
     let first = rig
         .connector
         .execute_at(request.clone(), NOW)
