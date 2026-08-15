@@ -11,7 +11,9 @@ or authority field changes.
 
 The two-file bundle at `migration/differential-aggregate-v1` is sealed by a
 detached SHA-256 manifest and a digest compiled into
-`mcloving-differential-aggregate`. Its twelve exact inputs bind:
+`mcloving-differential-aggregate`. Bundle enumeration and both entry opens are
+relative to the retained validated root handle, and the first unexpected,
+duplicate, or third entry fails closed. Its twelve exact inputs bind:
 
 - the 230-job inventory and source/job map;
 - the 228-file source manifest, corpus manifest, and per-file corpus index;

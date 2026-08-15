@@ -170,7 +170,7 @@ pub fn verify_bundle(
     bundle_root: &Path,
     repository_root: &Path,
 ) -> Result<VerificationReceipt, VerificationError> {
-    let bundle_root = canonical_direct_directory(bundle_root, "E_TREE")?;
+    let bundle_root = canonical_anchored_directory(bundle_root, "E_TREE")?;
     let repository_root = canonical_direct_directory(repository_root, "E_INPUT_SUBSTITUTION")?;
     let mut bundle = verify_bundle_tree(&bundle_root)?;
     let manifest_file = bundle
@@ -218,25 +218,12 @@ pub fn verify_bundle(
     })
 }
 
-fn verify_bundle_tree(root: &Path) -> Result<BTreeMap<String, fs::File>, VerificationError> {
-    let metadata = fs::symlink_metadata(root)
-        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(VerificationError::new(
-            "E_TREE",
-            "bundle root must be a directory",
-        ));
-    }
+fn verify_bundle_tree(
+    root: &AnchoredDirectory,
+) -> Result<BTreeMap<String, fs::File>, VerificationError> {
     let expected_names = BTreeSet::from(["SHA256SUMS".to_owned(), EVIDENCE_FILE.to_owned()]);
     let mut files = BTreeMap::new();
-    for entry in
-        fs::read_dir(root).map_err(|error| VerificationError::new("E_IO", error.to_string()))?
-    {
-        let entry = entry.map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| VerificationError::new("E_TREE", "non-UTF-8 bundle entry"))?;
+    for name in bundle_entry_names(root)? {
         if files.len() == expected_names.len()
             || !expected_names.contains(name.as_str())
             || files.contains_key(&name)
@@ -246,7 +233,7 @@ fn verify_bundle_tree(root: &Path) -> Result<BTreeMap<String, fs::File>, Verific
                 "bundle contains an unexpected or duplicate entry",
             ));
         }
-        let file = open_no_follow(&entry.path())
+        let file = open_regular_beneath_platform(&root.path, &root.anchor, &name)
             .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
         let metadata = file
             .metadata()
@@ -269,6 +256,71 @@ fn verify_bundle_tree(root: &Path) -> Result<BTreeMap<String, fs::File>, Verific
         ));
     }
     Ok(files)
+}
+
+#[cfg(unix)]
+fn bundle_entry_names(root: &AnchoredDirectory) -> Result<Vec<String>, VerificationError> {
+    use nix::dir::Dir;
+    use std::os::fd::OwnedFd;
+
+    let cloned = root
+        .anchor
+        .0
+        .try_clone()
+        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+    let mut directory = Dir::from_fd(OwnedFd::from(cloned))
+        .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
+    let mut names = Vec::new();
+    for entry in directory.iter() {
+        let entry = entry.map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        names.push(
+            std::str::from_utf8(bytes)
+                .map_err(|_| VerificationError::new("E_TREE", "non-UTF-8 bundle entry"))?
+                .to_owned(),
+        );
+        if names.len() > 2 {
+            return Err(VerificationError::new(
+                "E_TREE",
+                "bundle contains an unexpected or duplicate entry",
+            ));
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(windows)]
+fn bundle_entry_names(root: &AnchoredDirectory) -> Result<Vec<String>, VerificationError> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&root.path)
+        .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
+    {
+        let entry = entry.map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+        names.push(
+            entry
+                .file_name()
+                .into_string()
+                .map_err(|_| VerificationError::new("E_TREE", "non-UTF-8 bundle entry"))?,
+        );
+        if names.len() > 2 {
+            return Err(VerificationError::new(
+                "E_TREE",
+                "bundle contains an unexpected or duplicate entry",
+            ));
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn bundle_entry_names(_root: &AnchoredDirectory) -> Result<Vec<String>, VerificationError> {
+    Err(VerificationError::new(
+        "E_TREE",
+        "anchored bundle enumeration is unsupported on this platform",
+    ))
 }
 
 fn verify_aggregate(
@@ -1013,16 +1065,6 @@ fn file_is_reparse_point(_file: &fs::File) -> Result<bool, VerificationError> {
     Ok(false)
 }
 
-#[cfg(unix)]
-fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)
-}
-
 #[cfg(windows)]
 fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
     use std::os::windows::fs::OpenOptionsExt as _;
@@ -1032,11 +1074,6 @@ fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
-    fs::File::open(path)
 }
 
 fn read_bounded_file(
@@ -1316,10 +1353,8 @@ mod tests {
         };
         spelling.replace_range(0..1, &alternate_drive.to_string());
         let alternate = Path::new(&spelling);
-        assert!(
-            canonical_root_matches(alternate, &canonical, "E_INPUT_SUBSTITUTION")
-                .expect("compare root identity")
-        );
+        canonical_anchored_directory(alternate, "E_INPUT_SUBSTITUTION")
+            .expect("compare root identity");
     }
 
     #[test]
@@ -1490,7 +1525,7 @@ mod tests {
         let directory = temporary_directory();
         let path = directory.path().join("evidence");
         fs::write(&path, b"authenticated").expect("write evidence");
-        let file = open_no_follow(&path).expect("open evidence once");
+        let file = fs::File::open(&path).expect("open evidence once");
         let metadata = file.metadata().expect("inspect open evidence");
         assert!(!has_multiple_hard_links(&file, &metadata).expect("inspect link count"));
 
@@ -1528,6 +1563,40 @@ mod tests {
             read_bounded_file(file, 64, "E_SIZE", "oversized").expect("read anchored input"),
             b"authenticated"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_bundle_root_anchors_enumeration_and_entry_opens() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temporary_directory();
+        let root = parent.path().join("bundle");
+        let retained = parent.path().join("retained");
+        let substituted = parent.path().join("substituted");
+        fs::create_dir(&root).expect("create bundle");
+        fs::create_dir(&substituted).expect("create substituted bundle");
+        let fixture = repository().join("migration/differential-aggregate-v1");
+        for name in ["SHA256SUMS", EVIDENCE_FILE] {
+            fs::copy(fixture.join(name), root.join(name)).expect("copy authenticated fixture");
+            fs::copy(fixture.join(name), substituted.join(name)).expect("copy substituted fixture");
+        }
+        fs::write(substituted.join(EVIDENCE_FILE), b"{}\n").expect("substitute evidence");
+        let anchored =
+            canonical_anchored_directory(&root, "E_TREE").expect("anchor original bundle");
+
+        fs::rename(&root, &retained).expect("rename original bundle");
+        symlink(&substituted, &root).expect("substitute bundle root");
+        let mut files = verify_bundle_tree(&anchored).expect("read anchored bundle");
+        let evidence = read_bounded_file(
+            files.remove(EVIDENCE_FILE).expect("authenticated evidence"),
+            MAX_EVIDENCE_BYTES,
+            "E_SIZE",
+            "oversized",
+        )
+        .expect("read anchored evidence");
+
+        assert_eq!(sha256(&evidence), EVIDENCE_SHA256);
     }
 
     #[cfg(windows)]

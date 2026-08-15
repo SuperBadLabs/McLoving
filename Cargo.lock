@@ -1537,6 +1537,7 @@ dependencies = [
  "mcloving-jenkins-differential",
  "mcloving-state-policy-differential",
  "mcloving-windows-job",
+ "nix",
  "rustix",
  "serde",
  "serde_json",
