@@ -122,6 +122,7 @@ jobs:
           bash -n scripts/release-build-inner.sh
           bash -n scripts/test-state-policy-differential.sh
           bash -n scripts/test-boundary-differential.sh
+          bash -n scripts/verify-boundary-runtime.sh
           python3 scripts/test-execution-board.py
           python3 scripts/verify-execution-board.py
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15

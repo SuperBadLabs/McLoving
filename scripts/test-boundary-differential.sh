@@ -45,16 +45,23 @@ target_network="mcloving-diff003-target-${RANDOM}-${RANDOM}"
 jenkins="mcloving-diff003-jenkins-${RANDOM}-${RANDOM}"
 postgres="mcloving-diff003-postgres-${RANDOM}-${RANDOM}"
 runner="mcloving-diff003-runner-${RANDOM}-${RANDOM}"
+connector_runner="mcloving-diff003-connector-${RANDOM}-${RANDOM}"
+observer_runner="mcloving-diff003-observer-${RANDOM}-${RANDOM}"
 runtime_root="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-diff003.XXXXXX")"
 jenkins_home="${runtime_root}/jenkins-home"
 cargo_target="${runtime_root}/cargo-target"
+cargo_target_connector="${runtime_root}/cargo-target-connector"
+cargo_target_observer="${runtime_root}/cargo-target-observer"
+main_boundary_dir="${evidence}/runtime-boundaries-main"
+connector_boundary_dir="${evidence}/runtime-boundaries-connector"
+observer_boundary_dir="${evidence}/runtime-boundaries-observer"
 jenkins_port="$((21000 + (RANDOM % 2000)))"
 jenkins_password="$(openssl rand -hex 32)"
 jenkins_password_file="${runtime_root}/jenkins-password"
 jenkins_netrc="${runtime_root}/netrc"
 
 cleanup() {
-  for container in "${runner}" "${postgres}" "${jenkins}"; do
+  for container in "${observer_runner}" "${connector_runner}" "${runner}" "${postgres}" "${jenkins}"; do
     if [[ -n "${container}" ]]; then
       podman rm --force "${container}" >/dev/null 2>&1 || true
     fi
@@ -68,7 +75,9 @@ cleanup() {
 trap cleanup EXIT
 
 umask 077
-mkdir -p "${evidence}" "${jenkins_home}/init.groovy.d" "${cargo_target}"
+mkdir -p "${evidence}" "${jenkins_home}/init.groovy.d" "${cargo_target}" \
+  "${cargo_target_connector}" "${cargo_target_observer}" \
+  "${main_boundary_dir}" "${connector_boundary_dir}" "${observer_boundary_dir}"
 chmod 700 "${output_root}" "${evidence}" "${runtime_root}"
 printf '%s\n' "${jenkins_password}" >"${jenkins_password_file}"
 printf 'machine 127.0.0.1 login diff003-admin password %s\n' \
@@ -222,7 +231,7 @@ podman create --name "${runner}" \
   bash -c '
     set -euo pipefail
     mkdir -p /evidence/runtime-boundaries
-    export MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/evidence/runtime-boundaries
+    export MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/evidence/runtime-boundaries-main
     run_suite() {
       suite="$1"
       shift
@@ -247,20 +256,18 @@ podman create --name "${runner}" \
       -p mcloving-input-adapter
     run_suite provisioner cargo test --locked --offline \
       -p mcloving-provisioner
-    run_suite external-connector cargo test --locked --offline \
-      -p mcloving-external-connector --features loopback-test
-    run_suite destination-observer cargo test --locked --offline \
-      -p mcloving-destination-observer --features loopback-test
-    run_suite dependency-resolver cargo test --locked --offline \
-      -p mcloving-dependency-resolver
-    run_suite dependency-resolver-contained env \
-      MCLOVING_DEPENDENCY_TRANSPORT_ROOT=/tmp/mcloving-dependency-transport-16m \
-      MCLOVING_DEPENDENCY_TRANSPORT_CAPACITY=16777216 \
-      MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE=1 \
-      MCLOVING_DIFF003_CONTAINED=1 \
-      cargo test --locked --offline -p mcloving-dependency-resolver \
-        --test contained_resolver standalone_exact_resolution_and_offline_restart_replay \
-        -- --ignored --nocapture --test-threads=1
+    run_dependency_suite() {
+      cargo test --locked --offline -p mcloving-dependency-resolver
+      env \
+        MCLOVING_DEPENDENCY_TRANSPORT_ROOT=/tmp/mcloving-dependency-transport-16m \
+        MCLOVING_DEPENDENCY_TRANSPORT_CAPACITY=16777216 \
+        MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE=1 \
+        MCLOVING_DIFF003_CONTAINED=1 \
+        cargo test --locked --offline -p mcloving-dependency-resolver \
+          --test contained_resolver standalone_exact_resolution_and_offline_restart_replay \
+          -- --ignored --nocapture --test-threads=1
+    }
+    run_suite dependency-resolver run_dependency_suite
     run_suite cache cargo test --locked --offline -p mcloving-cache
     run_suite release-provenance cargo test --locked --offline \
       -p mcloving-release-provenance
@@ -275,7 +282,6 @@ podman create --name "${runner}" \
       echo "target fixture unexpectedly reached the public network" >&2
       exit 1
     fi
-    printf "target-network-negative\n" >>/evidence/component-suites.txt
     printf "public-network-denied\n" >/evidence/target-network-negative.txt
   ' >/dev/null
 
@@ -294,6 +300,92 @@ if [[ ${runner_status} -ne 0 ]]; then
   exit "${runner_status}"
 fi
 
+podman create --name "${connector_runner}" --network none \
+  --cpus 2 --memory 4g --pids-limit 2048 \
+  --security-opt no-new-privileges --cap-drop all \
+  --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/cargo-target \
+  --env RUSTUP_TOOLCHAIN=1.97.1 \
+  --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
+  --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
+  --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
+  --volume "${cargo_target_connector}:/cargo-target:Z" \
+  --volume "${connector_boundary_dir}:/receipt:Z" \
+  --volume "${repo_root}:/work:ro,Z" --workdir /work \
+  "${MCLOVING_RUST_IMAGE}" \
+  cargo test --locked --offline -p mcloving-external-connector \
+    --features loopback-test -- --test-threads=1 >/dev/null
+set +e
+podman start --attach "${connector_runner}" >>"${evidence}/test-output.txt" 2>&1
+connector_status=$?
+set -e
+podman inspect "${connector_runner}" >"${evidence}/connector-runner-inspect.json"
+[[ ${connector_status} -eq 0 ]] || {
+  echo "DIFF-003 isolated connector suite failed" >&2
+  exit "${connector_status}"
+}
+printf 'external-connector\n' >>"${evidence}/component-suites.txt"
+
+podman create --name "${observer_runner}" --network none \
+  --cpus 2 --memory 4g --pids-limit 2048 \
+  --security-opt no-new-privileges --cap-drop all \
+  --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/cargo-target \
+  --env RUSTUP_TOOLCHAIN=1.97.1 \
+  --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
+  --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
+  --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
+  --volume "${cargo_target_observer}:/cargo-target:Z" \
+  --volume "${observer_boundary_dir}:/receipt:Z" \
+  --volume "${repo_root}:/work:ro,Z" --workdir /work \
+  "${MCLOVING_RUST_IMAGE}" \
+  cargo test --locked --offline -p mcloving-destination-observer \
+    --features loopback-test -- --test-threads=1 >/dev/null
+set +e
+podman start --attach "${observer_runner}" >>"${evidence}/test-output.txt" 2>&1
+observer_status=$?
+set -e
+podman inspect "${observer_runner}" >"${evidence}/observer-runner-inspect.json"
+[[ ${observer_status} -eq 0 ]] || {
+  echo "DIFF-003 isolated observer suite failed" >&2
+  exit "${observer_status}"
+}
+printf 'destination-observer\n' >>"${evidence}/component-suites.txt"
+
+runtime_boundary_dir="${evidence}/runtime-boundaries"
+mkdir -p "${runtime_boundary_dir}"
+cp "${main_boundary_dir}"/*.json "${runtime_boundary_dir}/"
+cp "${connector_boundary_dir}/EXT-001.json" "${runtime_boundary_dir}/"
+cp "${observer_boundary_dir}/OBS-001.json" "${runtime_boundary_dir}/"
+
+# The resolver's two bind-topology authority-alias negatives require mount
+# authority. Run that one exact test in a separate rootless user-namespace
+# container with no network, no host-root mapping, and no writable source mount.
+podman run --rm --network none \
+  --cpus 2 --memory 4g --pids-limit 2048 \
+  --security-opt no-new-privileges --security-opt apparmor=unconfined \
+  --cap-drop all --cap-add SYS_ADMIN \
+  --env CARGO_NET_OFFLINE=true \
+  --env CARGO_TARGET_DIR=/cargo-target \
+  --env RUSTUP_TOOLCHAIN=1.97.1 \
+  --env MCLOVING_DEPENDENCY_TRANSPORT_ROOT=/tmp/mcloving-dependency-transport-16m \
+  --env MCLOVING_DEPENDENCY_TRANSPORT_CAPACITY=16777216 \
+  --env MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE=1 \
+  --env MCLOVING_DIFF003_CONTAINED=1 \
+  --env MCLOVING_DIFF003_MOUNT_DIRECT=1 \
+  --tmpfs /tmp/mcloving-dependency-transport-16m:rw,nodev,nosuid,noexec,size=16777216,mode=0700 \
+  --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
+  --volume "${cargo_target}:/cargo-target:Z" \
+  --volume "${repo_root}:/work:ro,Z" \
+  --workdir /work \
+  "${MCLOVING_RUST_IMAGE}" \
+  cargo test --locked --offline -p mcloving-dependency-resolver \
+    --test contained_resolver standalone_exact_resolution_and_offline_restart_replay \
+    -- --ignored --nocapture --test-threads=1 \
+  >>"${evidence}/test-output.txt" 2>&1
+printf 'rootless-isolated-bind-alias-negatives-passed\n' \
+  >"${evidence}/dependency-authority-alias-negative.txt"
+printf 'dependency-resolver-authority-alias\n' \
+  >>"${evidence}/component-suites.txt"
+
 expected_suites="${runtime_root}/expected-suites.txt"
 printf '%s\n' \
   controller-trigger \
@@ -304,14 +396,13 @@ printf '%s\n' \
   secret-broker \
   input-adapter \
   provisioner \
-  external-connector \
-  destination-observer \
   dependency-resolver \
-  dependency-resolver-contained \
   cache \
   release-provenance \
   boundary-differential \
-  target-network-negative \
+  external-connector \
+  destination-observer \
+  dependency-resolver-authority-alias \
   >"${expected_suites}"
 diff -u "${expected_suites}" "${evidence}/component-suites.txt"
 
@@ -344,7 +435,6 @@ while read -r component_id actual_digest; do
   fi
 done <"${component_manifest}"
 
-runtime_boundary_dir="${evidence}/runtime-boundaries"
 runtime_boundary_jsonl="${evidence}/runtime-boundaries.jsonl"
 : >"${runtime_boundary_jsonl}"
 for boundary_id in \
@@ -366,44 +456,13 @@ for boundary_id in \
 done
 jq --slurp '.' "${runtime_boundary_jsonl}" >"${evidence}/runtime-boundaries.json"
 
-runtime_join_jsonl="${evidence}/runtime-joins.jsonl"
-: >"${runtime_join_jsonl}"
-while IFS=$'\t' read -r join_name source_boundary target_boundary contract_sha256; do
-  source_receipt_sha256="$(jq -r --arg id "${source_boundary}" \
-    '.[] | select(.boundary == $id) | .receipt_sha256' \
-    "${evidence}/runtime-boundaries.json")"
-  target_receipt_sha256="$(jq -r --arg id "${target_boundary}" \
-    '.[] | select(.boundary == $id) | .receipt_sha256' \
-    "${evidence}/runtime-boundaries.json")"
-  live_join_sha256="$(printf 'join=%s\nsource=%s\ntarget=%s\ncontract=%s\n' \
-    "${join_name}" "${source_receipt_sha256}" "${target_receipt_sha256}" \
-    "${contract_sha256}" | sha256sum | awk '{print $1}')"
-  jq -cn \
-    --arg name "${join_name}" \
-    --arg source_boundary "${source_boundary}" \
-    --arg target_boundary "${target_boundary}" \
-    --arg contract_sha256 "${contract_sha256}" \
-    --arg source_receipt_sha256 "${source_receipt_sha256}" \
-    --arg target_receipt_sha256 "${target_receipt_sha256}" \
-    --arg live_join_sha256 "${live_join_sha256}" \
-    '{
-      name: $name,
-      source_boundary: $source_boundary,
-      target_boundary: $target_boundary,
-      contract_sha256: $contract_sha256,
-      source_receipt_sha256: $source_receipt_sha256,
-      target_receipt_sha256: $target_receipt_sha256,
-      live_join_sha256: $live_join_sha256
-    }' >>"${runtime_join_jsonl}"
-done < <(jq -r '.joins[] | [
-  .name, .source_boundary, .target_boundary, .shared_input_sha256
-] | @tsv' "${certificate}")
-jq --slurp '.' "${runtime_join_jsonl}" >"${evidence}/runtime-joins.json"
-jq --exit-status '
-  length == 12
-  and ([.[].source_receipt_sha256, .[].target_receipt_sha256, .[].live_join_sha256]
-    | all(test("^[0-9a-f]{64}$")))
-' "${evidence}/runtime-joins.json" >/dev/null
+"${repo_root}/scripts/verify-boundary-runtime.sh" \
+  "${certificate}" "${runtime_boundary_dir}" "${evidence}/test-output.txt" \
+  "${evidence}/runtime-verification"
+cp "${evidence}/runtime-verification/validated-joins.json" \
+  "${evidence}/runtime-joins.json"
+cp "${evidence}/runtime-verification/executed-scenarios.json" \
+  "${evidence}/executed-scenarios.json"
 
 certificate_sha256="$(sha256sum "${certificate}" | awk '{print $1}')"
 jq -n \
@@ -413,7 +472,8 @@ jq -n \
   --slurpfile certificate "${certificate}" \
   --slurpfile jenkins "${evidence}/jenkins-runtime.json" \
   --slurpfile live_boundaries "${evidence}/runtime-boundaries.json" \
-  --slurpfile live_joins "${evidence}/runtime-joins.json" '
+  --slurpfile live_joins "${evidence}/runtime-joins.json" \
+  --slurpfile executed_scenarios "${evidence}/executed-scenarios.json" '
   {
     schema: "mcloving.diff003.runtime-comparison/v1",
     source_commit: $source_commit,
@@ -424,6 +484,7 @@ jq -n \
     boundary_count: ($certificate[0].boundaries | length),
     live_boundary_receipt_count: ($live_boundaries[0] | length),
     scenario_count: ($certificate[0].scenarios | length),
+    executed_scenario_count: ($executed_scenarios[0] | length),
     join_count: ($certificate[0].joins | length),
     live_join_count: ($live_joins[0] | length),
     component_suites_passed: 15,
@@ -432,8 +493,9 @@ jq -n \
     production_boundary_mappings: $certificate[0].authority.production_boundary_mappings,
     production_external_effects: $certificate[0].authority.production_external_effects,
     production_cutover_claimed: $certificate[0].clients.production_cutover_claimed,
-    duplicate_effects: ([$certificate[0].scenarios[].duplicate_effects] | add),
-    secret_marker_disclosures: $certificate[0].marker_scan.disclosed_markers,
+    duplicate_effects: ([$live_joins[0][].duplicate_effects] | add),
+    secret_marker_disclosures: null,
+    encoded_marker_scan_passed: false,
     verifier_passed: true
   }
 ' >"${evidence}/runtime-comparison.json"
@@ -444,6 +506,7 @@ jq --exit-status '
   and .boundary_count == 13
   and .live_boundary_receipt_count == 13
   and .scenario_count == 48
+  and .executed_scenario_count == 48
   and .join_count == 12
   and .live_join_count == 12
   and .component_suites_passed == 15
@@ -453,7 +516,6 @@ jq --exit-status '
   and .production_external_effects == 0
   and (.production_cutover_claimed | not)
   and .duplicate_effects == 0
-  and .secret_marker_disclosures == 0
   and .verifier_passed
 ' "${evidence}/runtime-comparison.json" >/dev/null
 
@@ -489,11 +551,29 @@ for private_marker in \
   never-publish-this-secret \
   contained-dependency-credential \
   contained-dependency-receipt-key-material-v1; do
-  if grep -R -F -- "${private_marker}" "${evidence}" >/dev/null; then
-    echo "DIFF-003 retained evidence disclosed a contained private marker" >&2
-    exit 1
-  fi
+  marker_base64="$(printf '%s' "${private_marker}" | base64 -w0)"
+  marker_base64url="$(printf '%s' "${marker_base64}" | tr '+/' '-_' | sed 's/=*$//')"
+  marker_hex="$(printf '%s' "${private_marker}" | od -An -v -tx1 | tr -d ' \n')"
+  marker_percent="$(printf '%s' "${marker_hex}" | sed 's/../%&/g')"
+  marker_nested="$(printf '%s' "${marker_base64}" | base64 -w0)"
+  for marker_variant in \
+    "${private_marker}" "${marker_base64}" "${marker_base64url}" \
+    "${marker_hex}" "${marker_percent}" "${marker_nested}"; do
+    if grep -R -F -- "${marker_variant}" "${evidence}" >/dev/null; then
+      echo "DIFF-003 retained evidence disclosed a raw or encoded contained marker" >&2
+      exit 1
+    fi
+  done
 done
+printf 'raw-base64-base64url-hex-percent-nested-base64-clean\n' \
+  >"${evidence}/encoded-marker-scan.txt"
+comparison_update="${runtime_root}/runtime-comparison.json"
+jq '.secret_marker_disclosures = 0 | .encoded_marker_scan_passed = true' \
+  "${evidence}/runtime-comparison.json" >"${comparison_update}"
+mv "${comparison_update}" "${evidence}/runtime-comparison.json"
+jq --exit-status '
+  .secret_marker_disclosures == 0 and .encoded_marker_scan_passed
+' "${evidence}/runtime-comparison.json" >/dev/null
 
 for source_file in \
   Cargo.lock \
@@ -504,6 +584,7 @@ for source_file in \
   migration/boundary-differential-v1/boundary-differential.json \
   migration/boundary-differential-runtime-v1/init.groovy \
   migration/boundary-differential-runtime-v1/probe.groovy \
+  scripts/verify-boundary-runtime.sh \
   scripts/test-boundary-differential.sh; do
   sha256sum "${repo_root}/${source_file}"
 done >"${evidence}/source-files.sha256"

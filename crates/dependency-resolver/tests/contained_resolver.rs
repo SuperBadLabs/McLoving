@@ -259,13 +259,21 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         },
         loopback_fixture: true,
     };
-    if std::env::var_os("MCLOVING_DIFF003_CONTAINED").is_none() {
+    let diff003_direct_mount = std::env::var_os("MCLOVING_DIFF003_MOUNT_DIRECT").is_some();
+    if std::env::var_os("MCLOVING_DIFF003_CONTAINED").is_none() || diff003_direct_mount {
         let mutable_receipts = output_root.join("receipts");
         create_private_directory(&mutable_receipts);
         let mutable_receipt = private_file(&mutable_receipts, "mutable.key", &receipt_key);
         let receipt_alias = private_file(fixture.path(), "bind-receipt.key", b"mount target");
-        let mount_status = Command::new("sudo")
-            .arg("mount")
+        let mut mount_command = Command::new(if diff003_direct_mount {
+            "mount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            mount_command.arg("mount");
+        }
+        let mount_status = mount_command
             .arg("--bind")
             .arg(&mutable_receipt)
             .arg(&receipt_alias)
@@ -276,8 +284,15 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         let mut bind_alias_config = config.clone();
         bind_alias_config.receipt_key_path = path_string(&receipt_alias);
         let bind_alias_result = LoadedAuthorities::load(&bind_alias_config);
-        let unmount_status = Command::new("sudo")
-            .arg("umount")
+        let mut unmount_command = Command::new(if diff003_direct_mount {
+            "umount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            unmount_command.arg("umount");
+        }
+        let unmount_status = unmount_command
             .arg(&receipt_alias)
             .status()
             .await
@@ -296,8 +311,15 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         let topology_nested = output_root.join("topology-nested");
         create_private_directory(&topology_alias);
         create_private_directory(&topology_nested);
-        let topology_mount_status = Command::new("sudo")
-            .arg("mount")
+        let mut topology_mount_command = Command::new(if diff003_direct_mount {
+            "mount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            topology_mount_command.arg("mount");
+        }
+        let topology_mount_status = topology_mount_command
             .arg("--bind")
             .arg(&output_root)
             .arg(&topology_alias)
@@ -306,8 +328,15 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             .expect("bind mutable root alias");
         assert!(topology_mount_status.success(), "bind mutable root alias");
         let nested_authority_path = topology_alias.join("topology-nested");
-        let nested_mount_status = Command::new("sudo")
-            .arg("mount")
+        let mut nested_mount_command = Command::new(if diff003_direct_mount {
+            "mount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            nested_mount_command.arg("mount");
+        }
+        let nested_mount_status = nested_mount_command
             .arg("--bind")
             .arg(fixture.path())
             .arg(&nested_authority_path)
@@ -319,8 +348,15 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             "bind nested authority topology"
         );
         let nested_topology_result = LoadedAuthorities::load(&config);
-        let nested_unmount_status = Command::new("sudo")
-            .arg("umount")
+        let mut nested_unmount_command = Command::new(if diff003_direct_mount {
+            "umount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            nested_unmount_command.arg("umount");
+        }
+        let nested_unmount_status = nested_unmount_command
             .arg(&nested_authority_path)
             .status()
             .await
@@ -329,8 +365,15 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             nested_unmount_status.success(),
             "unmount nested authority topology"
         );
-        let topology_unmount_status = Command::new("sudo")
-            .arg("umount")
+        let mut topology_unmount_command = Command::new(if diff003_direct_mount {
+            "umount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            topology_unmount_command.arg("umount");
+        }
+        let topology_unmount_status = topology_unmount_command
             .arg(&topology_alias)
             .status()
             .await
