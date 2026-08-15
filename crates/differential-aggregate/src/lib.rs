@@ -766,6 +766,7 @@ fn canonical_direct_directory(
     path: &Path,
     error_code: &'static str,
 ) -> Result<std::path::PathBuf, VerificationError> {
+    validate_direct_root_components(path, error_code)?;
     let lexical = lexical_absolute(path)?;
     let canonical = fs::canonicalize(path)
         .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
@@ -784,6 +785,86 @@ fn canonical_direct_directory(
         ));
     }
     Ok(canonical)
+}
+
+#[cfg(unix)]
+fn validate_direct_root_components(
+    path: &Path,
+    error_code: &'static str,
+) -> Result<(), VerificationError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
+            .join(path)
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = open(Path::new("/"), flags, Mode::empty())
+        .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+    for component in absolute.components() {
+        let name = match component {
+            Component::Normal(name) => Some(name),
+            Component::ParentDir => Some(std::ffi::OsStr::new("..")),
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => None,
+        };
+        if let Some(name) = name {
+            directory = openat(&directory, name, flags, Mode::empty())
+                .map_err(|error| VerificationError::new(error_code, error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_direct_root_components(
+    path: &Path,
+    error_code: &'static str,
+) -> Result<(), VerificationError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
+            .join(path)
+    };
+    let mut current = std::path::PathBuf::new();
+    let mut anchors = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => current.push(component.as_os_str()),
+            Component::Normal(name) => {
+                current.push(name);
+                anchors.push(
+                    open_anchored_windows_directory(&current)
+                        .map_err(|error| VerificationError::new(error_code, error.to_string()))?,
+                );
+            }
+            Component::ParentDir => {
+                if !current.pop() {
+                    return Err(VerificationError::new(
+                        error_code,
+                        "root path escapes its filesystem root",
+                    ));
+                }
+            }
+            Component::CurDir => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_direct_root_components(
+    _path: &Path,
+    error_code: &'static str,
+) -> Result<(), VerificationError> {
+    Err(VerificationError::new(
+        error_code,
+        "direct root traversal is unsupported on this platform",
+    ))
 }
 
 #[cfg(windows)]
@@ -1258,6 +1339,28 @@ mod tests {
 
         assert_eq!(
             read_regular_beneath(&alias, "input.json").unwrap_err().code,
+            "E_INPUT_SUBSTITUTION"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_before_parent_root_component_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temporary_directory();
+        let child = parent.path().join("child");
+        let bundle = parent.path().join("bundle");
+        let alias = parent.path().join("alias");
+        fs::create_dir(&child).expect("create child");
+        fs::create_dir(&bundle).expect("create bundle");
+        symlink(&child, &alias).expect("symlink child");
+        let root = alias.join("..").join("bundle");
+
+        assert_eq!(
+            canonical_direct_directory(&root, "E_INPUT_SUBSTITUTION")
+                .unwrap_err()
+                .code,
             "E_INPUT_SUBSTITUTION"
         );
     }

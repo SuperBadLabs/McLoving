@@ -24,7 +24,10 @@ denied, and every input is a bounded, singly linked regular file with an exact
 compiled digest on Linux and Windows. Semantic TSV checks parse the same bytes
 that passed digest verification; each root is required to be its direct
 lexically normalized canonical path, and each boundary file is opened once
-with no-follow semantics. Unix opens are nonblocking so a FIFO cannot stall
+with no-follow semantics. Before canonicalization, every original root
+component—including a component later canceled by `..`—is traversed through
+no-follow directory opens, so a symlink or reparse point cannot disappear by
+lexical normalization. Unix opens are nonblocking so a FIFO cannot stall
 validation. Unix traversal starts from an open root descriptor and uses
 no-follow directory-relative opens for every component. Windows retains
 no-reparse directory handles without delete sharing until the descendant file
