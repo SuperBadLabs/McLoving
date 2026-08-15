@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "133c471887b86ae626994ba6d06de5d82469c6dc8efd8e29ae089a771d0b5c83";
+    "2004b53d0f28fbede0862b2e1c1c4c644bfc424a3e196f5dc9bf1daa39aabcf4";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -40,67 +40,67 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "TRIG-001",
         "mcloving.trigger-ingress/v1",
-        "fdcd50c1357384210aa9f141dbad8af90af08789ea4a1f8dfacd8baecfbbb6db",
+        "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
     ),
     (
         "SCM-001",
         "mcloving.source-acquirer/v1",
-        "a55f28854fbafb20754005ea078903343d0fd1a016e95341b2db9247a7519e4d",
+        "9141e5560b9495e3a253ed0cebfa02d02e7c63f2510cfa4e9ad5a2cc2e972ca6",
     ),
     (
         "SECRET-001",
         "mcloving.secret-grant/v1",
-        "2cf5eeb8fd5ac55febd8d706c4de766c9554dce7c659f1280537c09e5d70a45f",
+        "9c1a1d395a7bd6b72e6b5faf19c13e4dd3b0638ca98937d0753892e7b2c2ee48",
     ),
     (
         "INPUT-001",
         "mcloving.input-adapter/v1",
-        "457c9a3745bfefd06ef786afb69de48b03c0a81ca81603c12bdccf371c7bd58c",
+        "52c11bb148573d541da804a3a4b93b3080a5c2faa17428f50a8554899b34960d",
     ),
     (
         "PROV-001",
         "mcloving.provisioner.v1",
-        "b0bfa46bc3a8f6398fb54649b12768b646294b6ac02e85aa09a020f320406c32",
+        "1b713483d0c8b43ece9a60e121492c64936a1d8de7c08eb1b6f1371dcf2b6d4c",
     ),
     (
         "EXT-001",
         "mcloving.external-connector/v1",
-        "4aa1dcbab05ecc071c6e8e41c38387aa8f7473e9401df0d63049264cab2e868f",
+        "a2a687b27e0a32d564708a5459db7f2a620fc0a3def92bcd24e97ad612e7f3f6",
     ),
     (
         "OBS-001",
         "mcloving.destination-observer/v1",
-        "0db8e4870e4af776cc3ae2a9bcad544733daa24cccc6a215e1b2e4e55a69189f",
+        "aa6ee4b71caab84ca228dd51384e21c51f3f448daa2533049f0555c912abcfbb",
     ),
     (
         "DISC-001",
         "mcloving.discovery/v1",
-        "fdcd50c1357384210aa9f141dbad8af90af08789ea4a1f8dfacd8baecfbbb6db",
+        "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
     ),
     (
         "DEP-001",
         "mcloving.dependency-resolver/v1",
-        "644ee4c53c8bea5d7782be5cd4797cce3db96cd2ff15677dedfeccae3b6f841f",
+        "3f04eea1c895d1664955312065fefb69f42e646e82cacef940fb56f7f9212e37",
     ),
     (
         "CACHE-001",
         "mcloving.cache/v1",
-        "1e66c0d632427b183a791068e21beec634c1ec8bf4ccc0645ea7f6fe27579857",
+        "dd3236593e648fdcc25f763c6f099a14f01244e0307752328bd549d4fa41f8da",
     ),
     (
         "CONSUMER-001",
         "mcloving.external-read-consumer/v1",
-        "fdcd50c1357384210aa9f141dbad8af90af08789ea4a1f8dfacd8baecfbbb6db",
+        "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
     ),
     (
         "ADMIN-001",
         "mcloving.external-admin-client/v1",
-        "fdcd50c1357384210aa9f141dbad8af90af08789ea4a1f8dfacd8baecfbbb6db",
+        "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
     ),
     (
         "REL-001",
         "mcloving.release-provenance/v2",
-        "811922a071771667f4cec47a2066aa7d9f060db9f450ea6adfe8564da9393583",
+        "16de77debcb57629de72354c3416eb461aa8811eb5380e525251fdba946d39ae",
     ),
 ];
 

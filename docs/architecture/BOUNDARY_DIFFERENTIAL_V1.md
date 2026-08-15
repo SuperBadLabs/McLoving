@@ -198,8 +198,10 @@ The accepted receipt must bind the final reviewed PR head and tree after all
 code, documentation, and board changes. To avoid a self-invalidating metadata
 commit, its HeMan run path, source head/tree, public receipt-authentication-key
 digest, and independently rechecked self-excluding manifest digest are
-published in PR #59's closure comment after the final run; no repository change
-may follow that run before merge. Earlier receipts are diagnostic only.
+published in PR #59's closure comment after the final run. The private HeMan
+path is retained only in the owner-controlled execution record and is not
+posted publicly. No repository change may follow that run before merge.
+Earlier receipts are diagnostic only.
 
 The final receipt must contain the exact 15 component-suite entries, 13
 Ed25519-authenticated public boundary receipts, 12 two-receipt validated joins,

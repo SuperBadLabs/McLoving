@@ -20,7 +20,7 @@ impl Drop for ScenarioAssertions {
         }
         let root = std::env::var("MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR")
             .expect("DIFF-003 assertion output directory");
-        for (scenario, observed_outcome) in self.scenarios.iter().copied() {
+        for (scenario, observed_outcome) in self.scenarios.iter() {
             let path = std::path::Path::new(&root).join(format!("{scenario}.json"));
             let mut file = std::fs::OpenOptions::new()
                 .write(true)

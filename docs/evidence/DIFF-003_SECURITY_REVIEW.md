@@ -11,10 +11,11 @@ The real owner/operator client remains `jenkins_source`, and the Mario
 inventories retain zero admitted production boundary mappings.
 
 Exact acceptance metadata is intentionally not committed here. The final
-reviewed PR head must first run unchanged on HeMan; PR #59's closure comment
-then records the exact head/tree, retained run path, public receipt-key digest,
-and independently rechecked self-excluding manifest digest. No repository
-change may follow that accepted run before merge.
+reviewed PR head must first run unchanged on HeMan; PR #59's public closure
+comment then records only the exact head/tree, public receipt-key digest, and
+independently rechecked self-excluding manifest digest. The retained HeMan path
+stays in the private owner-controlled execution record. No repository change
+may follow that accepted run before merge.
 
 ## Evidence result
 
