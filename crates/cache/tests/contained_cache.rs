@@ -149,7 +149,12 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
     assert!(cold.content.is_none());
 
     let published = store
-        .publish("writer", "trusted", &request, b"sealed-dependency")
+        .publish(
+            "writer",
+            "trusted",
+            &request,
+            b"standalone contained dependency artifact",
+        )
         .unwrap();
     assert_eq!(published.status, PublishStatus::Published);
 
@@ -157,7 +162,7 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
     assert_eq!(hit.status, ReadStatus::Hit);
     assert_eq!(
         hit.content.as_deref(),
-        Some(b"sealed-dependency".as_slice())
+        Some(b"standalone contained dependency artifact".as_slice())
     );
     assert_eq!(store.verify_audit_chain().unwrap(), 3);
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {

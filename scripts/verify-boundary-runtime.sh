@@ -189,7 +189,7 @@ trigger_stale_generation_denied|TRIG-001|delivery_dedup_claim_retry_and_operatio
 trigger_outage_denied|TRIG-001|dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies_new_events
 source_revision_substitution_denied|SCM-001|exact_revision_replay_later_commit_and_sparse_truth
 source_later_revision_preserved|SCM-001|exact_revision_replay_later_commit_and_sparse_truth
-source_outage_denied|SCM-001|file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_claim
+source_outage_denied|SCM-001|repository_that_ignores_blob_filter_is_denied_without_publication
 secret_consumer_substitution_denied|SECRET-001|cross_tenant_attempt_fence_consumer_expiry_and_replay_are_denied_before_provider_use
 secret_taint_ineligible_denied|SECRET-001|workload_and_controller_visible_mappings_never_become_grant_eligible
 secret_marker_disclosure_denied|SECRET-001|raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fields
@@ -340,16 +340,23 @@ while IFS=$'\t' read -r name source target rule expected_effects \
     trigger_capture_to_source)
       pair_filter='.[0].trigger_generation == 1 and .[0].status == "pending"
         and .[1].initial.generation == 7 and .[1].later_revision.generation == 7
+        and .[0].canonical_payload.payload.repository_identity
+          == .[1].initial.repository_trees[0].repository_identity
         and .[1].initial.content_sha256 != .[1].later_revision.content_sha256'
       ;;
     source_later_revision_to_dependency)
       pair_filter='.[0].later_revision.generation == .[1].request.expected_generation
         and .[0].initial.content_sha256 != .[0].later_revision.content_sha256'
       ;;
-    secret_grant_to_source)
+    secret_grant_to_connector)
       pair_filter='.[0].provider_calls == 1
         and .[0].redemption.grant_receipt_sha256 == .[0].grant.receipt_sha256
-        and .[1].initial.generation == .[1].later_revision.generation'
+        and .[0].grant.consumer.connector_id == .[1].connector_id
+        and .[0].grant.consumer.implementation_sha256 == .[1].connector_implementation_sha256
+        and .[0].grant.fence == .[1].effect_fence
+        and .[0].grant.rotation_generation == .[1].generation
+        and (.[0].grant.secret_version | sub("^version-"; ""))
+          == .[1].protected_secret_refs[0].version'
       ;;
     input_capture_to_control_flow)
       pair_filter='.[0].generation == .[1].trigger_generation
@@ -358,24 +365,29 @@ while IFS=$'\t' read -r name source target rule expected_effects \
     dependency_to_cache)
       pair_filter='.[0].request.expected_generation == 7
         and .[1].cold.status == "miss" and .[1].published.status == "published"
-        and .[1].hit.status == "hit" and .[1].audit_events == 3'
+        and .[1].hit.status == "hit" and .[1].audit_events == 3
+        and .[0].artifacts[0].sha256 == .[1].hit.content_sha256'
       ;;
     discovery_to_trigger)
       pair_filter='.[0].initial.parent_generation == .[1].trigger_generation
         and .[0].reconfigured.parent_generation > .[1].trigger_generation'
       ;;
-    provisioner_to_runner)
+    provisioner_to_source_transport)
       pair_filter='.[0].ready.outcome == "ready"
         and .[0].cancelled.outcome == "cancelled" and .[0].cancelled.cleanup_confirmed
         and .[0].next_generation.fence_token == 2
+        and .[0].ready.generation == .[1].initial.generation
+        and (.[0].ready.agent.network.egress_allowlist
+          | index("source.contained:443") != null)
         and .[1].initial.protocol_version == "mcloving.source-acquirer/v1"'
-      ;;
-    dry_run_intent_to_connector)
-      pair_filter='.[0].status == "pending"
-        and .[1].status == "succeeded" and .[1].attempt_count == 1'
       ;;
     connector_to_observer)
       pair_filter='.[0].status == "succeeded" and .[0].attempt_count == 1
+        and .[0].effect_class == .[1].post.effect_class
+        and .[0].generation == .[1].post.generation
+        and .[0].outcome_signing_public_key_sha256
+          == .[1].post.receipt_signing_public_key_sha256
+        and .[1].post.state.published
         and .[1].pre.phase == "pre_action" and .[1].post.phase == "post_action"
         and .[1].reconciliation.phase == "reconciliation"
         and .[1].pre.destination_cursor < .[1].post.destination_cursor
@@ -386,12 +398,16 @@ while IFS=$'\t' read -r name source target rule expected_effects \
         and .[0].target.authority == "mc_loving_target"
         and .[0].rollback.authority == "jenkins_source"
         and .[0].rollback.binding_digest == .[0].source.binding_digest
-        and .[1].trigger_generation == 1 and .[1].status == "pending"'
+        and .[0].source.generation == .[1].trigger_generation
+        and .[1].status == "pending"'
       ;;
-    release_to_runtime)
+    release_to_connector)
       pair_filter='.[0].deployment_environment == "production"
         and .[0].rollback_manifest_sha256 == null
-        and .[1].ready.outcome == "ready" and .[1].cancelled.cleanup_confirmed'
+        and .[0].release_id == .[1].external_ids.release_id
+        and .[1].account_identity == "account/production"
+        and .[1].effect_class == "release_publication"
+        and .[1].status == "succeeded"'
       ;;
     *) fail "unsupported join compatibility rule ${name}" ;;
   esac
@@ -425,7 +441,7 @@ done < <(jq -r '.joins[] | [
   (.effects|tostring),(.duplicate_effects|tostring),(.rollback_restored|tostring)
 ] | @tsv' "${certificate}")
 jq --slurp '.' "${joins_jsonl}" >"${output_dir}/validated-joins.json"
-jq --exit-status 'length == 12 and all(
+jq --exit-status 'length == 11 and all(
   .source_contract_valid and .target_contract_valid and .compatible
   and .independent_live_observations
   and (.source_live_projection_sha256 | test("^[0-9a-f]{64}$"))
@@ -433,6 +449,6 @@ jq --exit-status 'length == 12 and all(
   and .duplicate_effects == 0
 )' "${output_dir}/validated-joins.json" >/dev/null || fail "join denominator"
 
-printf 'validated_boundary_receipts=13\nauthenticated_boundary_receipts=13\nreceipt_auth_public_key_sha256=%s\nexecuted_scenarios=48\nvalidated_joins=12\n' \
+printf 'validated_boundary_receipts=13\nauthenticated_boundary_receipts=13\nreceipt_auth_public_key_sha256=%s\nexecuted_scenarios=48\nvalidated_joins=11\n' \
   "${receipt_auth_public_key_sha256}" \
   >"${output_dir}/runtime-verifier.txt"

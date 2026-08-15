@@ -185,7 +185,7 @@ impl Context {
             generation: 7,
             primary_repository: RepositoryBinding {
                 provider_identity: "contained-git".to_owned(),
-                repository_identity: "repository/root".to_owned(),
+                repository_identity: "github:superbadlabs/mcloving".to_owned(),
                 repository_url: root_repository.url(),
             },
             allow_untrusted_forks,
@@ -717,25 +717,35 @@ async fn repository_that_ignores_blob_filter_is_denied_without_publication() {
     run_git(&root.bare, ["config", "uploadpack.allowFilter", "false"]);
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let request = context.request(&commit);
-    assert!(matches!(
-        context.acquirer.acquire(&request).await,
-        Err(SourceError::SourceUnavailable)
-    ));
-    assert!(
-        std::fs::read_dir(&context.config.output_root)
-            .unwrap()
-            .all(|entry| !entry
+    let unavailable_result = context.acquirer.acquire(&request).await;
+    let stage_clean = std::fs::read_dir(&context.config.output_root)
+        .unwrap()
+        .all(|entry| {
+            !entry
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".stage-"))
-    );
-    assert!(
-        !context
-            .config
-            .output_root
-            .join(request.acquisition_id.to_string())
-            .exists()
+                .starts_with(".stage-")
+        });
+    let unpublished = !context
+        .config
+        .output_root
+        .join(request.acquisition_id.to_string())
+        .exists();
+    let outage_denied = matches!(unavailable_result, Err(SourceError::SourceUnavailable))
+        && stage_clean
+        && unpublished;
+    assert!(outage_denied);
+    diff003::record_assertion(
+        "source_outage_denied",
+        "denied",
+        serde_json::json!({
+            "transport_capability": "blob_filter_unavailable",
+            "staging_entries_remaining": usize::from(!stage_clean),
+            "published": !unpublished,
+            "result": "source_unavailable",
+        }),
+        outage_denied,
     );
 }
 
@@ -1260,18 +1270,7 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
                 .to_string_lossy()
                 .starts_with(".stage-")
         });
-    let outage_denied = matches!(bounded_failure, Err(SourceError::LimitExceeded)) && stage_clean;
-    assert!(outage_denied);
-    diff003::record_assertion(
-        "source_outage_denied",
-        "denied",
-        serde_json::json!({
-            "failure": "limit_exceeded",
-            "max_file_bytes": limited_config.max_file_bytes,
-            "staging_entries_remaining": usize::from(!stage_clean),
-        }),
-        outage_denied,
-    );
+    assert!(matches!(bounded_failure, Err(SourceError::LimitExceeded)) && stage_clean);
 
     let mut count_config = context.config.clone();
     count_config.generation += 2;

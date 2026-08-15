@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "0d5b1c486a738c573551fbdb3daa7a694374b317a4bdcfe9245d0e025ee148ee";
+    "684ad3c49d64cb84d6f16b0c5e18dd99687414075f7f6fd0b29c9e7746f64e20";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -40,67 +40,67 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "TRIG-001",
         "mcloving.trigger-ingress/v1",
-        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+        "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
     ),
     (
         "SCM-001",
         "mcloving.source-acquirer/v1",
-        "e207d718da8a5da11306b2d4e4c8919b1846b66ccf97400fb0fd3928d78c54b1",
+        "3d0b1d404e2ed40f68d96a05b662970cd55add17a35646165b1a5e7bcdc58f71",
     ),
     (
         "SECRET-001",
         "mcloving.secret-grant/v1",
-        "3b487832b2c5ca0aa2442fc369b0fa5ef323fdc25f8e44ef1d4cb6aea2140067",
+        "dbac0d255e9fdc1ad1873683fad74c885b8f08897e444216986924a13ef2352a",
     ),
     (
         "INPUT-001",
         "mcloving.input-adapter/v1",
-        "886c3f4c86823e7b29ae9aa2a426b93628256a897ec4ac985970dc9fbdfe40e6",
+        "89ce93c736f4086e7bf30b442e6c6438bb066cd2fb593495b1806cee510dcc1b",
     ),
     (
         "PROV-001",
         "mcloving.provisioner.v1",
-        "f5c0eb2656d82bd73aaae1b27c4dc80dc179bb969fa78eb6948c67e633cffa83",
+        "05124c6606a41b64603c31099243a955e4f7507e2032bc568db753dec3c4e904",
     ),
     (
         "EXT-001",
         "mcloving.external-connector/v1",
-        "5faf31230c3e28247164680ad21fe2e7d836753f84d7ef2b6a782a4e39ed2b97",
+        "df2c7c3c9873d5cccd2f5a2719c3e026f508c7d3220323d89ae98dac0b3a03ca",
     ),
     (
         "OBS-001",
         "mcloving.destination-observer/v1",
-        "cef86b1ad041a9b1a12ad7ee09dde6365445b8e2fc82aa9833d297a672574a4c",
+        "e7b4641f7ab0f93e09eea7022d01b1d04c6b439b19a110b157e825142ec42003",
     ),
     (
         "DISC-001",
         "mcloving.discovery/v1",
-        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+        "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
     ),
     (
         "DEP-001",
         "mcloving.dependency-resolver/v1",
-        "f50f0f2c54fbf96bf9bb9797c3846042764dec2ff139dbffac39abbda128c037",
+        "de59aca533844e4bfdd35b90eebc599dfc1bdb276337a4cdd17d0786e4e7a705",
     ),
     (
         "CACHE-001",
         "mcloving.cache/v1",
-        "f7bcc30ee6c76104784cbef56b8d8f1b8e5e7ad13ed6647733b681b244d4fce4",
+        "c5fc4c673af6f1e5318854270012934fe8b4963aab0ce3adbac3197d8be8e72f",
     ),
     (
         "CONSUMER-001",
         "mcloving.external-read-consumer/v1",
-        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+        "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
     ),
     (
         "ADMIN-001",
         "mcloving.external-admin-client/v1",
-        "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+        "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
     ),
     (
         "REL-001",
         "mcloving.release-provenance/v2",
-        "5feb5e0f072c74a9fdd61e4aab257880c6e11708cdbc9fff8ad338214780b7fd",
+        "d495ad1e15db33303685d5e1cae3fc3c091d8e12ff30b1b949f653a16bcabdbd",
     ),
 ];
 
@@ -295,7 +295,7 @@ const EXPECTED_SCENARIOS: [(&str, &str, ScenarioOutcome); 48] = [
     ),
 ];
 
-const EXPECTED_JOINS: [(&str, &str, &str, u64, bool); 12] = [
+const EXPECTED_JOINS: [(&str, &str, &str, u64, bool); 11] = [
     ("trigger_capture_to_source", "TRIG-001", "SCM-001", 0, false),
     (
         "source_later_revision_to_dependency",
@@ -304,7 +304,13 @@ const EXPECTED_JOINS: [(&str, &str, &str, u64, bool); 12] = [
         0,
         false,
     ),
-    ("secret_grant_to_source", "SECRET-001", "SCM-001", 0, false),
+    (
+        "secret_grant_to_connector",
+        "SECRET-001",
+        "EXT-001",
+        1,
+        false,
+    ),
     (
         "input_capture_to_control_flow",
         "INPUT-001",
@@ -314,11 +320,10 @@ const EXPECTED_JOINS: [(&str, &str, &str, u64, bool); 12] = [
     ),
     ("dependency_to_cache", "DEP-001", "CACHE-001", 0, false),
     ("discovery_to_trigger", "DISC-001", "TRIG-001", 0, false),
-    ("provisioner_to_runner", "PROV-001", "SCM-001", 0, false),
     (
-        "dry_run_intent_to_connector",
-        "TRIG-001",
-        "EXT-001",
+        "provisioner_to_source_transport",
+        "PROV-001",
+        "SCM-001",
         0,
         false,
     ),
@@ -331,7 +336,7 @@ const EXPECTED_JOINS: [(&str, &str, &str, u64, bool); 12] = [
         true,
     ),
     ("admin_cutover_rollback", "ADMIN-001", "TRIG-001", 0, true),
-    ("release_to_runtime", "REL-001", "PROV-001", 0, false),
+    ("release_to_connector", "REL-001", "EXT-001", 1, false),
 ];
 
 const EXPECTED_MARKER_SURFACES: [&str; 11] = [
@@ -1026,7 +1031,7 @@ mod tests {
         let receipt = verify_bundle(&fixture()).expect("verify exact boundary bundle");
         assert_eq!(receipt.boundaries, 13);
         assert_eq!(receipt.scenarios, 48);
-        assert_eq!(receipt.joins, 12);
+        assert_eq!(receipt.joins, 11);
         assert_eq!(receipt.production_boundary_mappings, 0);
         assert_eq!(receipt.duplicate_effects, 0);
         assert_eq!(receipt.secret_marker_disclosures, 0);

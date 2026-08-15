@@ -322,7 +322,10 @@ async fn destination(
             version: "7".to_owned(),
             taint: "release-token".to_owned(),
         }],
-        external_ids: BTreeMap::from([("release_id".to_owned(), "rel-1".to_owned())]),
+        external_ids: BTreeMap::from([(
+            "release_id".to_owned(),
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+        )]),
         downstream_control_digest: content_sha256(b"continue"),
         later_intents_digest: content_sha256(b"notify"),
         completed_at_unix_ms: NOW + 1,

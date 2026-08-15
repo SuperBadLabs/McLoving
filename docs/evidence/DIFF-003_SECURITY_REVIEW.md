@@ -43,7 +43,7 @@ declared compatibility dimensions from both authenticated receipt files. A
 nonempty object, plausible-looking signature text, test name alone, static
 certificate outcome, or arbitrary pair of hashes cannot satisfy the gate.
 
-The retained comparison reports 13 validated live receipts, 12 validated live
+The retained comparison reports 13 validated live receipts, 11 validated live
 joins, 48 executed adversarial scenarios, zero production mappings, zero
 production effects, zero duplicate effects, zero production cutover claims, and
 zero secret-marker disclosures. Runner, connector, and observer identities and

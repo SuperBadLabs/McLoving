@@ -94,26 +94,29 @@ reconciled, cleaned, and restored cases require a fresh observation.
 
 ## Cross-boundary joins
 
-Twelve ordered contract joins apply pair-specific compatibility rules to
+Eleven ordered contract joins apply pair-specific compatibility rules to
 independently produced, authenticated live receipts. Each projection must equal
 its own receipt payload; the gate does not claim the contained fixtures are one
 shared live transaction or manufacture equality from shared constants:
 
 - trigger capture to source acquisition;
 - later source revision to dependency resolution;
-- secret grant to source acquisition;
+- secret grant to its connector consumer;
 - input capture to control flow;
 - dependency resolution to cache;
 - discovery to trigger installation;
-- provisioner identity to runner admission;
-- dry-run intent to connector intent;
+- provisioner identity to the admitted source transport;
 - connector outcome to independent observer state;
 - consumer cutover and rollback;
 - administrative cutover and rollback; and
-- trusted release to admitted runtime.
+- trusted release to its connector effect.
 
-Only the contained connector-to-observer join has one destination effect. All
-other joins have zero effects, and every join has zero duplicate effects.
+The contained secret-to-connector, connector-to-observer, and
+release-to-connector joins each observe the same single destination effect from
+their respective boundary pair. All other joins have zero effects, and every
+join has zero duplicate effects. The earlier dry-run adjacency was removed
+because the independent fixtures did not share a transaction identifier; the
+gate never counts mere adjacency as a join.
 
 The exact-head gate does not treat those repository assertions as runtime
 observations. Each of the 13 focused positive tests exports the actual public
@@ -178,7 +181,7 @@ cache, release-provenance, and independent differential-verifier suites. The
 target network also denies public reachability.
 
 The host recomputes each component source manifest and compares it with the
-certificate, requires all 13 live public receipts and all 12 derived live
+certificate, requires all 13 live public receipts and all 11 derived live
 joins, verifies the exact suite ledger and verifier receipt, records all
 container/image/network inspections and transcripts, rejects private-key
 material, private-key paths, and every contained private marker—including
@@ -217,7 +220,7 @@ posted publicly. No repository change may follow that run before merge.
 Earlier receipts are diagnostic only.
 
 The final receipt must contain the exact 15 component-suite entries, 13
-Ed25519-authenticated public boundary receipts, 12 two-receipt validated joins,
+Ed25519-authenticated public boundary receipts, 11 two-receipt validated joins,
 and 48 assertion-derived scenario outcomes. It must report zero production
 mappings, production effects, duplicate effects, production cutover claims,
 and secret-marker disclosures, with a clean unchanged source tree at seal time.

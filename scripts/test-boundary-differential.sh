@@ -554,8 +554,8 @@ jq --exit-status '
   and (.receipt_auth_public_key_sha256 | test("^[0-9a-f]{64}$"))
   and .scenario_count == 48
   and .executed_scenario_count == 48
-  and .join_count == 12
-  and .live_join_count == 12
+  and .join_count == 11
+  and .live_join_count == 11
   and .component_suites_passed == 15
   and .separate_private_stacks
   and .jenkins_destroyed_before_target
@@ -571,7 +571,7 @@ for required_line in \
   'case=mario-contained-boundaries-zero-authority' \
   'boundaries=13' \
   'scenarios=48' \
-  'joins=12' \
+  'joins=11' \
   'production_boundary_mappings=0' \
   'duplicate_effects=0' \
   'secret_marker_disclosures=0'; do

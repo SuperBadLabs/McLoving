@@ -62,7 +62,7 @@ fn install(broker: &mut SecretBroker, mapping: &CredentialMapping, now: i64) {
 
 fn connector() -> ConsumerBinding {
     ConsumerBinding::ExternalConnector {
-        connector_id: "connector:deploy:v1".to_owned(),
+        connector_id: "connector/release/v1".to_owned(),
         implementation_sha256: DIGEST.to_owned(),
         configuration_sha256: OTHER_DIGEST.to_owned(),
     }
@@ -352,7 +352,7 @@ fn exact_connector_grant_redeems_once_without_disclosing_secret_in_receipts_or_a
             ..
         } => {
             assert_eq!(grant_version, GRANT_PROTOCOL_VERSION);
-            assert_eq!(connector_id, "connector:deploy:v1");
+            assert_eq!(connector_id, "connector/release/v1");
             assert_eq!(implementation_sha256, DIGEST);
             assert_eq!(configuration_sha256, OTHER_DIGEST);
             assert!(grant_scope.contains(&request.attempt_id.to_string()));

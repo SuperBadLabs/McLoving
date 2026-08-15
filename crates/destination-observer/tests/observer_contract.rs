@@ -2405,19 +2405,7 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     expired.expires_at_unix_ms = NOW + 61_500;
     let expired = rig.prepare(expired);
     let expired_result = rig.observer.observe_at(expired, NOW + 61_000).await;
-    let identity_authority_denied = expired_result == Err(ObserverError::ExpiredGrant);
-    assert!(identity_authority_denied);
-    diff003::record_assertion(
-        "observer_identity_substitution_denied",
-        "denied",
-        serde_json::json!({
-            "grant_expiry_unix_ms": NOW + 61_500,
-            "verification_time_unix_ms": NOW + 61_000,
-            "configured_grant_expiry_unix_ms": rig.config.read_grant_expires_unix_ms,
-            "result": "expired_grant",
-        }),
-        identity_authority_denied,
-    );
+    assert_eq!(expired_result, Err(ObserverError::ExpiredGrant));
 
     rig.set_mode(Mode::Slow);
     let mut expires_during_read = rig.request(ObservationPhase::PreAction);
@@ -2454,19 +2442,39 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
     rig.observer.observe_at(replacement, NOW).await.unwrap();
 
-    assert!(matches!(
-        DestinationObserver::new_for_loopback_test(
-            rig.config.clone(),
-            rig.implementation_sha256.clone(),
-            rig.image_sha256.clone(),
-            b"substituted-token".to_vec(),
-            rig.request_public_key.clone(),
-            rig.destination_public_key.clone(),
-            rig.receipt_seed.clone(),
-            vec![b"substituted-token".to_vec(), SECRET.to_vec()],
-        ),
-        Err(ObserverError::InvalidConfig)
-    ));
+    let substituted_markers = vec![b"substituted-token".to_vec(), SECRET.to_vec()];
+    let substituted_marker_digests: Vec<String> = substituted_markers
+        .iter()
+        .map(|marker| content_sha256(marker))
+        .collect();
+    let mut substituted_credential_config = rig.config.clone();
+    substituted_credential_config.secret_marker_set_sha256 = domain_digest(
+        b"mcloving-secret-marker-set-v1",
+        &substituted_marker_digests,
+    );
+    let substituted_credential = DestinationObserver::new_for_loopback_test(
+        substituted_credential_config,
+        rig.implementation_sha256.clone(),
+        rig.image_sha256.clone(),
+        b"substituted-token".to_vec(),
+        rig.request_public_key.clone(),
+        rig.destination_public_key.clone(),
+        rig.receipt_seed.clone(),
+        substituted_markers,
+    );
+    let identity_substitution_denied =
+        matches!(substituted_credential, Err(ObserverError::InvalidConfig));
+    assert!(identity_substitution_denied);
+    diff003::record_assertion(
+        "observer_identity_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_credential_sha256": content_sha256(b"substituted-token"),
+            "expected_credential_sha256": rig.config.read_token_sha256.clone(),
+            "result": "invalid_config",
+        }),
+        identity_substitution_denied,
+    );
     assert!(matches!(
         DestinationObserver::new_for_loopback_test(
             rig.config.clone(),

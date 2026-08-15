@@ -59,7 +59,7 @@
     {
       "id": "TRIG-001",
       "protocol": "mcloving.trigger-ingress/v1",
-      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+      "implementation_source_manifest_sha256": "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
       "configuration_sha256": "e154c5381047ec6d77f21f321ec3bbbf54c66fd5f45f4c1d60751234df9d6e5a",
       "account_identity": "diff003-account/trig-001",
       "resource_identity": "diff003-resource/trig-001",
@@ -72,7 +72,7 @@
     {
       "id": "SCM-001",
       "protocol": "mcloving.source-acquirer/v1",
-      "implementation_source_manifest_sha256": "e207d718da8a5da11306b2d4e4c8919b1846b66ccf97400fb0fd3928d78c54b1",
+      "implementation_source_manifest_sha256": "3d0b1d404e2ed40f68d96a05b662970cd55add17a35646165b1a5e7bcdc58f71",
       "configuration_sha256": "3c6d55e6b12f900d8800b927f38d2d6068e004797a6cc1e6cef5d501288c0e59",
       "account_identity": "diff003-account/scm-001",
       "resource_identity": "diff003-resource/scm-001",
@@ -85,7 +85,7 @@
     {
       "id": "SECRET-001",
       "protocol": "mcloving.secret-grant/v1",
-      "implementation_source_manifest_sha256": "3b487832b2c5ca0aa2442fc369b0fa5ef323fdc25f8e44ef1d4cb6aea2140067",
+      "implementation_source_manifest_sha256": "dbac0d255e9fdc1ad1873683fad74c885b8f08897e444216986924a13ef2352a",
       "configuration_sha256": "cd100128c5738a0895f1c9e0cc01551d12990fe5bcb86ae9561688ef40ac1685",
       "account_identity": "diff003-account/secret-001",
       "resource_identity": "diff003-resource/secret-001",
@@ -98,7 +98,7 @@
     {
       "id": "INPUT-001",
       "protocol": "mcloving.input-adapter/v1",
-      "implementation_source_manifest_sha256": "886c3f4c86823e7b29ae9aa2a426b93628256a897ec4ac985970dc9fbdfe40e6",
+      "implementation_source_manifest_sha256": "89ce93c736f4086e7bf30b442e6c6438bb066cd2fb593495b1806cee510dcc1b",
       "configuration_sha256": "a2a07c012c43a4b9ce53c1ceffbedda5f8bfe476273b8a816532760cc51a6946",
       "account_identity": "diff003-account/input-001",
       "resource_identity": "diff003-resource/input-001",
@@ -111,7 +111,7 @@
     {
       "id": "PROV-001",
       "protocol": "mcloving.provisioner.v1",
-      "implementation_source_manifest_sha256": "f5c0eb2656d82bd73aaae1b27c4dc80dc179bb969fa78eb6948c67e633cffa83",
+      "implementation_source_manifest_sha256": "05124c6606a41b64603c31099243a955e4f7507e2032bc568db753dec3c4e904",
       "configuration_sha256": "ac6db663eac19a2b32a328594dc7026aff47d70f86e026e8ae57608fd7fbe9e3",
       "account_identity": "diff003-account/prov-001",
       "resource_identity": "diff003-resource/prov-001",
@@ -124,7 +124,7 @@
     {
       "id": "EXT-001",
       "protocol": "mcloving.external-connector/v1",
-      "implementation_source_manifest_sha256": "5faf31230c3e28247164680ad21fe2e7d836753f84d7ef2b6a782a4e39ed2b97",
+      "implementation_source_manifest_sha256": "df2c7c3c9873d5cccd2f5a2719c3e026f508c7d3220323d89ae98dac0b3a03ca",
       "configuration_sha256": "4461c18123789610f43dd626491419d96bd40ed51f372c46ef81f353c0a9b016",
       "account_identity": "diff003-account/ext-001",
       "resource_identity": "diff003-resource/ext-001",
@@ -137,7 +137,7 @@
     {
       "id": "OBS-001",
       "protocol": "mcloving.destination-observer/v1",
-      "implementation_source_manifest_sha256": "cef86b1ad041a9b1a12ad7ee09dde6365445b8e2fc82aa9833d297a672574a4c",
+      "implementation_source_manifest_sha256": "e7b4641f7ab0f93e09eea7022d01b1d04c6b439b19a110b157e825142ec42003",
       "configuration_sha256": "0401dae5ab4d39ab84c9c704c6f569cd90ba20a61ba5e0fd9029329c5a3fe62e",
       "account_identity": "diff003-account/obs-001",
       "resource_identity": "diff003-resource/obs-001",
@@ -150,7 +150,7 @@
     {
       "id": "DISC-001",
       "protocol": "mcloving.discovery/v1",
-      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+      "implementation_source_manifest_sha256": "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
       "configuration_sha256": "f89459ef255e2939d9f724341a63a8c2e930772af2c40821f668a289463f4965",
       "account_identity": "diff003-account/disc-001",
       "resource_identity": "diff003-resource/disc-001",
@@ -163,7 +163,7 @@
     {
       "id": "DEP-001",
       "protocol": "mcloving.dependency-resolver/v1",
-      "implementation_source_manifest_sha256": "f50f0f2c54fbf96bf9bb9797c3846042764dec2ff139dbffac39abbda128c037",
+      "implementation_source_manifest_sha256": "de59aca533844e4bfdd35b90eebc599dfc1bdb276337a4cdd17d0786e4e7a705",
       "configuration_sha256": "666c67464d09107f82d1b362c32bca8f8e8efcce2b84a589f3c862794b39888d",
       "account_identity": "diff003-account/dep-001",
       "resource_identity": "diff003-resource/dep-001",
@@ -176,7 +176,7 @@
     {
       "id": "CACHE-001",
       "protocol": "mcloving.cache/v1",
-      "implementation_source_manifest_sha256": "f7bcc30ee6c76104784cbef56b8d8f1b8e5e7ad13ed6647733b681b244d4fce4",
+      "implementation_source_manifest_sha256": "c5fc4c673af6f1e5318854270012934fe8b4963aab0ce3adbac3197d8be8e72f",
       "configuration_sha256": "3645d5c697d5159dc5ec6ac88725f5ad1a4c1354f7ee1cd62a07253f234ef5ef",
       "account_identity": "diff003-account/cache-001",
       "resource_identity": "diff003-resource/cache-001",
@@ -189,7 +189,7 @@
     {
       "id": "CONSUMER-001",
       "protocol": "mcloving.external-read-consumer/v1",
-      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+      "implementation_source_manifest_sha256": "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
       "configuration_sha256": "ef9e96f6eb70311d227a1e69cfa42e0461d90536a06e66784fdb15712caf9c8d",
       "account_identity": "diff003-account/consumer-001",
       "resource_identity": "diff003-resource/consumer-001",
@@ -202,7 +202,7 @@
     {
       "id": "ADMIN-001",
       "protocol": "mcloving.external-admin-client/v1",
-      "implementation_source_manifest_sha256": "47520602691e30f9d2355ad8e55d2054fef421e4d7d0809b262046d5492b9ed8",
+      "implementation_source_manifest_sha256": "c97b737a70b26c8e2c6df0549863386b61b56f197ae08a813229fe8f402f7a0d",
       "configuration_sha256": "ebbd27e590f57015e8cbe7234d1ad8e4566e4b610ceb90d37238c9e00e8decf4",
       "account_identity": "diff003-account/admin-001",
       "resource_identity": "diff003-resource/admin-001",
@@ -215,7 +215,7 @@
     {
       "id": "REL-001",
       "protocol": "mcloving.release-provenance/v2",
-      "implementation_source_manifest_sha256": "5feb5e0f072c74a9fdd61e4aab257880c6e11708cdbc9fff8ad338214780b7fd",
+      "implementation_source_manifest_sha256": "d495ad1e15db33303685d5e1cae3fc3c091d8e12ff30b1b949f653a16bcabdbd",
       "configuration_sha256": "6bf81d0a75004e575798c54dad683f05abcf3d1c8420efa523332fcc773b540a",
       "account_identity": "diff003-account/rel-001",
       "resource_identity": "diff003-resource/rel-001",
@@ -279,16 +279,15 @@
   "joins": [
     {"name":"trigger_capture_to_source","source_boundary":"TRIG-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/trigger_capture_to_source/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
     {"name":"source_later_revision_to_dependency","source_boundary":"SCM-001","target_boundary":"DEP-001","compatibility_rule":"mcloving.diff003.compatibility/source_later_revision_to_dependency/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"secret_grant_to_source","source_boundary":"SECRET-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/secret_grant_to_source/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"secret_grant_to_connector","source_boundary":"SECRET-001","target_boundary":"EXT-001","compatibility_rule":"mcloving.diff003.compatibility/secret_grant_to_connector/v2","independent_live_observations":true,"fresh_observation":true,"effects":1,"duplicate_effects":0,"rollback_restored":false},
     {"name":"input_capture_to_control_flow","source_boundary":"INPUT-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/input_capture_to_control_flow/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
     {"name":"dependency_to_cache","source_boundary":"DEP-001","target_boundary":"CACHE-001","compatibility_rule":"mcloving.diff003.compatibility/dependency_to_cache/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
     {"name":"discovery_to_trigger","source_boundary":"DISC-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/discovery_to_trigger/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"provisioner_to_runner","source_boundary":"PROV-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/provisioner_to_runner/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
-    {"name":"dry_run_intent_to_connector","source_boundary":"TRIG-001","target_boundary":"EXT-001","compatibility_rule":"mcloving.diff003.compatibility/dry_run_intent_to_connector/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
+    {"name":"provisioner_to_source_transport","source_boundary":"PROV-001","target_boundary":"SCM-001","compatibility_rule":"mcloving.diff003.compatibility/provisioner_to_source_transport/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false},
     {"name":"connector_to_observer","source_boundary":"EXT-001","target_boundary":"OBS-001","compatibility_rule":"mcloving.diff003.compatibility/connector_to_observer/v2","independent_live_observations":true,"fresh_observation":true,"effects":1,"duplicate_effects":0,"rollback_restored":false},
     {"name":"consumer_cutover_rollback","source_boundary":"CONSUMER-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/consumer_cutover_rollback/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":true},
     {"name":"admin_cutover_rollback","source_boundary":"ADMIN-001","target_boundary":"TRIG-001","compatibility_rule":"mcloving.diff003.compatibility/admin_cutover_rollback/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":true},
-    {"name":"release_to_runtime","source_boundary":"REL-001","target_boundary":"PROV-001","compatibility_rule":"mcloving.diff003.compatibility/release_to_runtime/v2","independent_live_observations":true,"fresh_observation":true,"effects":0,"duplicate_effects":0,"rollback_restored":false}
+    {"name":"release_to_connector","source_boundary":"REL-001","target_boundary":"EXT-001","compatibility_rule":"mcloving.diff003.compatibility/release_to_connector/v2","independent_live_observations":true,"fresh_observation":true,"effects":1,"duplicate_effects":0,"rollback_restored":false}
   ],
   "clients": {
     "inventory_sha256": "a4227af8021c7d5fb6f7cc72be84af756ce1f95d33cd2ec9bad721beab587549",
