@@ -176,7 +176,7 @@
     {
       "id": "CACHE-001",
       "protocol": "mcloving.cache/v1",
-      "implementation_source_manifest_sha256": "c5fc4c673af6f1e5318854270012934fe8b4963aab0ce3adbac3197d8be8e72f",
+      "implementation_source_manifest_sha256": "cf00fdc4c116619d163f0d8ff698f51c386e778c588249eeb4ccc722ba3008c0",
       "configuration_sha256": "3645d5c697d5159dc5ec6ac88725f5ad1a4c1354f7ee1cd62a07253f234ef5ef",
       "account_identity": "diff003-account/cache-001",
       "resource_identity": "diff003-resource/cache-001",

@@ -132,16 +132,10 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
     let temp = TempDir::new().unwrap();
     let key = [7_u8; 32];
     let clock = Arc::new(ManualClock::new(10_000));
-    let store = open_store(
-        config(
-            &temp,
-            &key,
-            vec![policy("policy-a", "trusted", "reader", "writer")],
-        ),
-        &key,
-        clock,
-    )
-    .unwrap();
+    let mut dependency_policy = policy("policy-a", "trusted", "reader", "writer");
+    dependency_policy.max_entry_bytes = 64;
+    dependency_policy.max_total_bytes = 128;
+    let store = open_store(config(&temp, &key, vec![dependency_policy]), &key, clock).unwrap();
     let request = request(store.generation_sha256(), "policy-a", "trusted", b"one");
 
     let cold = store.read("reader", "trusted", &request).unwrap();
