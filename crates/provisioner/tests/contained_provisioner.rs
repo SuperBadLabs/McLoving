@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -1008,12 +1011,14 @@ async fn ready_replay_cancel_and_fences_are_exact() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("PROV-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "ready": ready,
-                "cancelled": cancelled,
-                "next_generation": next,
-            }))
-            .expect("serialize DIFF-003 provisioner receipts"),
+            diff003::receipt(
+                "PROV-001",
+                serde_json::json!({
+                    "ready": ready,
+                    "cancelled": cancelled,
+                    "next_generation": next,
+                }),
+            ),
         )
         .expect("write DIFF-003 provisioner receipts");
     }
@@ -1021,6 +1026,8 @@ async fn ready_replay_cancel_and_fences_are_exact() {
 
 #[tokio::test]
 async fn substitution_startup_failure_and_timeout_leave_no_compute() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("provisioner_template_substitution_denied", "denied")]);
     for (mode, expected) in [
         (
             FixtureMode::SubstituteTemplate,
@@ -1054,6 +1061,7 @@ async fn substitution_startup_failure_and_timeout_leave_no_compute() {
 
 #[tokio::test]
 async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
+    let _diff003 = diff003::scenario_assertions(&[("provisioner_stale_instance_denied", "denied")]);
     for mode in [
         FixtureMode::StaleObservation,
         FixtureMode::WrongProviderIdentity,
@@ -1081,6 +1089,10 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
 
 #[tokio::test]
 async fn ambiguous_create_restart_orphan_and_agent_loss_reconcile() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("provisioner_interruption_reconciled", "reconciled"),
+        ("provisioner_orphan_cleaned", "cleaned"),
+    ]);
     let context = Context::new(FixtureMode::MalformedCreateOnce).await;
     let request = context.request();
     let ambiguous_receipt = context
@@ -1362,6 +1374,7 @@ async fn duplicate_initial_inventory_instance_id_is_rejected_before_cleanup() {
 
 #[tokio::test]
 async fn quota_and_all_certified_bindings_fail_before_provider_access() {
+    let _diff003 = diff003::scenario_assertions(&[("provisioner_exhaustion_denied", "denied")]);
     let context = Context::with_quota(FixtureMode::Ready, 1).await;
     let first = context.request();
     context

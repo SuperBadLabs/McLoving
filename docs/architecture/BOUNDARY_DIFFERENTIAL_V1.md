@@ -117,11 +117,16 @@ other joins have zero effects, and every join has zero duplicate effects.
 The exact-head gate does not treat those repository assertions as runtime
 observations. Each of the 13 focused positive tests exports the actual public
 receipt produced by the exercised implementation into a new evidence
-directory. The host requires the exact receipt set, hashes every receipt, and
-validates every boundary-specific schema, protocol, signature or authenticated
-digest, generation, transition, and outcome shape. It binds every certified
-scenario to an exact focused test that reported `ok`, then applies an explicit
-compatibility rule to both validated receipts in each of the 12 joins.
+directory. The host requires the exact receipt set and authenticates each exact
+file with a newly generated Ed25519 ceremony key. Only the public key and 13
+detached signatures enter evidence; the private key stays in the private
+runtime directory and is destroyed before verification and sealing. The
+verifier checks every boundary-specific schema, protocol, generation,
+transition, and outcome shape. Each certified scenario also requires one
+machine-readable outcome emitted only after the owning focused test's
+assertions completed successfully. Finally, every join compares trace, input,
+control-flow, effect-intent, outcome, content, generation, retry, effect,
+duplicate-effect, and rollback projections from both authenticated receipts.
 `runtime-boundaries.json`, `executed-scenarios.json`, and `runtime-joins.json`
 therefore bind the static differential contract to the code that ran; a
 nonempty object or two unrelated receipt hashes cannot satisfy the gate.
@@ -187,17 +192,17 @@ scripts/test-boundary-differential.sh \
   /sn8100/runs/mcloving/diff003-boundary-YYYYMMDDTHHMMSSZ
 ```
 
-## Accepted implementation receipt
+## Exact-head acceptance receipt
 
-Exact head `01d548c510dc84b10576c0fd0c9a4524a18835e4`, tree
-`d5ef1ce12f152a48ffc683537978f4549756693d`, sealed
-`/sn8100/runs/mcloving/diff003-boundary-20260815T060147Z`. The independently
-rechecked self-excluding evidence-manifest SHA-256 is
-`cd8a43e08b7e2a3c3e1ed0a2cbc961818c27b3daa5e2eba0f23b1a140521dff7`.
+The accepted receipt must bind the final reviewed PR head and tree after all
+code, documentation, and board changes. To avoid a self-invalidating metadata
+commit, its HeMan run path, source head/tree, public receipt-authentication-key
+digest, and independently rechecked self-excluding manifest digest are
+published in PR #59's closure comment after the final run; no repository change
+may follow that run before merge. Earlier receipts are diagnostic only.
 
-The receipt contains the exact 15 component-suite entries, 13 actual public
-boundary receipts, 12 validated joins, and 48 executed scenario bindings
-denominator. It reports zero production mappings, production effects, duplicate
-effects, production cutover claims, and secret-marker disclosures. The source
-tree was clean and unchanged at seal time. Detailed review and failed-attempt
-dispositions are in `docs/evidence/DIFF-003_SECURITY_REVIEW.md`.
+The final receipt must contain the exact 15 component-suite entries, 13
+Ed25519-authenticated public boundary receipts, 12 two-receipt validated joins,
+and 48 assertion-derived scenario outcomes. It must report zero production
+mappings, production effects, duplicate effects, production cutover claims,
+and secret-marker disclosures, with a clean unchanged source tree at seal time.

@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -409,7 +412,10 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("EXT-001.json"),
-            serde_json::to_vec_pretty(&first).expect("serialize DIFF-003 connector receipt"),
+            diff003::receipt(
+                "EXT-001",
+                serde_json::to_value(&first).expect("encode DIFF-003 connector receipt"),
+            ),
         )
         .expect("write DIFF-003 connector receipt");
     }
@@ -457,6 +463,8 @@ async fn signed_failure_is_terminal_and_signed_retryable_outcome_is_bounded() {
 
 #[tokio::test]
 async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("connector_ambiguous_retry_reconciled", "reconciled")]);
     let rig = Rig::new(Mode::Timeout, IdempotencyClass::NonIdempotent).await;
     let request = rig.request(IdempotencyClass::NonIdempotent);
     let receipt = rig
@@ -527,6 +535,11 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
 
 #[tokio::test]
 async fn stale_substituted_replayed_and_permission_negative_requests_are_denied() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("connector_identity_substitution_denied", "denied"),
+        ("connector_replay_denied", "denied"),
+        ("connector_stale_denied", "denied"),
+    ]);
     let rig = Rig::new(Mode::Success, IdempotencyClass::ExternallyIdempotent).await;
     let mut stale = rig.request(IdempotencyClass::ExternallyIdempotent);
     stale.expires_at_unix_ms = NOW + 1;
@@ -1155,6 +1168,7 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
 
 #[tokio::test]
 async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
+    let _diff003 = diff003::scenario_assertions(&[("connector_outage_reconciled", "reconciled")]);
     let rig = Rig::new(Mode::Timeout, IdempotencyClass::NonIdempotent).await;
     let action = rig.request(IdempotencyClass::NonIdempotent);
     let ambiguous = rig.connector.execute_at(action.clone(), NOW).await.unwrap();

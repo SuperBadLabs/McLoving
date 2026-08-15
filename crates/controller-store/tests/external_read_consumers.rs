@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -266,6 +269,10 @@ async fn fixture_with_scopes(
 
 #[tokio::test]
 async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authority() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("consumer_residual_jenkins_read_denied", "denied"),
+        ("consumer_rollback_restored", "restored"),
+    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -588,31 +595,33 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("CONSUMER-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "source": {
-                    "consumer_id": source_receipt.consumer_id,
-                    "generation": source_receipt.generation,
-                    "authority": source_receipt.authority,
-                    "binding_digest": source_receipt.binding_digest,
-                    "contract_digest": source_receipt.contract_digest,
-                },
-                "target": {
-                    "consumer_id": target_receipt.consumer_id,
-                    "generation": target_receipt.generation,
-                    "authority": target_receipt.authority,
-                    "binding_digest": target_receipt.binding_digest,
-                    "contract_digest": target_receipt.contract_digest,
-                },
-                "rollback": {
-                    "consumer_id": receipt.consumer_id,
-                    "generation": receipt.generation,
-                    "authority": receipt.authority,
-                    "binding_digest": receipt.binding_digest,
-                    "contract_digest": receipt.contract_digest,
-                },
-                "current": {"generation": current.0, "authority": current.1},
-            }))
-            .expect("serialize DIFF-003 consumer receipts"),
+            diff003::receipt(
+                "CONSUMER-001",
+                serde_json::json!({
+                    "source": {
+                        "consumer_id": source_receipt.consumer_id,
+                        "generation": source_receipt.generation,
+                        "authority": source_receipt.authority,
+                        "binding_digest": source_receipt.binding_digest,
+                        "contract_digest": source_receipt.contract_digest,
+                    },
+                    "target": {
+                        "consumer_id": target_receipt.consumer_id,
+                        "generation": target_receipt.generation,
+                        "authority": target_receipt.authority,
+                        "binding_digest": target_receipt.binding_digest,
+                        "contract_digest": target_receipt.contract_digest,
+                    },
+                    "rollback": {
+                        "consumer_id": receipt.consumer_id,
+                        "generation": receipt.generation,
+                        "authority": receipt.authority,
+                        "binding_digest": receipt.binding_digest,
+                        "contract_digest": receipt.contract_digest,
+                    },
+                    "current": {"generation": current.0, "authority": current.1},
+                }),
+            ),
         )
         .expect("write DIFF-003 consumer receipts");
     }
@@ -620,6 +629,8 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
 
 #[tokio::test]
 async fn contract_substitution_tenant_crossing_and_concurrent_first_generation_fail_closed() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("consumer_target_substitution_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;

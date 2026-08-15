@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -232,6 +235,10 @@ fn admin_scopes() -> BTreeSet<ServiceScope> {
 
 #[tokio::test]
 async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("admin_residual_jenkins_write_denied", "denied"),
+        ("admin_rollback_restored", "restored"),
+    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -409,30 +416,32 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("ADMIN-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "source": {
-                    "client_id": source_receipt.client_id,
-                    "generation": source_receipt.generation,
-                    "authority": source_receipt.authority,
-                    "binding_digest": source_receipt.binding_digest,
-                    "contract_digest": source_receipt.contract_digest,
-                },
-                "target": {
-                    "client_id": target_receipt.client_id,
-                    "generation": target_receipt.generation,
-                    "authority": target_receipt.authority,
-                    "binding_digest": target_receipt.binding_digest,
-                    "contract_digest": target_receipt.contract_digest,
-                },
-                "rollback": {
-                    "client_id": rollback_receipt.client_id,
-                    "generation": rollback_receipt.generation,
-                    "authority": rollback_receipt.authority,
-                    "binding_digest": rollback_receipt.binding_digest,
-                    "contract_digest": rollback_receipt.contract_digest,
-                },
-            }))
-            .expect("serialize DIFF-003 admin receipts"),
+            diff003::receipt(
+                "ADMIN-001",
+                serde_json::json!({
+                    "source": {
+                        "client_id": source_receipt.client_id,
+                        "generation": source_receipt.generation,
+                        "authority": source_receipt.authority,
+                        "binding_digest": source_receipt.binding_digest,
+                        "contract_digest": source_receipt.contract_digest,
+                    },
+                    "target": {
+                        "client_id": target_receipt.client_id,
+                        "generation": target_receipt.generation,
+                        "authority": target_receipt.authority,
+                        "binding_digest": target_receipt.binding_digest,
+                        "contract_digest": target_receipt.contract_digest,
+                    },
+                    "rollback": {
+                        "client_id": rollback_receipt.client_id,
+                        "generation": rollback_receipt.generation,
+                        "authority": rollback_receipt.authority,
+                        "binding_digest": rollback_receipt.binding_digest,
+                        "contract_digest": rollback_receipt.contract_digest,
+                    },
+                }),
+            ),
         )
         .expect("write DIFF-003 admin receipts");
     }
@@ -482,6 +491,7 @@ async fn target_identity_must_hold_every_mapped_write_action() {
 
 #[tokio::test]
 async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_closed() {
+    let _diff003 = diff003::scenario_assertions(&[("admin_target_substitution_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;

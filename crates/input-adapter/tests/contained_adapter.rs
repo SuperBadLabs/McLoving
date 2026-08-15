@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -351,6 +354,7 @@ fn request(adapter: &InputAdapter, branch: &str, mode: &str) -> CaptureRequest {
 
 #[tokio::test]
 async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
+    let _diff003 = diff003::scenario_assertions(&[("input_replay_denied", "denied")]);
     let fixture = start_fixture().await;
     let temp = TempDir::new().expect("temp dir");
     let adapter_config = config(&fixture.endpoint, temp.path());
@@ -594,7 +598,10 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("INPUT-001.json"),
-            serde_json::to_vec_pretty(&main_receipt).expect("serialize DIFF-003 input receipt"),
+            diff003::receipt(
+                "INPUT-001",
+                serde_json::to_value(&main_receipt).expect("encode DIFF-003 input receipt"),
+            ),
         )
         .expect("write DIFF-003 input receipt");
     }
@@ -628,6 +635,10 @@ async fn exact_json_number_is_preserved_in_the_signed_receipt() {
 
 #[tokio::test]
 async fn outage_rate_generation_and_rollback_are_fail_closed() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("input_stale_denied", "denied"),
+        ("input_outage_denied", "denied"),
+    ]);
     let fixture = start_fixture().await;
     let temp = TempDir::new().expect("temp dir");
     let mut limited_config = config(&fixture.endpoint, temp.path());
@@ -736,6 +747,8 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
 
 #[tokio::test]
 async fn credential_ca_and_expiry_substitution_fail_before_use() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("input_endpoint_substitution_denied", "denied")]);
     let fixture = start_fixture().await;
     let temp = TempDir::new().expect("temp dir");
     let bound_config = config(&fixture.endpoint, temp.path());

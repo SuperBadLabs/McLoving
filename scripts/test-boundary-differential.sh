@@ -55,6 +55,11 @@ cargo_target_observer="${runtime_root}/cargo-target-observer"
 main_boundary_dir="${evidence}/runtime-boundaries-main"
 connector_boundary_dir="${evidence}/runtime-boundaries-connector"
 observer_boundary_dir="${evidence}/runtime-boundaries-observer"
+main_assertion_dir="${evidence}/runtime-assertions-main"
+connector_assertion_dir="${evidence}/runtime-assertions-connector"
+observer_assertion_dir="${evidence}/runtime-assertions-observer"
+receipt_auth_dir="${evidence}/runtime-receipt-auth"
+receipt_signing_private="${runtime_root}/receipt-signing-private.pkcs8"
 jenkins_port="$((21000 + (RANDOM % 2000)))"
 jenkins_password="$(openssl rand -hex 32)"
 jenkins_password_file="${runtime_root}/jenkins-password"
@@ -77,8 +82,14 @@ trap cleanup EXIT
 umask 077
 mkdir -p "${evidence}" "${jenkins_home}/init.groovy.d" "${cargo_target}" \
   "${cargo_target_connector}" "${cargo_target_observer}" \
-  "${main_boundary_dir}" "${connector_boundary_dir}" "${observer_boundary_dir}"
+  "${main_boundary_dir}" "${connector_boundary_dir}" "${observer_boundary_dir}" \
+  "${main_assertion_dir}" "${connector_assertion_dir}" "${observer_assertion_dir}" \
+  "${receipt_auth_dir}"
 chmod 700 "${output_root}" "${evidence}" "${runtime_root}"
+openssl genpkey -algorithm ED25519 -out "${receipt_signing_private}" >/dev/null 2>&1
+chmod 600 "${receipt_signing_private}"
+openssl pkey -in "${receipt_signing_private}" -pubout \
+  -out "${receipt_auth_dir}/receipt-signing-public.pem" >/dev/null 2>&1
 printf '%s\n' "${jenkins_password}" >"${jenkins_password_file}"
 printf 'machine 127.0.0.1 login diff003-admin password %s\n' \
   "${jenkins_password}" >"${jenkins_netrc}"
@@ -232,6 +243,7 @@ podman create --name "${runner}" \
     set -euo pipefail
     mkdir -p /evidence/runtime-boundaries
     export MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/evidence/runtime-boundaries-main
+    export MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/evidence/runtime-assertions-main
     run_suite() {
       suite="$1"
       shift
@@ -306,10 +318,12 @@ podman create --name "${connector_runner}" --network none \
   --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/cargo-target \
   --env RUSTUP_TOOLCHAIN=1.97.1 \
   --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
+  --env MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions \
   --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target_connector}:/cargo-target:Z" \
   --volume "${connector_boundary_dir}:/receipt:Z" \
+  --volume "${connector_assertion_dir}:/assertions:Z" \
   --volume "${repo_root}:/work:ro,Z" --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
   cargo test --locked --offline -p mcloving-external-connector \
@@ -331,10 +345,12 @@ podman create --name "${observer_runner}" --network none \
   --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/cargo-target \
   --env RUSTUP_TOOLCHAIN=1.97.1 \
   --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
+  --env MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions \
   --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target_observer}:/cargo-target:Z" \
   --volume "${observer_boundary_dir}:/receipt:Z" \
+  --volume "${observer_assertion_dir}:/assertions:Z" \
   --volume "${repo_root}:/work:ro,Z" --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
   cargo test --locked --offline -p mcloving-destination-observer \
@@ -355,6 +371,20 @@ mkdir -p "${runtime_boundary_dir}"
 cp "${main_boundary_dir}"/*.json "${runtime_boundary_dir}/"
 cp "${connector_boundary_dir}/EXT-001.json" "${runtime_boundary_dir}/"
 cp "${observer_boundary_dir}/OBS-001.json" "${runtime_boundary_dir}/"
+
+runtime_assertion_dir="${evidence}/runtime-assertions"
+mkdir -p "${runtime_assertion_dir}"
+cp "${main_assertion_dir}"/*.json "${runtime_assertion_dir}/"
+cp "${connector_assertion_dir}"/*.json "${runtime_assertion_dir}/"
+cp "${observer_assertion_dir}"/*.json "${runtime_assertion_dir}/"
+
+for boundary_file in "${runtime_boundary_dir}"/*.json; do
+  boundary_id="$(basename "${boundary_file}" .json)"
+  openssl pkeyutl -sign -rawin -inkey "${receipt_signing_private}" \
+    -in "${boundary_file}" -out "${receipt_auth_dir}/${boundary_id}.sig"
+done
+rm -f -- "${receipt_signing_private}"
+receipt_signing_private=''
 
 # The resolver's two bind-topology authority-alias negatives require mount
 # authority. Run that one exact test in a separate rootless user-namespace
@@ -411,16 +441,16 @@ component_manifest="${evidence}/component-source-manifests.txt"
 component_digest() {
   git -C "${repo_root}" ls-files -s -- "$@" | sha256sum | awk '{print $1}'
 }
-printf 'controller %s\n' "$(component_digest crates/controller-store crates/controller-api)" >>"${component_manifest}"
-printf 'SCM-001 %s\n' "$(component_digest crates/source-acquirer)" >>"${component_manifest}"
-printf 'SECRET-001 %s\n' "$(component_digest crates/secret-broker)" >>"${component_manifest}"
-printf 'INPUT-001 %s\n' "$(component_digest crates/input-adapter)" >>"${component_manifest}"
-printf 'PROV-001 %s\n' "$(component_digest crates/provisioner)" >>"${component_manifest}"
-printf 'EXT-001 %s\n' "$(component_digest crates/external-connector)" >>"${component_manifest}"
-printf 'OBS-001 %s\n' "$(component_digest crates/destination-observer)" >>"${component_manifest}"
-printf 'DEP-001 %s\n' "$(component_digest crates/dependency-resolver)" >>"${component_manifest}"
-printf 'CACHE-001 %s\n' "$(component_digest crates/cache)" >>"${component_manifest}"
-printf 'REL-001 %s\n' "$(component_digest crates/release-provenance)" >>"${component_manifest}"
+printf 'controller %s\n' "$(component_digest crates/controller-store crates/controller-api crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'SCM-001 %s\n' "$(component_digest crates/source-acquirer crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'SECRET-001 %s\n' "$(component_digest crates/secret-broker crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'INPUT-001 %s\n' "$(component_digest crates/input-adapter crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'PROV-001 %s\n' "$(component_digest crates/provisioner crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'EXT-001 %s\n' "$(component_digest crates/external-connector crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'OBS-001 %s\n' "$(component_digest crates/destination-observer crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'DEP-001 %s\n' "$(component_digest crates/dependency-resolver crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'CACHE-001 %s\n' "$(component_digest crates/cache crates/test-support/diff003.rs)" >>"${component_manifest}"
+printf 'REL-001 %s\n' "$(component_digest crates/release-provenance crates/test-support/diff003.rs)" >>"${component_manifest}"
 
 certificate="${repo_root}/migration/boundary-differential-v1/boundary-differential.json"
 while read -r component_id actual_digest; do
@@ -457,7 +487,8 @@ done
 jq --slurp '.' "${runtime_boundary_jsonl}" >"${evidence}/runtime-boundaries.json"
 
 "${repo_root}/scripts/verify-boundary-runtime.sh" \
-  "${certificate}" "${runtime_boundary_dir}" "${evidence}/test-output.txt" \
+  "${certificate}" "${runtime_boundary_dir}" "${receipt_auth_dir}" \
+  "${runtime_assertion_dir}" "${evidence}/test-output.txt" \
   "${evidence}/runtime-verification"
 cp "${evidence}/runtime-verification/validated-joins.json" \
   "${evidence}/runtime-joins.json"
@@ -465,10 +496,15 @@ cp "${evidence}/runtime-verification/executed-scenarios.json" \
   "${evidence}/executed-scenarios.json"
 
 certificate_sha256="$(sha256sum "${certificate}" | awk '{print $1}')"
+receipt_auth_public_key_sha256=$(
+  openssl pkey -pubin -in "${receipt_auth_dir}/receipt-signing-public.pem" \
+    -outform DER | sha256sum | awk '{print $1}'
+)
 jq -n \
   --arg source_commit "${source_commit}" \
   --arg source_tree "${source_tree}" \
   --arg certificate_sha256 "${certificate_sha256}" \
+  --arg receipt_auth_public_key_sha256 "${receipt_auth_public_key_sha256}" \
   --slurpfile certificate "${certificate}" \
   --slurpfile jenkins "${evidence}/jenkins-runtime.json" \
   --slurpfile live_boundaries "${evidence}/runtime-boundaries.json" \
@@ -483,6 +519,8 @@ jq -n \
     jenkins_schema: $jenkins[0].schema,
     boundary_count: ($certificate[0].boundaries | length),
     live_boundary_receipt_count: ($live_boundaries[0] | length),
+    authenticated_boundary_receipt_count: ($live_boundaries[0] | length),
+    receipt_auth_public_key_sha256: $receipt_auth_public_key_sha256,
     scenario_count: ($certificate[0].scenarios | length),
     executed_scenario_count: ($executed_scenarios[0] | length),
     join_count: ($certificate[0].joins | length),
@@ -505,6 +543,8 @@ jq --exit-status '
   and .jenkins_schema == "mcloving.diff003.jenkins-runtime/v1"
   and .boundary_count == 13
   and .live_boundary_receipt_count == 13
+  and .authenticated_boundary_receipt_count == 13
+  and (.receipt_auth_public_key_sha256 | test("^[0-9a-f]{64}$"))
   and .scenario_count == 48
   and .executed_scenario_count == 48
   and .join_count == 12
@@ -531,7 +571,7 @@ for required_line in \
   grep -Fqx "${required_line}" "${evidence}/verifier-receipt.txt"
 done
 
-if grep -R -E -- 'BEGIN (OPENSSH |EC |RSA )?PRIVATE KEY|release-key\.pkcs8' \
+if grep -R -E -- 'BEGIN (OPENSSH |EC |RSA )?PRIVATE KEY|BEGIN PRIVATE KEY|release-key\.pkcs8' \
   "${evidence}" >/dev/null; then
   echo "DIFF-003 retained evidence contains private-key material or a private-key path" >&2
   exit 1
@@ -580,6 +620,7 @@ for source_file in \
   crates/boundary-differential/Cargo.toml \
   crates/boundary-differential/src/lib.rs \
   crates/boundary-differential/src/main.rs \
+  crates/test-support/diff003.rs \
   migration/boundary-differential-v1/SHA256SUMS \
   migration/boundary-differential-v1/boundary-differential.json \
   migration/boundary-differential-runtime-v1/init.groovy \

@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use mcloving_controller_store::{
     DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, PipelineOperationalState,
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
@@ -321,6 +324,11 @@ fn dag(
 
 #[tokio::test]
 async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("trigger_substitution_denied", "denied"),
+        ("trigger_replay_denied", "denied"),
+        ("trigger_stale_generation_denied", "denied"),
+    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -561,7 +569,10 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("TRIG-001.json"),
-            serde_json::to_vec_pretty(accepted).expect("serialize DIFF-003 trigger receipt"),
+            diff003::receipt(
+                "TRIG-001",
+                serde_json::to_value(accepted).expect("encode DIFF-003 trigger receipt"),
+            ),
         )
         .expect("write DIFF-003 trigger receipt");
     }
@@ -1901,6 +1912,7 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
 
 #[tokio::test]
 async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies_new_events() {
+    let _diff003 = diff003::scenario_assertions(&[("trigger_outage_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;

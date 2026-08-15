@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 4 ]]; then
-  echo "usage: $0 CERTIFICATE RECEIPT_DIR TEST_OUTPUT OUTPUT_DIR" >&2
+if [[ $# -ne 6 ]]; then
+  echo "usage: $0 CERTIFICATE RECEIPT_DIR RECEIPT_AUTH_DIR ASSERTION_DIR TEST_OUTPUT OUTPUT_DIR" >&2
   exit 64
 fi
 
 certificate="$1"
 receipt_dir="$2"
-test_output="$3"
-output_dir="$4"
+receipt_auth_dir="$3"
+assertion_dir="$4"
+test_output="$5"
+output_dir="$6"
 digest='^[0-9a-f]{64}$'
 base64='^[A-Za-z0-9+/_-]+={0,2}$'
 
@@ -20,6 +22,10 @@ fail() {
 
 [[ -f "${certificate}" && ! -L "${certificate}" ]] || fail "unsafe certificate"
 [[ -d "${receipt_dir}" && ! -L "${receipt_dir}" ]] || fail "unsafe receipt directory"
+[[ -d "${receipt_auth_dir}" && ! -L "${receipt_auth_dir}" ]] \
+  || fail "unsafe receipt authentication directory"
+[[ -d "${assertion_dir}" && ! -L "${assertion_dir}" ]] \
+  || fail "unsafe runtime assertion directory"
 [[ -f "${test_output}" && ! -L "${test_output}" ]] || fail "unsafe test output"
 mkdir -p "${output_dir}"
 
@@ -39,6 +45,35 @@ for file in "${actual_files[@]}"; do
   [[ "$(stat -c '%s' "${receipt_dir}/${file}")" -le 1048576 ]] || fail "oversized receipt ${file}"
   jq --exit-status 'type == "object" and length > 0' "${receipt_dir}/${file}" >/dev/null \
     || fail "malformed receipt ${file}"
+done
+
+mapfile -t actual_auth_files < <(
+  find "${receipt_auth_dir}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort
+)
+expected_auth_files=(
+  ADMIN-001.sig CACHE-001.sig CONSUMER-001.sig DEP-001.sig DISC-001.sig
+  EXT-001.sig INPUT-001.sig OBS-001.sig PROV-001.sig REL-001.sig
+  SCM-001.sig SECRET-001.sig TRIG-001.sig receipt-signing-public.pem
+)
+[[ "${actual_auth_files[*]}" == "${expected_auth_files[*]}" ]] \
+  || fail "receipt authentication file set is not exact"
+openssl pkey -pubin -in "${receipt_auth_dir}/receipt-signing-public.pem" \
+  -noout >/dev/null 2>&1 || fail "invalid receipt authentication public key"
+receipt_auth_public_key_sha256=$(
+  openssl pkey -pubin -in "${receipt_auth_dir}/receipt-signing-public.pem" \
+    -outform DER | sha256sum | awk '{print $1}'
+)
+for file in "${actual_files[@]}"; do
+  boundary="${file%.json}"
+  signature="${receipt_auth_dir}/${boundary}.sig"
+  [[ -f "${signature}" && ! -L "${signature}" ]] \
+    || fail "missing receipt signature ${boundary}"
+  [[ "$(stat -c '%s' "${signature}")" == 64 ]] \
+    || fail "invalid receipt signature length ${boundary}"
+  openssl pkeyutl -verify -pubin \
+    -inkey "${receipt_auth_dir}/receipt-signing-public.pem" \
+    -rawin -in "${receipt_dir}/${file}" -sigfile "${signature}" \
+    >/dev/null 2>&1 || fail "unauthenticated live receipt ${boundary}"
 done
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
@@ -199,6 +234,40 @@ release_timestamp_outage_denied|REL-001|source_builder_and_policy_substitution_a
 MAP
 )
 
+runtime_assertions_jsonl="${output_dir}/runtime-assertions.jsonl"
+mapfile -t actual_assertion_files < <(
+  find "${assertion_dir}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort
+)
+mapfile -t expected_assertion_files < <(
+  cut -d'|' -f1 <<<"${scenario_map}" | sed 's/$/.json/' | LC_ALL=C sort
+)
+[[ "${actual_assertion_files[*]}" == "${expected_assertion_files[*]}" ]] \
+  || fail "runtime assertion file set is not exact"
+: >"${runtime_assertions_jsonl}"
+for assertion_file in "${actual_assertion_files[@]}"; do
+  [[ ! -L "${assertion_dir}/${assertion_file}" ]] \
+    || fail "symlink runtime assertion ${assertion_file}"
+  [[ "$(stat -c '%h' "${assertion_dir}/${assertion_file}")" == 1 ]] \
+    || fail "linked runtime assertion ${assertion_file}"
+  [[ "$(stat -c '%s' "${assertion_dir}/${assertion_file}")" -le 4096 ]] \
+    || fail "oversized runtime assertion ${assertion_file}"
+  jq --compact-output '.' "${assertion_dir}/${assertion_file}" \
+    >>"${runtime_assertions_jsonl}" \
+    || fail "malformed runtime assertion ${assertion_file}"
+done
+jq --slurp '.' "${runtime_assertions_jsonl}" >"${output_dir}/runtime-assertions.json"
+jq --exit-status '
+  length == 48
+  and (map(.scenario) | unique | length) == 48
+  and all(
+    .schema == "mcloving.diff003.executed-assertion/v1"
+    and (.scenario | type == "string" and length > 0)
+    and (.observed_outcome | IN("denied", "preserved", "reconciled", "cleaned", "restored"))
+    and .assertions_passed
+  )
+' "${output_dir}/runtime-assertions.json" >/dev/null \
+  || fail "runtime assertion denominator"
+
 scenario_jsonl="${output_dir}/executed-scenarios.jsonl"
 : >"${scenario_jsonl}"
 while IFS='|' read -r scenario boundary test_name; do
@@ -207,54 +276,119 @@ while IFS='|' read -r scenario boundary test_name; do
   expected_outcome=$(jq -r --arg name "${scenario}" \
     '.scenarios[] | select(.name == $name) | .expected_outcome' "${certificate}")
   [[ -n "${expected_outcome}" ]] || fail "scenario ${scenario} absent from certificate"
+  observed_outcome=$(jq -r --arg name "${scenario}" '
+    [.[] | select(.scenario == $name)] as $matches
+    | if ($matches | length) == 1 then $matches[0].observed_outcome else empty end
+  ' "${output_dir}/runtime-assertions.json")
+  [[ -n "${observed_outcome}" ]] || fail "scenario ${scenario} lacks one runtime assertion"
+  [[ "${observed_outcome}" == "${expected_outcome}" ]] \
+    || fail "scenario ${scenario} runtime outcome mismatch"
   jq -cn --arg scenario "${scenario}" --arg boundary "${boundary}" \
-    --arg test "${test_name}" --arg outcome "${expected_outcome}" \
-    '{scenario:$scenario,boundary:$boundary,test:$test,outcome:$outcome,executed:true,passed:true}' \
+    --arg test "${test_name}" --arg outcome "${observed_outcome}" \
+    '{scenario:$scenario,boundary:$boundary,test:$test,outcome:$outcome,
+      outcome_source:"runtime_assertion",executed:true,passed:true}' \
     >>"${scenario_jsonl}"
 done <<<"${scenario_map}"
 jq --slurp '.' "${scenario_jsonl}" >"${output_dir}/executed-scenarios.json"
-jq --exit-status 'length == 48 and all(.executed and .passed)' \
+jq --exit-status 'length == 48 and all(
+  .executed and .passed and .outcome_source == "runtime_assertion"
+)' \
   "${output_dir}/executed-scenarios.json" >/dev/null || fail "scenario denominator"
 
-# Joins bind two validated live receipts and apply an explicit compatibility
-# rule. They no longer treat an arbitrary digest as evidence of equality.
+# Joins compare the same authenticated live projection from both receipts.
+# Compatibility is emitted only after every declared join dimension agrees.
 joins_jsonl="${output_dir}/validated-joins.jsonl"
 : >"${joins_jsonl}"
-while IFS=$'\t' read -r name source target input expected_effects rollback; do
+while IFS=$'\t' read -r name source target input source_trace target_trace \
+  expected_effects expected_duplicates expected_rollback; do
   source_file="${receipt_dir}/${source}.json"
   target_file="${receipt_dir}/${target}.json"
   source_sha=$(sha256sum "${source_file}" | awk '{print $1}')
   target_sha=$(sha256sum "${target_file}" | awk '{print $1}')
-  effects=0
-  [[ "${name}" != connector_to_observer ]] || effects=1
-  rollback_observed=false
-  if [[ "${name}" == consumer_cutover_rollback || "${name}" == admin_cutover_rollback ]]; then
-    rollback_observed=true
-  fi
+  jq --exit-status --arg boundary "${source}" --arg name "${name}" '
+    ._diff003.schema == "mcloving.diff003.live-boundary/v1"
+    and ._diff003.boundary == $boundary
+    and ([._diff003.joins[] | select(.name == $name)] | length) == 1
+  ' "${source_file}" >/dev/null || fail "join ${name} missing source projection"
+  jq --exit-status --arg boundary "${target}" --arg name "${name}" '
+    ._diff003.schema == "mcloving.diff003.live-boundary/v1"
+    and ._diff003.boundary == $boundary
+    and ([._diff003.joins[] | select(.name == $name)] | length) == 1
+  ' "${target_file}" >/dev/null || fail "join ${name} missing target projection"
+  source_claim=$(jq -c --arg name "${name}" \
+    '._diff003.joins[] | select(.name == $name)' "${source_file}")
+  target_claim=$(jq -c --arg name "${name}" \
+    '._diff003.joins[] | select(.name == $name)' "${target_file}")
+  [[ "${source_claim}" == "${target_claim}" ]] \
+    || fail "join ${name} live projections disagree"
+  jq --exit-status --arg input "${input}" --arg trace "${source_trace}" \
+    --argjson effects "${expected_effects}" \
+    --argjson duplicates "${expected_duplicates}" \
+    --argjson rollback "${expected_rollback}" '
+    .shared_input_sha256 == $input
+    and .trace_sha256 == $trace
+    and .control_flow_sha256 == $input
+    and .effect_intent_sha256 == $input
+    and .outcome_sha256 == $input
+    and .content_sha256 == $input
+    and .generation == 1
+    and (.retry_ambiguity | not)
+    and .effects == $effects
+    and .duplicate_effects == $duplicates
+    and .rollback_restored == $rollback
+  ' <<<"${source_claim}" >/dev/null || fail "join ${name} source projection mismatch"
+  jq --exit-status --arg input "${input}" --arg trace "${target_trace}" \
+    --argjson effects "${expected_effects}" \
+    --argjson duplicates "${expected_duplicates}" \
+    --argjson rollback "${expected_rollback}" '
+    .shared_input_sha256 == $input and .trace_sha256 == $trace
+    and .control_flow_sha256 == $input and .effect_intent_sha256 == $input
+    and .outcome_sha256 == $input and .content_sha256 == $input
+    and .generation == 1 and (.retry_ambiguity | not)
+    and .effects == $effects and .duplicate_effects == $duplicates
+    and .rollback_restored == $rollback
+  ' <<<"${target_claim}" >/dev/null || fail "join ${name} target projection mismatch"
+  effects=$(jq -r '.effects' <<<"${source_claim}")
+  duplicate_effects=$(jq -r '.duplicate_effects' <<<"${source_claim}")
+  rollback_observed=$(jq -r '.rollback_restored' <<<"${source_claim}")
   [[ "${effects}" == "${expected_effects}" ]] || fail "join ${name} effect mismatch"
-  [[ "${rollback_observed}" == "${rollback}" ]] || fail "join ${name} rollback mismatch"
-  join_sha=$(printf 'join=%s\nsource=%s\ntarget=%s\ninput=%s\neffects=%s\nrollback=%s\n' \
-    "${name}" "${source_sha}" "${target_sha}" "${input}" "${effects}" \
+  [[ "${duplicate_effects}" == "${expected_duplicates}" ]] \
+    || fail "join ${name} duplicate-effect mismatch"
+  [[ "${rollback_observed}" == "${expected_rollback}" ]] \
+    || fail "join ${name} rollback mismatch"
+  claim_sha=$(printf '%s' "${source_claim}" | sha256sum | awk '{print $1}')
+  join_sha=$(printf 'join=%s\nsource=%s\ntarget=%s\nclaim=%s\ninput=%s\neffects=%s\nrollback=%s\n' \
+    "${name}" "${source_sha}" "${target_sha}" "${claim_sha}" "${input}" "${effects}" \
     "${rollback_observed}" | sha256sum | awk '{print $1}')
   jq -cn --arg name "${name}" --arg source "${source}" --arg target "${target}" \
     --arg input "${input}" --arg source_sha "${source_sha}" --arg target_sha "${target_sha}" \
-    --arg join_sha "${join_sha}" --argjson effects "${effects}" \
+    --arg claim_sha "${claim_sha}" --arg join_sha "${join_sha}" \
+    --argjson effects "${effects}" --argjson duplicates "${duplicate_effects}" \
     --argjson rollback "${rollback_observed}" \
     '{name:$name,source_boundary:$source,target_boundary:$target,
       shared_input_sha256:$input,source_receipt_sha256:$source_sha,
-      target_receipt_sha256:$target_sha,validated_join_sha256:$join_sha,
+      target_receipt_sha256:$target_sha,live_projection_sha256:$claim_sha,
+      validated_join_sha256:$join_sha,
       source_contract_valid:true,target_contract_valid:true,
-      compatible:true,effects:$effects,duplicate_effects:0,
+      trace_equal:true,control_flow_equal:true,effect_intent_equal:true,
+      outcome_equal:true,content_equal:true,generation_equal:true,
+      retry_ambiguity_equal:true,compatible:true,
+      effects:$effects,duplicate_effects:$duplicates,
       rollback_restored:$rollback}' >>"${joins_jsonl}"
 done < <(jq -r '.joins[] | [
   .name,.source_boundary,.target_boundary,.shared_input_sha256,
-  (.effects|tostring),(.rollback_restored|tostring)
+  .source_trace_sha256,.target_trace_sha256,
+  (.effects|tostring),(.duplicate_effects|tostring),(.rollback_restored|tostring)
 ] | @tsv' "${certificate}")
 jq --slurp '.' "${joins_jsonl}" >"${output_dir}/validated-joins.json"
 jq --exit-status 'length == 12 and all(
   .source_contract_valid and .target_contract_valid and .compatible
+  and .trace_equal and .control_flow_equal and .effect_intent_equal
+  and .outcome_equal and .content_equal and .generation_equal
+  and .retry_ambiguity_equal
   and .duplicate_effects == 0
 )' "${output_dir}/validated-joins.json" >/dev/null || fail "join denominator"
 
-printf 'validated_boundary_receipts=13\nexecuted_scenarios=48\nvalidated_joins=12\n' \
+printf 'validated_boundary_receipts=13\nauthenticated_boundary_receipts=13\nreceipt_auth_public_key_sha256=%s\nexecuted_scenarios=48\nvalidated_joins=12\n' \
+  "${receipt_auth_public_key_sha256}" \
   >"${output_dir}/runtime-verifier.txt"

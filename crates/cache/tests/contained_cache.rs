@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
 
@@ -160,20 +163,22 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("CACHE-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "cold": {"status": cold.status, "receipts": cold.receipts},
-                "published": {
-                    "status": published.status,
-                    "receipts": published.receipts,
-                },
-                "hit": {
-                    "status": hit.status,
-                    "content_sha256": hit.content.as_deref().map(digest),
-                    "receipts": hit.receipts,
-                },
-                "audit_events": 3,
-            }))
-            .expect("serialize DIFF-003 cache receipts"),
+            diff003::receipt(
+                "CACHE-001",
+                serde_json::json!({
+                    "cold": {"status": cold.status, "receipts": cold.receipts},
+                    "published": {
+                        "status": published.status,
+                        "receipts": published.receipts,
+                    },
+                    "hit": {
+                        "status": hit.status,
+                        "content_sha256": hit.content.as_deref().map(digest),
+                        "receipts": hit.receipts,
+                    },
+                    "audit_events": 3,
+                }),
+            ),
         )
         .expect("write DIFF-003 cache receipts");
     }
@@ -280,6 +285,7 @@ fn tenant_pipeline_principal_and_trust_substitution_fail_closed() {
 
 #[test]
 fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
+    let _diff003 = diff003::scenario_assertions(&[("cache_replay_denied", "denied")]);
     let temp = TempDir::new().unwrap();
     let key = [9_u8; 32];
     let clock = Arc::new(ManualClock::new(30_000));
@@ -467,6 +473,8 @@ fn concurrent_same_content_converges_and_different_content_never_replaces() {
 
 #[test]
 fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("cache_generation_substitution_denied", "denied")]);
     let temp = TempDir::new().unwrap();
     let key = [11_u8; 32];
     let clock = Arc::new(ManualClock::new(50_000));
@@ -627,6 +635,7 @@ fn physically_restored_database_cannot_serve_the_new_restore_epoch() {
 
 #[test]
 fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
+    let _diff003 = diff003::scenario_assertions(&[("cache_stale_denied", "denied")]);
     let temp = TempDir::new().unwrap();
     let key = [16_u8; 32];
     let clock = Arc::new(ManualClock::new(68_000));

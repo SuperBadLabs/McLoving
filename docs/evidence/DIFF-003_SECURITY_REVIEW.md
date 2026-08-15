@@ -10,12 +10,11 @@ effect, deployment, client cutover, canary, rollback, or Jenkins decommission.
 The real owner/operator client remains `jenkins_source`, and the Mario
 inventories retain zero admitted production boundary mappings.
 
-The accepted implementation is exact head
-`01d548c510dc84b10576c0fd0c9a4524a18835e4`, tree
-`d5ef1ce12f152a48ffc683537978f4549756693d`. HeMan sealed
-`/sn8100/runs/mcloving/diff003-boundary-20260815T060147Z`; the independently
-rechecked self-excluding evidence-manifest SHA-256 is
-`cd8a43e08b7e2a3c3e1ed0a2cbc961818c27b3daa5e2eba0f23b1a140521dff7`.
+Exact acceptance metadata is intentionally not committed here. The final
+reviewed PR head must first run unchanged on HeMan; PR #59's closure comment
+then records the exact head/tree, retained run path, public receipt-key digest,
+and independently rechecked self-excluding manifest digest. No repository
+change may follow that accepted run before merge.
 
 ## Evidence result
 
@@ -29,13 +28,16 @@ The exact ledger contains 15 passing suite entries:
 4. physically separated no-network connector and observer contracts; and
 5. the rootless isolated dependency authority-alias negative contract.
 
-All 13 named boundaries exported the actual public receipt produced by the
-focused positive implementation test. The independent runtime verifier checks
-each boundary-specific contract, binds every one of the 48 certified scenarios
-to an exact test that executed successfully, and applies explicit compatibility
-rules to both validated live receipts in every join. A nonempty object, stale
-receipt, substituted boundary receipt, or arbitrary pair of hashes cannot
-satisfy the gate.
+All 13 named boundaries export the actual public receipt produced by the
+focused positive implementation test. A fresh ceremony-only Ed25519 key signs
+each exact receipt file after collection; the verifier retains the public key,
+requires the exact 13 detached signatures, and rejects any changed, stale, or
+fabricated file. The private key is destroyed before verification and sealing.
+Each of the 48 certified scenarios requires one runtime outcome emitted only
+after the owning test's assertions completed. Every join then compares all
+declared compatibility dimensions from both authenticated receipt files. A
+nonempty object, plausible-looking signature text, test name alone, static
+certificate outcome, or arbitrary pair of hashes cannot satisfy the gate.
 
 The retained comparison reports 13 validated live receipts, 12 validated live
 joins, 48 executed adversarial scenarios, zero production mappings, zero
@@ -60,7 +62,7 @@ production authority.
 
 ## Failed-attempt disposition
 
-Seven earlier attempts grant no closure authority:
+Eight earlier attempts grant no closure authority:
 
 - `20260815T041624Z`: PostgreSQL startup was incompatible with an all-capability
   drop and the harness stopped before target execution.
@@ -79,6 +81,10 @@ Seven earlier attempts grant no closure authority:
 - `20260815T054726Z`: the refreshed detached certificate passed its source check,
   but the separately compiled verifier retained the old resolver binding and
   failed closed before the isolated lanes.
+- `20260815T060147Z`: all hardened suites sealed, but final exact-head review
+  found that receipt authentication, assertion-derived scenario outcomes,
+  two-receipt join projections, and final reviewed-head binding remained
+  incomplete. The receipt is superseded and diagnostic only.
 
 The accepted attempt fixes each harness defect without borrowing evidence from
 an earlier run. Its exact head reruns the complete denominator and produces the

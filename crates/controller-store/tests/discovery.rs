@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use mcloving_controller_store::{
     AuthorizationPolicyWrite, DiscoveredRefKind, DiscoveryChildState, DiscoveryObservationWrite,
     DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
@@ -298,6 +301,7 @@ fn scan(
 
 #[tokio::test]
 async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
+    let _diff003 = diff003::scenario_assertions(&[("discovery_replay_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -816,11 +820,13 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("DISC-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "initial": receipt,
-                "reconfigured": reconfigured_receipt,
-            }))
-            .expect("serialize DIFF-003 discovery receipts"),
+            diff003::receipt(
+                "DISC-001",
+                serde_json::json!({
+                    "initial": receipt,
+                    "reconfigured": reconfigured_receipt,
+                }),
+            ),
         )
         .expect("write DIFF-003 discovery receipts");
     }
@@ -828,6 +834,10 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
 
 #[tokio::test]
 async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("discovery_config_substitution_denied", "denied"),
+        ("discovery_stale_denied", "denied"),
+    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;

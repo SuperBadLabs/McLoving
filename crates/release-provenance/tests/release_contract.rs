@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 
 use mcloving_release_provenance::{
@@ -389,7 +392,10 @@ fn exact_release_verifies_before_deployment_receipt() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("REL-001.json"),
-            serde_json::to_vec_pretty(&receipt).expect("serialize DIFF-003 release receipt"),
+            diff003::receipt(
+                "REL-001",
+                serde_json::to_value(&receipt).expect("encode DIFF-003 release receipt"),
+            ),
         )
         .expect("write DIFF-003 release receipt");
     }
@@ -414,6 +420,7 @@ fn exact_release_verifies_before_deployment_receipt() {
 
 #[test]
 fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
+    let _diff003 = diff003::scenario_assertions(&[("release_timestamp_outage_denied", "denied")]);
     let fixture = fixture(SHA1_A, SHA1_B, 2);
     let mut source = fixture.manifest.clone();
     source.source.commit_sha1 = SHA1_B.to_owned();
@@ -535,6 +542,8 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
 
 #[test]
 fn sbom_bundle_and_component_substitution_are_denied() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("release_artifact_substitution_denied", "denied")]);
     let fixture = fixture(SHA1_A, SHA1_B, 3);
     let envelope = signed(&fixture);
     let mut sbom = fixture.sbom.clone();
@@ -641,6 +650,7 @@ fn sbom_bundle_and_component_substitution_are_denied() {
 
 #[test]
 fn signer_signature_and_transparency_substitution_are_denied() {
+    let _diff003 = diff003::scenario_assertions(&[("release_untrusted_key_denied", "denied")]);
     let fixture = fixture(SHA1_A, SHA1_B, 4);
     let mut envelope = signed(&fixture);
     envelope.signature_base64.push('A');
@@ -784,6 +794,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
 
 #[test]
 fn rollback_target_must_match_a_previously_verified_release_exactly() {
+    let _diff003 = diff003::scenario_assertions(&[("release_replay_denied", "denied")]);
     let first = fixture(SHA1_A, SHA1_B, 5);
     let first_envelope = signed(&first);
     let first_verified = verify_release(

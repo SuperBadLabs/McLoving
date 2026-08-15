@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -491,6 +494,10 @@ fn kernel_deadline_kills_the_complete_transport_pid_namespace() {
 
 #[tokio::test]
 async fn exact_revision_replay_later_commit_and_sparse_truth() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("source_revision_substitution_denied", "denied"),
+        ("source_later_revision_preserved", "preserved"),
+    ]);
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
     root.write("README.md", b"first\n");
@@ -568,11 +575,13 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("SCM-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "initial": receipt,
-                "later_revision": later_receipt,
-            }))
-            .expect("serialize DIFF-003 source receipts"),
+            diff003::receipt(
+                "SCM-001",
+                serde_json::json!({
+                    "initial": receipt,
+                    "later_revision": later_receipt,
+                }),
+            ),
         )
         .expect("write DIFF-003 source receipts");
     }
@@ -1167,6 +1176,7 @@ async fn safe_symlink_executable_and_generation_rollback_bind_exact_tree_truth()
 
 #[tokio::test]
 async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_claim() {
+    let _diff003 = diff003::scenario_assertions(&[("source_outage_denied", "denied")]);
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
     root.write("oversized.txt", b"five!\n");

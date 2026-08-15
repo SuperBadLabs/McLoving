@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -83,6 +86,11 @@ async fn artifact(State(state): State<RepositoryState>, request: Request<Body>) 
 #[tokio::test]
 #[ignore = "requires the dedicated tmpfs boundary created by scripts/dependency-resolver-contained.sh"]
 async fn standalone_exact_resolution_and_offline_restart_replay() {
+    let _diff003 = diff003::scenario_assertions(&[
+        ("dependency_resolver_substitution_denied", "denied"),
+        ("dependency_replay_denied", "denied"),
+        ("dependency_outage_denied", "denied"),
+    ]);
     let transport_root = PathBuf::from(
         std::env::var_os("MCLOVING_DEPENDENCY_TRANSPORT_ROOT").expect("contained transport root"),
     );
@@ -477,7 +485,10 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("DEP-001.json"),
-            serde_json::to_vec_pretty(&left).expect("serialize DIFF-003 dependency receipt"),
+            diff003::receipt(
+                "DEP-001",
+                serde_json::to_value(&left).expect("encode DIFF-003 dependency receipt"),
+            ),
         )
         .expect("write DIFF-003 dependency receipt");
     }

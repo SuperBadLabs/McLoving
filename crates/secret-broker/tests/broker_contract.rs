@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -246,6 +249,7 @@ fn inventory_reconciliation_requires_exact_complete_owner_and_taint_truth() {
 
 #[test]
 fn workload_and_controller_visible_mappings_never_become_grant_eligible() {
+    let _diff003 = diff003::scenario_assertions(&[("secret_taint_ineligible_denied", "denied")]);
     let workload = ConsumerBinding::Workload {
         channel: WorkloadChannel::EnvironmentVariable,
         target: "DEPLOY_TOKEN".to_owned(),
@@ -376,12 +380,14 @@ fn exact_connector_grant_redeems_once_without_disclosing_secret_in_receipts_or_a
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("SECRET-001.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "grant": grant_receipt,
-                "redemption": redeemed.receipt,
-                "provider_calls": *provider.calls.borrow(),
-            }))
-            .expect("serialize DIFF-003 secret receipts"),
+            diff003::receipt(
+                "SECRET-001",
+                serde_json::json!({
+                    "grant": grant_receipt,
+                    "redemption": redeemed.receipt,
+                    "provider_calls": *provider.calls.borrow(),
+                }),
+            ),
         )
         .expect("write DIFF-003 secret receipts");
     }
@@ -417,6 +423,8 @@ fn source_acquirer_binding_uses_the_same_public_grant_protocol_without_provider_
 
 #[test]
 fn cross_tenant_attempt_fence_consumer_expiry_and_replay_are_denied_before_provider_use() {
+    let _diff003 =
+        diff003::scenario_assertions(&[("secret_consumer_substitution_denied", "denied")]);
     let mapping = mapping(source_acquirer());
     let request = grant(&mapping);
     let (_root, mut broker) = broker();
@@ -546,6 +554,7 @@ fn trusted_time_and_per_fence_scope_prevent_stale_or_renamed_grants() {
 
 #[test]
 fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fields() {
+    let _diff003 = diff003::scenario_assertions(&[("secret_marker_disclosure_denied", "denied")]);
     let lower_hex = SECRET
         .iter()
         .map(|byte| format!("{byte:02x}"))
