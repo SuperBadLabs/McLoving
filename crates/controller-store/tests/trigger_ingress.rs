@@ -597,19 +597,6 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         accepted.expires_at_unix_ms,
         accepted.accepted_at_unix_ms + 7_200_000
     );
-    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
-        let input_receipt = std::fs::read(std::path::Path::new(&root).join("INPUT-001.json"))
-            .expect("read live DIFF-003 input receipt");
-        let mut accepted_value =
-            serde_json::to_value(accepted).expect("encode DIFF-003 trigger receipt");
-        accepted_value["input_capture_receipt_sha256"] =
-            json!(format!("{:x}", Sha256::digest(&input_receipt)));
-        std::fs::write(
-            std::path::Path::new(&root).join("TRIG-001.json"),
-            diff003::receipt("TRIG-001", accepted_value),
-        )
-        .expect("write DIFF-003 trigger receipt");
-    }
     assert_eq!(
         concurrent_outcomes
             .iter()
@@ -1673,6 +1660,58 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         store.accept_trigger_delivery(&denied).await,
         Err(StoreError::PipelineDisabled { .. })
     ));
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let (live_organization_id, live_project_id, live_pipeline_id) = fixture(&store).await;
+        let live_trigger_id = Uuid::new_v4();
+        let live_trigger = trigger_write(
+            live_organization_id,
+            live_project_id,
+            live_pipeline_id,
+            live_trigger_id,
+            0,
+            TriggerKind::ScmWebhook,
+            PipelineTriggerState::Enabled,
+            "scm:github:installation:42",
+            json!({
+                "provider": "github",
+                "repository_identity": "github:superbadlabs/mcloving",
+                "filter": {"event_kinds": ["push"], "branches": ["main"], "path_prefixes": []},
+            }),
+            "diff003-stable-trigger",
+            3,
+        );
+        assert!(matches!(
+            store.put_pipeline_trigger(&live_trigger).await.unwrap(),
+            TriggerPutOutcome::Created(_)
+        ));
+        let live_now = database_unix_ms(&store).await;
+        let live_delivery = delivery(
+            live_organization_id,
+            live_project_id,
+            live_pipeline_id,
+            live_trigger_id,
+            1,
+            "diff003-stable-delivery",
+            "diff003-stable-event",
+            live_now,
+        );
+        let TriggerDeliveryAdmission::Created(live_receipt) =
+            store.accept_trigger_delivery(&live_delivery).await.unwrap()
+        else {
+            panic!("DIFF-003 stable trigger delivery must be newly accepted")
+        };
+        let input_receipt = std::fs::read(std::path::Path::new(&root).join("INPUT-001.json"))
+            .expect("read live DIFF-003 input receipt");
+        let mut live_value =
+            serde_json::to_value(live_receipt).expect("encode DIFF-003 trigger receipt");
+        live_value["input_capture_receipt_sha256"] =
+            json!(format!("{:x}", Sha256::digest(&input_receipt)));
+        std::fs::write(
+            std::path::Path::new(&root).join("TRIG-001.json"),
+            diff003::receipt("TRIG-001", live_value),
+        )
+        .expect("write DIFF-003 stable trigger receipt");
+    }
 }
 
 #[tokio::test]
