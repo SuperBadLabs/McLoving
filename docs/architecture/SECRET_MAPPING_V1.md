@@ -12,11 +12,14 @@ into provider-neutral, short-lived grants for one exact out-of-process
 another runner can use the same public mapping and receipt types without
 receiving secret bytes. The broker does not depend on either runner runtime.
 
-The only API type capable of holding secret bytes is `SecretMaterial`. It is
-not serializable, prints only `[REDACTED]`, and zeroizes its allocation on drop.
-Only an exact provider redemption hands that value to the selected external
-consumer integration. Mapping, grant, redemption, audit, source, connector,
-shadow, and runner-facing types contain references and digests only.
+The only runtime value type capable of delivering provider-resolved secret
+bytes is `SecretMaterial`. It is not serializable, prints only `[REDACTED]`, and
+zeroizes its allocation on drop. A separate owner-private, bounded startup
+registry supplies deny-only disclosure markers; those values can reject public
+input but are never emitted or persisted by the broker. Only an exact provider
+redemption hands `SecretMaterial` to the selected external consumer integration.
+Mapping, grant, redemption, audit, source, connector, shadow, and runner-facing
+types contain references and digests only.
 
 ## Inventory and classification
 
@@ -49,11 +52,15 @@ identity, exact external consumer identity plus implementation/configuration
 digests, provider identity/version/implementation/configuration, opaque
 provider reference, exact secret version, and monotonic rotation generation.
 
-Before opening state, the broker requires a nonempty, unambiguous registry of
-trusted owner key identities and Ed25519 public keys. Installation selects a
-key only from that startup-pinned registry; the installation caller cannot
-supply a key or self-authorize a mapping. The broker then verifies the owner
-approval over the complete canonical mapping payload. It independently checks
+Before opening state, the broker requires nonempty, unambiguous registries of
+trusted owner key identities/Ed25519 public keys and owner-private disclosure
+markers. Installation scans the complete semantic and canonical mapping for
+every raw and encoded marker before signature lookup, transaction creation, or
+audit emission. Provider references remain opaque provider-neutral identifiers,
+including URI-shaped values. Installation selects an owner key only from the
+startup-pinned registry; the installation caller cannot supply a key or
+self-authorize a mapping. The broker then verifies the owner approval over the
+complete canonical mapping payload. It independently checks
 the owner signing key identity and SHA-256, approval payload SHA-256, signature,
 approval start, bounded expiry, and trusted installation time. Changing the
 consumer, scope, provider, reference, version, taint, disposition, or evidence
@@ -62,6 +69,13 @@ the immutable inventory, owner, tenant, scope, classification, consumer,
 provider identity, and disposition. Provider implementation, configuration,
 reference, API version, secret version, and owner approval may advance only in
 that signed new generation.
+
+Before startup returns, every retained mapping generation is reparsed,
+structurally validated, checked for exact canonical/column identity, reverified
+against its startup-trusted owner key, and rescanned against the active marker
+registry. A legacy or tampered mapping therefore fails the entire broker open;
+it cannot issue or redeem a grant merely because it predates the current
+registry.
 
 ## Fenced short-lived grants
 
@@ -99,11 +113,12 @@ deny-authority shadows receive those receipts rather than a secret grant.
 
 ## Non-disclosure and durable evidence
 
-Before committing redemption, the broker scans the complete mapping, request,
-grant receipt, and prior audit payloads for the resolved secret's raw,
-standard-Base64, unpadded-Base64, Base64URL, hexadecimal, and percent-encoded
-forms. Detection denies redemption and emits no success receipt. The downstream
-SCM and connector boundaries retain their broader marker scanning for source,
+Before mapping persistence and again before committing redemption, the broker
+scans semantic and canonical public values for raw, standard-Base64,
+unpadded-Base64, Base64URL, hexadecimal, mixed percent-encoded, and up-to-eight-
+round fixed-point percent-encoded forms. Deeper encoding fails closed. Detection
+denies the operation before its success state or receipt. The downstream SCM and
+connector boundaries retain their broader marker scanning for source,
 destination, output, artifact, and replay evidence.
 
 The broker stores only canonical public mapping/grant truth in an

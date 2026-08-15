@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -59,7 +62,7 @@ fn install(broker: &mut SecretBroker, mapping: &CredentialMapping, now: i64) {
 
 fn connector() -> ConsumerBinding {
     ConsumerBinding::ExternalConnector {
-        connector_id: "connector:deploy:v1".to_owned(),
+        connector_id: "connector/release/v1".to_owned(),
         implementation_sha256: DIGEST.to_owned(),
         configuration_sha256: OTHER_DIGEST.to_owned(),
     }
@@ -174,9 +177,17 @@ fn broker() -> (TempDir, SecretBroker) {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("private temp root");
     }
-    let broker = SecretBroker::open(&root.path().join("broker.sqlite"), trusted_owner_keys())
-        .expect("open broker");
+    let broker = SecretBroker::open(
+        &root.path().join("broker.sqlite"),
+        trusted_owner_keys(),
+        denied_public_markers(),
+    )
+    .expect("open broker");
     (root, broker)
+}
+
+fn denied_public_markers() -> Vec<Vec<u8>> {
+    vec![SECRET.to_vec()]
 }
 
 struct ExactProvider {
@@ -253,10 +264,9 @@ fn workload_and_controller_visible_mappings_never_become_grant_eligible() {
     let mut workload_mapping = mapping(workload);
     workload_mapping.disposition = MappingDisposition::GrantEligible;
     let (_root, mut broker) = broker();
-    assert!(matches!(
-        broker.install_mapping(&workload_mapping, 1_000),
-        Err(BrokerError::InvalidMapping)
-    ));
+    let workload_result = broker.install_mapping(&workload_mapping, 1_000);
+    let workload_denied = matches!(workload_result, Err(BrokerError::InvalidMapping));
+    assert!(workload_denied);
 
     let mut mismatched = mapping(connector());
     mismatched.declared_taint = TaintClass::SourceAcquisitionOnly;
@@ -264,6 +274,16 @@ fn workload_and_controller_visible_mappings_never_become_grant_eligible() {
         broker.install_mapping(&mismatched, 1_000),
         Err(BrokerError::InvalidMapping)
     ));
+    diff003::record_assertion(
+        "secret_taint_ineligible_denied",
+        "denied",
+        serde_json::json!({
+            "consumer_channel": "environment_variable",
+            "requested_disposition": "grant_eligible",
+            "result": "invalid_mapping",
+        }),
+        workload_denied,
+    );
 }
 
 #[test]
@@ -293,6 +313,7 @@ fn owner_signature_key_payload_and_expiry_are_verified_before_mapping_install() 
                 "owner-key:release:v1".to_owned(),
                 wrong_key.public_key().as_ref().to_vec(),
             )]),
+            denied_public_markers(),
         )
         .expect("open wrong-key broker")
         .install_mapping(&approved, 1_000),
@@ -308,7 +329,11 @@ fn owner_signature_key_payload_and_expiry_are_verified_before_mapping_install() 
 fn broker_requires_a_nonempty_unambiguous_trusted_owner_key_registry() {
     let root = TempDir::new().expect("temporary broker root");
     assert!(matches!(
-        SecretBroker::open(&root.path().join("empty.sqlite"), BTreeMap::new()),
+        SecretBroker::open(
+            &root.path().join("empty.sqlite"),
+            BTreeMap::new(),
+            denied_public_markers(),
+        ),
         Err(BrokerError::OwnerApprovalDenied)
     ));
 
@@ -318,8 +343,64 @@ fn broker_requires_a_nonempty_unambiguous_trusted_owner_key_registry() {
         ("owner-key:alias:v1".to_owned(), key),
     ]);
     assert!(matches!(
-        SecretBroker::open(&root.path().join("ambiguous.sqlite"), duplicate_keys),
+        SecretBroker::open(
+            &root.path().join("ambiguous.sqlite"),
+            duplicate_keys,
+            denied_public_markers(),
+        ),
         Err(BrokerError::OwnerApprovalDenied)
+    ));
+}
+
+#[test]
+fn broker_requires_a_nonempty_unambiguous_public_marker_registry() {
+    let root = TempDir::new().expect("temporary broker root");
+    assert!(matches!(
+        SecretBroker::open(
+            &root.path().join("empty-markers.sqlite"),
+            trusted_owner_keys(),
+            Vec::new(),
+        ),
+        Err(BrokerError::InvalidMapping)
+    ));
+    assert!(matches!(
+        SecretBroker::open(
+            &root.path().join("duplicate-markers.sqlite"),
+            trusted_owner_keys(),
+            vec![SECRET.to_vec(), SECRET.to_vec()],
+        ),
+        Err(BrokerError::InvalidMapping)
+    ));
+}
+
+#[test]
+fn broker_rejects_legacy_mappings_that_conflict_with_the_active_marker_registry() {
+    let root = TempDir::new().expect("temporary broker root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private temp root");
+    }
+    let path = root.path().join("legacy.sqlite");
+    let mut mapping = mapping(connector());
+    let raw = String::from_utf8(SECRET.to_vec()).expect("ASCII marker");
+    mapping.provider_reference = format!("secret/{raw}");
+    approve(&mut mapping);
+    let mut legacy = SecretBroker::open(
+        &path,
+        trusted_owner_keys(),
+        vec![b"different-owner-private-marker-0001".to_vec()],
+    )
+    .expect("open legacy broker");
+    legacy
+        .install_mapping(&mapping, 900)
+        .expect("install previously admitted mapping");
+    drop(legacy);
+
+    assert!(matches!(
+        SecretBroker::open(&path, trusted_owner_keys(), denied_public_markers()),
+        Err(BrokerError::ConfidentialityDenied)
     ));
 }
 
@@ -340,7 +421,7 @@ fn exact_connector_grant_redeems_once_without_disclosing_secret_in_receipts_or_a
             ..
         } => {
             assert_eq!(grant_version, GRANT_PROTOCOL_VERSION);
-            assert_eq!(connector_id, "connector:deploy:v1");
+            assert_eq!(connector_id, "connector/release/v1");
             assert_eq!(implementation_sha256, DIGEST);
             assert_eq!(configuration_sha256, OTHER_DIGEST);
             assert!(grant_scope.contains(&request.attempt_id.to_string()));
@@ -373,6 +454,20 @@ fn exact_connector_grant_redeems_once_without_disclosing_secret_in_receipts_or_a
             .expect("public evidence is UTF-8")
             .contains("unique-secret-marker")
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("SECRET-001.json"),
+            diff003::receipt(
+                "SECRET-001",
+                serde_json::json!({
+                    "grant": grant_receipt,
+                    "redemption": redeemed.receipt,
+                    "provider_calls": *provider.calls.borrow(),
+                }),
+            ),
+        )
+        .expect("write DIFF-003 secret receipts");
+    }
 }
 
 #[test]
@@ -420,19 +515,33 @@ fn cross_tenant_attempt_fence_consumer_expiry_and_replay_are_denied_before_provi
         Box::new(|value| value.fence += 1),
         Box::new(|value| value.consumer = connector()),
     ];
+    let mutation_count = mutations.len();
+    let mut denied_mutations = 0;
     for mutate in mutations {
         let mut denied = redemption(&request);
         mutate(&mut denied);
-        assert!(matches!(
-            broker.redeem_grant(&denied, &provider, 2_000),
-            Err(BrokerError::GrantDenied)
-        ));
+        let denied_result = broker.redeem_grant(&denied, &provider, 2_000);
+        let denied = matches!(denied_result, Err(BrokerError::GrantDenied));
+        assert!(denied);
+        denied_mutations += usize::from(denied);
     }
     assert!(matches!(
         broker.redeem_grant(&redemption(&request), &provider, 20_000),
         Err(BrokerError::GrantDenied)
     ));
     assert_eq!(*provider.calls.borrow(), 0);
+    let consumer_substitution_denied =
+        denied_mutations == mutation_count && *provider.calls.borrow() == 0;
+    diff003::record_assertion(
+        "secret_consumer_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "mutations_attempted": mutation_count,
+            "mutations_denied": denied_mutations,
+            "provider_calls": *provider.calls.borrow(),
+        }),
+        consumer_substitution_denied,
+    );
 }
 
 #[test]
@@ -542,29 +651,129 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
         .iter()
         .map(|byte| format!("%{byte:02X}"))
         .collect::<String>();
+    let raw = String::from_utf8(SECRET.to_vec()).expect("ASCII marker");
+    let base64 = STANDARD.encode(SECRET);
+    let mixed_percent = raw.replacen('-', "%2D", 1);
+    let nested_percent = raw.replacen('-', &format!("%{}2D", "25".repeat(7)), 1);
     let representations = [
-        String::from_utf8(SECRET.to_vec()).expect("ASCII marker"),
-        STANDARD.encode(SECRET),
-        lower_hex,
-        percent,
+        ("raw", raw.clone(), format!("secret/{raw}")),
+        ("base64", base64.clone(), format!("credential:{base64}")),
+        (
+            "hex",
+            lower_hex.clone(),
+            format!("opaque-{lower_hex}-reference"),
+        ),
+        ("percent", percent.clone(), format!("vault/path/{percent}")),
+        (
+            "mixed_percent",
+            mixed_percent.clone(),
+            format!("secret/{mixed_percent}"),
+        ),
+        (
+            "nested_percent",
+            nested_percent.clone(),
+            format!("secret/{nested_percent}"),
+        ),
     ];
-    for (index, representation) in representations.into_iter().enumerate() {
+    let representation_count = representations.len();
+    let mut pre_persistence_denials = 0;
+    let mut persisted_rows = 0_i64;
+    let mut persisted_marker_bytes = 0;
+    for (index, (_name, representation, provider_reference)) in
+        representations.into_iter().enumerate()
+    {
         let mut mapping = mapping(connector());
         mapping.mapping_id = Uuid::from_u128(100 + index as u128);
-        mapping.provider_reference = representation;
+        mapping.provider_reference = provider_reference;
         approve(&mut mapping);
-        let mut request = grant(&mapping);
-        request.grant_id = Uuid::from_u128(200 + index as u128);
-        request.mapping_id = mapping.mapping_id;
+        let (root, mut broker) = broker();
+        let install_result = broker.install_mapping(&mapping, 900);
+        let denied_before_persistence =
+            matches!(install_result, Err(BrokerError::ConfidentialityDenied));
+        assert!(denied_before_persistence);
+        pre_persistence_denials += usize::from(denied_before_persistence);
+
+        let connection = rusqlite::Connection::open(root.path().join("broker.sqlite"))
+            .expect("inspect broker state");
+        for table in [
+            "mapping_versions",
+            "mapping_heads",
+            "grants",
+            "audit_events",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count persisted rows");
+            persisted_rows += count;
+            assert_eq!(count, 0, "{table} persisted a rejected marker mapping");
+        }
+        drop(connection);
+        drop(broker);
+        let database = std::fs::read(root.path().join("broker.sqlite")).expect("read broker state");
+        let marker_persisted = database
+            .windows(representation.len())
+            .any(|window| window == representation.as_bytes());
+        persisted_marker_bytes += usize::from(marker_persisted);
+        assert!(!marker_persisted);
+    }
+    diff003::record_assertion(
+        "secret_marker_disclosure_denied",
+        "denied",
+        serde_json::json!({
+            "representations_attempted": representation_count,
+            "pre_persistence_denials": pre_persistence_denials,
+            "persisted_rows": persisted_rows,
+            "persisted_marker_representations": persisted_marker_bytes,
+            "representations": [
+                "raw", "base64", "hex", "percent", "mixed_percent", "nested_percent"
+            ],
+        }),
+        pre_persistence_denials == representation_count
+            && persisted_rows == 0
+            && persisted_marker_bytes == 0,
+    );
+}
+
+#[test]
+fn over_depth_percent_encoding_fails_closed_before_mapping_persistence() {
+    let over_depth = format!("opaque-%{}41-reference", "25".repeat(8));
+    let mut mapping = mapping(connector());
+    mapping.provider_reference = over_depth;
+    approve(&mut mapping);
+    let (root, mut broker) = broker();
+    assert!(matches!(
+        broker.install_mapping(&mapping, 900),
+        Err(BrokerError::ConfidentialityDenied)
+    ));
+    let connection = rusqlite::Connection::open(root.path().join("broker.sqlite"))
+        .expect("inspect broker state");
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM mapping_versions", [], |row| {
+            row.get(0)
+        })
+        .expect("count persisted mappings");
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn opaque_and_uri_provider_references_remain_provider_neutral() {
+    for (index, provider_reference) in [
+        "opaque-credential-id",
+        "https://vault.example/v1/secrets/release?id=deploy",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut mapping = mapping(connector());
+        mapping.mapping_id = Uuid::from_u128(200 + index as u128);
+        mapping.provider_reference = provider_reference.to_owned();
+        approve(&mut mapping);
         let (_root, mut broker) = broker();
-        install(&mut broker, &mapping, 900);
-        broker.issue_grant(&request, 1_000).expect("grant");
-        let provider = ExactProvider::new(provider_request(&mapping, &request));
-        assert!(matches!(
-            broker.redeem_grant(&redemption(&request), &provider, 2_000),
-            Err(BrokerError::ConfidentialityDenied)
-        ));
-        assert_eq!(broker.verify_audit_chain().expect("valid audit"), 2);
+        broker
+            .install_mapping(&mapping, 900)
+            .expect("provider-neutral reference");
     }
 }
 
@@ -578,7 +787,8 @@ fn audit_chain_detects_persisted_event_tampering() {
             .expect("private temp root");
     }
     let path = root.path().join("broker.sqlite");
-    let mut broker = SecretBroker::open(&path, trusted_owner_keys()).expect("open broker");
+    let mut broker = SecretBroker::open(&path, trusted_owner_keys(), denied_public_markers())
+        .expect("open broker");
     let mapping = mapping(connector());
     install(&mut broker, &mapping, 900);
     assert_eq!(broker.verify_audit_chain().expect("valid chain"), 1);
@@ -605,7 +815,8 @@ fn broker_state_rejects_public_parent_symlink_and_hardlink_paths() {
     assert!(matches!(
         SecretBroker::open(
             &public_root.path().join("broker.sqlite"),
-            trusted_owner_keys()
+            trusted_owner_keys(),
+            denied_public_markers(),
         ),
         Err(BrokerError::InvalidStatePath)
     ));
@@ -620,14 +831,18 @@ fn broker_state_rejects_public_parent_symlink_and_hardlink_paths() {
     let symlink_path = private_root.path().join("symlink.sqlite");
     symlink(&target, &symlink_path).expect("state symlink");
     assert!(matches!(
-        SecretBroker::open(&symlink_path, trusted_owner_keys()),
+        SecretBroker::open(&symlink_path, trusted_owner_keys(), denied_public_markers(),),
         Err(BrokerError::InvalidStatePath)
     ));
 
     let hardlink_path = private_root.path().join("hardlink.sqlite");
     std::fs::hard_link(&target, &hardlink_path).expect("state hardlink");
     assert!(matches!(
-        SecretBroker::open(&hardlink_path, trusted_owner_keys()),
+        SecretBroker::open(
+            &hardlink_path,
+            trusted_owner_keys(),
+            denied_public_markers(),
+        ),
         Err(BrokerError::InvalidStatePath)
     ));
 
@@ -635,7 +850,11 @@ fn broker_state_rejects_public_parent_symlink_and_hardlink_paths() {
     let sidecar_symlink = private_root.path().join("sidecar.sqlite-wal");
     symlink(&target, &sidecar_symlink).expect("state sidecar symlink");
     assert!(matches!(
-        SecretBroker::open(&sidecar_database, trusted_owner_keys()),
+        SecretBroker::open(
+            &sidecar_database,
+            trusted_owner_keys(),
+            denied_public_markers(),
+        ),
         Err(BrokerError::InvalidStatePath)
     ));
 }

@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -486,11 +489,23 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
     residual.source_reads_observed = 1;
     residual.expected_contract_digest =
         compute_external_read_consumer_digest(&residual).expect("residual digest");
-    assert!(matches!(
-        store.install_external_read_consumer(&residual).await,
+    let residual_result = store.install_external_read_consumer(&residual).await;
+    let residual_read_denied = matches!(
+        residual_result,
         Err(StoreError::InvalidConsumerMigration(message))
             if message.contains("zero residual Jenkins reads")
-    ));
+    );
+    assert!(residual_read_denied);
+    diff003::record_assertion(
+        "consumer_residual_jenkins_read_denied",
+        "denied",
+        serde_json::json!({
+            "source_reads_observed": residual.source_reads_observed,
+            "requested_authority": residual.authority,
+            "result": "zero_residual_reads_required",
+        }),
+        residual_read_denied,
+    );
 
     let target = consumer(
         organization_id,
@@ -550,6 +565,19 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
     assert_eq!(receipt.authority, ExternalReadAuthority::JenkinsSource);
     assert_eq!(receipt.generation, 3);
     assert_eq!(receipt.binding_digest, source_receipt.binding_digest);
+    let rollback_restored = receipt.authority == ExternalReadAuthority::JenkinsSource
+        && receipt.generation == 3
+        && receipt.binding_digest == source_receipt.binding_digest;
+    diff003::record_assertion(
+        "consumer_rollback_restored",
+        "restored",
+        serde_json::json!({
+            "restored_generation": receipt.generation,
+            "restored_authority": receipt.authority,
+            "binding_preserved": receipt.binding_digest == source_receipt.binding_digest,
+        }),
+        rollback_restored,
+    );
 
     let current: (i64, String) = sqlx::query_as(
         "SELECT current.current_generation, version.authority
@@ -585,6 +613,48 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
             .iter()
             .any(|event| event.action == "external_read_consumer.rolled_back")
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let trigger_receipt = std::fs::read(std::path::Path::new(&root).join("TRIG-001.json"))
+            .expect("read live DIFF-003 trigger receipt");
+        let trigger: serde_json::Value =
+            serde_json::from_slice(&trigger_receipt).expect("parse live DIFF-003 trigger receipt");
+        std::fs::write(
+            std::path::Path::new(&root).join("CONSUMER-001.json"),
+            diff003::receipt(
+                "CONSUMER-001",
+                serde_json::json!({
+                    "source": {
+                        "consumer_id": source_receipt.consumer_id,
+                        "generation": source_receipt.generation,
+                        "authority": source_receipt.authority,
+                        "binding_digest": source_receipt.binding_digest,
+                        "contract_digest": source_receipt.contract_digest,
+                    },
+                    "target": {
+                        "consumer_id": target_receipt.consumer_id,
+                        "generation": target_receipt.generation,
+                        "authority": target_receipt.authority,
+                        "binding_digest": target_receipt.binding_digest,
+                        "contract_digest": target_receipt.contract_digest,
+                    },
+                    "rollback": {
+                        "consumer_id": receipt.consumer_id,
+                        "generation": receipt.generation,
+                        "authority": receipt.authority,
+                        "binding_digest": receipt.binding_digest,
+                        "contract_digest": receipt.contract_digest,
+                    },
+                    "current": {"generation": current.0, "authority": current.1},
+                    "trigger_receipt_sha256": format!("{:x}", Sha256::digest(&trigger_receipt)),
+                    "trigger_id": trigger["trigger_id"],
+                    "trigger_organization_id": trigger["organization_id"],
+                    "trigger_project_id": trigger["project_id"],
+                    "trigger_pipeline_id": trigger["pipeline_id"],
+                }),
+            ),
+        )
+        .expect("write DIFF-003 consumer receipts");
+    }
 }
 
 #[tokio::test]
@@ -604,11 +674,23 @@ async fn contract_substitution_tenant_crossing_and_concurrent_first_generation_f
     );
     let mut substituted = source.clone();
     substituted.source_endpoint = "https://attacker.invalid/jenkins".to_owned();
-    assert!(matches!(
-        store.install_external_read_consumer(&substituted).await,
+    let substitution_result = store.install_external_read_consumer(&substituted).await;
+    let target_substitution_denied = matches!(
+        substitution_result,
         Err(StoreError::InvalidConsumerMigration(message))
             if message.contains("digest does not match")
-    ));
+    );
+    assert!(target_substitution_denied);
+    diff003::record_assertion(
+        "consumer_target_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_source_endpoint": substituted.source_endpoint,
+            "expected_contract_digest": substituted.expected_contract_digest,
+            "result": "contract_digest_mismatch",
+        }),
+        target_substitution_denied,
+    );
 
     let mut mislabeled_endpoint = source.clone();
     mislabeled_endpoint

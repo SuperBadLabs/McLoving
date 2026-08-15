@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 
 use mcloving_release_provenance::{
@@ -386,6 +389,16 @@ fn exact_release_verifies_before_deployment_receipt() {
         verified.deployment_receipt("production", DIGEST_A, 1_786_000_199_999),
         Err(ReleaseError::DeploymentDenied)
     ));
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("REL-001.json"),
+            diff003::receipt(
+                "REL-001",
+                serde_json::to_value(&receipt).expect("encode DIFF-003 release receipt"),
+            ),
+        )
+        .expect("write DIFF-003 release receipt");
+    }
 
     let mut inverted_anchor = fixture.policy.clone();
     inverted_anchor.expected_audit_anchor.verified_at_unix_ms = 1_786_000_099_999;
@@ -406,6 +419,40 @@ fn exact_release_verifies_before_deployment_receipt() {
 }
 
 #[test]
+fn timestamp_anchor_outage_is_denied() {
+    let fixture = fixture(SHA1_A, SHA1_B, 2);
+    let envelope = signed(&fixture);
+    let (transparency, evidence_manifest, audit_anchor, policy) =
+        verification_material(&fixture, &envelope);
+    let mut unavailable_anchor = audit_anchor;
+    unavailable_anchor.proof_sha256.clear();
+    unavailable_anchor.verifier_statement_sha256.clear();
+    unavailable_anchor.notary_reference.clear();
+    let result = core_verify_release(
+        &envelope,
+        &policy,
+        &transparency,
+        &evidence_manifest,
+        &unavailable_anchor,
+        &fixture.sbom,
+        &fixture.bundle,
+        &fixture.lock,
+        None,
+    );
+    let timestamp_outage_denied = matches!(result, Err(ReleaseError::TransparencyDenied));
+    diff003::record_assertion(
+        "release_timestamp_outage_denied",
+        "denied",
+        serde_json::json!({
+            "timestamp_anchor_evidence_complete": false,
+            "required_anchor_identity": policy.signing.expected_audit_anchor_identity,
+            "result": "transparency_denied",
+        }),
+        timestamp_outage_denied,
+    );
+}
+
+#[test]
 fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
     let fixture = fixture(SHA1_A, SHA1_B, 2);
     let mut source = fixture.manifest.clone();
@@ -420,7 +467,7 @@ fn source_builder_and_policy_substitution_are_denied_even_when_resigned() {
             &fixture.sbom,
             &fixture.bundle,
             &fixture.lock,
-            None
+            None,
         ),
         Err(ReleaseError::SourceDenied)
     ));
@@ -532,17 +579,27 @@ fn sbom_bundle_and_component_substitution_are_denied() {
     let envelope = signed(&fixture);
     let mut sbom = fixture.sbom.clone();
     *sbom.last_mut().expect("SBOM byte") ^= 1;
-    assert!(matches!(
-        verify_release(
-            &envelope,
-            &fixture.policy,
-            &sbom,
-            &fixture.bundle,
-            &fixture.lock,
-            None
-        ),
-        Err(ReleaseError::ArtifactDenied)
-    ));
+    let artifact_result = verify_release(
+        &envelope,
+        &fixture.policy,
+        &sbom,
+        &fixture.bundle,
+        &fixture.lock,
+        None,
+    );
+    let artifact_substitution_denied = matches!(artifact_result, Err(ReleaseError::ArtifactDenied));
+    assert!(artifact_substitution_denied);
+    diff003::record_assertion(
+        "release_artifact_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "artifact": "sbom",
+            "expected_sha256": fixture.manifest.sbom_sha256,
+            "presented_sha256": sha256(&sbom),
+            "result": "artifact_denied",
+        }),
+        artifact_substitution_denied,
+    );
 
     let mut incomplete_sbom: mcloving_release_provenance::ReleaseSbom =
         serde_json::from_slice(&fixture.sbom).expect("parse SBOM");
@@ -644,7 +701,7 @@ fn signer_signature_and_transparency_substitution_are_denied() {
             &fixture.sbom,
             &fixture.bundle,
             &fixture.lock,
-            None
+            None,
         ),
         Err(ReleaseError::SignatureDenied)
     ));
@@ -655,17 +712,26 @@ fn signer_signature_and_transparency_substitution_are_denied() {
     let mut manifest = fixture.manifest.clone();
     manifest.signer_public_key_sha256 = sha256(attacker.public_key().as_ref());
     let envelope = sign_release(manifest, attacker_pkcs8.as_ref()).expect("attacker envelope");
-    assert!(matches!(
-        verify_release(
-            &envelope,
-            &fixture.policy,
-            &fixture.sbom,
-            &fixture.bundle,
-            &fixture.lock,
-            None
-        ),
-        Err(ReleaseError::SignatureDenied)
-    ));
+    let untrusted_result = verify_release(
+        &envelope,
+        &fixture.policy,
+        &fixture.sbom,
+        &fixture.bundle,
+        &fixture.lock,
+        None,
+    );
+    let untrusted_key_denied = matches!(untrusted_result, Err(ReleaseError::SignatureDenied));
+    assert!(untrusted_key_denied);
+    diff003::record_assertion(
+        "release_untrusted_key_denied",
+        "denied",
+        serde_json::json!({
+            "trusted_key_sha256": fixture.manifest.signer_public_key_sha256,
+            "presented_key_sha256": sha256(attacker.public_key().as_ref()),
+            "result": "signature_denied",
+        }),
+        untrusted_key_denied,
+    );
 
     let mut transparency = fixture.manifest.clone();
     transparency
@@ -975,28 +1041,46 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         None,
     )
     .expect("unrelated verified release");
+    let unrelated_result = verify_release(
+        &second_envelope,
+        &second.policy,
+        &second.sbom,
+        &second.bundle,
+        &second.lock,
+        Some(&unrelated_verified),
+    );
     assert!(matches!(
-        verify_release(
-            &second_envelope,
-            &second.policy,
-            &second.sbom,
-            &second.bundle,
-            &second.lock,
-            Some(&unrelated_verified)
-        ),
+        unrelated_result,
         Err(ReleaseError::RollbackDenied)
     ));
+    let missing_predecessor_result = verify_release(
+        &second_envelope,
+        &second.policy,
+        &second.sbom,
+        &second.bundle,
+        &second.lock,
+        None,
+    );
     assert!(matches!(
-        verify_release(
-            &second_envelope,
-            &second.policy,
-            &second.sbom,
-            &second.bundle,
-            &second.lock,
-            None
-        ),
+        missing_predecessor_result,
         Err(ReleaseError::RollbackDenied)
     ));
+    let replay_denied = matches!(unrelated_result, Err(ReleaseError::RollbackDenied))
+        && matches!(
+            missing_predecessor_result,
+            Err(ReleaseError::RollbackDenied)
+        );
+    diff003::record_assertion(
+        "release_replay_denied",
+        "denied",
+        serde_json::json!({
+            "required_predecessor_manifest_sha256": first_verified.manifest_sha256(),
+            "presented_unrelated_manifest_sha256": unrelated_verified.manifest_sha256(),
+            "unrelated_result": "rollback_denied",
+            "missing_predecessor_result": "rollback_denied",
+        }),
+        replay_denied,
+    );
 }
 
 #[test]

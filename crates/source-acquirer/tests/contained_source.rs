@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -182,7 +185,7 @@ impl Context {
             generation: 7,
             primary_repository: RepositoryBinding {
                 provider_identity: "contained-git".to_owned(),
-                repository_identity: "repository/root".to_owned(),
+                repository_identity: "github:superbadlabs/mcloving".to_owned(),
                 repository_url: root_repository.url(),
             },
             allow_untrusted_forks,
@@ -538,6 +541,20 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
         std::fs::read(later_output.join("src/later.txt")).unwrap(),
         b"later\n"
     );
+    let later_revision_preserved = later_receipt.content_sha256 != receipt.content_sha256
+        && !later_output.join("README.md").exists()
+        && std::fs::read(later_output.join("src/later.txt")).unwrap() == b"later\n";
+    diff003::record_assertion(
+        "source_later_revision_preserved",
+        "preserved",
+        serde_json::json!({
+            "initial_commit": receipt.repository_trees[0].resolved_commit,
+            "later_commit": later_receipt.repository_trees[0].resolved_commit,
+            "content_digest_changed": later_receipt.content_sha256 != receipt.content_sha256,
+            "later_sparse_file": "src/later.txt",
+        }),
+        later_revision_preserved,
+    );
 
     let mut descendant_of_leaf = context.request(&second);
     descendant_of_leaf.sparse_roots = vec!["deps/child".to_owned()];
@@ -561,10 +578,32 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
     );
 
     let stale = context.request(&first);
-    assert!(matches!(
-        context.acquirer.acquire(&stale).await,
-        Err(SourceError::RevisionMismatch)
-    ));
+    let stale_result = context.acquirer.acquire(&stale).await;
+    let revision_substitution_denied = matches!(stale_result, Err(SourceError::RevisionMismatch));
+    assert!(revision_substitution_denied);
+    diff003::record_assertion(
+        "source_revision_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "requested_commit": first,
+            "latest_accepted_commit": second,
+            "result": "revision_mismatch",
+        }),
+        revision_substitution_denied,
+    );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("SCM-001.json"),
+            diff003::receipt(
+                "SCM-001",
+                serde_json::json!({
+                    "initial": receipt,
+                    "later_revision": later_receipt,
+                }),
+            ),
+        )
+        .expect("write DIFF-003 source receipts");
+    }
 }
 
 #[tokio::test]
@@ -670,33 +709,47 @@ async fn untrusted_fork_is_denied_before_source_access() {
 }
 
 #[tokio::test]
-async fn repository_that_ignores_blob_filter_is_denied_without_publication() {
+async fn repository_transport_outage_is_denied_without_publication() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");
-    let root = RepositoryFixture::new(repositories.path(), "filter-refusal-root");
-    root.write("README.md", b"small unfiltered source\n");
-    let commit = root.commit("filter refusal");
-    run_git(&root.bare, ["config", "uploadpack.allowFilter", "false"]);
+    let root = RepositoryFixture::new(repositories.path(), "outage-root");
+    root.write("README.md", b"source available before outage\n");
+    let commit = root.commit("outage baseline");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let request = context.request(&commit);
-    assert!(matches!(
-        context.acquirer.acquire(&request).await,
-        Err(SourceError::SourceUnavailable)
-    ));
-    assert!(
-        std::fs::read_dir(&context.config.output_root)
-            .unwrap()
-            .all(|entry| !entry
+    let unavailable_repository = repositories.path().join("outage-root.offline");
+    std::fs::rename(&root.bare, &unavailable_repository).expect("inject repository outage");
+    assert!(!root.bare.exists());
+    assert!(unavailable_repository.is_dir());
+    let unavailable_result = context.acquirer.acquire(&request).await;
+    let stage_clean = std::fs::read_dir(&context.config.output_root)
+        .unwrap()
+        .all(|entry| {
+            !entry
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".stage-"))
-    );
-    assert!(
-        !context
-            .config
-            .output_root
-            .join(request.acquisition_id.to_string())
-            .exists()
+                .starts_with(".stage-")
+        });
+    let unpublished = !context
+        .config
+        .output_root
+        .join(request.acquisition_id.to_string())
+        .exists();
+    let outage_denied = matches!(unavailable_result, Err(SourceError::SourceUnavailable))
+        && stage_clean
+        && unpublished;
+    assert!(outage_denied);
+    diff003::record_assertion(
+        "source_outage_denied",
+        "denied",
+        serde_json::json!({
+            "transport_state": "repository_unavailable",
+            "repository_endpoint_present": root.bare.exists(),
+            "staging_entries_remaining": usize::from(!stage_clean),
+            "published": !unpublished,
+            "result": "source_unavailable",
+        }),
+        outage_denied,
     );
 }
 
@@ -1211,19 +1264,17 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
     let mut request = context.request(&commit);
     request.expected_generation = limited_config.generation;
     request.expected_config_sha256 = limited.config_sha256().to_owned();
-    assert!(matches!(
-        limited.acquire(&request).await,
-        Err(SourceError::LimitExceeded)
-    ));
-    assert!(
-        std::fs::read_dir(&limited_config.output_root)
-            .unwrap()
-            .all(|entry| !entry
+    let bounded_failure = limited.acquire(&request).await;
+    let stage_clean = std::fs::read_dir(&limited_config.output_root)
+        .unwrap()
+        .all(|entry| {
+            !entry
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".stage-"))
-    );
+                .starts_with(".stage-")
+        });
+    assert!(matches!(bounded_failure, Err(SourceError::LimitExceeded)) && stage_clean);
 
     let mut count_config = context.config.clone();
     count_config.generation += 2;

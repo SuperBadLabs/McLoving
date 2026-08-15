@@ -1,8 +1,9 @@
 //! Provider-neutral Jenkins credential mapping and short-lived grant broker.
 //!
-//! Secret bytes exist only in [`SecretMaterial`] during redemption by an exact
-//! out-of-process consumer. Mapping, grant, receipt, and audit types deliberately
-//! have no field capable of carrying those bytes.
+//! Provider-resolved secret bytes exist only in [`SecretMaterial`] during
+//! redemption by an exact out-of-process consumer. Owner-private startup markers
+//! are deny-only inputs; mapping, grant, receipt, and audit types deliberately
+//! have no field capable of carrying secret bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const SCHEMA_VERSION: &str = "mcloving.secret-mapping/v1";
 pub const GRANT_PROTOCOL_VERSION: &str = "mcloving.secret-grant/v1";
@@ -26,6 +27,9 @@ const MAX_TEXT_BYTES: usize = 1_024;
 const MAX_REFERENCE_BYTES: usize = 4_096;
 const MAX_TAINT_PATH: usize = 32;
 const MAX_SECRET_BYTES: usize = 65_536;
+const MAX_DENIED_PUBLIC_MARKERS: usize = 256;
+const MAX_DENIED_PUBLIC_MARKER_BYTES: usize = 1024 * 1024;
+const MAX_PERCENT_DECODE_ROUNDS: usize = 8;
 const MAX_GRANT_TTL_MS: i64 = 15 * 60 * 1_000;
 const MAX_APPROVAL_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -466,14 +470,18 @@ pub enum BrokerError {
 pub struct SecretBroker {
     connection: Connection,
     trusted_owner_keys: BTreeMap<String, Vec<u8>>,
+    denied_public_markers: Zeroizing<Vec<Vec<u8>>>,
 }
 
 impl SecretBroker {
     pub fn open(
         path: &Path,
         trusted_owner_keys: BTreeMap<String, Vec<u8>>,
+        denied_public_markers: Vec<Vec<u8>>,
     ) -> Result<Self, BrokerError> {
+        let denied_public_markers = Zeroizing::new(denied_public_markers);
         validate_trusted_owner_keys(&trusted_owner_keys)?;
+        validate_denied_public_markers(&denied_public_markers)?;
         let canonical_path = prepare_state_path(path)?;
         validate_state_sidecars(&canonical_path)?;
         let connection = Connection::open(&canonical_path)?;
@@ -523,9 +531,11 @@ impl SecretBroker {
         )?;
         validate_state_file(&canonical_path)?;
         validate_state_sidecars(&canonical_path)?;
+        validate_stored_mappings(&connection, &trusted_owner_keys, &denied_public_markers)?;
         Ok(Self {
             connection,
             trusted_owner_keys,
+            denied_public_markers,
         })
     }
 
@@ -535,12 +545,13 @@ impl SecretBroker {
         installed_at_unix_ms: i64,
     ) -> Result<(), BrokerError> {
         validate_mapping(mapping)?;
+        let canonical = serde_json::to_vec(mapping)?;
+        ensure_markers_absent(mapping, &canonical, &self.denied_public_markers)?;
         let owner_approval_public_key = self
             .trusted_owner_keys
             .get(&mapping.owner_approval_signer_key_id)
             .ok_or(BrokerError::OwnerApprovalDenied)?;
         verify_owner_approval(mapping, owner_approval_public_key, installed_at_unix_ms)?;
-        let canonical = serde_json::to_vec(mapping)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1136,10 +1147,10 @@ fn ensure_non_disclosure(
     for event in audit_events {
         public.extend_from_slice(event);
     }
-    if secret_representations(secret)
-        .iter()
-        .any(|marker| public.windows(marker.len()).any(|window| window == marker))
-    {
+    let representations = secret_representations(secret)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if contains_marker(&public, &representations)? {
         return Err(BrokerError::ConfidentialityDenied);
     }
     Ok(())
@@ -1220,6 +1231,164 @@ fn validate_trusted_owner_keys(
     Ok(())
 }
 
+fn validate_denied_public_markers(markers: &[Vec<u8>]) -> Result<(), BrokerError> {
+    let mut unique_representations = BTreeSet::new();
+    if markers.is_empty()
+        || markers.len() > MAX_DENIED_PUBLIC_MARKERS
+        || markers
+            .iter()
+            .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
+            .is_none_or(|total| total > MAX_DENIED_PUBLIC_MARKER_BYTES)
+        || markers.iter().any(|marker| {
+            marker.len() < 16
+                || marker.len() > MAX_SECRET_BYTES
+                || secret_representations(marker)
+                    .into_iter()
+                    .any(|representation| !unique_representations.insert(representation))
+        })
+    {
+        return Err(BrokerError::InvalidMapping);
+    }
+    Ok(())
+}
+
+fn validate_stored_mappings(
+    connection: &Connection,
+    trusted_owner_keys: &BTreeMap<String, Vec<u8>>,
+    denied_public_markers: &[Vec<u8>],
+) -> Result<(), BrokerError> {
+    let mut statement = connection.prepare(
+        "SELECT mapping_id, rotation_generation, canonical_json
+         FROM mapping_versions ORDER BY mapping_id, rotation_generation",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (mapping_id, rotation_generation, canonical) = row?;
+        let mapping: CredentialMapping = serde_json::from_slice(&canonical)?;
+        validate_mapping(&mapping)?;
+        if mapping_id != mapping.mapping_id.to_string()
+            || rotation_generation != mapping.rotation_generation
+            || serde_json::to_vec(&mapping)? != canonical
+        {
+            return Err(BrokerError::InvalidMapping);
+        }
+        let owner_approval_public_key = trusted_owner_keys
+            .get(&mapping.owner_approval_signer_key_id)
+            .ok_or(BrokerError::OwnerApprovalDenied)?;
+        verify_owner_approval_integrity(&mapping, owner_approval_public_key)?;
+        ensure_markers_absent(&mapping, &canonical, denied_public_markers)?;
+    }
+    Ok(())
+}
+
+fn ensure_markers_absent<T: Serialize>(
+    value: &T,
+    canonical: &[u8],
+    markers: &[Vec<u8>],
+) -> Result<(), BrokerError> {
+    let representations = markers
+        .iter()
+        .flat_map(|marker| secret_representations(marker))
+        .collect::<Vec<_>>();
+    let semantic = serde_json::to_value(value)?;
+    if contains_marker(canonical, &representations)?
+        || json_contains_marker(&semantic, &representations)?
+    {
+        return Err(BrokerError::ConfidentialityDenied);
+    }
+    Ok(())
+}
+
+fn contains_marker(value: &[u8], markers: &[Vec<u8>]) -> Result<bool, BrokerError> {
+    let mut candidate = value.to_vec();
+    for _ in 0..MAX_PERCENT_DECODE_ROUNDS {
+        if markers.iter().any(|marker| {
+            candidate
+                .windows(marker.len())
+                .any(|window| window == marker.as_slice())
+        }) {
+            return Ok(true);
+        }
+        let decoded = percent_decode_once(&candidate);
+        if decoded == candidate {
+            return Ok(false);
+        }
+        candidate = decoded;
+    }
+    if percent_decode_once(&candidate) != candidate {
+        return Err(BrokerError::ConfidentialityDenied);
+    }
+    Ok(markers.iter().any(|marker| {
+        candidate
+            .windows(marker.len())
+            .any(|window| window == marker.as_slice())
+    }))
+}
+
+fn json_contains_marker(
+    value: &serde_json::Value,
+    markers: &[Vec<u8>],
+) -> Result<bool, BrokerError> {
+    match value {
+        serde_json::Value::String(value) => contains_marker(value.as_bytes(), markers),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                if json_contains_marker(value, markers)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if contains_marker(key.as_bytes(), markers)?
+                    || json_contains_marker(value, markers)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(false)
+        }
+    }
+}
+
+fn percent_decode_once(value: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] == b'%'
+            && index.saturating_add(2) < value.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(value[index + 1]), hex_digit(value[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(value[index]);
+            index += 1;
+        }
+    }
+    decoded
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn verify_owner_approval(
     mapping: &CredentialMapping,
     owner_approval_public_key: &[u8],
@@ -1231,8 +1400,17 @@ fn verify_owner_approval(
     if installed_at_unix_ms < mapping.owner_approved_at_unix_ms
         || installed_at_unix_ms >= mapping.owner_approval_expires_unix_ms
         || approval_ttl.is_none_or(|ttl| !(1..=MAX_APPROVAL_TTL_MS).contains(&ttl))
-        || sha256_hex(owner_approval_public_key) != mapping.owner_approval_public_key_sha256
     {
+        return Err(BrokerError::OwnerApprovalDenied);
+    }
+    verify_owner_approval_integrity(mapping, owner_approval_public_key)
+}
+
+fn verify_owner_approval_integrity(
+    mapping: &CredentialMapping,
+    owner_approval_public_key: &[u8],
+) -> Result<(), BrokerError> {
+    if sha256_hex(owner_approval_public_key) != mapping.owner_approval_public_key_sha256 {
         return Err(BrokerError::OwnerApprovalDenied);
     }
     let payload = mapping.owner_approval_payload()?;

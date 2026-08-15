@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use mcloving_controller_store::{
     DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, PipelineOperationalState,
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
@@ -201,12 +204,13 @@ fn delivery(
     event_id: &str,
     accepted_at_unix_ms: i64,
 ) -> NewTriggerDelivery {
+    let source_revision = diff003_source_revision();
     let canonical_payload = json!({
         "event_kind": "push",
         "event_time_unix_ms": accepted_at_unix_ms - 1_000,
         "payload": {
             "repository_identity": "github:superbadlabs/mcloving",
-            "revision": "0123456789abcdef",
+            "revision": source_revision,
             "branch": "main",
             "paths": ["src/lib.rs"]
         },
@@ -235,6 +239,21 @@ fn delivery(
         accepted_at_unix_ms,
         schedule_slot: None,
     }
+}
+
+fn diff003_source_revision() -> String {
+    let Some(root) = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") else {
+        return "0123456789abcdef".to_owned();
+    };
+    let source: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("SCM-001.json"))
+            .expect("read live DIFF-003 source receipt"),
+    )
+    .expect("parse live DIFF-003 source receipt");
+    source["initial"]["repository_trees"][0]["resolved_commit"]
+        .as_str()
+        .expect("live DIFF-003 source revision")
+        .to_owned()
 }
 
 fn remote_delivery(mut input: NewTriggerDelivery) -> NewTriggerDelivery {
@@ -481,6 +500,26 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         now,
     );
     input.accepted_at_unix_ms = now + 10 * 60_000;
+    let mut stale_generation = input.clone();
+    stale_generation.delivery_id = "delivery-stale-generation".to_owned();
+    stale_generation.event_id = "event-stale-generation".to_owned();
+    stale_generation.expected_trigger_generation = 2;
+    let stale_generation_result = store.accept_trigger_delivery(&stale_generation).await;
+    let stale_generation_denied = matches!(
+        stale_generation_result,
+        Err(StoreError::TriggerIngressConflict(_))
+    );
+    assert!(stale_generation_denied);
+    diff003::record_assertion(
+        "trigger_stale_generation_denied",
+        "denied",
+        json!({
+            "presented_generation": stale_generation.expected_trigger_generation,
+            "active_generation": 1,
+            "result": "trigger_ingress_conflict",
+        }),
+        stale_generation_denied,
+    );
     let mut future = delivery_with_event_time(input.clone(), now + 310_000);
     future.delivery_id = "delivery-future".to_owned();
     future.event_id = "event-future".to_owned();
@@ -572,16 +611,40 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .count(),
         1
     );
-    assert!(matches!(
-        store.accept_trigger_delivery(&input).await.unwrap(),
-        TriggerDeliveryAdmission::Replayed(_)
-    ));
+    let replay = store.accept_trigger_delivery(&input).await.unwrap();
+    let replay_denied = matches!(replay, TriggerDeliveryAdmission::Replayed(_));
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "trigger_replay_denied",
+        "denied",
+        json!({
+            "delivery_id": input.delivery_id,
+            "admission": "replayed",
+            "created_count": concurrent_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, TriggerDeliveryAdmission::Created(_)))
+                .count(),
+        }),
+        replay_denied,
+    );
     let mut substituted = input.clone();
     substituted.event_kind = "pull_request".to_owned();
-    assert!(matches!(
-        store.accept_trigger_delivery(&substituted).await,
+    let substitution_result = store.accept_trigger_delivery(&substituted).await;
+    let substitution_denied = matches!(
+        substitution_result,
         Err(StoreError::TriggerIngressConflict(_))
-    ));
+    );
+    assert!(substitution_denied);
+    diff003::record_assertion(
+        "trigger_substitution_denied",
+        "denied",
+        json!({
+            "delivery_id": substituted.delivery_id,
+            "substituted_event_kind": substituted.event_kind,
+            "result": "trigger_ingress_conflict",
+        }),
+        substitution_denied,
+    );
 
     let first_claim = match store
         .claim_trigger_delivery(&claim(
@@ -1597,6 +1660,58 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         store.accept_trigger_delivery(&denied).await,
         Err(StoreError::PipelineDisabled { .. })
     ));
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let (live_organization_id, live_project_id, live_pipeline_id) = fixture(&store).await;
+        let live_trigger_id = Uuid::new_v4();
+        let live_trigger = trigger_write(
+            live_organization_id,
+            live_project_id,
+            live_pipeline_id,
+            live_trigger_id,
+            0,
+            TriggerKind::ScmWebhook,
+            PipelineTriggerState::Enabled,
+            "scm:github:installation:42",
+            json!({
+                "provider": "github",
+                "repository_identity": "github:superbadlabs/mcloving",
+                "filter": {"event_kinds": ["push"], "branches": ["main"], "path_prefixes": []},
+            }),
+            "diff003-stable-trigger",
+            3,
+        );
+        assert!(matches!(
+            store.put_pipeline_trigger(&live_trigger).await.unwrap(),
+            TriggerPutOutcome::Created(_)
+        ));
+        let live_now = database_unix_ms(&store).await;
+        let live_delivery = delivery(
+            live_organization_id,
+            live_project_id,
+            live_pipeline_id,
+            live_trigger_id,
+            1,
+            "diff003-stable-delivery",
+            "diff003-stable-event",
+            live_now,
+        );
+        let TriggerDeliveryAdmission::Created(live_receipt) =
+            store.accept_trigger_delivery(&live_delivery).await.unwrap()
+        else {
+            panic!("DIFF-003 stable trigger delivery must be newly accepted")
+        };
+        let input_receipt = std::fs::read(std::path::Path::new(&root).join("INPUT-001.json"))
+            .expect("read live DIFF-003 input receipt");
+        let mut live_value =
+            serde_json::to_value(live_receipt).expect("encode DIFF-003 trigger receipt");
+        live_value["input_capture_receipt_sha256"] =
+            json!(format!("{:x}", Sha256::digest(&input_receipt)));
+        std::fs::write(
+            std::path::Path::new(&root).join("TRIG-001.json"),
+            diff003::receipt("TRIG-001", live_value),
+        )
+        .expect("write DIFF-003 stable trigger receipt");
+    }
 }
 
 #[tokio::test]
@@ -1954,7 +2069,18 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         })
         .await
         .unwrap();
-    assert!(matches!(failed, TriggerDeliveryFailure::DeadLettered(_)));
+    let outage_denied = matches!(failed, TriggerDeliveryFailure::DeadLettered(_));
+    assert!(outage_denied);
+    diff003::record_assertion(
+        "trigger_attempt_budget_denied",
+        "denied",
+        json!({
+            "delivery_id": input.delivery_id,
+            "failure_disposition": "dead_lettered",
+            "retryable": true,
+        }),
+        outage_denied,
+    );
 
     let redrive = TriggerDeliveryRedrive {
         organization_id,

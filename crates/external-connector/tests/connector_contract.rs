@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,6 +53,32 @@ struct DestinationState {
     seed: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct Diff003ReleaseBinding {
+    receipt_sha256: String,
+    release_id: String,
+    manifest_sha256: String,
+    envelope_sha256: String,
+    bundle_sha256: String,
+}
+
+#[derive(Clone)]
+struct Diff003SecretGrantBinding {
+    receipt_sha256: String,
+    grant_id: String,
+    grant_version: String,
+    grant_scope: String,
+    configuration_sha256: String,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    attempt_id: Uuid,
+    fence: u64,
+    rotation_generation: u64,
+    connector_id: String,
+    implementation_sha256: String,
+}
+
 struct Rig {
     _state: TempDir,
     config: ConnectorConfig,
@@ -59,10 +88,14 @@ struct Rig {
     observer_seed: Vec<u8>,
     connector: ExternalConnector,
     calls: Arc<AtomicUsize>,
+    release_binding: Option<Diff003ReleaseBinding>,
+    secret_grant_binding: Option<Diff003SecretGrantBinding>,
 }
 
 impl Rig {
     async fn new(mode: Mode, _class: IdempotencyClass) -> Self {
+        let release_binding = diff003_release_binding();
+        let secret_grant_binding = diff003_secret_grant_binding();
         let request_seed = vec![1; 32];
         let destination_seed = vec![2; 32];
         let outcome_seed = vec![3; 32];
@@ -84,11 +117,36 @@ impl Rig {
         make_private(state.path());
         let mut public_output_schema = BTreeMap::new();
         public_output_schema.insert("url".to_owned(), JsonKind::String);
+        let mut request_payload_schema = if release_binding.is_some() {
+            BTreeMap::from([
+                ("release_id".to_owned(), JsonKind::String),
+                ("release_receipt_sha256".to_owned(), JsonKind::String),
+                ("manifest_sha256".to_owned(), JsonKind::String),
+                ("envelope_sha256".to_owned(), JsonKind::String),
+                ("bundle_sha256".to_owned(), JsonKind::String),
+            ])
+        } else {
+            BTreeMap::from([("release".to_owned(), JsonKind::String)])
+        };
+        if secret_grant_binding.is_some() {
+            request_payload_schema
+                .insert("secret_grant_receipt_sha256".to_owned(), JsonKind::String);
+            request_payload_schema.insert(
+                "secret_grant_configuration_sha256".to_owned(),
+                JsonKind::String,
+            );
+        }
         let config = ConnectorConfig {
             schema_version: CONFIG_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            connector_id: "connector/release/v1".to_owned(),
-            implementation_sha256: "a".repeat(64),
+            connector_id: secret_grant_binding.as_ref().map_or_else(
+                || "connector/release/v1".to_owned(),
+                |binding| binding.connector_id.clone(),
+            ),
+            implementation_sha256: secret_grant_binding.as_ref().map_or_else(
+                || "a".repeat(64),
+                |binding| binding.implementation_sha256.clone(),
+            ),
             image_sha256: "b".repeat(64),
             runtime_attestation_authority_key_id: "key/runtime-attestation".to_owned(),
             runtime_attestation_authority_key_sha256: "9".repeat(64),
@@ -99,7 +157,9 @@ impl Rig {
             configuration_authority_identity: "authority/config".to_owned(),
             request_authority_identity: "authority/request".to_owned(),
             credential_issuance_path_identity: "issuer/connector".to_owned(),
-            generation: 1,
+            generation: secret_grant_binding
+                .as_ref()
+                .map_or(1, |binding| binding.rotation_generation),
             activation_mode: ActivationMode::Current,
             previous_generation: None,
             previous_config_sha256: None,
@@ -111,12 +171,21 @@ impl Rig {
             effect_class: "release_publication".to_owned(),
             action_name: "publish_release".to_owned(),
             action_schema_version: "release-publication/v1".to_owned(),
-            request_payload_schema: BTreeMap::from([("release".to_owned(), JsonKind::String)]),
+            request_payload_schema,
             public_output_schema,
             allowed_secret_taints: BTreeSet::from(["release-token".to_owned()]),
-            credential_grant_id: "grant/release".to_owned(),
-            credential_grant_version: "generation/7".to_owned(),
-            credential_grant_scope: "release:write".to_owned(),
+            credential_grant_id: secret_grant_binding.as_ref().map_or_else(
+                || "grant/release".to_owned(),
+                |binding| binding.grant_id.clone(),
+            ),
+            credential_grant_version: secret_grant_binding.as_ref().map_or_else(
+                || "generation/7".to_owned(),
+                |binding| binding.grant_version.clone(),
+            ),
+            credential_grant_scope: secret_grant_binding.as_ref().map_or_else(
+                || "release:write".to_owned(),
+                |binding| binding.grant_scope.clone(),
+            ),
             credential_grant_expires_unix_ms: NOW + 60_000,
             credential_token_sha256: content_sha256(TOKEN),
             request_authority_key_id: "key/request".to_owned(),
@@ -205,10 +274,35 @@ impl Rig {
             observer_seed,
             connector,
             calls,
+            release_binding,
+            secret_grant_binding,
         }
     }
 
     fn request(&self, class: IdempotencyClass) -> ActionRequest {
+        let mut request_payload = self.release_binding.as_ref().map_or_else(
+            || json!({"release": "v1.0.0"}),
+            |binding| {
+                json!({
+                    "release_id": binding.release_id,
+                    "release_receipt_sha256": binding.receipt_sha256,
+                    "manifest_sha256": binding.manifest_sha256,
+                    "envelope_sha256": binding.envelope_sha256,
+                    "bundle_sha256": binding.bundle_sha256,
+                })
+            },
+        );
+        if let Some(binding) = &self.secret_grant_binding {
+            let payload = request_payload.as_object_mut().unwrap();
+            payload.insert(
+                "secret_grant_receipt_sha256".to_owned(),
+                json!(binding.receipt_sha256),
+            );
+            payload.insert(
+                "secret_grant_configuration_sha256".to_owned(),
+                json!(binding.configuration_sha256),
+            );
+        }
         let mut request = ActionRequest {
             schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -232,7 +326,7 @@ impl Rig {
             idempotency_class: class,
             action_name: self.config.action_name.clone(),
             action_schema_version: self.config.action_schema_version.clone(),
-            request_payload: json!({"release": "v1.0.0"}),
+            request_payload,
             credential_grant_id: self.config.credential_grant_id.clone(),
             credential_grant_version: self.config.credential_grant_version.clone(),
             credential_grant_scope: self.config.credential_grant_scope.clone(),
@@ -319,7 +413,10 @@ async fn destination(
             version: "7".to_owned(),
             taint: "release-token".to_owned(),
         }],
-        external_ids: BTreeMap::from([("release_id".to_owned(), "rel-1".to_owned())]),
+        external_ids: BTreeMap::from([(
+            "release_id".to_owned(),
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+        )]),
         downstream_control_digest: content_sha256(b"continue"),
         later_intents_digest: content_sha256(b"notify"),
         completed_at_unix_ms: NOW + 1,
@@ -394,7 +491,15 @@ async fn destination(
 #[tokio::test]
 async fn success_is_signed_exactly_once_and_restart_replays_without_transport() {
     let rig = Rig::new(Mode::Success, IdempotencyClass::ExternallyIdempotent).await;
-    let request = rig.request(IdempotencyClass::ExternallyIdempotent);
+    let mut request = rig.request(IdempotencyClass::ExternallyIdempotent);
+    if let Some(binding) = &rig.secret_grant_binding {
+        request.tenant_id = binding.organization_id;
+        request.project_id = binding.project_id;
+        request.build_id = binding.build_id;
+        request.attempt_id = binding.attempt_id;
+        request.effect_fence = binding.fence;
+        sign_action_request(&mut request, &rig.request_seed).unwrap();
+    }
     let first = rig
         .connector
         .execute_at(request.clone(), NOW)
@@ -403,9 +508,109 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
     assert_eq!(first.status, OutcomeStatus::Succeeded);
     assert_eq!(first.attempt_count, 1);
     verify_outcome_receipt(&first, &public_key_from_seed(&rig.outcome_seed).unwrap()).unwrap();
-    let replay = rig.restart().execute_at(request, NOW + 10).await.unwrap();
+    let replay = rig
+        .restart()
+        .execute_at(request.clone(), NOW + 10)
+        .await
+        .unwrap();
     assert_eq!(replay, first);
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let mut receipt = serde_json::to_value(&first).expect("encode DIFF-003 connector receipt");
+        if let Some(binding) = &rig.release_binding {
+            receipt["release_binding"] = json!({
+                "release_receipt_sha256": binding.receipt_sha256,
+                "release_id": binding.release_id,
+                "manifest_sha256": binding.manifest_sha256,
+                "envelope_sha256": binding.envelope_sha256,
+                "bundle_sha256": binding.bundle_sha256,
+                "request_payload_sha256": first.request_payload_sha256,
+            });
+        }
+        if let Some(binding) = &rig.secret_grant_binding {
+            assert_eq!(
+                request.request_payload["secret_grant_receipt_sha256"],
+                binding.receipt_sha256
+            );
+            assert_eq!(
+                request.request_payload["secret_grant_configuration_sha256"],
+                binding.configuration_sha256
+            );
+            receipt["secret_grant_binding"] = json!({
+                "grant_receipt_sha256": binding.receipt_sha256,
+                "grant_id": binding.grant_id,
+                "grant_version": binding.grant_version,
+                "grant_scope": binding.grant_scope,
+                "configuration_sha256": binding.configuration_sha256,
+                "organization_id": binding.organization_id,
+                "project_id": binding.project_id,
+                "build_id": binding.build_id,
+                "attempt_id": binding.attempt_id,
+                "fence": binding.fence,
+                "request_payload_sha256": first.request_payload_sha256,
+            });
+        }
+        receipt["observer_receipt_signing_public_key_sha256"] = json!(
+            rig.config
+                .observer_binding
+                .receipt_signing_public_key_sha256
+        );
+        std::fs::write(
+            std::path::Path::new(&root).join("EXT-001.outcome-public-key.bin"),
+            public_key_from_seed(&rig.outcome_seed).expect("derive connector outcome public key"),
+        )
+        .expect("write DIFF-003 connector outcome public key");
+        std::fs::write(
+            std::path::Path::new(&root).join("EXT-001.json"),
+            diff003::receipt("EXT-001", receipt),
+        )
+        .expect("write DIFF-003 connector receipt");
+    }
+}
+
+fn diff003_release_binding() -> Option<Diff003ReleaseBinding> {
+    let path = std::env::var_os("MCLOVING_DIFF003_RELEASE_RECEIPT")?;
+    let bytes = std::fs::read(path).ok()?;
+    let release: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(Diff003ReleaseBinding {
+        receipt_sha256: content_sha256(&bytes),
+        release_id: release["release_id"].as_str()?.to_owned(),
+        manifest_sha256: release["manifest_sha256"].as_str()?.to_owned(),
+        envelope_sha256: release["envelope_sha256"].as_str()?.to_owned(),
+        bundle_sha256: release["bundle_sha256"].as_str()?.to_owned(),
+    })
+}
+
+fn diff003_secret_grant_binding() -> Option<Diff003SecretGrantBinding> {
+    let path = std::env::var_os("MCLOVING_DIFF003_SECRET_GRANT_RECEIPT")?;
+    let bytes = std::fs::read(path).ok()?;
+    let receipt: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let grant = receipt.get("grant")?;
+    let consumer = grant.get("consumer")?;
+    let organization_id = Uuid::parse_str(grant["organization_id"].as_str()?).ok()?;
+    let project_id = Uuid::parse_str(grant["project_id"].as_str()?).ok()?;
+    let build_id = Uuid::parse_str(grant["build_id"].as_str()?).ok()?;
+    let attempt_id = Uuid::parse_str(grant["attempt_id"].as_str()?).ok()?;
+    let environment = grant["environment"].as_str()?;
+    let action = grant["action"].as_str()?;
+    let fence = grant["fence"].as_u64()?;
+    Some(Diff003SecretGrantBinding {
+        receipt_sha256: content_sha256(&bytes),
+        grant_id: grant["grant_id"].as_str()?.to_owned(),
+        grant_version: grant["protocol_version"].as_str()?.to_owned(),
+        grant_scope: format!(
+            "organization/{organization_id}/project/{project_id}/build/{build_id}/attempt/{attempt_id}/environment/{environment}/action/{action}/fence/{fence}"
+        ),
+        configuration_sha256: consumer["configuration_sha256"].as_str()?.to_owned(),
+        organization_id,
+        project_id,
+        build_id,
+        attempt_id,
+        fence,
+        rotation_generation: grant["rotation_generation"].as_u64()?,
+        connector_id: consumer["connector_id"].as_str()?.to_owned(),
+        implementation_sha256: consumer["implementation_sha256"].as_str()?.to_owned(),
+    })
 }
 
 #[tokio::test]
@@ -472,7 +677,11 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
     let mut different_request_same_scope = request.clone();
     different_request_same_scope.request_id = Uuid::new_v4();
     sign_action_request(&mut different_request_same_scope, &rig.request_seed).unwrap();
-    let replay = rig.restart().execute_at(request, NOW + 1).await.unwrap();
+    let replay = rig
+        .restart()
+        .execute_at(request.clone(), NOW + 1)
+        .await
+        .unwrap();
     assert_eq!(replay, receipt);
     assert_eq!(
         rig.connector
@@ -481,6 +690,49 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
         Err(ConnectorError::EffectPending)
     );
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    let ambiguous_digest = outcome_receipt_digest(&receipt).unwrap();
+    let mut observation = observation_for(&rig, &receipt, true);
+    mcloving_destination_observer::sign_receipt(&mut observation, &rig.observer_seed).unwrap();
+    let reconciled = rig
+        .connector
+        .reconcile_at(
+            ReconcileRequest {
+                schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                request_id: request.request_id,
+                expected_request_sha256: receipt.request_sha256.clone(),
+                expected_ambiguous_receipt_sha256: ambiguous_digest,
+                observed_effect: true,
+                observation_receipt: observation,
+                audit_provenance: "audit/reconcile/non-idempotent-timeout".to_owned(),
+            },
+            NOW + 500,
+        )
+        .unwrap();
+    assert_eq!(reconciled.status, OutcomeStatus::Succeeded);
+    assert_eq!(reconciled.status_code, "reconciled_effect_observed");
+    assert!(!reconciled.ambiguous_requires_observation);
+    assert!(reconciled.observation_receipt_sha256.is_some());
+    let ambiguous_retry_reconciled = receipt.status == OutcomeStatus::Ambiguous
+        && receipt.ambiguous_requires_observation
+        && replay == receipt
+        && reconciled.status == OutcomeStatus::Succeeded
+        && reconciled.status_code == "reconciled_effect_observed"
+        && !reconciled.ambiguous_requires_observation
+        && reconciled.observation_receipt_sha256.is_some()
+        && rig.calls.load(Ordering::SeqCst) == 1;
+    diff003::record_assertion(
+        "connector_ambiguous_retry_reconciled",
+        "reconciled",
+        serde_json::json!({
+            "initial_status": format!("{:?}", receipt.status),
+            "reconciled_status": format!("{:?}", reconciled.status),
+            "status_code": reconciled.status_code,
+            "observation_receipt_bound": reconciled.observation_receipt_sha256.is_some(),
+            "network_calls": rig.calls.load(Ordering::SeqCst),
+            "replay_equal": replay == receipt,
+        }),
+        ambiguous_retry_reconciled,
+    );
 }
 
 #[tokio::test]
@@ -524,9 +776,18 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
     let mut stale = rig.request(IdempotencyClass::ExternallyIdempotent);
     stale.expires_at_unix_ms = NOW + 1;
     sign_action_request(&mut stale, &rig.request_seed).unwrap();
-    assert_eq!(
-        rig.connector.execute_at(stale, NOW + 2).await,
-        Err(ConnectorError::ExpiredAuthority)
+    let stale_result = rig.connector.execute_at(stale, NOW + 2).await;
+    let stale_denied = stale_result == Err(ConnectorError::ExpiredAuthority);
+    assert!(stale_denied);
+    diff003::record_assertion(
+        "connector_stale_denied",
+        "denied",
+        serde_json::json!({
+            "presented_expiry_unix_ms": NOW + 1,
+            "verification_time_unix_ms": NOW + 2,
+            "result": "expired_authority",
+        }),
+        stale_denied,
     );
 
     let mut too_short_for_transport = rig.request(IdempotencyClass::ExternallyIdempotent);
@@ -560,9 +821,20 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
     let mut substituted = rig.request(IdempotencyClass::ExternallyIdempotent);
     sign_action_request(&mut substituted, &rig.request_seed).unwrap();
     substituted.resource_identity = "resource/substituted-after-signing".to_owned();
-    assert_eq!(
-        rig.connector.execute_at(substituted, NOW).await,
-        Err(ConnectorError::UnauthorizedRequest)
+    let substituted_identity = substituted.resource_identity.clone();
+    let substitution_result = rig.connector.execute_at(substituted, NOW).await;
+    let identity_substitution_denied =
+        substitution_result == Err(ConnectorError::UnauthorizedRequest);
+    assert!(identity_substitution_denied);
+    diff003::record_assertion(
+        "connector_identity_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_resource_identity": substituted_identity,
+            "result": "unauthorized_request",
+            "endpoint_calls": rig.calls.load(Ordering::SeqCst),
+        }),
+        identity_substitution_denied,
     );
 
     let mut schema_substituted = rig.request(IdempotencyClass::ExternallyIdempotent);
@@ -581,9 +853,18 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
     let mut divergent_replay = request;
     divergent_replay.audit_provenance = "audit/divergent-replay".to_owned();
     sign_action_request(&mut divergent_replay, &rig.request_seed).unwrap();
-    assert_eq!(
-        rig.connector.execute_at(divergent_replay, NOW).await,
-        Err(ConnectorError::ReplayMismatch)
+    let replay_result = rig.connector.execute_at(divergent_replay, NOW).await;
+    let replay_denied = replay_result == Err(ConnectorError::ReplayMismatch);
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "connector_replay_denied",
+        "denied",
+        serde_json::json!({
+            "mutation": "audit_provenance",
+            "result": "replay_mismatch",
+            "effect_calls": rig.calls.load(Ordering::SeqCst),
+        }),
+        replay_denied,
     );
 
     let denied = Rig::new(Mode::Denied, IdempotencyClass::ExternallyIdempotent).await;
@@ -1254,6 +1535,20 @@ async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
     assert_eq!(reconciled.status, OutcomeStatus::Succeeded);
     assert_eq!(reconciled.status_code, "reconciled_effect_observed");
     assert!(reconciled.observation_receipt_sha256.is_some());
+    let outage_reconciled = reconciled.status == OutcomeStatus::Succeeded
+        && reconciled.status_code == "reconciled_effect_observed"
+        && reconciled.observation_receipt_sha256.is_some();
+    diff003::record_assertion(
+        "connector_outage_reconciled",
+        "reconciled",
+        serde_json::json!({
+            "initial_status": format!("{:?}", ambiguous.status),
+            "reconciled_status": format!("{:?}", reconciled.status),
+            "status_code": reconciled.status_code,
+            "observation_receipt_bound": reconciled.observation_receipt_sha256.is_some(),
+        }),
+        outage_reconciled,
+    );
 }
 
 #[tokio::test]

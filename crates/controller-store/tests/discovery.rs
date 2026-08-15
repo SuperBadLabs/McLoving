@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use mcloving_controller_store::{
     AuthorizationPolicyWrite, DiscoveredRefKind, DiscoveryChildState, DiscoveryObservationWrite,
     DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
@@ -118,42 +121,53 @@ fn trigger_write(
     }
 }
 
-async fn fixture(store: &Store) -> (Uuid, Uuid, Uuid, Uuid, [u8; 32]) {
-    let organization_id = Uuid::new_v4();
-    let project_id = Uuid::new_v4();
-    let pipeline_id = Uuid::new_v4();
-    let trigger_id = Uuid::new_v4();
-    store
-        .create_project(
-            organization_id,
-            &format!("org-{organization_id}"),
-            project_id,
-            &format!("project-{project_id}"),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
+async fn fixture(
+    store: &Store,
+    bind_live_trigger: bool,
+) -> (Uuid, Uuid, Uuid, Uuid, [u8; 32], [u8; 32]) {
+    let live_trigger = bind_live_trigger.then(diff003_trigger_identity).flatten();
+    let (organization_id, project_id, pipeline_id, trigger_id) =
+        live_trigger.unwrap_or_else(|| {
+            (
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            )
+        });
+    if live_trigger.is_none() {
         store
-            .put_pipeline_as(
-                &PipelineWrite {
-                    organization_id,
-                    project_id,
-                    pipeline_id,
-                    slug: format!("pipeline-{pipeline_id}"),
-                    source: SOURCE.to_owned(),
-                    source_sha256: digest(SOURCE),
-                    semantic_digest: digest("discovery-semantic-v1"),
-                    schema_major: 1,
-                    schema_minor: 0,
-                    parameter_schema: json!({}),
-                },
-                Some(0),
-                "creator@example.test",
+            .create_project(
+                organization_id,
+                &format!("org-{organization_id}"),
+                project_id,
+                &format!("project-{project_id}"),
             )
             .await
-            .unwrap(),
-        PipelinePutOutcome::Created(_)
-    ));
+            .unwrap();
+        assert!(matches!(
+            store
+                .put_pipeline_as(
+                    &PipelineWrite {
+                        organization_id,
+                        project_id,
+                        pipeline_id,
+                        slug: format!("pipeline-{pipeline_id}"),
+                        source: SOURCE.to_owned(),
+                        source_sha256: digest(SOURCE),
+                        semantic_digest: digest("discovery-semantic-v1"),
+                        schema_major: 1,
+                        schema_minor: 0,
+                        parameter_schema: json!({}),
+                    },
+                    Some(0),
+                    "creator@example.test",
+                )
+                .await
+                .unwrap(),
+            PipelinePutOutcome::Created(_)
+        ));
+    }
     let mut policy = AuthorizationPolicyWrite {
         organization_id,
         project_id,
@@ -170,18 +184,49 @@ async fn fixture(store: &Store) -> (Uuid, Uuid, Uuid, Uuid, [u8; 32]) {
     };
     policy.expected_policy_digest = compute_authorization_policy_digest(&policy).unwrap();
     let policy_receipt = store.install_authorization_policy(&policy).await.unwrap();
-    let trigger = trigger_write(organization_id, project_id, pipeline_id, trigger_id);
-    assert!(matches!(
-        store.put_pipeline_trigger(&trigger).await.unwrap(),
-        TriggerPutOutcome::Created(_)
-    ));
+    let trigger_configuration_sha256 = if live_trigger.is_some() {
+        let stored: Vec<u8> = sqlx::query_scalar(
+            "SELECT configuration_sha256 FROM pipeline_trigger_versions
+             WHERE organization_id = $1 AND trigger_id = $2 AND generation = 1",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("load live trigger configuration digest");
+        stored
+            .try_into()
+            .expect("live trigger configuration digest length")
+    } else {
+        let trigger = trigger_write(organization_id, project_id, pipeline_id, trigger_id);
+        assert!(matches!(
+            store.put_pipeline_trigger(&trigger).await.unwrap(),
+            TriggerPutOutcome::Created(_)
+        ));
+        trigger.configuration_sha256
+    };
     (
         organization_id,
         project_id,
         pipeline_id,
         trigger_id,
         policy_receipt.policy_digest,
+        trigger_configuration_sha256,
     )
+}
+
+fn diff003_trigger_identity() -> Option<(Uuid, Uuid, Uuid, Uuid)> {
+    let root = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR")?;
+    let trigger: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("TRIG-001.json")).ok()?,
+    )
+    .ok()?;
+    Some((
+        Uuid::parse_str(trigger["organization_id"].as_str()?).ok()?,
+        Uuid::parse_str(trigger["project_id"].as_str()?).ok()?,
+        Uuid::parse_str(trigger["pipeline_id"].as_str()?).ok()?,
+        Uuid::parse_str(trigger["trigger_id"].as_str()?).ok()?,
+    ))
 }
 
 fn parent_write(
@@ -191,6 +236,7 @@ fn parent_write(
     parent_id: Uuid,
     trigger_id: Uuid,
     auth_digest: [u8; 32],
+    trigger_configuration_sha256: [u8; 32],
 ) -> DiscoveryParentWrite {
     let mut write = DiscoveryParentWrite {
         organization_id,
@@ -222,13 +268,7 @@ fn parent_write(
         authorization_policy_sha256: auth_digest,
         trigger_id,
         trigger_generation: 1,
-        trigger_configuration_sha256: trigger_write(
-            organization_id,
-            project_id,
-            pipeline_id,
-            trigger_id,
-        )
-        .configuration_sha256,
+        trigger_configuration_sha256,
         source_implementation_sha256: digest("source-acquirer-v1"),
         source_protocol_version: "mcloving.source-acquisition/v1".to_owned(),
         source_configuration_sha256: digest("source-acquirer-config-v1"),
@@ -302,7 +342,14 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
     };
-    let (organization_id, project_id, pipeline_id, trigger_id, auth_digest) = fixture(&store).await;
+    let (
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        auth_digest,
+        trigger_configuration_sha256,
+    ) = fixture(&store, true).await;
     let parent_id = Uuid::new_v4();
     let parent = parent_write(
         organization_id,
@@ -311,15 +358,25 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
         parent_id,
         trigger_id,
         auth_digest,
+        trigger_configuration_sha256,
     );
     assert!(matches!(
         store.put_discovery_parent(&parent).await.unwrap(),
         DiscoveryParentPutOutcome::Created(_)
     ));
-    assert!(matches!(
-        store.put_discovery_parent(&parent).await.unwrap(),
-        DiscoveryParentPutOutcome::Replayed(_)
-    ));
+    let replay = store.put_discovery_parent(&parent).await.unwrap();
+    let replay_denied = matches!(replay, DiscoveryParentPutOutcome::Replayed(_));
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "discovery_replay_denied",
+        "denied",
+        json!({
+            "parent_id": parent.parent_id,
+            "presented_generation": parent.expected_generation,
+            "outcome": "replayed",
+        }),
+        replay_denied,
+    );
     let mut divergent_parent_replay = parent.clone();
     divergent_parent_replay.reason = "substituted audit reason".to_owned();
     assert!(matches!(
@@ -813,6 +870,23 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     assert_eq!(reconfigured_receipt.observation_count, 1);
     assert_eq!(reconfigured_receipt.selected_count, 0);
     assert_eq!(reconfigured_receipt.retired_count, 4);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let trigger_receipt = std::fs::read(std::path::Path::new(&root).join("TRIG-001.json"))
+            .expect("read live DIFF-003 trigger receipt");
+        std::fs::write(
+            std::path::Path::new(&root).join("DISC-001.json"),
+            diff003::receipt(
+                "DISC-001",
+                serde_json::json!({
+                    "initial": receipt,
+                    "reconfigured": reconfigured_receipt,
+                    "trigger_id": trigger_id,
+                    "trigger_receipt_sha256": format!("{:x}", Sha256::digest(&trigger_receipt)),
+                }),
+            ),
+        )
+        .expect("write DIFF-003 discovery receipts");
+    }
 }
 
 #[tokio::test]
@@ -821,7 +895,14 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
     };
-    let (organization_id, project_id, pipeline_id, trigger_id, auth_digest) = fixture(&store).await;
+    let (
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        auth_digest,
+        trigger_configuration_sha256,
+    ) = fixture(&store, false).await;
     let parent_id = Uuid::new_v4();
     let parent = parent_write(
         organization_id,
@@ -830,13 +911,24 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         parent_id,
         trigger_id,
         auth_digest,
+        trigger_configuration_sha256,
     );
     let mut substituted = parent.clone();
     substituted.implementation_sha256 = digest("substituted-implementation");
-    assert!(matches!(
-        store.put_discovery_parent(&substituted).await,
-        Err(StoreError::InvalidDiscovery(_))
-    ));
+    let substitution_result = store.put_discovery_parent(&substituted).await;
+    let config_substitution_denied =
+        matches!(substitution_result, Err(StoreError::InvalidDiscovery(_)));
+    assert!(config_substitution_denied);
+    diff003::record_assertion(
+        "discovery_config_substitution_denied",
+        "denied",
+        json!({
+            "parent_id": substituted.parent_id,
+            "presented_implementation_sha256": substituted.implementation_sha256,
+            "result": "invalid_discovery",
+        }),
+        config_substitution_denied,
+    );
 
     let mut oversized = parent.clone();
     oversized.repositories = (0..130)
@@ -912,10 +1004,20 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         2,
         Vec::new(),
     );
-    assert!(matches!(
-        store.reconcile_discovery_scan(&stale_scan).await,
-        Err(StoreError::DiscoveryConflict(_))
-    ));
+    let stale_result = store.reconcile_discovery_scan(&stale_scan).await;
+    let stale_denied = matches!(stale_result, Err(StoreError::DiscoveryConflict(_)));
+    assert!(stale_denied);
+    diff003::record_assertion(
+        "discovery_stale_denied",
+        "denied",
+        json!({
+            "scan_id": stale_scan.scan_id,
+            "presented_authorization_generation": parent.authorization_generation,
+            "active_authorization_generation": 2,
+            "result": "discovery_conflict",
+        }),
+        stale_denied,
+    );
 
     let mut rebound = parent.clone();
     rebound.expected_generation = 1;

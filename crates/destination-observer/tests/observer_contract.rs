@@ -1,5 +1,8 @@
 #![cfg(feature = "loopback-test")]
 
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
@@ -29,6 +32,10 @@ use mcloving_destination_observer::{
     ObserverLimits, PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization,
     SignedDestinationState, StateFieldSchema, content_sha256, destination_state_message,
     observation_receipt_digest, sign_observation_request, verify_observation_receipt,
+};
+use mcloving_external_connector::{
+    OutcomeReceipt as ConnectorOutcomeReceipt, OutcomeStatus as ConnectorOutcomeStatus,
+    verify_outcome_receipt,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use serde::Serialize;
@@ -91,6 +98,25 @@ struct DestinationState {
     cursor: AtomicU64,
     observed_at_unix_ms: AtomicI64,
     reads: AtomicU64,
+    shared_effect_published: Option<bool>,
+}
+
+#[derive(Clone)]
+struct Diff003ConnectorBinding {
+    tenant_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    build_id: Uuid,
+    attempt_id: Uuid,
+    effect_fence: u64,
+    endpoint_identity: String,
+    account_identity: String,
+    resource_identity: String,
+    effect_class: String,
+    release_id: String,
+    receipt_sha256: String,
+    authenticated_outcome: bool,
+    effect_published: bool,
 }
 
 struct Rig {
@@ -105,16 +131,18 @@ struct Rig {
     receipt_seed: Vec<u8>,
     implementation_sha256: String,
     image_sha256: String,
+    connector_binding: Option<Diff003ConnectorBinding>,
 }
 
 impl Rig {
     async fn new() -> Self {
         let request_seed = vec![1_u8; 32];
         let destination_seed = vec![2_u8; 32];
-        let receipt_seed = vec![3_u8; 32];
+        let receipt_seed = vec![4_u8; 32];
         let request_public_key = public_key(&request_seed);
         let destination_public_key = public_key(&destination_seed);
         let receipt_public_key = public_key(&receipt_seed);
+        let connector_binding = diff003_connector_binding();
         let server = Arc::new(DestinationState {
             seed: destination_seed,
             request: Mutex::new(None),
@@ -122,6 +150,9 @@ impl Rig {
             cursor: AtomicU64::new(10),
             observed_at_unix_ms: AtomicI64::new(NOW),
             reads: AtomicU64::new(0),
+            shared_effect_published: connector_binding
+                .as_ref()
+                .map(|binding| binding.effect_published),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -158,10 +189,22 @@ impl Rig {
             previous_config_sha256: None,
             rollback_from_generation: None,
             endpoint_url: format!("http://{address}/state"),
-            endpoint_identity: "endpoint/release-state".to_owned(),
-            account_identity: "account/customer-a".to_owned(),
-            resource_identity: "release/app-a".to_owned(),
-            effect_class: "release_publication".to_owned(),
+            endpoint_identity: connector_binding
+                .as_ref()
+                .map(|binding| binding.endpoint_identity.clone())
+                .unwrap_or_else(|| "endpoint/release-state".to_owned()),
+            account_identity: connector_binding
+                .as_ref()
+                .map(|binding| binding.account_identity.clone())
+                .unwrap_or_else(|| "account/customer-a".to_owned()),
+            resource_identity: connector_binding
+                .as_ref()
+                .map(|binding| binding.resource_identity.clone())
+                .unwrap_or_else(|| "release/app-a".to_owned()),
+            effect_class: connector_binding
+                .as_ref()
+                .map(|binding| binding.effect_class.clone())
+                .unwrap_or_else(|| "release_publication".to_owned()),
             state_schema_version: "release-state/v1".to_owned(),
             allowed_query_keys: vec!["release_id".to_owned()],
             response_schema: vec![StateFieldSchema {
@@ -230,22 +273,53 @@ impl Rig {
             receipt_seed,
             implementation_sha256,
             image_sha256,
+            connector_binding,
         }
     }
 
     fn request(&self, phase: ObservationPhase) -> ObservationRequest {
         let mut query = BTreeMap::new();
-        query.insert("release_id".to_owned(), "release-42".to_owned());
+        query.insert(
+            "release_id".to_owned(),
+            self.connector_binding
+                .as_ref()
+                .map(|binding| binding.release_id.clone())
+                .unwrap_or_else(|| "release-42".to_owned()),
+        );
         ObservationRequest {
             schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             observation_id: Uuid::new_v4(),
-            tenant_id: Uuid::from_u128(1),
-            project_id: Uuid::from_u128(2),
-            pipeline_id: Uuid::from_u128(3),
-            build_id: Uuid::from_u128(4),
-            attempt_id: Uuid::from_u128(5),
-            effect_fence: 17,
+            tenant_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.tenant_id)
+                .unwrap_or_else(|| Uuid::from_u128(1)),
+            project_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.project_id)
+                .unwrap_or_else(|| Uuid::from_u128(2)),
+            pipeline_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.pipeline_id)
+                .unwrap_or_else(|| Uuid::from_u128(3)),
+            build_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.build_id)
+                .unwrap_or_else(|| Uuid::from_u128(4)),
+            attempt_id: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.attempt_id)
+                .unwrap_or_else(|| Uuid::from_u128(5)),
+            effect_fence: self
+                .connector_binding
+                .as_ref()
+                .map(|binding| binding.effect_fence)
+                .unwrap_or(17),
             phase,
             observer_id: "observer-release-state".to_owned(),
             request_authority_identity: "authority/reconciler".to_owned(),
@@ -256,10 +330,10 @@ impl Rig {
             activation_mode: ActivationMode::Current,
             previous_generation: None,
             rollback_from_generation: None,
-            endpoint_identity: "endpoint/release-state".to_owned(),
-            account_identity: "account/customer-a".to_owned(),
-            resource_identity: "release/app-a".to_owned(),
-            effect_class: "release_publication".to_owned(),
+            endpoint_identity: self.config.endpoint_identity.clone(),
+            account_identity: self.config.account_identity.clone(),
+            resource_identity: self.config.resource_identity.clone(),
+            effect_class: self.config.effect_class.clone(),
             read_grant_id: "grant/observer".to_owned(),
             read_grant_version: "7".to_owned(),
             read_grant_scope: "release:read".to_owned(),
@@ -305,6 +379,44 @@ impl Rig {
             vec![TOKEN.to_vec(), SECRET.to_vec()],
         )
     }
+}
+
+fn diff003_connector_binding() -> Option<Diff003ConnectorBinding> {
+    let path = std::env::var_os("MCLOVING_DIFF003_CONNECTOR_RECEIPT")?;
+    let bytes = fs::read(path).ok()?;
+    let mut connector: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let receipt_sha256 = content_sha256(&bytes);
+    connector.as_object_mut()?.remove("_diff003");
+    connector.as_object_mut()?.remove("release_binding");
+    connector.as_object_mut()?.remove("secret_grant_binding");
+    connector
+        .as_object_mut()?
+        .remove("observer_receipt_signing_public_key_sha256");
+    let outcome: ConnectorOutcomeReceipt = serde_json::from_value(connector.clone()).ok()?;
+    let outcome_public_key = fs::read(std::env::var_os(
+        "MCLOVING_DIFF003_CONNECTOR_OUTCOME_PUBLIC_KEY",
+    )?)
+    .ok()?;
+    if content_sha256(&outcome_public_key) != outcome.outcome_signing_public_key_sha256 {
+        return None;
+    }
+    verify_outcome_receipt(&outcome, &outcome_public_key).ok()?;
+    Some(Diff003ConnectorBinding {
+        tenant_id: Uuid::parse_str(connector["tenant_id"].as_str()?).ok()?,
+        project_id: Uuid::parse_str(connector["project_id"].as_str()?).ok()?,
+        pipeline_id: Uuid::parse_str(connector["pipeline_id"].as_str()?).ok()?,
+        build_id: Uuid::parse_str(connector["build_id"].as_str()?).ok()?,
+        attempt_id: Uuid::parse_str(connector["attempt_id"].as_str()?).ok()?,
+        effect_fence: connector["effect_fence"].as_u64()?,
+        endpoint_identity: connector["endpoint_identity"].as_str()?.to_owned(),
+        account_identity: connector["account_identity"].as_str()?.to_owned(),
+        resource_identity: connector["resource_identity"].as_str()?.to_owned(),
+        effect_class: connector["effect_class"].as_str()?.to_owned(),
+        release_id: connector["external_ids"]["release_id"].as_str()?.to_owned(),
+        receipt_sha256,
+        authenticated_outcome: true,
+        effect_published: outcome.status == ConnectorOutcomeStatus::Succeeded,
+    })
 }
 
 async fn destination_handler(
@@ -506,7 +618,9 @@ async fn destination_handler(
         observed_at_unix_ms: server.observed_at_unix_ms.load(Ordering::SeqCst),
         state_schema_version: "release-state/v1".to_owned(),
         confidentiality: Confidentiality::Internal,
-        state: json!({"published": true}),
+        state: json!({
+            "published": server.shared_effect_published.unwrap_or(true),
+        }),
         grant_id: request.read_grant_id.clone(),
         grant_version: request.read_grant_version.clone(),
         grant_scope: request.read_grant_scope.clone(),
@@ -673,6 +787,32 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     assert_eq!(reconciliation.destination_cursor, 12);
     assert_eq!(reconciliation.evidence_sequence, 3);
     verify_observation_receipt(&reconciliation, &rig.receipt_public_key).unwrap();
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let connector_receipt = fs::read(
+            std::env::var_os("MCLOVING_DIFF003_CONNECTOR_RECEIPT")
+                .expect("DIFF-003 connector receipt path"),
+        )
+        .expect("read live DIFF-003 connector receipt");
+        std::fs::write(
+            std::path::Path::new(&root).join("OBS-001.json"),
+            diff003::receipt(
+                "OBS-001",
+                serde_json::json!({
+                    "pre": pre,
+                    "post": post,
+                    "reconciliation": reconciliation,
+                    "connector_receipt_sha256": content_sha256(&connector_receipt),
+                    "connector_outcome_authenticated": rig.connector_binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.authenticated_outcome),
+                    "shared_effect_state_sha256": rig.connector_binding
+                        .as_ref()
+                        .map(|binding| binding.receipt_sha256.clone()),
+                }),
+            ),
+        )
+        .expect("write DIFF-003 observer receipts");
+    }
 }
 
 #[tokio::test]
@@ -697,6 +837,7 @@ async fn publication_deadline_is_anchored_to_signed_destination_freshness() {
 
 #[tokio::test]
 async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fail_closed() {
+    let mut stale_denials = 0;
     for (mode, expected) in [
         (Mode::Stale, ObserverError::StaleObservation),
         (Mode::PredatesRequest, ObserverError::StaleObservation),
@@ -778,15 +919,30 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         let rig = Rig::new().await;
         rig.set_mode(mode);
         let request = rig.prepare(rig.request(ObservationPhase::PreAction));
-        assert_eq!(
-            rig.observer.observe_at(request.clone(), NOW).await,
-            Err(expected.clone())
-        );
-        assert_eq!(rig.observer.observe_at(request, NOW).await, Err(expected));
+        let first_result = rig.observer.observe_at(request.clone(), NOW).await;
+        let second_result = rig.observer.observe_at(request, NOW).await;
+        assert_eq!(first_result, Err(expected.clone()));
+        assert_eq!(second_result, Err(expected.clone()));
+        if matches!(mode, Mode::Stale | Mode::PredatesRequest)
+            && first_result == Err(ObserverError::StaleObservation)
+            && second_result == Err(ObserverError::StaleObservation)
+        {
+            stale_denials += 1;
+        }
         rig.set_mode(Mode::Good);
         let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
         rig.observer.observe_at(replacement, NOW).await.unwrap();
     }
+    diff003::record_assertion(
+        "observer_stale_denied",
+        "denied",
+        serde_json::json!({
+            "stale_modes_executed": 2,
+            "stale_modes_denied_twice": stale_denials,
+            "result": "stale_observation",
+        }),
+        stale_denials == 2,
+    );
 
     for mode in [
         Mode::Outage,
@@ -914,15 +1070,24 @@ async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
     let rig = Rig::new().await;
     rig.set_mode(Mode::Outage);
     let request = rig.prepare(rig.request(ObservationPhase::PreAction));
-    assert_eq!(
-        rig.observer.observe_at(request.clone(), NOW).await,
-        Err(ObserverError::DestinationUnavailable)
-    );
+    let outage_result = rig.observer.observe_at(request.clone(), NOW).await;
+    let outage_denied = outage_result == Err(ObserverError::DestinationUnavailable);
+    assert!(outage_denied);
     rig.set_mode(Mode::Good);
     let restarted = rig.restart();
     let receipt = restarted.observe_at(request, NOW).await.unwrap();
     assert_eq!(receipt.retry_count, 1);
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
+    diff003::record_assertion(
+        "observer_outage_denied",
+        "denied",
+        serde_json::json!({
+            "initial_result": "destination_unavailable",
+            "restart_retry_count": receipt.retry_count,
+            "receipt_verified": true,
+        }),
+        outage_denied && receipt.retry_count == 1,
+    );
 }
 
 #[tokio::test]
@@ -2362,10 +2527,8 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     expired.requested_at_unix_ms = NOW + 60_000;
     expired.expires_at_unix_ms = NOW + 61_500;
     let expired = rig.prepare(expired);
-    assert_eq!(
-        rig.observer.observe_at(expired, NOW + 61_000).await,
-        Err(ObserverError::ExpiredGrant)
-    );
+    let expired_result = rig.observer.observe_at(expired, NOW + 61_000).await;
+    assert_eq!(expired_result, Err(ObserverError::ExpiredGrant));
 
     rig.set_mode(Mode::Slow);
     let mut expires_during_read = rig.request(ObservationPhase::PreAction);
@@ -2402,19 +2565,39 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
     rig.observer.observe_at(replacement, NOW).await.unwrap();
 
-    assert!(matches!(
-        DestinationObserver::new_for_loopback_test(
-            rig.config.clone(),
-            rig.implementation_sha256.clone(),
-            rig.image_sha256.clone(),
-            b"substituted-token".to_vec(),
-            rig.request_public_key.clone(),
-            rig.destination_public_key.clone(),
-            rig.receipt_seed.clone(),
-            vec![b"substituted-token".to_vec(), SECRET.to_vec()],
-        ),
-        Err(ObserverError::InvalidConfig)
-    ));
+    let substituted_markers = vec![b"substituted-token".to_vec(), SECRET.to_vec()];
+    let substituted_marker_digests: Vec<String> = substituted_markers
+        .iter()
+        .map(|marker| content_sha256(marker))
+        .collect();
+    let mut substituted_credential_config = rig.config.clone();
+    substituted_credential_config.secret_marker_set_sha256 = domain_digest(
+        b"mcloving-secret-marker-set-v1",
+        &substituted_marker_digests,
+    );
+    let substituted_credential = DestinationObserver::new_for_loopback_test(
+        substituted_credential_config,
+        rig.implementation_sha256.clone(),
+        rig.image_sha256.clone(),
+        b"substituted-token".to_vec(),
+        rig.request_public_key.clone(),
+        rig.destination_public_key.clone(),
+        rig.receipt_seed.clone(),
+        substituted_markers,
+    );
+    let identity_substitution_denied =
+        matches!(substituted_credential, Err(ObserverError::InvalidConfig));
+    assert!(identity_substitution_denied);
+    diff003::record_assertion(
+        "observer_identity_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_credential_sha256": content_sha256(b"substituted-token"),
+            "expected_credential_sha256": rig.config.read_token_sha256.clone(),
+            "result": "invalid_config",
+        }),
+        identity_substitution_denied,
+    );
     assert!(matches!(
         DestinationObserver::new_for_loopback_test(
             rig.config.clone(),
@@ -2913,6 +3096,12 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         "request": request,
     }))
     .unwrap();
+    let mut write_request = rig.request(ObservationPhase::PostAction);
+    sign_observation_request(&mut write_request, &rig.request_seed).unwrap();
+    let write_command = serde_json::to_vec(&ObserverCommand::Write {
+        request: write_request,
+    })
+    .unwrap();
     let paths = [
         config_path,
         image_sha256_path,
@@ -2954,9 +3143,8 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         let mut input = child.stdin.take().unwrap();
         input.write_all(&command).unwrap();
         input.write_all(b"\n").unwrap();
-        input
-            .write_all(b"{\"operation\":\"write\",\"request\":{}}\n")
-            .unwrap();
+        input.write_all(&write_command).unwrap();
+        input.write_all(b"\n").unwrap();
         drop(input);
         child.wait_with_output().unwrap()
     })
@@ -2983,7 +3171,22 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         serde_json::from_value(responses[0]["receipt"].clone()).unwrap();
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
     assert_eq!(responses[1]["status"], "error");
-    assert_eq!(responses[1]["code"], "malformed_request");
+    assert_eq!(responses[1]["code"], "unauthorized_request");
+    let write_permission_denied = responses[0]["status"] == "observed"
+        && responses[1]["status"] == "error"
+        && responses[1]["code"] == "unauthorized_request";
+    diff003::record_assertion(
+        "observer_write_permission_denied",
+        "denied",
+        serde_json::json!({
+            "read_operation_status": responses[0]["status"],
+            "write_request_well_formed": true,
+            "read_only_boundary": true,
+            "write_operation_status": responses[1]["status"],
+            "write_operation_code": responses[1]["code"],
+        }),
+        write_permission_denied,
+    );
 }
 
 #[tokio::test]
@@ -3036,12 +3239,22 @@ async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
 
     let first = rig.prepare(rig.request(ObservationPhase::PreAction));
     let receipt = rig.observer.observe_at(first.clone(), NOW).await.unwrap();
+    let observation_id = first.observation_id;
     let mut substituted = first;
     substituted.audit_provenance = "audit/forged".to_owned();
     sign_observation_request(&mut substituted, &rig.request_seed).unwrap();
-    assert_eq!(
-        rig.observer.observe_at(substituted, NOW).await,
-        Err(ObserverError::ReplayMismatch)
+    let replay_result = rig.observer.observe_at(substituted, NOW).await;
+    let replay_denied = replay_result == Err(ObserverError::ReplayMismatch);
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "observer_replay_denied",
+        "denied",
+        serde_json::json!({
+            "observation_id": observation_id,
+            "mutation": "audit_provenance",
+            "result": "replay_mismatch",
+        }),
+        replay_denied,
     );
 
     let mut post = rig.request(ObservationPhase::PostAction);
