@@ -3095,6 +3095,12 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         "request": request,
     }))
     .unwrap();
+    let mut write_request = rig.request(ObservationPhase::PostAction);
+    sign_observation_request(&mut write_request, &rig.request_seed).unwrap();
+    let write_command = serde_json::to_vec(&ObserverCommand::Write {
+        request: write_request,
+    })
+    .unwrap();
     let paths = [
         config_path,
         image_sha256_path,
@@ -3136,9 +3142,8 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         let mut input = child.stdin.take().unwrap();
         input.write_all(&command).unwrap();
         input.write_all(b"\n").unwrap();
-        input
-            .write_all(b"{\"operation\":\"write\",\"request\":{}}\n")
-            .unwrap();
+        input.write_all(&write_command).unwrap();
+        input.write_all(b"\n").unwrap();
         drop(input);
         child.wait_with_output().unwrap()
     })
@@ -3165,15 +3170,17 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         serde_json::from_value(responses[0]["receipt"].clone()).unwrap();
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
     assert_eq!(responses[1]["status"], "error");
-    assert_eq!(responses[1]["code"], "malformed_request");
+    assert_eq!(responses[1]["code"], "unauthorized_request");
     let write_permission_denied = responses[0]["status"] == "observed"
         && responses[1]["status"] == "error"
-        && responses[1]["code"] == "malformed_request";
+        && responses[1]["code"] == "unauthorized_request";
     diff003::record_assertion(
         "observer_write_permission_denied",
         "denied",
         serde_json::json!({
             "read_operation_status": responses[0]["status"],
+            "write_request_well_formed": true,
+            "read_only_boundary": true,
             "write_operation_status": responses[1]["status"],
             "write_operation_code": responses[1]["code"],
         }),

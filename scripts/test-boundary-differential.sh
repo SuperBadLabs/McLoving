@@ -608,7 +608,7 @@ mixed_percent_pattern_for() {
   done
   printf '%s' "${pattern}"
 }
-for private_marker in \
+private_markers=(
   contained-source-credential-marker-00000001 \
   contained-source-receipt-signing-key-00000000000000000001 \
   unique-secret-marker-do-not-disclose \
@@ -622,7 +622,9 @@ for private_marker in \
   read-only-observer-token \
   never-publish-this-secret \
   contained-dependency-credential \
-  contained-dependency-receipt-key-material-v1; do
+  contained-dependency-receipt-key-material-v1
+)
+for private_marker in "${private_markers[@]}"; do
   marker_base64="$(printf '%s' "${private_marker}" | base64 -w0)"
   marker_base64url="$(printf '%s' "${marker_base64}" | tr '+/' '-_' | sed 's/=*$//')"
   marker_hex="$(printf '%s' "${private_marker}" | od -An -v -tx1 | tr -d ' \n')"
@@ -682,7 +684,9 @@ for private_marker in \
     done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
   done
 done
-printf 'contents-and-pathnames-raw-base64-base64url-hex-nested-base64-percent-mixed-all-forms-all-case-clean\n' \
+python3 "${repo_root}/scripts/scan-percent-encoded-markers.py" \
+  "${evidence}" "${private_markers[@]}"
+printf 'contents-and-pathnames-raw-base64-base64url-hex-nested-base64-percent-fixed-point-8-all-forms-all-case-clean\n' \
   >"${evidence}/encoded-marker-scan.txt"
 comparison_update="${runtime_root}/runtime-comparison.json"
 jq '.secret_marker_disclosures = 0 | .encoded_marker_scan_passed = true' \
@@ -703,6 +707,7 @@ for source_file in \
   migration/boundary-differential-runtime-v1/init.groovy \
   migration/boundary-differential-runtime-v1/probe.groovy \
   scripts/verify-boundary-runtime.sh \
+  scripts/scan-percent-encoded-markers.py \
   scripts/test-boundary-differential.sh; do
   sha256sum "${repo_root}/${source_file}"
 done >"${evidence}/source-files.sha256"

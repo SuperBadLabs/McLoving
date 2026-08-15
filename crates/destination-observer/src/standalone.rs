@@ -20,6 +20,7 @@ const MAX_RUNTIME_IMAGE_DIGEST_BYTES: usize = 66;
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObserverCommand {
     Observe { request: ObservationRequest },
+    Write { request: ObservationRequest },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -182,6 +183,9 @@ pub async fn serve_stdio(observer: &DestinationObserver) -> Result<(), ObserverE
                     receipt: Box::new(receipt),
                 })
                 .unwrap_or_else(|error| ObserverResponse::from_error(&error)),
+            Ok(ObserverCommand::Write { request: _ }) => {
+                ObserverResponse::from_error(&ObserverError::UnauthorizedRequest)
+            }
             Err(_) => ObserverResponse::from_error(&ObserverError::MalformedRequest),
         };
         write_response(&mut output, &response)?;
