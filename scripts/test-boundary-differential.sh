@@ -15,6 +15,10 @@ if [[ ! -d "${cargo_registry}" ]]; then
   echo "a prefetched Cargo registry is required for the offline contained run" >&2
   exit 69
 fi
+if [[ "$(podman info --format '{{.Host.Security.Rootless}}')" != true ]]; then
+  echo "DIFF-003 requires a rootless Podman engine" >&2
+  exit 78
+fi
 
 output_parent="$(realpath -e "$(dirname -- "$1")")"
 output_leaf="$(basename -- "$1")"
@@ -201,6 +205,7 @@ podman create --name "${runner}" \
   --cpus 2 --memory 6g --pids-limit 4096 \
   --security-opt no-new-privileges \
   --cap-drop all \
+  --cap-add SETUID --cap-add SETGID \
   --env CARGO_NET_OFFLINE=true \
   --env CARGO_TARGET_DIR=/cargo-target \
   --env RUSTUP_TOOLCHAIN=1.97.1 \

@@ -148,10 +148,15 @@ effects, and no public-network reachability. Its credential is marker-scanned
 out of retained evidence. The Jenkins container and network are destroyed
 before the target network exists.
 
-The target phase starts the pinned PostgreSQL service and a pinned Rust runner
-with all capabilities dropped, no-new-privileges, finite CPU, memory, and PID
-ceilings, a read-only source mount, read-only offline Cargo registry, fresh
-writable target directory, and exact-capacity source-transport tmpfs mounts.
+The target phase requires a rootless Podman engine, starts the pinned PostgreSQL
+service, and starts a pinned Rust runner with no-new-privileges, finite CPU,
+memory, and PID ceilings, a read-only source mount, read-only offline Cargo
+registry, fresh writable target directory, and exact-capacity source-transport
+tmpfs mounts. The runner drops the complete default capability set and restores
+only rootless `SETUID` and `SETGID`, which the source-acquirer needs to write the
+single-identity UID/GID maps for its inner transport user namespace. It retains
+no host-root mapping, `SYS_ADMIN`, mount, public-network, or production
+authority.
 It runs the real PostgreSQL trigger, discovery, consumer, and admin suites plus
 the complete focused source-acquirer, secret-broker, input-adapter,
 provisioner, external-connector, destination-observer, dependency-resolver,
