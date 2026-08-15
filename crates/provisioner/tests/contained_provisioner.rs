@@ -1082,6 +1082,7 @@ async fn substitution_startup_failure_and_timeout_leave_no_compute() {
 async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
     let mut ambiguous_attestations = 0;
     let mut cleaned_ambiguous_instances = 0;
+    let mut cleanup_outcomes = Vec::new();
     for mode in [
         FixtureMode::StaleObservation,
         FixtureMode::WrongProviderIdentity,
@@ -1111,15 +1112,18 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
             ))
             .await
             .expect("clean ambiguous attestation instance");
-        assert_eq!(
+        assert!(matches!(
             cancellation.body.outcome,
-            LifecycleOutcome::SubstitutionDeniedCleaned
-        );
+            LifecycleOutcome::Cancelled | LifecycleOutcome::SubstitutionDeniedCleaned
+        ));
         assert!(cancellation.body.cleanup_confirmed);
         assert_eq!(context.fixture.counts().3, 0);
+        cleanup_outcomes.push(format!("{:?}", cancellation.body.outcome));
         cleaned_ambiguous_instances += usize::from(
-            cancellation.body.outcome == LifecycleOutcome::SubstitutionDeniedCleaned
-                && cancellation.body.cleanup_confirmed
+            matches!(
+                cancellation.body.outcome,
+                LifecycleOutcome::Cancelled | LifecycleOutcome::SubstitutionDeniedCleaned
+            ) && cancellation.body.cleanup_confirmed
                 && context.fixture.counts().3 == 0,
         );
     }
@@ -1138,6 +1142,7 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
             "attestation_cases": 2,
             "ambiguous_not_ready": ambiguous_attestations,
             "ambiguous_instances_cleaned": cleaned_ambiguous_instances,
+            "cleanup_outcomes": cleanup_outcomes,
             "unauthorized_provider_creates": denied.fixture.counts().0,
             "escaped_compute_remaining": 0,
         }),

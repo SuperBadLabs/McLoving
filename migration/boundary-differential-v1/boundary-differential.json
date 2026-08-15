@@ -111,7 +111,7 @@
     {
       "id": "PROV-001",
       "protocol": "mcloving.provisioner.v1",
-      "implementation_source_manifest_sha256": "86c7b38f78b18332ca9ca5d7338e1aa547093944730105273997b9dc313e6e3e",
+      "implementation_source_manifest_sha256": "b87c420a8261a7890409e3039df62437580f2338b58da772e785eedc053c462f",
       "configuration_sha256": "ac6db663eac19a2b32a328594dc7026aff47d70f86e026e8ae57608fd7fbe9e3",
       "account_identity": "diff003-account/prov-001",
       "resource_identity": "diff003-resource/prov-001",
