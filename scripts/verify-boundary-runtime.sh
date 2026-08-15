@@ -363,7 +363,9 @@ while IFS=$'\t' read -r name source target rule expected_effects \
       ;;
     source_later_revision_to_dependency)
       pair_filter='.[0].later_revision.generation == .[1].request.expected_generation
-        and .[0].initial.content_sha256 != .[0].later_revision.content_sha256'
+        and .[0].initial.content_sha256 != .[0].later_revision.content_sha256
+        and .[1].request.acquisition_receipt_sha256 == $source_sha
+        and .[1].request.source_tree_sha256 == .[0].later_revision.content_sha256'
       ;;
     secret_grant_to_connector)
       pair_filter='.[0].provider_calls == 1
@@ -428,7 +430,8 @@ while IFS=$'\t' read -r name source target rule expected_effects \
       ;;
     *) fail "unsupported join compatibility rule ${name}" ;;
   esac
-  jq --exit-status --slurp "${pair_filter}" "${source_file}" "${target_file}" \
+  jq --exit-status --arg source_sha "${source_sha}" --slurp \
+    "${pair_filter}" "${source_file}" "${target_file}" \
     >/dev/null || fail "join ${name} independent compatibility rule"
 
   source_projection_sha=$(printf '%s' "${source_claim}" | sha256sum | awk '{print $1}')

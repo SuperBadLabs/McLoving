@@ -488,7 +488,11 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
     let mut different_request_same_scope = request.clone();
     different_request_same_scope.request_id = Uuid::new_v4();
     sign_action_request(&mut different_request_same_scope, &rig.request_seed).unwrap();
-    let replay = rig.restart().execute_at(request, NOW + 1).await.unwrap();
+    let replay = rig
+        .restart()
+        .execute_at(request.clone(), NOW + 1)
+        .await
+        .unwrap();
     assert_eq!(replay, receipt);
     assert_eq!(
         rig.connector
@@ -497,16 +501,44 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
         Err(ConnectorError::EffectPending)
     );
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    let ambiguous_digest = outcome_receipt_digest(&receipt).unwrap();
+    let mut observation = observation_for(&rig, &receipt, true);
+    mcloving_destination_observer::sign_receipt(&mut observation, &rig.observer_seed).unwrap();
+    let reconciled = rig
+        .connector
+        .reconcile_at(
+            ReconcileRequest {
+                schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                request_id: request.request_id,
+                expected_request_sha256: receipt.request_sha256.clone(),
+                expected_ambiguous_receipt_sha256: ambiguous_digest,
+                observed_effect: true,
+                observation_receipt: observation,
+                audit_provenance: "audit/reconcile/non-idempotent-timeout".to_owned(),
+            },
+            NOW + 500,
+        )
+        .unwrap();
+    assert_eq!(reconciled.status, OutcomeStatus::Succeeded);
+    assert_eq!(reconciled.status_code, "reconciled_effect_observed");
+    assert!(!reconciled.ambiguous_requires_observation);
+    assert!(reconciled.observation_receipt_sha256.is_some());
     let ambiguous_retry_reconciled = receipt.status == OutcomeStatus::Ambiguous
         && receipt.ambiguous_requires_observation
         && replay == receipt
+        && reconciled.status == OutcomeStatus::Succeeded
+        && reconciled.status_code == "reconciled_effect_observed"
+        && !reconciled.ambiguous_requires_observation
+        && reconciled.observation_receipt_sha256.is_some()
         && rig.calls.load(Ordering::SeqCst) == 1;
     diff003::record_assertion(
         "connector_ambiguous_retry_reconciled",
         "reconciled",
         serde_json::json!({
-            "status": format!("{:?}", receipt.status),
-            "ambiguous_requires_observation": receipt.ambiguous_requires_observation,
+            "initial_status": format!("{:?}", receipt.status),
+            "reconciled_status": format!("{:?}", reconciled.status),
+            "status_code": reconciled.status_code,
+            "observation_receipt_bound": reconciled.observation_receipt_sha256.is_some(),
             "network_calls": rig.calls.load(Ordering::SeqCst),
             "replay_equal": replay == receipt,
         }),

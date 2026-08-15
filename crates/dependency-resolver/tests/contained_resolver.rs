@@ -94,6 +94,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         .parse::<u64>()
         .expect("numeric transport capacity");
     let fixture = TempDir::new().expect("contained fixture root");
+    let (acquisition_receipt_sha256, source_tree_sha256) = diff003_source_binding();
     let output_root = fixture.path().join("output");
     create_private_directory(&output_root);
     let credential = b"Bearer contained-dependency-credential".to_vec();
@@ -122,7 +123,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -143,7 +144,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -421,8 +422,8 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         expected_resolver_toolchain_id: preliminary_plan.resolver_toolchain_id.clone(),
         expected_resolver_toolchain_sha256: preliminary_plan.resolver_toolchain_sha256.clone(),
         expected_generation: config.generation,
-        acquisition_receipt_sha256: "7".repeat(64),
-        source_tree_sha256: preliminary_plan.source_tree_sha256.clone(),
+        acquisition_receipt_sha256,
+        source_tree_sha256: source_tree_sha256.clone(),
         logical_lock_path: "dependency-locks/maven.json".to_owned(),
         expected_lock_sha256: preliminary_plan.lock_sha256.clone(),
         ecosystem: Ecosystem::Maven,
@@ -615,7 +616,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -673,7 +674,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -789,6 +790,21 @@ fn create_private_directory(path: &Path) {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn diff003_source_binding() -> (String, String) {
+    let Some(root) = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") else {
+        return ("7".repeat(64), "b".repeat(64));
+    };
+    let source_receipt =
+        fs::read(Path::new(&root).join("SCM-001.json")).expect("read live DIFF-003 source receipt");
+    let source: serde_json::Value =
+        serde_json::from_slice(&source_receipt).expect("parse live DIFF-003 source receipt");
+    let source_tree_sha256 = source["later_revision"]["content_sha256"]
+        .as_str()
+        .expect("live source content digest")
+        .to_owned();
+    (sha256(&source_receipt), source_tree_sha256)
 }
 
 fn sign_source_request(request: &mut ResolutionRequest, key: &Ed25519KeyPair) {

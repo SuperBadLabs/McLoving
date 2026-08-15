@@ -124,7 +124,7 @@
     {
       "id": "EXT-001",
       "protocol": "mcloving.external-connector/v1",
-      "implementation_source_manifest_sha256": "5fbb8c0488b5dd97613caeb81252f77cae844793a36ce50a2850a6a5fe3eb8a5",
+      "implementation_source_manifest_sha256": "980c95b72e53d024b7f311768365e504313e9cba4bf4789bd1a3169877cd2d89",
       "configuration_sha256": "4461c18123789610f43dd626491419d96bd40ed51f372c46ef81f353c0a9b016",
       "account_identity": "diff003-account/ext-001",
       "resource_identity": "diff003-resource/ext-001",
@@ -163,7 +163,7 @@
     {
       "id": "DEP-001",
       "protocol": "mcloving.dependency-resolver/v1",
-      "implementation_source_manifest_sha256": "ddf1e27ae698e401206c9dbbdef0f32de8f941ddccfe73cff64b2243e0446b36",
+      "implementation_source_manifest_sha256": "462d751af4532ee64403c3dedfda35029049a8f5a62f9a688d09707c09eb4a18",
       "configuration_sha256": "666c67464d09107f82d1b362c32bca8f8e8efcce2b84a589f3c862794b39888d",
       "account_identity": "diff003-account/dep-001",
       "resource_identity": "diff003-resource/dep-001",
