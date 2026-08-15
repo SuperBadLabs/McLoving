@@ -80,7 +80,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "DEP-001",
         "mcloving.dependency-resolver/v1",
-        "7480defe4dc272bef020914ca1f1f2df229db57adf95ef2e140b8e1091432fa6",
+        "e1e22ed5a68da721d39168df29104422261aae232b4760dbf4ce6eac15a10667",
     ),
     (
         "CACHE-001",
