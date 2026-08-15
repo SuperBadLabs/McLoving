@@ -381,6 +381,7 @@ fn exact_release_verifies_before_deployment_receipt() {
         1_786_000_200_000
     );
     assert!(receipt.rollback_manifest_sha256().is_none());
+    assert!(receipt.rollback_evidence_chain().is_empty());
     assert!(matches!(
         verified.deployment_receipt("production", DIGEST_A, 1_786_000_199_999),
         Err(ReleaseError::DeploymentDenied)
@@ -821,9 +822,124 @@ fn rollback_target_must_match_a_previously_verified_release_exactly() {
         second_verified.deployment_receipt("production", DIGEST_A, 1_786_000_399_999),
         Err(ReleaseError::DeploymentDenied)
     ));
-    second_verified
+    let receipt = second_verified
         .deployment_receipt("production", DIGEST_A, 1_786_000_400_000)
         .expect("deployment follows every rollback-chain authorization");
+    assert_eq!(
+        receipt.rollback_manifest_sha256(),
+        Some(first_verified.manifest_sha256())
+    );
+    assert_eq!(receipt.rollback_evidence_chain().len(), 1);
+    let predecessor = &receipt.rollback_evidence_chain()[0];
+    assert_eq!(
+        predecessor.release_id(),
+        first_verified.manifest().release_id
+    );
+    assert_eq!(
+        predecessor.manifest_sha256(),
+        first_verified.manifest_sha256()
+    );
+    assert_eq!(
+        predecessor.envelope_sha256(),
+        first_verified.envelope_sha256()
+    );
+    assert_eq!(
+        predecessor.evidence_manifest_sha256(),
+        first.policy.expected_audit_anchor.evidence_manifest_sha256
+    );
+    assert_eq!(
+        predecessor.audit_anchor_sha256(),
+        sha256(
+            &serde_json::to_vec(&first.policy.expected_audit_anchor)
+                .expect("canonical predecessor anchor")
+        )
+    );
+    assert_eq!(
+        predecessor.audit_anchor_verified_at_unix_ms(),
+        first.policy.expected_audit_anchor.verified_at_unix_ms
+    );
+
+    let mut alternate_first_policy = first.policy.clone();
+    alternate_first_policy.expected_audit_anchor.proof_sha256 = DIGEST_C.to_owned();
+    let alternate_first_verified = verify_release(
+        &first_envelope,
+        &alternate_first_policy,
+        &first.sbom,
+        &first.bundle,
+        &first.lock,
+        None,
+    )
+    .expect("verify separate evidence instance for the same predecessor");
+    let second_with_alternate_predecessor = verify_release(
+        &second_envelope,
+        &second.policy,
+        &second.sbom,
+        &second.bundle,
+        &second.lock,
+        Some(&alternate_first_verified),
+    )
+    .expect("accept separately anchored exact predecessor");
+    let alternate_receipt = second_with_alternate_predecessor
+        .deployment_receipt("production", DIGEST_A, 1_786_000_400_000)
+        .expect("emit separately anchored predecessor commitment");
+    assert_eq!(
+        alternate_receipt.rollback_evidence_chain()[0].manifest_sha256(),
+        predecessor.manifest_sha256()
+    );
+    assert_eq!(
+        alternate_receipt.rollback_evidence_chain()[0].evidence_manifest_sha256(),
+        predecessor.evidence_manifest_sha256()
+    );
+    assert_ne!(
+        alternate_receipt.rollback_evidence_chain()[0].audit_anchor_sha256(),
+        predecessor.audit_anchor_sha256()
+    );
+
+    let mut third = fixture(SHA1_A, SHA1_B, 7);
+    third.policy.signing.allow_genesis_release = false;
+    third.manifest.rollback_target = Some(RollbackTarget {
+        release_id: second_verified.manifest().release_id,
+        manifest_sha256: second_verified.manifest_sha256().to_owned(),
+        bundle_sha256: second_verified.manifest().bundle_sha256.clone(),
+        signer_key_id: second_verified.manifest().signer_key_id.clone(),
+        source_commit_sha1: second_verified.manifest().source.commit_sha1.clone(),
+    });
+    let third_envelope = signed(&third);
+    let (_, _, _, third_policy) = verification_material_from_with_times(
+        &third.policy.signing,
+        &third_envelope,
+        &third.sbom,
+        &third.bundle,
+        &third.lock,
+        1_786_000_500,
+        1_786_000_600_000,
+    );
+    third.policy = third_policy;
+    let third_verified = verify_release(
+        &third_envelope,
+        &third.policy,
+        &third.sbom,
+        &third.bundle,
+        &third.lock,
+        Some(&second_verified),
+    )
+    .expect("verify complete rollback chain");
+    let third_receipt = third_verified
+        .deployment_receipt("production", DIGEST_A, 1_786_000_600_000)
+        .expect("emit complete rollback-chain commitment");
+    assert_eq!(third_receipt.rollback_evidence_chain().len(), 2);
+    assert_eq!(
+        third_receipt.rollback_evidence_chain()[0].manifest_sha256(),
+        first_verified.manifest_sha256()
+    );
+    assert_eq!(
+        third_receipt.rollback_evidence_chain()[1].manifest_sha256(),
+        second_verified.manifest_sha256()
+    );
+    assert_ne!(
+        third_receipt.rollback_evidence_chain()[0].evidence_manifest_sha256(),
+        third_receipt.rollback_evidence_chain()[1].evidence_manifest_sha256()
+    );
 
     let mut late_first_policy = first.policy.clone();
     late_first_policy.expected_audit_anchor.verified_at_unix_ms = 1_786_000_350_000;

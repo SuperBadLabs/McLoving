@@ -199,7 +199,13 @@ time, proving that the rollback target was already verified when the successor
 became transparent. The serialized deployment receipt retains both the Rekor
 integration time and independent-anchor verification time alongside their
 complete evidence identifiers so downstream auditors can reconstruct the exact
-ordering that authorized placement.
+ordering that authorized placement. For a rollback release it also retains an
+oldest-first chain of canonical commitments to every verified predecessor's
+release, envelope, evidence manifest, audit anchor and anchor-verification time.
+The evidence-manifest and audit-anchor SHA-256 values distinguish separate
+authorization instances even when they bind the same signed predecessor, so an
+auditor can identify the exact predecessor evidence that satisfied successor
+chronology.
 Its fields are private and it does not implement deserialization, so stored JSON
 cannot be converted back into deployment authority or forged as a typed
 receipt. Any authority-bearing deployment function must consume the live
@@ -259,7 +265,8 @@ A genesis release is allowed only by an explicit policy bit. A non-genesis
 release without its exact verified predecessor is denied. An unrelated valid
 release cannot satisfy rollback. Only the final verified value can emit a
 deployment receipt binding environment, deployment configuration digest,
-release, source, builder, signer, transparency entry and rollback manifest.
+release, source, builder, signer, transparency entry, rollback manifest and the
+complete verified predecessor evidence chain.
 That receipt is serialization-only audit output and cannot recreate the
 verified value.
 

@@ -294,6 +294,49 @@ pub struct SigningKeyInfo {
     pub public_key_sha256: String,
 }
 
+/// Canonical commitment to one independently verified rollback predecessor.
+///
+/// The deployment receipt retains these commitments oldest-first so an auditor
+/// can identify the exact evidence-manifest and audit-anchor instances that
+/// satisfied the release chronology checks. Like [`DeploymentReceipt`], this
+/// value is serialization-only evidence and conveys no deployment authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackEvidenceCommitment {
+    release_id: Uuid,
+    manifest_sha256: String,
+    envelope_sha256: String,
+    evidence_manifest_sha256: String,
+    audit_anchor_sha256: String,
+    audit_anchor_verified_at_unix_ms: i64,
+}
+
+impl RollbackEvidenceCommitment {
+    pub fn release_id(&self) -> Uuid {
+        self.release_id
+    }
+
+    pub fn manifest_sha256(&self) -> &str {
+        &self.manifest_sha256
+    }
+
+    pub fn envelope_sha256(&self) -> &str {
+        &self.envelope_sha256
+    }
+
+    pub fn evidence_manifest_sha256(&self) -> &str {
+        &self.evidence_manifest_sha256
+    }
+
+    pub fn audit_anchor_sha256(&self) -> &str {
+        &self.audit_anchor_sha256
+    }
+
+    pub fn audit_anchor_verified_at_unix_ms(&self) -> i64 {
+        self.audit_anchor_verified_at_unix_ms
+    }
+}
+
 /// Audit evidence emitted from a live [`VerifiedRelease`].
 ///
 /// This type is deliberately serialization-only and has private fields. It
@@ -330,6 +373,7 @@ pub struct DeploymentReceipt {
     audit_anchor_notary_reference: String,
     audit_anchor_verified_at_unix_ms: i64,
     rollback_manifest_sha256: Option<String>,
+    rollback_evidence_chain: Vec<RollbackEvidenceCommitment>,
     deployed_at_unix_ms: i64,
     deployment_environment: String,
     deployment_configuration_sha256: String,
@@ -444,6 +488,10 @@ impl DeploymentReceipt {
         self.rollback_manifest_sha256.as_deref()
     }
 
+    pub fn rollback_evidence_chain(&self) -> &[RollbackEvidenceCommitment] {
+        &self.rollback_evidence_chain
+    }
+
     pub fn deployed_at_unix_ms(&self) -> i64 {
         self.deployed_at_unix_ms
     }
@@ -464,6 +512,7 @@ pub struct VerifiedRelease {
     transparency: TransparencyEvidence,
     evidence_manifest: ReleaseEvidenceManifest,
     audit_anchor: AuditAnchorEvidence,
+    rollback_evidence_chain: Vec<RollbackEvidenceCommitment>,
     authorization_complete_at_unix_ms: i64,
 }
 
@@ -552,6 +601,7 @@ impl VerifiedRelease {
                 .rollback_target
                 .as_ref()
                 .map(|target| target.manifest_sha256.clone()),
+            rollback_evidence_chain: self.rollback_evidence_chain.clone(),
             deployed_at_unix_ms,
             deployment_environment: deployment_environment.to_owned(),
             deployment_configuration_sha256: deployment_configuration_sha256.to_owned(),
@@ -804,6 +854,21 @@ pub fn verify_release(
         return Err(ReleaseError::RollbackDenied);
     }
 
+    let rollback_evidence_chain = if let Some(previous) = rollback {
+        let mut chain = previous.rollback_evidence_chain.clone();
+        chain.push(RollbackEvidenceCommitment {
+            release_id: previous.manifest.release_id,
+            manifest_sha256: previous.manifest_sha256.clone(),
+            envelope_sha256: previous.envelope_sha256.clone(),
+            evidence_manifest_sha256: previous.audit_anchor.evidence_manifest_sha256.clone(),
+            audit_anchor_sha256: sha256_hex(&serde_json::to_vec(&previous.audit_anchor)?),
+            audit_anchor_verified_at_unix_ms: previous.audit_anchor.verified_at_unix_ms,
+        });
+        chain
+    } else {
+        Vec::new()
+    };
+
     Ok(VerifiedRelease {
         manifest: envelope.manifest.clone(),
         manifest_sha256,
@@ -811,6 +876,7 @@ pub fn verify_release(
         transparency: transparency.clone(),
         evidence_manifest: evidence_manifest.clone(),
         audit_anchor: audit_anchor.clone(),
+        rollback_evidence_chain,
         authorization_complete_at_unix_ms: audit_anchor.verified_at_unix_ms,
     })
 }
