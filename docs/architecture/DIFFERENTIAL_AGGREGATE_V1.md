@@ -20,8 +20,8 @@ detached SHA-256 manifest and a digest compiled into
 - the immutable DIFF-001, DIFF-002, and DIFF-003 evidence sets.
 
 Every relative path is fixed, traversal and symlink components are denied, and
-every input is a bounded regular file with an exact compiled digest. The
-aggregate then calls these existing verifiers exactly once:
+every input is a bounded, singly linked regular file with an exact compiled
+digest. The aggregate then calls these existing verifiers exactly once:
 
 1. `mcloving-jenkins-differential` for native execution parity;
 2. `mcloving-state-policy-differential` for identity, authorization,

@@ -215,7 +215,10 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
             .map_err(|_| VerificationError::new("E_TREE", "non-UTF-8 bundle entry"))?;
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || has_multiple_hard_links(&metadata)
+        {
             return Err(VerificationError::new(
                 "E_TREE",
                 format!("unsafe bundle entry {name}"),
@@ -669,6 +672,18 @@ fn safe_relative(path: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+#[cfg(unix)]
+fn has_multiple_hard_links(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    metadata.nlink() != 1
+}
+
+#[cfg(not(unix))]
+fn has_multiple_hard_links(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, VerificationError> {
     if !safe_relative(relative) {
         return Err(VerificationError::new(
@@ -696,10 +711,10 @@ fn read_regular_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, Verifica
     }
     let metadata = fs::symlink_metadata(&current)
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
-    if !metadata.is_file() {
+    if !metadata.is_file() || has_multiple_hard_links(&metadata) {
         return Err(VerificationError::new(
             "E_INPUT_SUBSTITUTION",
-            "bound input is not a regular file",
+            "bound input is not an unaliased regular file",
         ));
     }
     fs::read(current).map_err(|error| VerificationError::new("E_IO", error.to_string()))
@@ -776,6 +791,23 @@ mod tests {
         assert_eq!(
             verify_aggregate(&taxonomy, &repository()).unwrap_err().code,
             "E_TAXONOMY"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multiply_linked_bound_input_fails_closed() {
+        let temporary = tempfile::tempdir().expect("temporary repository");
+        let input = temporary.path().join("input.json");
+        let alias_directory = tempfile::tempdir().expect("alias directory");
+        fs::write(&input, b"{}\n").expect("write input");
+        fs::hard_link(&input, alias_directory.path().join("input-alias")).expect("hardlink input");
+
+        assert_eq!(
+            read_regular_beneath(temporary.path(), "input.json")
+                .unwrap_err()
+                .code,
+            "E_INPUT_SUBSTITUTION"
         );
     }
 }

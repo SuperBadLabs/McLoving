@@ -77,3 +77,21 @@ fn symlinked_evidence_fails_closed() {
         "E_TREE"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn hardlinked_evidence_fails_closed() {
+    let temporary = copy_fixture();
+    let alias_directory = tempfile::tempdir().expect("alias directory");
+    fs::hard_link(
+        temporary.path().join(EVIDENCE_FILE),
+        alias_directory.path().join("evidence-alias"),
+    )
+    .expect("hardlink evidence");
+    assert_eq!(
+        verify_bundle(temporary.path(), &repository())
+            .unwrap_err()
+            .code,
+        "E_TREE"
+    );
+}
