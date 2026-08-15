@@ -388,6 +388,7 @@ fn diff003_connector_binding() -> Option<Diff003ConnectorBinding> {
     let receipt_sha256 = content_sha256(&bytes);
     connector.as_object_mut()?.remove("_diff003");
     connector.as_object_mut()?.remove("release_binding");
+    connector.as_object_mut()?.remove("secret_grant_binding");
     connector
         .as_object_mut()?
         .remove("observer_receipt_signing_public_key_sha256");
