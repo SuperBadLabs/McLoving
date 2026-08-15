@@ -213,7 +213,8 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
             "bundle root must be a directory",
         ));
     }
-    let mut names = Vec::new();
+    let expected_names = BTreeSet::from(["SHA256SUMS".to_owned(), EVIDENCE_FILE.to_owned()]);
+    let mut names = BTreeSet::new();
     for entry in
         fs::read_dir(root).map_err(|error| VerificationError::new("E_IO", error.to_string()))?
     {
@@ -222,6 +223,15 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
             .file_name()
             .into_string()
             .map_err(|_| VerificationError::new("E_TREE", "non-UTF-8 bundle entry"))?;
+        if names.len() == expected_names.len()
+            || !expected_names.contains(name.as_str())
+            || !names.insert(name.clone())
+        {
+            return Err(VerificationError::new(
+                "E_TREE",
+                "bundle contains an unexpected or duplicate entry",
+            ));
+        }
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
         if !metadata.is_file()
@@ -233,10 +243,8 @@ fn verify_bundle_tree(root: &Path) -> Result<(), VerificationError> {
                 format!("unsafe bundle entry {name}"),
             ));
         }
-        names.push(name);
     }
-    names.sort();
-    if names != ["SHA256SUMS", EVIDENCE_FILE] {
+    if names != expected_names {
         return Err(VerificationError::new(
             "E_TREE",
             "bundle must contain exactly SHA256SUMS and differential-aggregate.json",
