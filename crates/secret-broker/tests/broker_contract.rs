@@ -374,6 +374,37 @@ fn broker_requires_a_nonempty_unambiguous_public_marker_registry() {
 }
 
 #[test]
+fn broker_rejects_legacy_mappings_that_conflict_with_the_active_marker_registry() {
+    let root = TempDir::new().expect("temporary broker root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private temp root");
+    }
+    let path = root.path().join("legacy.sqlite");
+    let mut mapping = mapping(connector());
+    let raw = String::from_utf8(SECRET.to_vec()).expect("ASCII marker");
+    mapping.provider_reference = format!("secret/{raw}");
+    approve(&mut mapping);
+    let mut legacy = SecretBroker::open(
+        &path,
+        trusted_owner_keys(),
+        vec![b"different-owner-private-marker-0001".to_vec()],
+    )
+    .expect("open legacy broker");
+    legacy
+        .install_mapping(&mapping, 900)
+        .expect("install previously admitted mapping");
+    drop(legacy);
+
+    assert!(matches!(
+        SecretBroker::open(&path, trusted_owner_keys(), denied_public_markers()),
+        Err(BrokerError::ConfidentialityDenied)
+    ));
+}
+
+#[test]
 fn exact_connector_grant_redeems_once_without_disclosing_secret_in_receipts_or_audit() {
     let mapping = mapping(connector());
     let request = grant(&mapping);

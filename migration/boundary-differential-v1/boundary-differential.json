@@ -83,7 +83,7 @@
     {
       "id": "SECRET-001",
       "protocol": "mcloving.secret-grant/v1",
-      "implementation_source_manifest_sha256": "2134caa8d9ff5e5246ca80d17b6603741a1faafac3f5fc307cc44326a687432a",
+      "implementation_source_manifest_sha256": "d427fd96bc17266b31fe08798a65f1c9e5d9f1ab780bb50ae5055bbd6d3c6041",
       "configuration_sha256": "cd100128c5738a0895f1c9e0cc01551d12990fe5bcb86ae9561688ef40ac1685",
       "account_identity": "diff003-account/secret-001",
       "resource_identity": "diff003-resource/secret-001",

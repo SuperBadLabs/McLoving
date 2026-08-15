@@ -531,6 +531,7 @@ impl SecretBroker {
         )?;
         validate_state_file(&canonical_path)?;
         validate_state_sidecars(&canonical_path)?;
+        validate_stored_mappings(&connection, &trusted_owner_keys, &denied_public_markers)?;
         Ok(Self {
             connection,
             trusted_owner_keys,
@@ -1251,6 +1252,41 @@ fn validate_denied_public_markers(markers: &[Vec<u8>]) -> Result<(), BrokerError
     Ok(())
 }
 
+fn validate_stored_mappings(
+    connection: &Connection,
+    trusted_owner_keys: &BTreeMap<String, Vec<u8>>,
+    denied_public_markers: &[Vec<u8>],
+) -> Result<(), BrokerError> {
+    let mut statement = connection.prepare(
+        "SELECT mapping_id, rotation_generation, canonical_json
+         FROM mapping_versions ORDER BY mapping_id, rotation_generation",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (mapping_id, rotation_generation, canonical) = row?;
+        let mapping: CredentialMapping = serde_json::from_slice(&canonical)?;
+        validate_mapping(&mapping)?;
+        if mapping_id != mapping.mapping_id.to_string()
+            || rotation_generation != mapping.rotation_generation
+            || serde_json::to_vec(&mapping)? != canonical
+        {
+            return Err(BrokerError::InvalidMapping);
+        }
+        let owner_approval_public_key = trusted_owner_keys
+            .get(&mapping.owner_approval_signer_key_id)
+            .ok_or(BrokerError::OwnerApprovalDenied)?;
+        verify_owner_approval_integrity(&mapping, owner_approval_public_key)?;
+        ensure_markers_absent(&mapping, &canonical, denied_public_markers)?;
+    }
+    Ok(())
+}
+
 fn ensure_markers_absent<T: Serialize>(
     value: &T,
     canonical: &[u8],
@@ -1364,8 +1400,17 @@ fn verify_owner_approval(
     if installed_at_unix_ms < mapping.owner_approved_at_unix_ms
         || installed_at_unix_ms >= mapping.owner_approval_expires_unix_ms
         || approval_ttl.is_none_or(|ttl| !(1..=MAX_APPROVAL_TTL_MS).contains(&ttl))
-        || sha256_hex(owner_approval_public_key) != mapping.owner_approval_public_key_sha256
     {
+        return Err(BrokerError::OwnerApprovalDenied);
+    }
+    verify_owner_approval_integrity(mapping, owner_approval_public_key)
+}
+
+fn verify_owner_approval_integrity(
+    mapping: &CredentialMapping,
+    owner_approval_public_key: &[u8],
+) -> Result<(), BrokerError> {
+    if sha256_hex(owner_approval_public_key) != mapping.owner_approval_public_key_sha256 {
         return Err(BrokerError::OwnerApprovalDenied);
     }
     let payload = mapping.owner_approval_payload()?;

@@ -70,6 +70,13 @@ provider identity, and disposition. Provider implementation, configuration,
 reference, API version, secret version, and owner approval may advance only in
 that signed new generation.
 
+Before startup returns, every retained mapping generation is reparsed,
+structurally validated, checked for exact canonical/column identity, reverified
+against its startup-trusted owner key, and rescanned against the active marker
+registry. A legacy or tampered mapping therefore fails the entire broker open;
+it cannot issue or redeem a grant merely because it predates the current
+registry.
+
 ## Fenced short-lived grants
 
 Grant protocol `mcloving.secret-grant/v1` binds:
