@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "177a2e001f7d469e7304730e0888540c750e511356d5b58dc20d504a6b2cab20";
+    "d79047f200db9b96eaeecacb6419e9ff40f45fc1b7e26ceffab2393512fb7eb9";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -40,7 +40,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "TRIG-001",
         "mcloving.trigger-ingress/v1",
-        "b12f995679869747b83feee75262ee1568d9ea360b97a99a2fe56f433baa2b75",
+        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
     ),
     (
         "SCM-001",
@@ -75,7 +75,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "DISC-001",
         "mcloving.discovery/v1",
-        "b12f995679869747b83feee75262ee1568d9ea360b97a99a2fe56f433baa2b75",
+        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
     ),
     (
         "DEP-001",
@@ -90,12 +90,12 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "CONSUMER-001",
         "mcloving.external-read-consumer/v1",
-        "b12f995679869747b83feee75262ee1568d9ea360b97a99a2fe56f433baa2b75",
+        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
     ),
     (
         "ADMIN-001",
         "mcloving.external-admin-client/v1",
-        "b12f995679869747b83feee75262ee1568d9ea360b97a99a2fe56f433baa2b75",
+        "686f7bdf2312db386fbcb443c312b950fcbb9eba792676abb42fa65427003810",
     ),
     (
         "REL-001",
@@ -116,7 +116,11 @@ const EXPECTED_SCENARIOS: [(&str, &str, ScenarioOutcome); 48] = [
         "TRIG-001",
         ScenarioOutcome::Denied,
     ),
-    ("trigger_outage_denied", "TRIG-001", ScenarioOutcome::Denied),
+    (
+        "trigger_attempt_budget_denied",
+        "TRIG-001",
+        ScenarioOutcome::Denied,
+    ),
     (
         "source_revision_substitution_denied",
         "SCM-001",

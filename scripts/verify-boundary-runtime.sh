@@ -79,6 +79,7 @@ done
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
   .trigger_generation == 1 and .status == "pending"
   and (.delivery_id | type == "string" and length > 0)
+  and (.input_capture_receipt_sha256 | test($d))
 ' "${receipt_dir}/TRIG-001.json" >/dev/null || fail "TRIG-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
@@ -203,7 +204,7 @@ scenario_map=$(cat <<'MAP'
 trigger_substitution_denied|TRIG-001|delivery_dedup_claim_retry_and_operational_fences_are_durable
 trigger_replay_denied|TRIG-001|delivery_dedup_claim_retry_and_operational_fences_are_durable
 trigger_stale_generation_denied|TRIG-001|delivery_dedup_claim_retry_and_operational_fences_are_durable
-trigger_outage_denied|TRIG-001|dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies_new_events
+trigger_attempt_budget_denied|TRIG-001|dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies_new_events
 source_revision_substitution_denied|SCM-001|exact_revision_replay_later_commit_and_sparse_truth
 source_later_revision_preserved|SCM-001|exact_revision_replay_later_commit_and_sparse_truth
 source_outage_denied|SCM-001|repository_that_ignores_blob_filter_is_denied_without_publication
@@ -359,6 +360,8 @@ while IFS=$'\t' read -r name source target rule expected_effects \
         and .[1].initial.generation == 7 and .[1].later_revision.generation == 7
         and .[0].canonical_payload.payload.repository_identity
           == .[1].initial.repository_trees[0].repository_identity
+        and .[0].canonical_payload.payload.revision
+          == .[1].initial.repository_trees[0].resolved_commit
         and .[1].initial.content_sha256 != .[1].later_revision.content_sha256'
       ;;
     source_later_revision_to_dependency)
@@ -379,6 +382,7 @@ while IFS=$'\t' read -r name source target rule expected_effects \
       ;;
     input_capture_to_control_flow)
       pair_filter='.[0].generation == .[1].trigger_generation
+        and .[1].input_capture_receipt_sha256 == $source_sha
         and .[1].status == "pending"'
       ;;
     dependency_to_cache)

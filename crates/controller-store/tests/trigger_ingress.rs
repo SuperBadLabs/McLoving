@@ -204,12 +204,13 @@ fn delivery(
     event_id: &str,
     accepted_at_unix_ms: i64,
 ) -> NewTriggerDelivery {
+    let source_revision = diff003_source_revision();
     let canonical_payload = json!({
         "event_kind": "push",
         "event_time_unix_ms": accepted_at_unix_ms - 1_000,
         "payload": {
             "repository_identity": "github:superbadlabs/mcloving",
-            "revision": "0123456789abcdef",
+            "revision": source_revision,
             "branch": "main",
             "paths": ["src/lib.rs"]
         },
@@ -238,6 +239,21 @@ fn delivery(
         accepted_at_unix_ms,
         schedule_slot: None,
     }
+}
+
+fn diff003_source_revision() -> String {
+    let Some(root) = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") else {
+        return "0123456789abcdef".to_owned();
+    };
+    let source: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("SCM-001.json"))
+            .expect("read live DIFF-003 source receipt"),
+    )
+    .expect("parse live DIFF-003 source receipt");
+    source["initial"]["repository_trees"][0]["resolved_commit"]
+        .as_str()
+        .expect("live DIFF-003 source revision")
+        .to_owned()
 }
 
 fn remote_delivery(mut input: NewTriggerDelivery) -> NewTriggerDelivery {
@@ -582,12 +598,15 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         accepted.accepted_at_unix_ms + 7_200_000
     );
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let input_receipt = std::fs::read(std::path::Path::new(&root).join("INPUT-001.json"))
+            .expect("read live DIFF-003 input receipt");
+        let mut accepted_value =
+            serde_json::to_value(accepted).expect("encode DIFF-003 trigger receipt");
+        accepted_value["input_capture_receipt_sha256"] =
+            json!(format!("{:x}", Sha256::digest(&input_receipt)));
         std::fs::write(
             std::path::Path::new(&root).join("TRIG-001.json"),
-            diff003::receipt(
-                "TRIG-001",
-                serde_json::to_value(accepted).expect("encode DIFF-003 trigger receipt"),
-            ),
+            diff003::receipt("TRIG-001", accepted_value),
         )
         .expect("write DIFF-003 trigger receipt");
     }
@@ -2014,7 +2033,7 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
     let outage_denied = matches!(failed, TriggerDeliveryFailure::DeadLettered(_));
     assert!(outage_denied);
     diff003::record_assertion(
-        "trigger_outage_denied",
+        "trigger_attempt_budget_denied",
         "denied",
         json!({
             "delivery_id": input.delivery_id,

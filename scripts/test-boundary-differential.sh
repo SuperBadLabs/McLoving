@@ -255,6 +255,10 @@ podman create --name "${runner}" \
       printf "%s\n" "${suite}" >>/runner-output/component-suites.txt
       printf "suite_end=%s\n" "${suite}"
     }
+    run_suite input-adapter cargo test --locked --offline \
+      -p mcloving-input-adapter -- --test-threads=1
+    run_suite source-acquirer cargo test --locked --offline \
+      -p mcloving-source-acquirer -- --test-threads=1
     run_suite controller-trigger cargo test --locked --offline \
       -p mcloving-controller-store --test trigger_ingress -- --test-threads=1
     run_suite controller-discovery cargo test --locked --offline \
@@ -263,12 +267,8 @@ podman create --name "${runner}" \
       -p mcloving-controller-store --test external_read_consumers -- --test-threads=1
     run_suite controller-admin cargo test --locked --offline \
       -p mcloving-controller-store --test external_admin_clients -- --test-threads=1
-    run_suite source-acquirer cargo test --locked --offline \
-      -p mcloving-source-acquirer -- --test-threads=1
     run_suite secret-broker cargo test --locked --offline \
       -p mcloving-secret-broker
-    run_suite input-adapter cargo test --locked --offline \
-      -p mcloving-input-adapter
     run_suite provisioner cargo test --locked --offline \
       -p mcloving-provisioner
     run_dependency_suite() {
@@ -425,13 +425,13 @@ printf 'dependency-resolver-authority-alias\n' \
 
 expected_suites="${runtime_root}/expected-suites.txt"
 printf '%s\n' \
+  input-adapter \
+  source-acquirer \
   controller-trigger \
   controller-discovery \
   controller-consumer \
   controller-admin \
-  source-acquirer \
   secret-broker \
-  input-adapter \
   provisioner \
   dependency-resolver \
   cache \
