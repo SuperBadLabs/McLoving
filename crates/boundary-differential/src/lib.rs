@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "4db65e7a924c325684bd907ff9df87d3bdb1b2c9d2efb9ae1749af06fc632181";
+    "a72955c5184e40dbfd7e6135460627b7aaf56595d75901032e112b720591a9dd";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -60,7 +60,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "PROV-001",
         "mcloving.provisioner.v1",
-        "4caecde3a08c688000a7dcebafc21d51e0220a5ac0d28c7144e9f0a8b90b6cab",
+        "86c7b38f78b18332ca9ca5d7338e1aa547093944730105273997b9dc313e6e3e",
     ),
     (
         "EXT-001",

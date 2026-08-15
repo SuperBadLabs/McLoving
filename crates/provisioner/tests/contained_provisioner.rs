@@ -1111,11 +1111,17 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
             ))
             .await
             .expect("clean ambiguous attestation instance");
-        assert_eq!(cancellation.body.outcome, LifecycleOutcome::Cancelled);
+        assert_eq!(
+            cancellation.body.outcome,
+            LifecycleOutcome::SubstitutionDeniedCleaned
+        );
         assert!(cancellation.body.cleanup_confirmed);
         assert_eq!(context.fixture.counts().3, 0);
-        cleaned_ambiguous_instances +=
-            usize::from(cancellation.body.cleanup_confirmed && context.fixture.counts().3 == 0);
+        cleaned_ambiguous_instances += usize::from(
+            cancellation.body.outcome == LifecycleOutcome::SubstitutionDeniedCleaned
+                && cancellation.body.cleanup_confirmed
+                && context.fixture.counts().3 == 0,
+        );
     }
 
     let denied = Context::new(FixtureMode::Unauthorized).await;
