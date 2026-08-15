@@ -35,7 +35,10 @@ digest-authenticated bytes into a new owner-private snapshot. DIFF-001's
 authenticated 30-file manifest selects and authenticates every snapshot file;
 DIFF-002 and DIFF-003 use their authenticated evidence bytes and compiled
 canonical manifests. Each snapshot remains alive through verifier completion
-and is then removed, so a mutable repository cannot replace a file between
+and is then removed. On Windows, the aggregate additionally retains every
+snapshot directory and file handle without write/delete sharing, preventing
+replacement regardless of an inherited temporary-directory ACL. A mutable
+repository or concurrent local process therefore cannot replace a file between
 aggregate authentication and canonical semantic verification. The aggregate
 then calls these existing verifiers exactly once against those snapshots:
 

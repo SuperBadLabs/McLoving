@@ -166,6 +166,18 @@ struct HistoricalMetric {
     grants_runnable_or_equivalence_claim: bool,
 }
 
+struct VerifiedSnapshot {
+    directory: tempfile::TempDir,
+    #[cfg(windows)]
+    _anchors: Vec<fs::File>,
+}
+
+impl VerifiedSnapshot {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
 pub fn verify_bundle(
     bundle_root: &Path,
     repository_root: &Path,
@@ -1035,7 +1047,7 @@ fn open_regular_beneath_platform(
 fn snapshot_manifest_bundle(
     source_root: &Path,
     manifest: &[u8],
-) -> Result<tempfile::TempDir, VerificationError> {
+) -> Result<VerifiedSnapshot, VerificationError> {
     let text = std::str::from_utf8(manifest)
         .map_err(|error| VerificationError::new("E_INPUT_SUBSTITUTION", error.to_string()))?;
     if manifest.len() as u64 > MAX_BOUND_INPUT_BYTES || !text.ends_with('\n') {
@@ -1087,7 +1099,7 @@ fn snapshot_single_file_bundle(
     manifest: &str,
     name: &str,
     bytes: &[u8],
-) -> Result<tempfile::TempDir, VerificationError> {
+) -> Result<VerifiedSnapshot, VerificationError> {
     let expected_digest = manifest
         .strip_suffix('\n')
         .and_then(|line| line.split_once("  "))
@@ -1114,13 +1126,15 @@ fn snapshot_single_file_bundle(
 fn materialize_snapshot(
     manifest: &[u8],
     files: BTreeMap<String, Vec<u8>>,
-) -> Result<tempfile::TempDir, VerificationError> {
+) -> Result<VerifiedSnapshot, VerificationError> {
     let snapshot = tempfile::Builder::new()
         .prefix("mcloving-differential-snapshot-")
         .tempdir()
         .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
     set_private_directory(snapshot.path())?;
     write_private_snapshot_file(snapshot.path(), "SHA256SUMS", manifest)?;
+    #[cfg(windows)]
+    let snapshot_paths = files.keys().cloned().collect::<Vec<_>>();
     for (relative, bytes) in files {
         let parent = Path::new(&relative).parent().ok_or_else(|| {
             VerificationError::new("E_INPUT_SUBSTITUTION", "snapshot path has no parent")
@@ -1133,7 +1147,74 @@ fn materialize_snapshot(
         }
         write_private_snapshot_file(snapshot.path(), &relative, &bytes)?;
     }
-    Ok(snapshot)
+    #[cfg(windows)]
+    let anchors = anchor_windows_snapshot(snapshot.path(), &snapshot_paths)?;
+    Ok(VerifiedSnapshot {
+        directory: snapshot,
+        #[cfg(windows)]
+        _anchors: anchors,
+    })
+}
+
+#[cfg(windows)]
+fn anchor_windows_snapshot(
+    root: &Path,
+    files: &[String],
+) -> Result<Vec<fs::File>, VerificationError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let open_anchor = |path: &Path, directory: bool| -> Result<fs::File, VerificationError> {
+        let flags = FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            };
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(flags)
+            .open(path)
+            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| VerificationError::new("E_IO", error.to_string()))?;
+        if metadata.is_dir() != directory
+            || mcloving_windows_job::file_is_reparse_point(&file)
+                .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
+            || (!directory
+                && mcloving_windows_job::file_link_count(&file)
+                    .map_err(|error| VerificationError::new("E_IO", error.to_string()))?
+                    != 1)
+        {
+            return Err(VerificationError::new(
+                "E_INPUT_SUBSTITUTION",
+                "snapshot anchor identity mismatch",
+            ));
+        }
+        Ok(file)
+    };
+
+    let mut directories = BTreeSet::new();
+    for relative in files {
+        if let Some(parent) = Path::new(relative).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    let mut anchors = vec![open_anchor(root, true)?];
+    for directory in directories {
+        anchors.push(open_anchor(&root.join(directory), true)?);
+    }
+    anchors.push(open_anchor(&root.join("SHA256SUMS"), false)?);
+    for relative in files {
+        anchors.push(open_anchor(&root.join(relative), false)?);
+    }
+    Ok(anchors)
 }
 
 fn write_private_snapshot_file(
@@ -1215,6 +1296,18 @@ mod tests {
         assert!(mcloving_jenkins_differential::verify_bundle(mutable_source.path()).is_err());
         mcloving_jenkins_differential::verify_bundle(authenticated.path())
             .expect("verify immutable authenticated snapshot");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_snapshot_anchors_deny_mutation_until_verification_finishes() {
+        let bytes = b"authenticated\n";
+        let manifest = format!("{}  evidence.json\n", sha256(bytes));
+        let snapshot = snapshot_single_file_bundle(&manifest, "evidence.json", bytes)
+            .expect("create anchored snapshot");
+
+        assert!(fs::write(snapshot.path().join("evidence.json"), b"replacement\n").is_err());
+        assert!(fs::remove_file(snapshot.path().join("SHA256SUMS")).is_err());
     }
 
     #[test]
