@@ -205,7 +205,7 @@ podman create --name "${runner}" \
   --cpus 2 --memory 6g --pids-limit 4096 \
   --security-opt no-new-privileges \
   --cap-drop all \
-  --cap-add SETUID --cap-add SETGID \
+  --cap-add SETUID --cap-add SETGID --cap-add SETFCAP \
   --env CARGO_NET_OFFLINE=true \
   --env CARGO_TARGET_DIR=/cargo-target \
   --env RUSTUP_TOOLCHAIN=1.97.1 \

@@ -153,10 +153,11 @@ service, and starts a pinned Rust runner with no-new-privileges, finite CPU,
 memory, and PID ceilings, a read-only source mount, read-only offline Cargo
 registry, fresh writable target directory, and exact-capacity source-transport
 tmpfs mounts. The runner drops the complete default capability set and restores
-only rootless `SETUID` and `SETGID`, which the source-acquirer needs to write the
-single-identity UID/GID maps for its inner transport user namespace. It retains
-no host-root mapping, `SYS_ADMIN`, mount, public-network, or production
-authority.
+only rootless `SETUID`, `SETGID`, and `SETFCAP`. The source-acquirer needs the
+first two to write the single-identity UID/GID maps for its inner transport user
+namespace; Linux requires the third when the inner mapping contains namespace
+UID zero. It retains no host-root mapping, `SYS_ADMIN`, mount, public-network,
+or production authority.
 It runs the real PostgreSQL trigger, discovery, consumer, and admin suites plus
 the complete focused source-acquirer, secret-broker, input-adapter,
 provisioner, external-connector, destination-observer, dependency-resolver,
