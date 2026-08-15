@@ -10,12 +10,16 @@ effect, deployment, client cutover, canary, rollback, or Jenkins decommission.
 The real owner/operator client remains `jenkins_source`, and the Mario
 inventories retain zero admitted production boundary mappings.
 
-Exact acceptance metadata is intentionally not committed here. The final
-reviewed PR head must first run unchanged on HeMan; PR #59's public closure
-comment then records only the exact head/tree, public receipt-key digest, and
-independently rechecked self-excluding manifest digest. The retained HeMan path
-stays in the private owner-controlled execution record. No repository change
-may follow that accepted run before merge.
+The accepted unchanged HeMan run binds exact reviewed head
+`296238dfb7aefaef1518a72c2398848f7b5fd2ec`, tree
+`7020c99d334089e7c7862e87ce430790cce47491`, and independently rechecked
+self-excluding 175-file evidence-manifest SHA-256
+`40ff90e57bd29b16044706b8cd6686211527131a6459a0eea8cf85c024074fd5`.
+The exact receipt-authentication public key's canonical DER SHA-256 is
+`47bd4c993a30cf5a048b5590c09f0c00712649580902f9dfc1ecc9bf044cc23b`.
+The retained HeMan path stays in the private owner-controlled execution record.
+No repository change followed that accepted run before PR #59 squash-merged as
+protected-main commit `6156e70fa2b869b2f2b3097e65a618e8e741936e`.
 
 ## Evidence result
 

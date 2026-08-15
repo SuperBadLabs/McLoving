@@ -1,8 +1,12 @@
 # External-boundary differential v1
 
-Status: accepted DIFF-003 implementation receipt; independent PR review,
-protected checks, merge, and post-merge verification remain required before the
-execution board can mark DIFF-003 complete. No production authority is claimed.
+Status: `DIFF-003` complete. Exact implementation head
+`296238dfb7aefaef1518a72c2398848f7b5fd2ec` passed the contained ceremony,
+independent review, all nine protected checks, and resolution of every review
+thread. PR #59 squash-merged as protected-main commit
+`6156e70fa2b869b2f2b3097e65a618e8e741936e`; post-merge Foundation run
+`31895158982` and Windows run `31895158966` passed. No production authority is
+claimed.
 
 ## Claim boundary
 
@@ -214,17 +218,20 @@ the private filesystem root is never published in repository documentation.
 
 ## Exact-head acceptance receipt
 
-The accepted receipt must bind the final reviewed PR head and tree after all
-code, documentation, and board changes. To avoid a self-invalidating metadata
-commit, its source head/tree, public receipt-authentication-key digest, and
-independently rechecked self-excluding manifest digest are published in PR
-#59's closure comment after the final run. The private HeMan run path is
-retained only in the owner-controlled execution record and is not
-posted publicly. No repository change may follow that run before merge.
-Earlier receipts are diagnostic only.
+The accepted receipt binds final reviewed PR head
+`296238dfb7aefaef1518a72c2398848f7b5fd2ec` and tree
+`7020c99d334089e7c7862e87ce430790cce47491`. Its independently rechecked,
+self-excluding 175-file evidence-manifest has SHA-256
+`40ff90e57bd29b16044706b8cd6686211527131a6459a0eea8cf85c024074fd5`.
+The Ed25519 receipt-authentication public key's canonical DER SHA-256 is
+`47bd4c993a30cf5a048b5590c09f0c00712649580902f9dfc1ecc9bf044cc23b`.
+The private HeMan run path remains only in the owner-controlled execution
+record and is not posted publicly. No repository change followed the accepted
+run before merge; earlier receipts are diagnostic only.
 
-The final receipt must contain the exact 15 component-suite entries, 13
-Ed25519-authenticated public boundary receipts, 11 two-receipt validated joins,
-and 48 assertion-derived scenario outcomes. It must report zero production
-mappings, production effects, duplicate effects, production cutover claims,
-and secret-marker disclosures, with a clean unchanged source tree at seal time.
+The final receipt contains the exact 15 component-suite entries, 13/13
+Ed25519-authenticated public boundary receipts, 11/11 two-receipt validated
+joins, and 48/48 assertion-derived scenario outcomes. It reports zero
+production mappings, production effects, duplicate effects, production cutover
+claims, and secret-marker disclosures, with a clean unchanged source tree at
+seal time.
