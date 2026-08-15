@@ -1529,6 +1529,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-differential-aggregate"
+version = "0.0.0"
+dependencies = [
+ "mcloving-boundary-differential",
+ "mcloving-jenkins-differential",
+ "mcloving-state-policy-differential",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "mcloving-domain"
 version = "0.0.0"
 

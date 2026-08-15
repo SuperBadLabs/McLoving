@@ -1,0 +1,69 @@
+{
+  "schema": "mcloving.jenkins.differential-aggregate/v1",
+  "case": "mario-230-corpus-228-immutable-closure",
+  "inputs": [
+    {"name":"corpus_manifest","path":"migration/mario-jenkins-oracle-228/corpus-v1/SHA256SUMS","sha256":"a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2"},
+    {"name":"source_manifest","path":"migration/mario-jenkins-oracle-228/corpus-v1/SOURCE_SHA256SUMS","sha256":"3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06"},
+    {"name":"corpus_index","path":"migration/mario-jenkins-oracle-228/corpus-v1/corpus-index.tsv","sha256":"5ecfefafc33b61d5c304a2dc6fbd60ca819882c3294605d92248f86215d51137"},
+    {"name":"source_job_map","path":"migration/mario-jenkins-oracle-228/corpus-v1/source-job-map.tsv","sha256":"cc4f25bb2d487751255e124942e596320f8d5ab059b396421044f2085baf398b"},
+    {"name":"inventory","path":"migration/mario-jenkins-oracle-228/inventory-20260731T064417Z-r2/eligibility-ledger.yaml","sha256":"436c76718f537ce199e4177e4db9998aad4b661176ff25d5daef17e082e4e636"},
+    {"name":"oracle_summary","path":"migration/mario-jenkins-oracle-228/corpus-v1/oracle/summary.json","sha256":"c7045cc4fd280579d9427e4781ba2d672b04f38c359ce8a3e541ab8adeec5512"},
+    {"name":"compiler_receipt","path":"migration/mario-jenkins-oracle-228/corpus-v1/compiler-v1/rust-admission.receipt","sha256":"3585f3e12525c42cd0b99abf61de371e64e03a20628dd1e5cbda87ae1933bb76"},
+    {"name":"mapping_catalog","path":"migration/mario-jenkins-oracle-228/corpus-v1/mapping-v1/catalog.yaml","sha256":"d383ab8e15593ca5cc2847633a1410b53e676442f60dfcca93606610d1f761c8"},
+    {"name":"mapping_lock","path":"migration/mario-jenkins-oracle-228/corpus-v1/mapping-v1/catalog.lock.yaml","sha256":"e8af0a08f60b7e179667e80ab19b2e8d0a119e185faa5faa4edb810e169ab203"},
+    {"name":"diff001_manifest","path":"migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/SHA256SUMS","sha256":"e783c38f9014b80a162328eba3abcf2565e38dfe54caa2a51660b886e3c3e73e"},
+    {"name":"diff002_evidence","path":"migration/state-policy-differential-v1/state-policy.json","sha256":"70607ab0b64cb35c5b875dea7b1f94db14e6df7e931671e2f96828e1c7a52a78"},
+    {"name":"diff003_evidence","path":"migration/boundary-differential-v1/boundary-differential.json","sha256":"45f4686f4a18940e72ebb4836dcc8b6136634761cb0cd01250e2ed48bdd3320b"}
+  ],
+  "differential_receipts": {
+    "diff001": {"root":"migration/mario-jenkins-oracle-228/corpus-v1/differential-v1","schema":"mcloving.jenkins.native-differential/v1","case":"corpus-052-cinqict_jenkinsdev","evidence_sha256":"e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6","verified_records":228,"mismatches":0},
+    "diff002": {"root":"migration/state-policy-differential-v1","schema":"mcloving.jenkins.state-policy-differential/v1","case":"mig005a-state-policy-exact-profile","evidence_sha256":"70607ab0b64cb35c5b875dea7b1f94db14e6df7e931671e2f96828e1c7a52a78","verified_records":33,"mismatches":0},
+    "diff003": {"root":"migration/boundary-differential-v1","schema":"mcloving.jenkins.boundary-differential/v1","case":"mario-contained-boundaries-zero-authority","evidence_sha256":"45f4686f4a18940e72ebb4836dcc8b6136634761cb0cd01250e2ed48bdd3320b","verified_records":72,"mismatches":0}
+  },
+  "identity_joins": {
+    "jenkins_image_sha256": "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+    "jenkins_plugin_manifest_sha256": "e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0",
+    "rust_image_sha256": "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+    "postgres_image_sha256": "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+    "source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+    "pipeline_sha256": "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc",
+    "compiler_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+    "mapping_catalog_sha256": "d383ab8e15593ca5cc2847633a1410b53e676442f60dfcca93606610d1f761c8",
+    "corpus_manifest_sha256": "59faf74bb8ebfbd658f85b5224ec15ee7b0db841ad66b2da1326cd83adac4f2a",
+    "runtime_dependency_manifest_sha256": "238ed4cc59ff67bbb1dc40bb1bd3ec28dce914c4dffd701f1a8505d760ba11a4",
+    "identity_client_manifest_sha256": "a4227af8021c7d5fb6f7cc72be84af756ce1f95d33cd2ec9bad721beab587549",
+    "release_id": "3d38cc2c-a88b-4fac-aae2-7d9459c36ee5",
+    "release_version": "v0.1.0",
+    "release_profile": "private-linux-x86_64",
+    "release_envelope_sha256": "09fea3d02f5bdb55fd4835a6bf92339eb47cfbba9f33b8b4a3bc4925596e293e",
+    "release_evidence_manifest_sha256": "0ccc39a48217524efe681d984fea41f4f1afe1d3fa1be3177fa4598e6ddf8a41",
+    "release_verification_receipt_sha256": "6c11cc651b1f4daab6647b43947a433ae565b1a11dfa09cf5cf48e9f789f139f",
+    "mig005a_forward_sha256": "af172be8893e282b72fc20b820382c8236e18c7b981bc3b4acbf57884ead55e4",
+    "mig005a_reverse_sha256": "1a66f2c6354011abd23f45671674291e0b22faeea1043791920fc5ee0123ef52",
+    "mig005a_evidence_sha256": "e28b47d2aa70ec2ad8cdaa2c48e1100c8862c9a47765d22a355c1660e96cafe7"
+  },
+  "coverage": [
+    {"name":"production_population","numerator":230,"denominator":230,"unit":"disabled_jobs","evidence":"source_job_map"},
+    {"name":"parse_reach","numerator":140,"denominator":228,"unit":"corpus_files","evidence":"oracle_summary.chengis_parsed"},
+    {"name":"native_runnable","numerator":1,"denominator":228,"unit":"corpus_files","evidence":"diff001.certified_cases"},
+    {"name":"actionable_migration","numerator":1,"denominator":228,"unit":"corpus_files","evidence":"compiler_and_mapping_admission"},
+    {"name":"deterministic_rejection","numerator":227,"denominator":227,"unit":"non_admitted_cases","evidence":"E_SOURCE_NOT_ADMITTED"},
+    {"name":"certified_equivalence_admitted","numerator":1,"denominator":1,"unit":"admitted_cases","evidence":"diff001.certified_cases"},
+    {"name":"certified_equivalence_corpus","numerator":1,"denominator":228,"unit":"corpus_files","evidence":"diff001.certified_cases"}
+  ],
+  "taxonomy": {
+    "deterministic_rejection": ["E_SOURCE_NOT_ADMITTED"],
+    "aggregate_mismatch": ["E_INPUT_SUBSTITUTION","E_IDENTITY_MISMATCH","E_RECEIPT_MISMATCH","E_DENOMINATOR_BORROWING"],
+    "regression": ["E_DIFF001_REGRESSION","E_DIFF002_REGRESSION","E_DIFF003_REGRESSION"]
+  },
+  "authority": {
+    "certification_scope": "immutable_contained_evidence_only",
+    "production_authority": false,
+    "production_credentials": false,
+    "production_effects": false,
+    "scheduler_authority": false,
+    "cutover_authority": false,
+    "migration_package_is_input": false,
+    "historical_ranvil_native": {"numerator":18,"denominator":228,"meaning":"legacy_parser_model_reach_only","grants_runnable_or_equivalence_claim":false}
+  }
+}
