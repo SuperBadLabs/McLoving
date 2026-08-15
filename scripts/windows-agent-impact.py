@@ -20,6 +20,7 @@ ANCHOR_PACKAGE = "mcloving-agent"
 ALWAYS_RUN_PATHS = {
     ".cargo/config",
     ".cargo/config.toml",
+    ".gitattributes",
     ".github/workflows/windows-agent.yml",
     "rust-toolchain.toml",
     "scripts/windows-agent-impact.py",

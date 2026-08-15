@@ -123,7 +123,7 @@ class WindowsAgentImpactTests(unittest.TestCase):
         self.assertIn("Windows verifier source", reason)
 
     def test_repository_cargo_configuration_triggers(self) -> None:
-        for path in (".cargo/config", ".cargo/config.toml"):
+        for path in (".cargo/config", ".cargo/config.toml", ".gitattributes"):
             with self.subTest(path=path):
                 run_windows, reason = IMPACT.classify(
                     {path},
