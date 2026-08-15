@@ -622,6 +622,8 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
         .collect::<String>();
     let raw = String::from_utf8(SECRET.to_vec()).expect("ASCII marker");
     let base64 = STANDARD.encode(SECRET);
+    let mixed_percent = raw.replacen('-', "%2D", 1);
+    let nested_percent = raw.replacen('-', &format!("%{}2D", "25".repeat(7)), 1);
     let representations = [
         ("raw", raw.clone(), format!("secret/{raw}")),
         ("base64", base64.clone(), format!("credential:{base64}")),
@@ -631,6 +633,16 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
             format!("opaque-{lower_hex}-reference"),
         ),
         ("percent", percent.clone(), format!("vault/path/{percent}")),
+        (
+            "mixed_percent",
+            mixed_percent.clone(),
+            format!("secret/{mixed_percent}"),
+        ),
+        (
+            "nested_percent",
+            nested_percent.clone(),
+            format!("secret/{nested_percent}"),
+        ),
     ];
     let representation_count = representations.len();
     let mut pre_persistence_denials = 0;
@@ -683,12 +695,35 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
             "pre_persistence_denials": pre_persistence_denials,
             "persisted_rows": persisted_rows,
             "persisted_marker_representations": persisted_marker_bytes,
-            "representations": ["raw", "base64", "hex", "percent"],
+            "representations": [
+                "raw", "base64", "hex", "percent", "mixed_percent", "nested_percent"
+            ],
         }),
         pre_persistence_denials == representation_count
             && persisted_rows == 0
             && persisted_marker_bytes == 0,
     );
+}
+
+#[test]
+fn over_depth_percent_encoding_fails_closed_before_mapping_persistence() {
+    let over_depth = format!("opaque-%{}41-reference", "25".repeat(8));
+    let mut mapping = mapping(connector());
+    mapping.provider_reference = over_depth;
+    approve(&mut mapping);
+    let (root, mut broker) = broker();
+    assert!(matches!(
+        broker.install_mapping(&mapping, 900),
+        Err(BrokerError::ConfidentialityDenied)
+    ));
+    let connection = rusqlite::Connection::open(root.path().join("broker.sqlite"))
+        .expect("inspect broker state");
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM mapping_versions", [], |row| {
+            row.get(0)
+        })
+        .expect("count persisted mappings");
+    assert_eq!(rows, 0);
 }
 
 #[test]

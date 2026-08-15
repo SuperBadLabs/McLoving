@@ -29,6 +29,7 @@ const MAX_TAINT_PATH: usize = 32;
 const MAX_SECRET_BYTES: usize = 65_536;
 const MAX_DENIED_PUBLIC_MARKERS: usize = 256;
 const MAX_DENIED_PUBLIC_MARKER_BYTES: usize = 1024 * 1024;
+const MAX_PERCENT_DECODE_ROUNDS: usize = 8;
 const MAX_GRANT_TTL_MS: i64 = 15 * 60 * 1_000;
 const MAX_APPROVAL_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -1145,10 +1146,10 @@ fn ensure_non_disclosure(
     for event in audit_events {
         public.extend_from_slice(event);
     }
-    if secret_representations(secret)
-        .iter()
-        .any(|marker| public.windows(marker.len()).any(|window| window == marker))
-    {
+    let representations = secret_representations(secret)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if contains_marker(&public, &representations)? {
         return Err(BrokerError::ConfidentialityDenied);
     }
     Ok(())
@@ -1260,34 +1261,95 @@ fn ensure_markers_absent<T: Serialize>(
         .flat_map(|marker| secret_representations(marker))
         .collect::<Vec<_>>();
     let semantic = serde_json::to_value(value)?;
-    if contains_marker(canonical, &representations)
-        || json_contains_marker(&semantic, &representations)
+    if contains_marker(canonical, &representations)?
+        || json_contains_marker(&semantic, &representations)?
     {
         return Err(BrokerError::ConfidentialityDenied);
     }
     Ok(())
 }
 
-fn contains_marker(value: &[u8], markers: &[Vec<u8>]) -> bool {
-    markers.iter().any(|marker| {
-        value
+fn contains_marker(value: &[u8], markers: &[Vec<u8>]) -> Result<bool, BrokerError> {
+    let mut candidate = value.to_vec();
+    for _ in 0..MAX_PERCENT_DECODE_ROUNDS {
+        if markers.iter().any(|marker| {
+            candidate
+                .windows(marker.len())
+                .any(|window| window == marker.as_slice())
+        }) {
+            return Ok(true);
+        }
+        let decoded = percent_decode_once(&candidate);
+        if decoded == candidate {
+            return Ok(false);
+        }
+        candidate = decoded;
+    }
+    if percent_decode_once(&candidate) != candidate {
+        return Err(BrokerError::ConfidentialityDenied);
+    }
+    Ok(markers.iter().any(|marker| {
+        candidate
             .windows(marker.len())
             .any(|window| window == marker.as_slice())
-    })
+    }))
 }
 
-fn json_contains_marker(value: &serde_json::Value, markers: &[Vec<u8>]) -> bool {
+fn json_contains_marker(
+    value: &serde_json::Value,
+    markers: &[Vec<u8>],
+) -> Result<bool, BrokerError> {
     match value {
         serde_json::Value::String(value) => contains_marker(value.as_bytes(), markers),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_marker(value, markers)),
-        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
-            contains_marker(key.as_bytes(), markers) || json_contains_marker(value, markers)
-        }),
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            false
+        serde_json::Value::Array(values) => {
+            for value in values {
+                if json_contains_marker(value, markers)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if contains_marker(key.as_bytes(), markers)?
+                    || json_contains_marker(value, markers)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(false)
+        }
+    }
+}
+
+fn percent_decode_once(value: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] == b'%'
+            && index.saturating_add(2) < value.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(value[index + 1]), hex_digit(value[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(value[index]);
+            index += 1;
+        }
+    }
+    decoded
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 

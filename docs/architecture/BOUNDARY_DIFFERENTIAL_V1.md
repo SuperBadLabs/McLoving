@@ -142,8 +142,10 @@ nonempty object or two unrelated receipt hashes cannot satisfy the gate.
 
 Fourteen synthetic markers exercise the declared artifact, audit, cache,
 controller API, destination response, log, receipt, retained-state,
-reverse-transform, test-report, and workspace surfaces. The accepted shape is
-zero disclosure on every surface.
+reverse-transform, test-report, and workspace surfaces. Raw, padded and
+unpadded standard/Base64URL, twice-encoded, hexadecimal, mixed-percent, and
+eight-round fixed-point percent forms are scanned in contents and pathnames.
+The accepted shape is zero disclosure on every surface.
 
 The contained client fixture proves zero Jenkins reads and writes after its
 target generation and exact rollback restoration at generation three. It does

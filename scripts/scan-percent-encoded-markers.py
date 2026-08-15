@@ -36,13 +36,18 @@ def percent_decode_fixed_point(value: bytes) -> bytes:
 
 
 def representations(marker: bytes) -> tuple[tuple[bytes, ...], tuple[bytes, ...]]:
-    encoded = base64.b64encode(marker)
-    exact = (
-        marker,
-        encoded,
+    first_level = {
+        base64.b64encode(marker),
+        base64.b64encode(marker).rstrip(b"="),
+        base64.urlsafe_b64encode(marker),
         base64.urlsafe_b64encode(marker).rstrip(b"="),
-        base64.b64encode(encoded),
-    )
+    }
+    second_level: set[bytes] = set()
+    for encoded in first_level:
+        for nested in (base64.b64encode(encoded), base64.urlsafe_b64encode(encoded)):
+            second_level.add(nested)
+            second_level.add(nested.rstrip(b"="))
+    exact = tuple({marker, *first_level, *second_level})
     case_insensitive = (marker.hex().encode("ascii"),)
     return exact, case_insensitive
 

@@ -106,11 +106,12 @@ deny-authority shadows receive those receipts rather than a secret grant.
 
 ## Non-disclosure and durable evidence
 
-Before committing redemption, the broker scans the complete mapping, request,
-grant receipt, and prior audit payloads for the resolved secret's raw,
-standard-Base64, unpadded-Base64, Base64URL, hexadecimal, and percent-encoded
-forms. Detection denies redemption and emits no success receipt. The downstream
-SCM and connector boundaries retain their broader marker scanning for source,
+Before mapping persistence and again before committing redemption, the broker
+scans semantic and canonical public values for raw, standard-Base64,
+unpadded-Base64, Base64URL, hexadecimal, mixed percent-encoded, and up-to-eight-
+round fixed-point percent-encoded forms. Deeper encoding fails closed. Detection
+denies the operation before its success state or receipt. The downstream SCM and
+connector boundaries retain their broader marker scanning for source,
 destination, output, artifact, and replay evidence.
 
 The broker stores only canonical public mapping/grant truth in an
