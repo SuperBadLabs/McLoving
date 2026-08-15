@@ -250,7 +250,7 @@ podman create --name "${runner}" \
     run_suite external-connector cargo test --locked --offline \
       -p mcloving-external-connector --features loopback-test
     run_suite destination-observer cargo test --locked --offline \
-      -p mcloving-destination-observer
+      -p mcloving-destination-observer --features loopback-test
     run_suite dependency-resolver cargo test --locked --offline \
       -p mcloving-dependency-resolver
     run_suite dependency-resolver-contained env \
