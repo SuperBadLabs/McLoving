@@ -163,7 +163,7 @@
     {
       "id": "DEP-001",
       "protocol": "mcloving.dependency-resolver/v1",
-      "implementation_source_manifest_sha256": "7480defe4dc272bef020914ca1f1f2df229db57adf95ef2e140b8e1091432fa6",
+      "implementation_source_manifest_sha256": "e1e22ed5a68da721d39168df29104422261aae232b4760dbf4ce6eac15a10667",
       "configuration_sha256": "666c67464d09107f82d1b362c32bca8f8e8efcce2b84a589f3c862794b39888d",
       "account_identity": "diff003-account/dep-001",
       "resource_identity": "diff003-resource/dep-001",
