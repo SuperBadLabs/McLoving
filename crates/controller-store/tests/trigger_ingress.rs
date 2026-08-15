@@ -324,11 +324,6 @@ fn dag(
 
 #[tokio::test]
 async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("trigger_substitution_denied", "denied"),
-        ("trigger_replay_denied", "denied"),
-        ("trigger_stale_generation_denied", "denied"),
-    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -489,6 +484,26 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         now,
     );
     input.accepted_at_unix_ms = now + 10 * 60_000;
+    let mut stale_generation = input.clone();
+    stale_generation.delivery_id = "delivery-stale-generation".to_owned();
+    stale_generation.event_id = "event-stale-generation".to_owned();
+    stale_generation.expected_trigger_generation = 0;
+    let stale_generation_result = store.accept_trigger_delivery(&stale_generation).await;
+    let stale_generation_denied = matches!(
+        stale_generation_result,
+        Err(StoreError::TriggerIngressConflict(_))
+    );
+    assert!(stale_generation_denied);
+    diff003::record_assertion(
+        "trigger_stale_generation_denied",
+        "denied",
+        json!({
+            "presented_generation": stale_generation.expected_trigger_generation,
+            "active_generation": 1,
+            "result": "trigger_ingress_conflict",
+        }),
+        stale_generation_denied,
+    );
     let mut future = delivery_with_event_time(input.clone(), now + 310_000);
     future.delivery_id = "delivery-future".to_owned();
     future.event_id = "event-future".to_owned();
@@ -590,16 +605,40 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .count(),
         1
     );
-    assert!(matches!(
-        store.accept_trigger_delivery(&input).await.unwrap(),
-        TriggerDeliveryAdmission::Replayed(_)
-    ));
+    let replay = store.accept_trigger_delivery(&input).await.unwrap();
+    let replay_denied = matches!(replay, TriggerDeliveryAdmission::Replayed(_));
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "trigger_replay_denied",
+        "denied",
+        json!({
+            "delivery_id": input.delivery_id,
+            "admission": "replayed",
+            "created_count": concurrent_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, TriggerDeliveryAdmission::Created(_)))
+                .count(),
+        }),
+        replay_denied,
+    );
     let mut substituted = input.clone();
     substituted.event_kind = "pull_request".to_owned();
-    assert!(matches!(
-        store.accept_trigger_delivery(&substituted).await,
+    let substitution_result = store.accept_trigger_delivery(&substituted).await;
+    let substitution_denied = matches!(
+        substitution_result,
         Err(StoreError::TriggerIngressConflict(_))
-    ));
+    );
+    assert!(substitution_denied);
+    diff003::record_assertion(
+        "trigger_substitution_denied",
+        "denied",
+        json!({
+            "delivery_id": substituted.delivery_id,
+            "substituted_event_kind": substituted.event_kind,
+            "result": "trigger_ingress_conflict",
+        }),
+        substitution_denied,
+    );
 
     let first_claim = match store
         .claim_trigger_delivery(&claim(
@@ -1912,7 +1951,6 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
 
 #[tokio::test]
 async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies_new_events() {
-    let _diff003 = diff003::scenario_assertions(&[("trigger_outage_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -1973,7 +2011,18 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         })
         .await
         .unwrap();
-    assert!(matches!(failed, TriggerDeliveryFailure::DeadLettered(_)));
+    let outage_denied = matches!(failed, TriggerDeliveryFailure::DeadLettered(_));
+    assert!(outage_denied);
+    diff003::record_assertion(
+        "trigger_outage_denied",
+        "denied",
+        json!({
+            "delivery_id": input.delivery_id,
+            "failure_disposition": "dead_lettered",
+            "retryable": true,
+        }),
+        outage_denied,
+    );
 
     let redrive = TriggerDeliveryRedrive {
         organization_id,

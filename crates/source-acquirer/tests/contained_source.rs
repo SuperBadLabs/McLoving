@@ -494,10 +494,6 @@ fn kernel_deadline_kills_the_complete_transport_pid_namespace() {
 
 #[tokio::test]
 async fn exact_revision_replay_later_commit_and_sparse_truth() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("source_revision_substitution_denied", "denied"),
-        ("source_later_revision_preserved", "preserved"),
-    ]);
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
     root.write("README.md", b"first\n");
@@ -545,6 +541,20 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
         std::fs::read(later_output.join("src/later.txt")).unwrap(),
         b"later\n"
     );
+    let later_revision_preserved = later_receipt.content_sha256 != receipt.content_sha256
+        && !later_output.join("README.md").exists()
+        && std::fs::read(later_output.join("src/later.txt")).unwrap() == b"later\n";
+    diff003::record_assertion(
+        "source_later_revision_preserved",
+        "preserved",
+        serde_json::json!({
+            "initial_commit": receipt.repository_trees[0].resolved_commit,
+            "later_commit": later_receipt.repository_trees[0].resolved_commit,
+            "content_digest_changed": later_receipt.content_sha256 != receipt.content_sha256,
+            "later_sparse_file": "src/later.txt",
+        }),
+        later_revision_preserved,
+    );
 
     let mut descendant_of_leaf = context.request(&second);
     descendant_of_leaf.sparse_roots = vec!["deps/child".to_owned()];
@@ -568,10 +578,19 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
     );
 
     let stale = context.request(&first);
-    assert!(matches!(
-        context.acquirer.acquire(&stale).await,
-        Err(SourceError::RevisionMismatch)
-    ));
+    let stale_result = context.acquirer.acquire(&stale).await;
+    let revision_substitution_denied = matches!(stale_result, Err(SourceError::RevisionMismatch));
+    assert!(revision_substitution_denied);
+    diff003::record_assertion(
+        "source_revision_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "requested_commit": first,
+            "latest_accepted_commit": second,
+            "result": "revision_mismatch",
+        }),
+        revision_substitution_denied,
+    );
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
             std::path::Path::new(&root).join("SCM-001.json"),
@@ -1176,7 +1195,6 @@ async fn safe_symlink_executable_and_generation_rollback_bind_exact_tree_truth()
 
 #[tokio::test]
 async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_claim() {
-    let _diff003 = diff003::scenario_assertions(&[("source_outage_denied", "denied")]);
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
     root.write("oversized.txt", b"five!\n");
@@ -1232,18 +1250,27 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
     let mut request = context.request(&commit);
     request.expected_generation = limited_config.generation;
     request.expected_config_sha256 = limited.config_sha256().to_owned();
-    assert!(matches!(
-        limited.acquire(&request).await,
-        Err(SourceError::LimitExceeded)
-    ));
-    assert!(
-        std::fs::read_dir(&limited_config.output_root)
-            .unwrap()
-            .all(|entry| !entry
+    let bounded_failure = limited.acquire(&request).await;
+    let stage_clean = std::fs::read_dir(&limited_config.output_root)
+        .unwrap()
+        .all(|entry| {
+            !entry
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".stage-"))
+                .starts_with(".stage-")
+        });
+    let outage_denied = matches!(bounded_failure, Err(SourceError::LimitExceeded)) && stage_clean;
+    assert!(outage_denied);
+    diff003::record_assertion(
+        "source_outage_denied",
+        "denied",
+        serde_json::json!({
+            "failure": "limit_exceeded",
+            "max_file_bytes": limited_config.max_file_bytes,
+            "staging_entries_remaining": usize::from(!stage_clean),
+        }),
+        outage_denied,
     );
 
     let mut count_config = context.config.clone();

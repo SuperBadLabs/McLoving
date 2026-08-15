@@ -249,7 +249,6 @@ fn inventory_reconciliation_requires_exact_complete_owner_and_taint_truth() {
 
 #[test]
 fn workload_and_controller_visible_mappings_never_become_grant_eligible() {
-    let _diff003 = diff003::scenario_assertions(&[("secret_taint_ineligible_denied", "denied")]);
     let workload = ConsumerBinding::Workload {
         channel: WorkloadChannel::EnvironmentVariable,
         target: "DEPLOY_TOKEN".to_owned(),
@@ -257,10 +256,9 @@ fn workload_and_controller_visible_mappings_never_become_grant_eligible() {
     let mut workload_mapping = mapping(workload);
     workload_mapping.disposition = MappingDisposition::GrantEligible;
     let (_root, mut broker) = broker();
-    assert!(matches!(
-        broker.install_mapping(&workload_mapping, 1_000),
-        Err(BrokerError::InvalidMapping)
-    ));
+    let workload_result = broker.install_mapping(&workload_mapping, 1_000);
+    let workload_denied = matches!(workload_result, Err(BrokerError::InvalidMapping));
+    assert!(workload_denied);
 
     let mut mismatched = mapping(connector());
     mismatched.declared_taint = TaintClass::SourceAcquisitionOnly;
@@ -268,6 +266,16 @@ fn workload_and_controller_visible_mappings_never_become_grant_eligible() {
         broker.install_mapping(&mismatched, 1_000),
         Err(BrokerError::InvalidMapping)
     ));
+    diff003::record_assertion(
+        "secret_taint_ineligible_denied",
+        "denied",
+        serde_json::json!({
+            "consumer_channel": "environment_variable",
+            "requested_disposition": "grant_eligible",
+            "result": "invalid_mapping",
+        }),
+        workload_denied,
+    );
 }
 
 #[test]
@@ -423,8 +431,6 @@ fn source_acquirer_binding_uses_the_same_public_grant_protocol_without_provider_
 
 #[test]
 fn cross_tenant_attempt_fence_consumer_expiry_and_replay_are_denied_before_provider_use() {
-    let _diff003 =
-        diff003::scenario_assertions(&[("secret_consumer_substitution_denied", "denied")]);
     let mapping = mapping(source_acquirer());
     let request = grant(&mapping);
     let (_root, mut broker) = broker();
@@ -440,19 +446,33 @@ fn cross_tenant_attempt_fence_consumer_expiry_and_replay_are_denied_before_provi
         Box::new(|value| value.fence += 1),
         Box::new(|value| value.consumer = connector()),
     ];
+    let mutation_count = mutations.len();
+    let mut denied_mutations = 0;
     for mutate in mutations {
         let mut denied = redemption(&request);
         mutate(&mut denied);
-        assert!(matches!(
-            broker.redeem_grant(&denied, &provider, 2_000),
-            Err(BrokerError::GrantDenied)
-        ));
+        let denied_result = broker.redeem_grant(&denied, &provider, 2_000);
+        let denied = matches!(denied_result, Err(BrokerError::GrantDenied));
+        assert!(denied);
+        denied_mutations += usize::from(denied);
     }
     assert!(matches!(
         broker.redeem_grant(&redemption(&request), &provider, 20_000),
         Err(BrokerError::GrantDenied)
     ));
     assert_eq!(*provider.calls.borrow(), 0);
+    let consumer_substitution_denied =
+        denied_mutations == mutation_count && *provider.calls.borrow() == 0;
+    diff003::record_assertion(
+        "secret_consumer_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "mutations_attempted": mutation_count,
+            "mutations_denied": denied_mutations,
+            "provider_calls": *provider.calls.borrow(),
+        }),
+        consumer_substitution_denied,
+    );
 }
 
 #[test]
@@ -554,7 +574,6 @@ fn trusted_time_and_per_fence_scope_prevent_stale_or_renamed_grants() {
 
 #[test]
 fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fields() {
-    let _diff003 = diff003::scenario_assertions(&[("secret_marker_disclosure_denied", "denied")]);
     let lower_hex = SECRET
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -569,6 +588,8 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
         lower_hex,
         percent,
     ];
+    let representation_count = representations.len();
+    let mut confidentiality_denials = 0;
     for (index, representation) in representations.into_iter().enumerate() {
         let mut mapping = mapping(connector());
         mapping.mapping_id = Uuid::from_u128(100 + index as u128);
@@ -581,12 +602,23 @@ fn raw_encoded_hex_and_percent_secret_material_are_denied_in_public_mapping_fiel
         install(&mut broker, &mapping, 900);
         broker.issue_grant(&request, 1_000).expect("grant");
         let provider = ExactProvider::new(provider_request(&mapping, &request));
-        assert!(matches!(
-            broker.redeem_grant(&redemption(&request), &provider, 2_000),
-            Err(BrokerError::ConfidentialityDenied)
-        ));
+        let disclosure_result = broker.redeem_grant(&redemption(&request), &provider, 2_000);
+        let disclosure_denied =
+            matches!(disclosure_result, Err(BrokerError::ConfidentialityDenied));
+        assert!(disclosure_denied);
+        confidentiality_denials += usize::from(disclosure_denied);
         assert_eq!(broker.verify_audit_chain().expect("valid audit"), 2);
     }
+    diff003::record_assertion(
+        "secret_marker_disclosure_denied",
+        "denied",
+        serde_json::json!({
+            "representations_attempted": representation_count,
+            "confidentiality_denials": confidentiality_denials,
+            "representations": ["raw", "base64", "hex", "percent"],
+        }),
+        confidentiality_denials == representation_count,
+    );
 }
 
 #[test]

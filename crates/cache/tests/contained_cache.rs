@@ -285,7 +285,6 @@ fn tenant_pipeline_principal_and_trust_substitution_fail_closed() {
 
 #[test]
 fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
-    let _diff003 = diff003::scenario_assertions(&[("cache_replay_denied", "denied")]);
     let temp = TempDir::new().unwrap();
     let key = [9_u8; 32];
     let clock = Arc::new(ManualClock::new(30_000));
@@ -308,8 +307,18 @@ fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
         )
         .unwrap();
     let rejected = store.read("reader", "trusted", &request).unwrap();
-    assert_eq!(rejected.status, ReadStatus::CorruptRejected);
-    assert!(rejected.content.is_none());
+    let corrupt_replay_denied =
+        rejected.status == ReadStatus::CorruptRejected && rejected.content.is_none();
+    assert!(corrupt_replay_denied);
+    diff003::record_assertion(
+        "cache_replay_denied",
+        "denied",
+        serde_json::json!({
+            "read_status": format!("{:?}", rejected.status),
+            "content_returned": rejected.content.is_some(),
+        }),
+        corrupt_replay_denied,
+    );
 
     store
         .publish("writer", "trusted", &request, b"original")
@@ -473,8 +482,6 @@ fn concurrent_same_content_converges_and_different_content_never_replaces() {
 
 #[test]
 fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
-    let _diff003 =
-        diff003::scenario_assertions(&[("cache_generation_substitution_denied", "denied")]);
     let temp = TempDir::new().unwrap();
     let key = [11_u8; 32];
     let clock = Arc::new(ManualClock::new(50_000));
@@ -520,10 +527,20 @@ fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
     let mut generation_two = first_config.clone();
     generation_two.cache_generation = 2;
     let rotated = open_store(generation_two, &key, Arc::clone(&clock)).unwrap();
-    assert!(matches!(
-        rotated.read("reader", "trusted", &rotating),
-        Err(CacheError::InvalidRequest)
-    ));
+    let generation_substitution = rotated.read("reader", "trusted", &rotating);
+    let generation_substitution_denied =
+        matches!(generation_substitution, Err(CacheError::InvalidRequest));
+    assert!(generation_substitution_denied);
+    diff003::record_assertion(
+        "cache_generation_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "old_generation_sha256": rotating.generation_sha256,
+            "new_generation_sha256": rotated.generation_sha256(),
+            "result": "invalid_request",
+        }),
+        generation_substitution_denied,
+    );
     let rotated_request = request(
         rotated.generation_sha256(),
         "policy-a",
@@ -635,7 +652,6 @@ fn physically_restored_database_cannot_serve_the_new_restore_epoch() {
 
 #[test]
 fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
-    let _diff003 = diff003::scenario_assertions(&[("cache_stale_denied", "denied")]);
     let temp = TempDir::new().unwrap();
     let key = [16_u8; 32];
     let clock = Arc::new(ManualClock::new(68_000));
@@ -665,6 +681,19 @@ fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
     assert_eq!(
         replacement.receipts[0].event.outcome,
         mcloving_cache::CacheOutcome::Expired
+    );
+    let stale_replay_denied = replacement.status == PublishStatus::Published
+        && replacement.receipts.len() == 2
+        && replacement.receipts[0].event.outcome == mcloving_cache::CacheOutcome::Expired;
+    diff003::record_assertion(
+        "cache_stale_denied",
+        "denied",
+        serde_json::json!({
+            "replacement_status": format!("{:?}", replacement.status),
+            "prior_outcome": format!("{:?}", replacement.receipts[0].event.outcome),
+            "receipt_count": replacement.receipts.len(),
+        }),
+        stale_replay_denied,
     );
     assert_eq!(
         store

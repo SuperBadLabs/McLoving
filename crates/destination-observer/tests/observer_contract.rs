@@ -714,7 +714,7 @@ async fn publication_deadline_is_anchored_to_signed_destination_freshness() {
 
 #[tokio::test]
 async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fail_closed() {
-    let _diff003 = diff003::scenario_assertions(&[("observer_stale_denied", "denied")]);
+    let mut stale_denials = 0;
     for (mode, expected) in [
         (Mode::Stale, ObserverError::StaleObservation),
         (Mode::PredatesRequest, ObserverError::StaleObservation),
@@ -796,15 +796,30 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         let rig = Rig::new().await;
         rig.set_mode(mode);
         let request = rig.prepare(rig.request(ObservationPhase::PreAction));
-        assert_eq!(
-            rig.observer.observe_at(request.clone(), NOW).await,
-            Err(expected.clone())
-        );
-        assert_eq!(rig.observer.observe_at(request, NOW).await, Err(expected));
+        let first_result = rig.observer.observe_at(request.clone(), NOW).await;
+        let second_result = rig.observer.observe_at(request, NOW).await;
+        assert_eq!(first_result, Err(expected.clone()));
+        assert_eq!(second_result, Err(expected.clone()));
+        if matches!(mode, Mode::Stale | Mode::PredatesRequest)
+            && first_result == Err(ObserverError::StaleObservation)
+            && second_result == Err(ObserverError::StaleObservation)
+        {
+            stale_denials += 1;
+        }
         rig.set_mode(Mode::Good);
         let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
         rig.observer.observe_at(replacement, NOW).await.unwrap();
     }
+    diff003::record_assertion(
+        "observer_stale_denied",
+        "denied",
+        serde_json::json!({
+            "stale_modes_executed": 2,
+            "stale_modes_denied_twice": stale_denials,
+            "result": "stale_observation",
+        }),
+        stale_denials == 2,
+    );
 
     for mode in [
         Mode::Outage,
@@ -929,19 +944,27 @@ async fn outbound_rate_reservation_uses_the_post_database_wait_time() {
 
 #[tokio::test]
 async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
-    let _diff003 = diff003::scenario_assertions(&[("observer_outage_denied", "denied")]);
     let rig = Rig::new().await;
     rig.set_mode(Mode::Outage);
     let request = rig.prepare(rig.request(ObservationPhase::PreAction));
-    assert_eq!(
-        rig.observer.observe_at(request.clone(), NOW).await,
-        Err(ObserverError::DestinationUnavailable)
-    );
+    let outage_result = rig.observer.observe_at(request.clone(), NOW).await;
+    let outage_denied = outage_result == Err(ObserverError::DestinationUnavailable);
+    assert!(outage_denied);
     rig.set_mode(Mode::Good);
     let restarted = rig.restart();
     let receipt = restarted.observe_at(request, NOW).await.unwrap();
     assert_eq!(receipt.retry_count, 1);
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
+    diff003::record_assertion(
+        "observer_outage_denied",
+        "denied",
+        serde_json::json!({
+            "initial_result": "destination_unavailable",
+            "restart_retry_count": receipt.retry_count,
+            "receipt_verified": true,
+        }),
+        outage_denied && receipt.retry_count == 1,
+    );
 }
 
 #[tokio::test]
@@ -2376,16 +2399,24 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
 
 #[tokio::test]
 async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() {
-    let _diff003 =
-        diff003::scenario_assertions(&[("observer_identity_substitution_denied", "denied")]);
     let rig = Rig::new().await;
     let mut expired = rig.request(ObservationPhase::PreAction);
     expired.requested_at_unix_ms = NOW + 60_000;
     expired.expires_at_unix_ms = NOW + 61_500;
     let expired = rig.prepare(expired);
-    assert_eq!(
-        rig.observer.observe_at(expired, NOW + 61_000).await,
-        Err(ObserverError::ExpiredGrant)
+    let expired_result = rig.observer.observe_at(expired, NOW + 61_000).await;
+    let identity_authority_denied = expired_result == Err(ObserverError::ExpiredGrant);
+    assert!(identity_authority_denied);
+    diff003::record_assertion(
+        "observer_identity_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "grant_expiry_unix_ms": NOW + 61_500,
+            "verification_time_unix_ms": NOW + 61_000,
+            "configured_grant_expiry_unix_ms": rig.config.read_grant_expires_unix_ms,
+            "result": "expired_grant",
+        }),
+        identity_authority_denied,
     );
 
     rig.set_mode(Mode::Slow);
@@ -2857,7 +2888,6 @@ async fn runtime_history_quota_blocks_growth_but_allows_exact_generation_restart
 #[cfg(all(target_os = "linux", feature = "loopback-test"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operation() {
-    let _diff003 = diff003::scenario_assertions(&[("observer_write_permission_denied", "denied")]);
     let rig = Rig::new().await;
     let production_binary_path = env!("CARGO_BIN_EXE_mcloving-destination-observer");
     let binary_path = env!("CARGO_BIN_EXE_mcloving-destination-observer-loopback-test");
@@ -3006,11 +3036,23 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
     assert_eq!(responses[1]["status"], "error");
     assert_eq!(responses[1]["code"], "malformed_request");
+    let write_permission_denied = responses[0]["status"] == "observed"
+        && responses[1]["status"] == "error"
+        && responses[1]["code"] == "malformed_request";
+    diff003::record_assertion(
+        "observer_write_permission_denied",
+        "denied",
+        serde_json::json!({
+            "read_operation_status": responses[0]["status"],
+            "write_operation_status": responses[1]["status"],
+            "write_operation_code": responses[1]["code"],
+        }),
+        write_permission_denied,
+    );
 }
 
 #[tokio::test]
 async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
-    let _diff003 = diff003::scenario_assertions(&[("observer_replay_denied", "denied")]);
     let rig = Rig::new().await;
     let unsigned = rig.request(ObservationPhase::PreAction);
     assert_eq!(
@@ -3059,12 +3101,22 @@ async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
 
     let first = rig.prepare(rig.request(ObservationPhase::PreAction));
     let receipt = rig.observer.observe_at(first.clone(), NOW).await.unwrap();
+    let observation_id = first.observation_id;
     let mut substituted = first;
     substituted.audit_provenance = "audit/forged".to_owned();
     sign_observation_request(&mut substituted, &rig.request_seed).unwrap();
-    assert_eq!(
-        rig.observer.observe_at(substituted, NOW).await,
-        Err(ObserverError::ReplayMismatch)
+    let replay_result = rig.observer.observe_at(substituted, NOW).await;
+    let replay_denied = replay_result == Err(ObserverError::ReplayMismatch);
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "observer_replay_denied",
+        "denied",
+        serde_json::json!({
+            "observation_id": observation_id,
+            "mutation": "audit_provenance",
+            "result": "replay_mismatch",
+        }),
+        replay_denied,
     );
 
     let mut post = rig.request(ObservationPhase::PostAction);

@@ -59,7 +59,7 @@
     {
       "id": "TRIG-001",
       "protocol": "mcloving.trigger-ingress/v1",
-      "implementation_source_manifest_sha256": "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
+      "implementation_source_manifest_sha256": "281a256820f36d6415c00ff7f86acd49fdd63628bcdb2a5ba11dd5abd21579b9",
       "configuration_sha256": "e154c5381047ec6d77f21f321ec3bbbf54c66fd5f45f4c1d60751234df9d6e5a",
       "account_identity": "diff003-account/trig-001",
       "resource_identity": "diff003-resource/trig-001",
@@ -72,7 +72,7 @@
     {
       "id": "SCM-001",
       "protocol": "mcloving.source-acquirer/v1",
-      "implementation_source_manifest_sha256": "9141e5560b9495e3a253ed0cebfa02d02e7c63f2510cfa4e9ad5a2cc2e972ca6",
+      "implementation_source_manifest_sha256": "0a76b6633f58b036ce5bfac7cab3a938089bf1f97743946f57ce615eae0348d7",
       "configuration_sha256": "3c6d55e6b12f900d8800b927f38d2d6068e004797a6cc1e6cef5d501288c0e59",
       "account_identity": "diff003-account/scm-001",
       "resource_identity": "diff003-resource/scm-001",
@@ -85,7 +85,7 @@
     {
       "id": "SECRET-001",
       "protocol": "mcloving.secret-grant/v1",
-      "implementation_source_manifest_sha256": "9c1a1d395a7bd6b72e6b5faf19c13e4dd3b0638ca98937d0753892e7b2c2ee48",
+      "implementation_source_manifest_sha256": "41fde0a426e9e594e83d7875b25b1bc92e9bf924d671e9608c13489b29b0d929",
       "configuration_sha256": "cd100128c5738a0895f1c9e0cc01551d12990fe5bcb86ae9561688ef40ac1685",
       "account_identity": "diff003-account/secret-001",
       "resource_identity": "diff003-resource/secret-001",
@@ -98,7 +98,7 @@
     {
       "id": "INPUT-001",
       "protocol": "mcloving.input-adapter/v1",
-      "implementation_source_manifest_sha256": "52c11bb148573d541da804a3a4b93b3080a5c2faa17428f50a8554899b34960d",
+      "implementation_source_manifest_sha256": "585f4117fe76e849c865e5e63e85023ebdc12829a47905fc98da4a01bc189e9d",
       "configuration_sha256": "a2a07c012c43a4b9ce53c1ceffbedda5f8bfe476273b8a816532760cc51a6946",
       "account_identity": "diff003-account/input-001",
       "resource_identity": "diff003-resource/input-001",
@@ -111,7 +111,7 @@
     {
       "id": "PROV-001",
       "protocol": "mcloving.provisioner.v1",
-      "implementation_source_manifest_sha256": "1b713483d0c8b43ece9a60e121492c64936a1d8de7c08eb1b6f1371dcf2b6d4c",
+      "implementation_source_manifest_sha256": "3b23b374e00e55fc56f20d45fd0c71e1d81a2cfe80fc702c026a395d1ea94841",
       "configuration_sha256": "ac6db663eac19a2b32a328594dc7026aff47d70f86e026e8ae57608fd7fbe9e3",
       "account_identity": "diff003-account/prov-001",
       "resource_identity": "diff003-resource/prov-001",
@@ -124,7 +124,7 @@
     {
       "id": "EXT-001",
       "protocol": "mcloving.external-connector/v1",
-      "implementation_source_manifest_sha256": "a2a687b27e0a32d564708a5459db7f2a620fc0a3def92bcd24e97ad612e7f3f6",
+      "implementation_source_manifest_sha256": "0388359b192f28a3031f651703f64f9d404ea3a1a2ca55e0ffafe88000f64ef7",
       "configuration_sha256": "4461c18123789610f43dd626491419d96bd40ed51f372c46ef81f353c0a9b016",
       "account_identity": "diff003-account/ext-001",
       "resource_identity": "diff003-resource/ext-001",
@@ -137,7 +137,7 @@
     {
       "id": "OBS-001",
       "protocol": "mcloving.destination-observer/v1",
-      "implementation_source_manifest_sha256": "aa6ee4b71caab84ca228dd51384e21c51f3f448daa2533049f0555c912abcfbb",
+      "implementation_source_manifest_sha256": "da1545a7a9edb67dc0588813c3721c36a3daf2831cb9fa2bc05eb1fdc946f5ec",
       "configuration_sha256": "0401dae5ab4d39ab84c9c704c6f569cd90ba20a61ba5e0fd9029329c5a3fe62e",
       "account_identity": "diff003-account/obs-001",
       "resource_identity": "diff003-resource/obs-001",
@@ -150,7 +150,7 @@
     {
       "id": "DISC-001",
       "protocol": "mcloving.discovery/v1",
-      "implementation_source_manifest_sha256": "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
+      "implementation_source_manifest_sha256": "281a256820f36d6415c00ff7f86acd49fdd63628bcdb2a5ba11dd5abd21579b9",
       "configuration_sha256": "f89459ef255e2939d9f724341a63a8c2e930772af2c40821f668a289463f4965",
       "account_identity": "diff003-account/disc-001",
       "resource_identity": "diff003-resource/disc-001",
@@ -163,7 +163,7 @@
     {
       "id": "DEP-001",
       "protocol": "mcloving.dependency-resolver/v1",
-      "implementation_source_manifest_sha256": "3f04eea1c895d1664955312065fefb69f42e646e82cacef940fb56f7f9212e37",
+      "implementation_source_manifest_sha256": "17b1c3f023ee538f181cafad3801b5f64a22d5e8839eeae36e99e9bfec0f518f",
       "configuration_sha256": "666c67464d09107f82d1b362c32bca8f8e8efcce2b84a589f3c862794b39888d",
       "account_identity": "diff003-account/dep-001",
       "resource_identity": "diff003-resource/dep-001",
@@ -176,7 +176,7 @@
     {
       "id": "CACHE-001",
       "protocol": "mcloving.cache/v1",
-      "implementation_source_manifest_sha256": "dd3236593e648fdcc25f763c6f099a14f01244e0307752328bd549d4fa41f8da",
+      "implementation_source_manifest_sha256": "42af2ab0a25b4fff6243422e2af8d2e728a9998baa787044f2ffba86f81f73d2",
       "configuration_sha256": "3645d5c697d5159dc5ec6ac88725f5ad1a4c1354f7ee1cd62a07253f234ef5ef",
       "account_identity": "diff003-account/cache-001",
       "resource_identity": "diff003-resource/cache-001",
@@ -189,7 +189,7 @@
     {
       "id": "CONSUMER-001",
       "protocol": "mcloving.external-read-consumer/v1",
-      "implementation_source_manifest_sha256": "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
+      "implementation_source_manifest_sha256": "281a256820f36d6415c00ff7f86acd49fdd63628bcdb2a5ba11dd5abd21579b9",
       "configuration_sha256": "ef9e96f6eb70311d227a1e69cfa42e0461d90536a06e66784fdb15712caf9c8d",
       "account_identity": "diff003-account/consumer-001",
       "resource_identity": "diff003-resource/consumer-001",
@@ -202,7 +202,7 @@
     {
       "id": "ADMIN-001",
       "protocol": "mcloving.external-admin-client/v1",
-      "implementation_source_manifest_sha256": "0eb639f317ee3e7ee9182a1fb8bb518cc12429f2dc63b3bf04e9d6f5a48e4fdf",
+      "implementation_source_manifest_sha256": "281a256820f36d6415c00ff7f86acd49fdd63628bcdb2a5ba11dd5abd21579b9",
       "configuration_sha256": "ebbd27e590f57015e8cbe7234d1ad8e4566e4b610ceb90d37238c9e00e8decf4",
       "account_identity": "diff003-account/admin-001",
       "resource_identity": "diff003-resource/admin-001",
@@ -215,7 +215,7 @@
     {
       "id": "REL-001",
       "protocol": "mcloving.release-provenance/v2",
-      "implementation_source_manifest_sha256": "16de77debcb57629de72354c3416eb461aa8811eb5380e525251fdba946d39ae",
+      "implementation_source_manifest_sha256": "68460048755a3090a6616e7643801c7a7bd5aa41b5a3b5d564f20d7a77695ca2",
       "configuration_sha256": "6bf81d0a75004e575798c54dad683f05abcf3d1c8420efa523332fcc773b540a",
       "account_identity": "diff003-account/rel-001",
       "resource_identity": "diff003-resource/rel-001",

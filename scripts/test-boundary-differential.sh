@@ -52,6 +52,7 @@ jenkins_home="${runtime_root}/jenkins-home"
 cargo_target="${runtime_root}/cargo-target"
 cargo_target_connector="${runtime_root}/cargo-target-connector"
 cargo_target_observer="${runtime_root}/cargo-target-observer"
+main_runner_output="${runtime_root}/main-runner-output"
 main_boundary_dir="${evidence}/runtime-boundaries-main"
 connector_boundary_dir="${evidence}/runtime-boundaries-connector"
 observer_boundary_dir="${evidence}/runtime-boundaries-observer"
@@ -82,6 +83,7 @@ trap cleanup EXIT
 umask 077
 mkdir -p "${evidence}" "${jenkins_home}/init.groovy.d" "${cargo_target}" \
   "${cargo_target_connector}" "${cargo_target_observer}" \
+  "${main_runner_output}" \
   "${main_boundary_dir}" "${connector_boundary_dir}" "${observer_boundary_dir}" \
   "${main_assertion_dir}" "${connector_assertion_dir}" "${observer_assertion_dir}" \
   "${receipt_auth_dir}"
@@ -235,21 +237,22 @@ podman create --name "${runner}" \
   --tmpfs /tmp/mcloving-dependency-transport-16m:rw,nodev,nosuid,noexec,size=16777216,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target}:/cargo-target:Z" \
-  --volume "${evidence}:/evidence:Z" \
+  --volume "${main_boundary_dir}:/receipt:Z" \
+  --volume "${main_assertion_dir}:/assertions:Z" \
+  --volume "${main_runner_output}:/runner-output:Z" \
   --volume "${repo_root}:/work:ro,Z" \
   --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
   bash -c '
     set -euo pipefail
-    mkdir -p /evidence/runtime-boundaries
-    export MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/evidence/runtime-boundaries-main
-    export MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/evidence/runtime-assertions-main
+    export MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt
+    export MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions
     run_suite() {
       suite="$1"
       shift
       printf "suite_begin=%s\n" "${suite}"
       "$@"
-      printf "%s\n" "${suite}" >>/evidence/component-suites.txt
+      printf "%s\n" "${suite}" >>/runner-output/component-suites.txt
       printf "suite_end=%s\n" "${suite}"
     }
     run_suite controller-trigger cargo test --locked --offline \
@@ -288,13 +291,13 @@ podman create --name "${runner}" \
     cargo run --locked --offline --quiet \
       -p mcloving-boundary-differential -- \
       migration/boundary-differential-v1 \
-      >/evidence/verifier-receipt.txt
+      >/runner-output/verifier-receipt.txt
     if timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" \
       >/dev/null 2>&1; then
       echo "target fixture unexpectedly reached the public network" >&2
       exit 1
     fi
-    printf "public-network-denied\n" >/evidence/target-network-negative.txt
+    printf "public-network-denied\n" >/runner-output/target-network-negative.txt
   ' >/dev/null
 
 set +e
@@ -311,6 +314,10 @@ if [[ ${runner_status} -ne 0 ]]; then
   echo "DIFF-003 contained runner failed; evidence retained unsealed at ${output_root}" >&2
   exit "${runner_status}"
 fi
+cp "${main_runner_output}/component-suites.txt" "${evidence}/component-suites.txt"
+cp "${main_runner_output}/verifier-receipt.txt" "${evidence}/verifier-receipt.txt"
+cp "${main_runner_output}/target-network-negative.txt" \
+  "${evidence}/target-network-negative.txt"
 
 podman create --name "${connector_runner}" --network none \
   --cpus 2 --memory 4g --pids-limit 2048 \
@@ -604,8 +611,14 @@ for private_marker in \
       exit 1
     fi
   done
+  for case_insensitive_variant in "${marker_hex}" "${marker_percent}"; do
+    if grep -R -F -i -- "${case_insensitive_variant}" "${evidence}" >/dev/null; then
+      echo "DIFF-003 retained evidence disclosed a case-varied encoded marker" >&2
+      exit 1
+    fi
+  done
 done
-printf 'raw-base64-base64url-hex-percent-nested-base64-clean\n' \
+printf 'raw-base64-base64url-hex-all-case-percent-all-case-nested-base64-clean\n' \
   >"${evidence}/encoded-marker-scan.txt"
 comparison_update="${runtime_root}/runtime-comparison.json"
 jq '.secret_marker_disclosures = 0 | .encoded_marker_scan_passed = true' \
@@ -652,6 +665,18 @@ fi
 } >"${evidence}/runtime.txt"
 
 manifest="${output_root}/evidence-manifest.sha256"
+non_regular_entry=$(
+  find "${evidence}" -mindepth 1 ! -type f ! -type d -print -quit
+)
+if [[ -n "${non_regular_entry}" ]]; then
+  echo "DIFF-003 retained evidence contains a non-regular entry" >&2
+  exit 1
+fi
+linked_file=$(find "${evidence}" -type f -links +1 -print -quit)
+if [[ -n "${linked_file}" ]]; then
+  echo "DIFF-003 retained evidence contains a multiply linked file" >&2
+  exit 1
+fi
 (
   cd "${output_root}"
   find evidence -type f -printf '%P\0' \

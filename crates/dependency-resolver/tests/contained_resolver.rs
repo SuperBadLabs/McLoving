@@ -86,11 +86,6 @@ async fn artifact(State(state): State<RepositoryState>, request: Request<Body>) 
 #[tokio::test]
 #[ignore = "requires the dedicated tmpfs boundary created by scripts/dependency-resolver-contained.sh"]
 async fn standalone_exact_resolution_and_offline_restart_replay() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("dependency_resolver_substitution_denied", "denied"),
-        ("dependency_replay_denied", "denied"),
-        ("dependency_outage_denied", "denied"),
-    ]);
     let transport_root = PathBuf::from(
         std::env::var_os("MCLOVING_DEPENDENCY_TRANSPORT_ROOT").expect("contained transport root"),
     );
@@ -510,6 +505,19 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(denied["status"], "error");
     assert_eq!(denied["code"], "DEP_REQUEST_SOURCE_PROVENANCE_INVALID");
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let substitution_denied = denied["status"] == "error"
+        && denied["code"] == "DEP_REQUEST_SOURCE_PROVENANCE_INVALID"
+        && requests.load(Ordering::SeqCst) == 1;
+    diff003::record_assertion(
+        "dependency_resolver_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "result_code": denied["code"],
+            "repository_requests": requests.load(Ordering::SeqCst),
+            "substitution": "source_provenance",
+        }),
+        substitution_denied,
+    );
 
     let mut disk_full = frame.clone();
     disk_full.request.resolution_id = Uuid::new_v4().to_string();
@@ -597,6 +605,18 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         "offline restart replay must be byte-equivalent JSON"
     );
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+    let outage_denied = second == first && requests.load(Ordering::SeqCst) == 3;
+    diff003::record_assertion(
+        "dependency_outage_denied",
+        "denied",
+        serde_json::json!({
+            "repository_aborted": true,
+            "repository_requests_before_restart": 3,
+            "repository_requests_after_restart": requests.load(Ordering::SeqCst),
+            "offline_receipt_equal": second == first,
+        }),
+        outage_denied,
+    );
 
     let later_lock = String::from_utf8(lock.clone())
         .expect("UTF-8 lock")
@@ -635,6 +655,19 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(denied["status"], "error");
     assert_eq!(denied["code"], "DEP_STORE_RECEIPT_INVALID");
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+    let replay_denied = denied["status"] == "error"
+        && denied["code"] == "DEP_STORE_RECEIPT_INVALID"
+        && requests.load(Ordering::SeqCst) == 3;
+    diff003::record_assertion(
+        "dependency_replay_denied",
+        "denied",
+        serde_json::json!({
+            "result_code": denied["code"],
+            "divergent_lock_sha256": later.request.expected_lock_sha256,
+            "repository_requests": requests.load(Ordering::SeqCst),
+        }),
+        replay_denied,
+    );
 
     assert!(!contains_bytes(
         serde_json::to_vec(&second)

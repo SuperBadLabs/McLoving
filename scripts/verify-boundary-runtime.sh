@@ -263,6 +263,7 @@ jq --exit-status '
     .schema == "mcloving.diff003.executed-assertion/v1"
     and (.scenario | type == "string" and length > 0)
     and (.observed_outcome | IN("denied", "preserved", "reconciled", "cleaned", "restored"))
+    and (.observation | type == "object" and length > 0)
     and .assertions_passed
   )
 ' "${output_dir}/runtime-assertions.json" >/dev/null \

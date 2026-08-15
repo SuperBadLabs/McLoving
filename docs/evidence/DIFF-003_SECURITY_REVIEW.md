@@ -34,8 +34,11 @@ focused positive implementation test. A fresh ceremony-only Ed25519 key signs
 each exact receipt file after collection; the verifier retains the public key,
 requires the exact 13 detached signatures, and rejects any changed, stale, or
 fabricated file. The private key is destroyed before verification and sealing.
-Each of the 48 certified scenarios requires one runtime outcome emitted only
-after the owning test's assertions completed. Every join then compares all
+Each of the 48 certified scenarios requires one runtime outcome emitted from a
+scenario-specific predicate over the owning test's actual observed error,
+status, counter, digest, generation, or rollback state. Each create-new,
+synchronized outcome retains a nonempty structured observation; test completion
+alone cannot emit it. Every join then compares all
 declared compatibility dimensions from both authenticated receipt files. A
 nonempty object, plausible-looking signature text, test name alone, static
 certificate outcome, or arbitrary pair of hashes cannot satisfy the gate.
@@ -48,7 +51,11 @@ permissions remain distinct. Jenkins and target fixtures used different
 internal-only networks; Jenkins was destroyed before the target network existed.
 
 The main target runner is rootless, no-new-privileges, read-only for source and
-Cargo registry, resource-bounded, and drops the default capability set. It restores
+Cargo registry, resource-bounded, and has only three disjoint writable mounts:
+public component receipts, scenario observations, and runner-only outputs. It
+cannot preseed or modify the host-retained evidence root, authentication files,
+logs, inspections, merged receipt set, verifier output, or manifest. It drops
+the default capability set and restores
 only rootless `SETUID`, `SETGID`, and `SETFCAP` so the source-acquirer can create
 its single-identity inner user namespace. Focused and complete runs prove the
 namespace deadline kills the whole transport PID namespace and credentialed
@@ -60,6 +67,13 @@ other's state. A separate rootless no-network container receives only
 user-namespace `SYS_ADMIN` to execute the two bind-mount authority-alias
 negatives. It has no host-root mapping, production mount, writable source, or
 production authority.
+
+Before the self-excluding manifest is written, the host scans raw, Base64,
+Base64URL, nested, hexadecimal, and percent marker forms; the hexadecimal and
+percent checks are case-insensitive. It also rejects every retained filesystem
+entry that is neither a regular file nor a directory, and every regular file
+whose link count is not one. These checks prevent case-varied marker bypass,
+special-file omission, and hard-link aliasing outside the sealed tree.
 
 ## Failed-attempt disposition
 

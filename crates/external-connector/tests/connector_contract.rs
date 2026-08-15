@@ -463,8 +463,6 @@ async fn signed_failure_is_terminal_and_signed_retryable_outcome_is_bounded() {
 
 #[tokio::test]
 async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
-    let _diff003 =
-        diff003::scenario_assertions(&[("connector_ambiguous_retry_reconciled", "reconciled")]);
     let rig = Rig::new(Mode::Timeout, IdempotencyClass::NonIdempotent).await;
     let request = rig.request(IdempotencyClass::NonIdempotent);
     let receipt = rig
@@ -496,6 +494,21 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
         Err(ConnectorError::EffectPending)
     );
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    let ambiguous_retry_reconciled = receipt.status == OutcomeStatus::Ambiguous
+        && receipt.ambiguous_requires_observation
+        && replay == receipt
+        && rig.calls.load(Ordering::SeqCst) == 1;
+    diff003::record_assertion(
+        "connector_ambiguous_retry_reconciled",
+        "reconciled",
+        serde_json::json!({
+            "status": format!("{:?}", receipt.status),
+            "ambiguous_requires_observation": receipt.ambiguous_requires_observation,
+            "network_calls": rig.calls.load(Ordering::SeqCst),
+            "replay_equal": replay == receipt,
+        }),
+        ambiguous_retry_reconciled,
+    );
 }
 
 #[tokio::test]
@@ -535,18 +548,22 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
 
 #[tokio::test]
 async fn stale_substituted_replayed_and_permission_negative_requests_are_denied() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("connector_identity_substitution_denied", "denied"),
-        ("connector_replay_denied", "denied"),
-        ("connector_stale_denied", "denied"),
-    ]);
     let rig = Rig::new(Mode::Success, IdempotencyClass::ExternallyIdempotent).await;
     let mut stale = rig.request(IdempotencyClass::ExternallyIdempotent);
     stale.expires_at_unix_ms = NOW + 1;
     sign_action_request(&mut stale, &rig.request_seed).unwrap();
-    assert_eq!(
-        rig.connector.execute_at(stale, NOW + 2).await,
-        Err(ConnectorError::ExpiredAuthority)
+    let stale_result = rig.connector.execute_at(stale, NOW + 2).await;
+    let stale_denied = stale_result == Err(ConnectorError::ExpiredAuthority);
+    assert!(stale_denied);
+    diff003::record_assertion(
+        "connector_stale_denied",
+        "denied",
+        serde_json::json!({
+            "presented_expiry_unix_ms": NOW + 1,
+            "verification_time_unix_ms": NOW + 2,
+            "result": "expired_authority",
+        }),
+        stale_denied,
     );
 
     let mut too_short_for_transport = rig.request(IdempotencyClass::ExternallyIdempotent);
@@ -580,9 +597,20 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
     let mut substituted = rig.request(IdempotencyClass::ExternallyIdempotent);
     sign_action_request(&mut substituted, &rig.request_seed).unwrap();
     substituted.resource_identity = "resource/substituted-after-signing".to_owned();
-    assert_eq!(
-        rig.connector.execute_at(substituted, NOW).await,
-        Err(ConnectorError::UnauthorizedRequest)
+    let substituted_identity = substituted.resource_identity.clone();
+    let substitution_result = rig.connector.execute_at(substituted, NOW).await;
+    let identity_substitution_denied =
+        substitution_result == Err(ConnectorError::UnauthorizedRequest);
+    assert!(identity_substitution_denied);
+    diff003::record_assertion(
+        "connector_identity_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_resource_identity": substituted_identity,
+            "result": "unauthorized_request",
+            "endpoint_calls": rig.calls.load(Ordering::SeqCst),
+        }),
+        identity_substitution_denied,
     );
 
     let mut schema_substituted = rig.request(IdempotencyClass::ExternallyIdempotent);
@@ -601,9 +629,18 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
     let mut divergent_replay = request;
     divergent_replay.audit_provenance = "audit/divergent-replay".to_owned();
     sign_action_request(&mut divergent_replay, &rig.request_seed).unwrap();
-    assert_eq!(
-        rig.connector.execute_at(divergent_replay, NOW).await,
-        Err(ConnectorError::ReplayMismatch)
+    let replay_result = rig.connector.execute_at(divergent_replay, NOW).await;
+    let replay_denied = replay_result == Err(ConnectorError::ReplayMismatch);
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "connector_replay_denied",
+        "denied",
+        serde_json::json!({
+            "mutation": "audit_provenance",
+            "result": "replay_mismatch",
+            "effect_calls": rig.calls.load(Ordering::SeqCst),
+        }),
+        replay_denied,
     );
 
     let denied = Rig::new(Mode::Denied, IdempotencyClass::ExternallyIdempotent).await;
@@ -1168,7 +1205,6 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
 
 #[tokio::test]
 async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
-    let _diff003 = diff003::scenario_assertions(&[("connector_outage_reconciled", "reconciled")]);
     let rig = Rig::new(Mode::Timeout, IdempotencyClass::NonIdempotent).await;
     let action = rig.request(IdempotencyClass::NonIdempotent);
     let ambiguous = rig.connector.execute_at(action.clone(), NOW).await.unwrap();
@@ -1275,6 +1311,20 @@ async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
     assert_eq!(reconciled.status, OutcomeStatus::Succeeded);
     assert_eq!(reconciled.status_code, "reconciled_effect_observed");
     assert!(reconciled.observation_receipt_sha256.is_some());
+    let outage_reconciled = reconciled.status == OutcomeStatus::Succeeded
+        && reconciled.status_code == "reconciled_effect_observed"
+        && reconciled.observation_receipt_sha256.is_some();
+    diff003::record_assertion(
+        "connector_outage_reconciled",
+        "reconciled",
+        serde_json::json!({
+            "initial_status": format!("{:?}", ambiguous.status),
+            "reconciled_status": format!("{:?}", reconciled.status),
+            "status_code": reconciled.status_code,
+            "observation_receipt_bound": reconciled.observation_receipt_sha256.is_some(),
+        }),
+        outage_reconciled,
+    );
 }
 
 #[tokio::test]

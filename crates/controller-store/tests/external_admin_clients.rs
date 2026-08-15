@@ -235,10 +235,6 @@ fn admin_scopes() -> BTreeSet<ServiceScope> {
 
 #[tokio::test]
 async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("admin_residual_jenkins_write_denied", "denied"),
-        ("admin_rollback_restored", "restored"),
-    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -357,10 +353,23 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
     pending.source_writes_observed = 1;
     pending.expected_contract_digest =
         compute_external_admin_client_digest(&pending).expect("residual-write digest");
-    assert!(matches!(
-        store.install_external_admin_client(&pending).await,
-        Err(StoreError::InvalidAdminMigration(message)) if message.contains("zero residual Jenkins writes")
-    ));
+    let residual_result = store.install_external_admin_client(&pending).await;
+    let residual_write_denied = matches!(
+        residual_result,
+        Err(StoreError::InvalidAdminMigration(message))
+            if message.contains("zero residual Jenkins writes")
+    );
+    assert!(residual_write_denied);
+    diff003::record_assertion(
+        "admin_residual_jenkins_write_denied",
+        "denied",
+        serde_json::json!({
+            "source_writes_observed": pending.source_writes_observed,
+            "requested_authority": pending.authority,
+            "result": "zero_residual_writes_required",
+        }),
+        residual_write_denied,
+    );
 
     pending.source_writes_observed = 0;
     pending.expected_contract_digest =
@@ -395,6 +404,19 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
     assert_eq!(
         rollback_receipt.authority,
         ExternalAdminAuthority::JenkinsSource
+    );
+    let rollback_restored = rollback_receipt.authority == ExternalAdminAuthority::JenkinsSource
+        && rollback_receipt.generation == 3
+        && rollback_receipt.binding_digest == source_receipt.binding_digest;
+    diff003::record_assertion(
+        "admin_rollback_restored",
+        "restored",
+        serde_json::json!({
+            "restored_generation": rollback_receipt.generation,
+            "restored_authority": rollback_receipt.authority,
+            "binding_preserved": rollback_receipt.binding_digest == source_receipt.binding_digest,
+        }),
+        rollback_restored,
     );
 
     let audit = store
@@ -491,7 +513,6 @@ async fn target_identity_must_hold_every_mapped_write_action() {
 
 #[tokio::test]
 async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_closed() {
-    let _diff003 = diff003::scenario_assertions(&[("admin_target_substitution_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -509,10 +530,23 @@ async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_clos
     );
     let mut substituted = source.clone();
     substituted.source_endpoint = "https://substituted.invalid/jenkins".to_owned();
-    assert!(matches!(
-        store.install_external_admin_client(&substituted).await,
-        Err(StoreError::InvalidAdminMigration(message)) if message.contains("digest does not match")
-    ));
+    let substitution_result = store.install_external_admin_client(&substituted).await;
+    let target_substitution_denied = matches!(
+        substitution_result,
+        Err(StoreError::InvalidAdminMigration(message))
+            if message.contains("digest does not match")
+    );
+    assert!(target_substitution_denied);
+    diff003::record_assertion(
+        "admin_target_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_source_endpoint": substituted.source_endpoint,
+            "expected_contract_digest": substituted.expected_contract_digest,
+            "result": "contract_digest_mismatch",
+        }),
+        target_substitution_denied,
+    );
 
     let mut omitted = source.clone();
     omitted.operation_contracts.pop();

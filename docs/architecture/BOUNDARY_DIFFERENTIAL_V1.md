@@ -123,8 +123,11 @@ detached signatures enter evidence; the private key stays in the private
 runtime directory and is destroyed before verification and sealing. The
 verifier checks every boundary-specific schema, protocol, generation,
 transition, and outcome shape. Each certified scenario also requires one
-machine-readable outcome emitted only after the owning focused test's
-assertions completed successfully. Finally, every join compares trace, input,
+machine-readable outcome emitted from a scenario-specific predicate over the
+actual error, status, counter, digest, generation, or rollback state observed
+by the owning focused test. The outcome file includes a nonempty structured
+observation, is create-new and synchronized, and cannot be emitted by merely
+reaching the end of a non-panicking test. Finally, every join compares trace, input,
 control-flow, effect-intent, outcome, content, generation, retry, effect,
 duplicate-effect, and rollback projections from both authenticated receipts.
 `runtime-boundaries.json`, `executed-scenarios.json`, and `runtime-joins.json`
@@ -157,8 +160,11 @@ before the target network exists.
 The target phase requires a rootless Podman engine, starts the pinned PostgreSQL
 service, and starts a pinned Rust runner with no-new-privileges, finite CPU,
 memory, and PID ceilings, a read-only source mount, read-only offline Cargo
-registry, fresh writable target directory, and exact-capacity source-transport
-tmpfs mounts. The runner drops the complete default capability set and restores
+registry, three disjoint writable mounts for public receipts, scenario
+observations, and runner-only outputs, and exact-capacity source-transport tmpfs
+mounts. It cannot write the retained evidence root, host-owned logs,
+inspections, authentication material, merged receipts, verifier output, or
+manifest. The runner drops the complete default capability set and restores
 only rootless `SETUID`, `SETGID`, and `SETFCAP`. The source-acquirer needs the
 first two to write the single-identity UID/GID maps for its inner transport user
 namespace; Linux requires the third when the inner mapping contains namespace
@@ -174,8 +180,10 @@ The host recomputes each component source manifest and compares it with the
 certificate, requires all 13 live public receipts and all 12 derived live
 joins, verifies the exact suite ledger and verifier receipt, records all
 container/image/network inspections and transcripts, rejects private-key
-material, private-key paths, and every contained private marker, rechecks the
-exact source commit/tree/status, and seals a self-excluding evidence manifest.
+material, private-key paths, and every contained private marker—including
+case-varied hexadecimal and percent encodings—rechecks the exact source
+commit/tree/status, rejects every nonregular or multiply-linked retained entry,
+and seals a self-excluding evidence manifest.
 Failed attempts remain unsealed and grant no authority.
 
 Run the repository verifier with:

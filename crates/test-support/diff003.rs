@@ -1,47 +1,47 @@
 use serde_json::{Value, json};
 use std::io::Write as _;
 
-pub struct ScenarioAssertions {
-    scenarios: Vec<(&'static str, &'static str)>,
-}
-
-pub fn scenario_assertions(scenarios: &[(&'static str, &'static str)]) -> ScenarioAssertions {
-    ScenarioAssertions {
-        scenarios: scenarios.to_vec(),
+pub fn record_assertion(
+    scenario: &'static str,
+    observed_outcome: &'static str,
+    observation: Value,
+    assertion_passed: bool,
+) {
+    assert!(
+        assertion_passed,
+        "DIFF-003 scenario-specific assertion failed: {scenario}"
+    );
+    if std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR").is_none() {
+        return;
     }
-}
-
-impl Drop for ScenarioAssertions {
-    fn drop(&mut self) {
-        if std::thread::panicking()
-            || std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR").is_none()
-        {
-            return;
-        }
-        let root = std::env::var("MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR")
-            .expect("DIFF-003 assertion output directory");
-        for (scenario, observed_outcome) in self.scenarios.iter() {
-            let path = std::path::Path::new(&root).join(format!("{scenario}.json"));
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
-            serde_json::to_writer(
-                &mut file,
-                &json!({
-                    "schema": "mcloving.diff003.executed-assertion/v1",
-                    "scenario": scenario,
-                    "observed_outcome": observed_outcome,
-                    "assertions_passed": true,
-                }),
-            )
-            .expect("serialize DIFF-003 executed assertion");
-            file.write_all(b"\n")
-                .expect("terminate DIFF-003 executed assertion");
-            file.sync_all().expect("sync DIFF-003 executed assertion");
-        }
-    }
+    assert!(
+        observation
+            .as_object()
+            .is_some_and(|value| !value.is_empty()),
+        "DIFF-003 scenario observation must be a nonempty object"
+    );
+    let root = std::env::var("MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR")
+        .expect("DIFF-003 assertion output directory");
+    let path = std::path::Path::new(&root).join(format!("{scenario}.json"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+    serde_json::to_writer(
+        &mut file,
+        &json!({
+            "schema": "mcloving.diff003.executed-assertion/v1",
+            "scenario": scenario,
+            "observed_outcome": observed_outcome,
+            "observation": observation,
+            "assertions_passed": assertion_passed,
+        }),
+    )
+    .expect("serialize DIFF-003 executed assertion");
+    file.write_all(b"\n")
+        .expect("terminate DIFF-003 executed assertion");
+    file.sync_all().expect("sync DIFF-003 executed assertion");
 }
 
 #[derive(Clone, Copy)]

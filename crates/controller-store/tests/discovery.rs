@@ -301,7 +301,6 @@ fn scan(
 
 #[tokio::test]
 async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
-    let _diff003 = diff003::scenario_assertions(&[("discovery_replay_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -320,10 +319,19 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
         store.put_discovery_parent(&parent).await.unwrap(),
         DiscoveryParentPutOutcome::Created(_)
     ));
-    assert!(matches!(
-        store.put_discovery_parent(&parent).await.unwrap(),
-        DiscoveryParentPutOutcome::Replayed(_)
-    ));
+    let replay = store.put_discovery_parent(&parent).await.unwrap();
+    let replay_denied = matches!(replay, DiscoveryParentPutOutcome::Replayed(_));
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "discovery_replay_denied",
+        "denied",
+        json!({
+            "parent_id": parent.parent_id,
+            "presented_generation": parent.expected_generation,
+            "outcome": "replayed",
+        }),
+        replay_denied,
+    );
     let mut divergent_parent_replay = parent.clone();
     divergent_parent_replay.reason = "substituted audit reason".to_owned();
     assert!(matches!(
@@ -834,10 +842,6 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
 
 #[tokio::test]
 async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("discovery_config_substitution_denied", "denied"),
-        ("discovery_stale_denied", "denied"),
-    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -854,10 +858,20 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
     );
     let mut substituted = parent.clone();
     substituted.implementation_sha256 = digest("substituted-implementation");
-    assert!(matches!(
-        store.put_discovery_parent(&substituted).await,
-        Err(StoreError::InvalidDiscovery(_))
-    ));
+    let substitution_result = store.put_discovery_parent(&substituted).await;
+    let config_substitution_denied =
+        matches!(substitution_result, Err(StoreError::InvalidDiscovery(_)));
+    assert!(config_substitution_denied);
+    diff003::record_assertion(
+        "discovery_config_substitution_denied",
+        "denied",
+        json!({
+            "parent_id": substituted.parent_id,
+            "presented_implementation_sha256": substituted.implementation_sha256,
+            "result": "invalid_discovery",
+        }),
+        config_substitution_denied,
+    );
 
     let mut oversized = parent.clone();
     oversized.repositories = (0..130)
@@ -933,10 +947,20 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         2,
         Vec::new(),
     );
-    assert!(matches!(
-        store.reconcile_discovery_scan(&stale_scan).await,
-        Err(StoreError::DiscoveryConflict(_))
-    ));
+    let stale_result = store.reconcile_discovery_scan(&stale_scan).await;
+    let stale_denied = matches!(stale_result, Err(StoreError::DiscoveryConflict(_)));
+    assert!(stale_denied);
+    diff003::record_assertion(
+        "discovery_stale_denied",
+        "denied",
+        json!({
+            "scan_id": stale_scan.scan_id,
+            "presented_authorization_generation": parent.authorization_generation,
+            "active_authorization_generation": 2,
+            "result": "discovery_conflict",
+        }),
+        stale_denied,
+    );
 
     let mut rebound = parent.clone();
     rebound.expected_generation = 1;

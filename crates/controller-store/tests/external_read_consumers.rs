@@ -269,10 +269,6 @@ async fn fixture_with_scopes(
 
 #[tokio::test]
 async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authority() {
-    let _diff003 = diff003::scenario_assertions(&[
-        ("consumer_residual_jenkins_read_denied", "denied"),
-        ("consumer_rollback_restored", "restored"),
-    ]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -493,11 +489,23 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
     residual.source_reads_observed = 1;
     residual.expected_contract_digest =
         compute_external_read_consumer_digest(&residual).expect("residual digest");
-    assert!(matches!(
-        store.install_external_read_consumer(&residual).await,
+    let residual_result = store.install_external_read_consumer(&residual).await;
+    let residual_read_denied = matches!(
+        residual_result,
         Err(StoreError::InvalidConsumerMigration(message))
             if message.contains("zero residual Jenkins reads")
-    ));
+    );
+    assert!(residual_read_denied);
+    diff003::record_assertion(
+        "consumer_residual_jenkins_read_denied",
+        "denied",
+        serde_json::json!({
+            "source_reads_observed": residual.source_reads_observed,
+            "requested_authority": residual.authority,
+            "result": "zero_residual_reads_required",
+        }),
+        residual_read_denied,
+    );
 
     let target = consumer(
         organization_id,
@@ -557,6 +565,19 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
     assert_eq!(receipt.authority, ExternalReadAuthority::JenkinsSource);
     assert_eq!(receipt.generation, 3);
     assert_eq!(receipt.binding_digest, source_receipt.binding_digest);
+    let rollback_restored = receipt.authority == ExternalReadAuthority::JenkinsSource
+        && receipt.generation == 3
+        && receipt.binding_digest == source_receipt.binding_digest;
+    diff003::record_assertion(
+        "consumer_rollback_restored",
+        "restored",
+        serde_json::json!({
+            "restored_generation": receipt.generation,
+            "restored_authority": receipt.authority,
+            "binding_preserved": receipt.binding_digest == source_receipt.binding_digest,
+        }),
+        rollback_restored,
+    );
 
     let current: (i64, String) = sqlx::query_as(
         "SELECT current.current_generation, version.authority
@@ -629,8 +650,6 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
 
 #[tokio::test]
 async fn contract_substitution_tenant_crossing_and_concurrent_first_generation_fail_closed() {
-    let _diff003 =
-        diff003::scenario_assertions(&[("consumer_target_substitution_denied", "denied")]);
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -646,11 +665,23 @@ async fn contract_substitution_tenant_crossing_and_concurrent_first_generation_f
     );
     let mut substituted = source.clone();
     substituted.source_endpoint = "https://attacker.invalid/jenkins".to_owned();
-    assert!(matches!(
-        store.install_external_read_consumer(&substituted).await,
+    let substitution_result = store.install_external_read_consumer(&substituted).await;
+    let target_substitution_denied = matches!(
+        substitution_result,
         Err(StoreError::InvalidConsumerMigration(message))
             if message.contains("digest does not match")
-    ));
+    );
+    assert!(target_substitution_denied);
+    diff003::record_assertion(
+        "consumer_target_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_source_endpoint": substituted.source_endpoint,
+            "expected_contract_digest": substituted.expected_contract_digest,
+            "result": "contract_digest_mismatch",
+        }),
+        target_substitution_denied,
+    );
 
     let mut mislabeled_endpoint = source.clone();
     mislabeled_endpoint
