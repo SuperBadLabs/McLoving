@@ -515,7 +515,11 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
     assert_eq!(first.status, OutcomeStatus::Succeeded);
     assert_eq!(first.attempt_count, 1);
     verify_outcome_receipt(&first, &public_key_from_seed(&rig.outcome_seed).unwrap()).unwrap();
-    let replay = rig.restart().execute_at(request, NOW + 10).await.unwrap();
+    let replay = rig
+        .restart()
+        .execute_at(request.clone(), NOW + 10)
+        .await
+        .unwrap();
     assert_eq!(replay, first);
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
