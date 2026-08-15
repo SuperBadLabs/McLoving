@@ -97,10 +97,9 @@ fn symlinked_evidence_fails_closed() {
 #[test]
 fn hardlinked_evidence_fails_closed() {
     let temporary = copy_fixture();
-    let alias_directory = tempfile::tempdir().expect("alias directory");
     fs::hard_link(
         temporary.path().join(EVIDENCE_FILE),
-        alias_directory.path().join("evidence-alias"),
+        temporary.path().join("evidence-alias"),
     )
     .expect("hardlink evidence");
     assert_eq!(
