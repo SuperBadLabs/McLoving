@@ -65,7 +65,6 @@
       "resource_identity": "diff003-resource/trig-001",
       "content_sha256": "c934a0a3381034157bf496091d1fc44217e1348e2a7e9c95b3882c04250f4bdc",
       "generation": 1,
-      "positive_receipt_sha256": "4948e48688b78086c6a174935c6f1fc674e3944a4168c04b86080ca325c6bf88",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -78,20 +77,18 @@
       "resource_identity": "diff003-resource/scm-001",
       "content_sha256": "99a168a8565f5d5388822a8c9241951e027f7582bd307239dd508cc40c08b2fd",
       "generation": 1,
-      "positive_receipt_sha256": "c0040bc9d8095b2eb8a79687648252849008b0089f3fde6f2acd61f48923d09b",
       "fixture_effects": 0,
       "production_authority": false
     },
     {
       "id": "SECRET-001",
       "protocol": "mcloving.secret-grant/v1",
-      "implementation_source_manifest_sha256": "77623dbc30c3fb8ae69c47fd0bd8fba97b3cb5367b934f9aac51d22ff46e5b1e",
+      "implementation_source_manifest_sha256": "5daa060108f97557b0eaef63cbfb4134598c213aab38f4e4a31058d7e4161280",
       "configuration_sha256": "cd100128c5738a0895f1c9e0cc01551d12990fe5bcb86ae9561688ef40ac1685",
       "account_identity": "diff003-account/secret-001",
       "resource_identity": "diff003-resource/secret-001",
       "content_sha256": "2fffc6c91ed0be1397256ebab1f115c2f24762c092d25d6333e350eaa1397ae1",
       "generation": 1,
-      "positive_receipt_sha256": "d3e274ea6bbd686b1ef74cf5c1b9811e948fbbf5ef08492ead1f9634be0447ff",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -104,7 +101,6 @@
       "resource_identity": "diff003-resource/input-001",
       "content_sha256": "576e713e64ab08a2019aa3338288766ca97e340ad83d399659369f1b69c1f8f7",
       "generation": 1,
-      "positive_receipt_sha256": "2d1cee2167d0b06e3e371ea6a6c7aad240204690dad9788d66e4d4c0998a5716",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -117,7 +113,6 @@
       "resource_identity": "diff003-resource/prov-001",
       "content_sha256": "3977ad72c613fb6e124b72f4242cfc60c159939d413a4d1097617f3cd7073f3a",
       "generation": 1,
-      "positive_receipt_sha256": "6ddda5d53bf8fa2c359c33eb0b0f854acaddc6a94438152b7bb9130d5c21cfc8",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -130,7 +125,6 @@
       "resource_identity": "diff003-resource/ext-001",
       "content_sha256": "ffad33ee6f25f1aeb36cd4ab95e59533878468c8e6a8325c456022da7b046b4a",
       "generation": 1,
-      "positive_receipt_sha256": "c96074fba5b8b4d50212498f58f5c7053d59bdc5773d43de9858d0dd4553f12d",
       "fixture_effects": 1,
       "production_authority": false
     },
@@ -143,7 +137,6 @@
       "resource_identity": "diff003-resource/obs-001",
       "content_sha256": "f76a95a1ded011b2952b593b53debc09e6a2cc0516745d57bf7e86ea69ea6567",
       "generation": 1,
-      "positive_receipt_sha256": "2883efc9de442b8bd0fd9e58256afb7ce165d25ae6fdf0171aba14a56d5b89bd",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -156,7 +149,6 @@
       "resource_identity": "diff003-resource/disc-001",
       "content_sha256": "45fa533e9cd5dbd22aad72a2e5c19043f57bb84df70ce9205cb098bdda4e008c",
       "generation": 1,
-      "positive_receipt_sha256": "42e3a388758f3f9d4ded81670d238197c8655f27c93511161b9407d2e78fa642",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -169,7 +161,6 @@
       "resource_identity": "diff003-resource/dep-001",
       "content_sha256": "0216a93c6ebe5e3a82674a79c0aac860f97644d755902edf1aceadc6b9b694bf",
       "generation": 1,
-      "positive_receipt_sha256": "84d5c41556be1076fd93d09f18e46949ec98cc647c9f1045e547c1da739421a2",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -182,7 +173,6 @@
       "resource_identity": "diff003-resource/cache-001",
       "content_sha256": "ccb20ca33f96c9be28383af999870da36959b75ab8db2236821b59c73442b689",
       "generation": 1,
-      "positive_receipt_sha256": "071a6b3c22790afd5eca56f1ab0e59ac879bdd31f2931764c41d06f9a8e55f65",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -195,7 +185,6 @@
       "resource_identity": "diff003-resource/consumer-001",
       "content_sha256": "785c5fb9b450a99d9f4faccbaa5984055800ac134ceb0223a87f010b6eb664b1",
       "generation": 1,
-      "positive_receipt_sha256": "d63bd576af5711721e081c4c2bf480cddc9cdf902e093efcd4cc39e05b58ef3c",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -208,7 +197,6 @@
       "resource_identity": "diff003-resource/admin-001",
       "content_sha256": "df89befc0dd1361b8750ecbf821782bf7fcae6ad7e6553d53d718483d5367307",
       "generation": 1,
-      "positive_receipt_sha256": "122b2b93a008035b607bcd8daf6d810a3a9e194ab512fe17f1695bcb7a317c58",
       "fixture_effects": 0,
       "production_authority": false
     },
@@ -221,7 +209,6 @@
       "resource_identity": "diff003-resource/rel-001",
       "content_sha256": "f66d426213a0c516102116d7ea75dd6334eaeb61bb6660ab2e0bd798671a43d6",
       "generation": 1,
-      "positive_receipt_sha256": "56c4083af90f5769369d2923d34f755fb410a1b9f43fb0c434711942558f90bb",
       "fixture_effects": 0,
       "production_authority": false
     }

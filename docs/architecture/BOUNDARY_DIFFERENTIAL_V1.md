@@ -16,7 +16,7 @@ owner/operator client intentionally remains Jenkins-source-authoritative.
 The certificate therefore makes two bounded claims:
 
 1. every named DIFF-003 prerequisite implementation and protocol is frozen by
-   an exact current source-manifest SHA-256 and positive receipt contract; and
+   an exact current source-manifest SHA-256 and live receipt contract; and
 2. the complete declared cross-boundary and adversarial fixture denominator is
    fail-closed, effect-safe, non-disclosing, and explicit about the absence of
    production authority.

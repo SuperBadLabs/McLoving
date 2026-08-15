@@ -1,8 +1,9 @@
 //! Provider-neutral Jenkins credential mapping and short-lived grant broker.
 //!
-//! Secret bytes exist only in [`SecretMaterial`] during redemption by an exact
-//! out-of-process consumer. Mapping, grant, receipt, and audit types deliberately
-//! have no field capable of carrying those bytes.
+//! Provider-resolved secret bytes exist only in [`SecretMaterial`] during
+//! redemption by an exact out-of-process consumer. Owner-private startup markers
+//! are deny-only inputs; mapping, grant, receipt, and audit types deliberately
+//! have no field capable of carrying secret bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const SCHEMA_VERSION: &str = "mcloving.secret-mapping/v1";
 pub const GRANT_PROTOCOL_VERSION: &str = "mcloving.secret-grant/v1";
@@ -26,6 +27,8 @@ const MAX_TEXT_BYTES: usize = 1_024;
 const MAX_REFERENCE_BYTES: usize = 4_096;
 const MAX_TAINT_PATH: usize = 32;
 const MAX_SECRET_BYTES: usize = 65_536;
+const MAX_DENIED_PUBLIC_MARKERS: usize = 256;
+const MAX_DENIED_PUBLIC_MARKER_BYTES: usize = 1024 * 1024;
 const MAX_GRANT_TTL_MS: i64 = 15 * 60 * 1_000;
 const MAX_APPROVAL_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -466,14 +469,18 @@ pub enum BrokerError {
 pub struct SecretBroker {
     connection: Connection,
     trusted_owner_keys: BTreeMap<String, Vec<u8>>,
+    denied_public_markers: Zeroizing<Vec<Vec<u8>>>,
 }
 
 impl SecretBroker {
     pub fn open(
         path: &Path,
         trusted_owner_keys: BTreeMap<String, Vec<u8>>,
+        denied_public_markers: Vec<Vec<u8>>,
     ) -> Result<Self, BrokerError> {
+        let denied_public_markers = Zeroizing::new(denied_public_markers);
         validate_trusted_owner_keys(&trusted_owner_keys)?;
+        validate_denied_public_markers(&denied_public_markers)?;
         let canonical_path = prepare_state_path(path)?;
         validate_state_sidecars(&canonical_path)?;
         let connection = Connection::open(&canonical_path)?;
@@ -526,6 +533,7 @@ impl SecretBroker {
         Ok(Self {
             connection,
             trusted_owner_keys,
+            denied_public_markers,
         })
     }
 
@@ -535,12 +543,13 @@ impl SecretBroker {
         installed_at_unix_ms: i64,
     ) -> Result<(), BrokerError> {
         validate_mapping(mapping)?;
+        let canonical = serde_json::to_vec(mapping)?;
+        ensure_markers_absent(mapping, &canonical, &self.denied_public_markers)?;
         let owner_approval_public_key = self
             .trusted_owner_keys
             .get(&mapping.owner_approval_signer_key_id)
             .ok_or(BrokerError::OwnerApprovalDenied)?;
         verify_owner_approval(mapping, owner_approval_public_key, installed_at_unix_ms)?;
-        let canonical = serde_json::to_vec(mapping)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1220,6 +1229,68 @@ fn validate_trusted_owner_keys(
     Ok(())
 }
 
+fn validate_denied_public_markers(markers: &[Vec<u8>]) -> Result<(), BrokerError> {
+    let mut unique_representations = BTreeSet::new();
+    if markers.is_empty()
+        || markers.len() > MAX_DENIED_PUBLIC_MARKERS
+        || markers
+            .iter()
+            .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
+            .is_none_or(|total| total > MAX_DENIED_PUBLIC_MARKER_BYTES)
+        || markers.iter().any(|marker| {
+            marker.len() < 16
+                || marker.len() > MAX_SECRET_BYTES
+                || secret_representations(marker)
+                    .into_iter()
+                    .any(|representation| !unique_representations.insert(representation))
+        })
+    {
+        return Err(BrokerError::InvalidMapping);
+    }
+    Ok(())
+}
+
+fn ensure_markers_absent<T: Serialize>(
+    value: &T,
+    canonical: &[u8],
+    markers: &[Vec<u8>],
+) -> Result<(), BrokerError> {
+    let representations = markers
+        .iter()
+        .flat_map(|marker| secret_representations(marker))
+        .collect::<Vec<_>>();
+    let semantic = serde_json::to_value(value)?;
+    if contains_marker(canonical, &representations)
+        || json_contains_marker(&semantic, &representations)
+    {
+        return Err(BrokerError::ConfidentialityDenied);
+    }
+    Ok(())
+}
+
+fn contains_marker(value: &[u8], markers: &[Vec<u8>]) -> bool {
+    markers.iter().any(|marker| {
+        value
+            .windows(marker.len())
+            .any(|window| window == marker.as_slice())
+    })
+}
+
+fn json_contains_marker(value: &serde_json::Value, markers: &[Vec<u8>]) -> bool {
+    match value {
+        serde_json::Value::String(value) => contains_marker(value.as_bytes(), markers),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_marker(value, markers)),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            contains_marker(key.as_bytes(), markers) || json_contains_marker(value, markers)
+        }),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
 fn verify_owner_approval(
     mapping: &CredentialMapping,
     owner_approval_public_key: &[u8],
@@ -1274,7 +1345,7 @@ fn validate_mapping(mapping: &CredentialMapping) -> Result<(), BrokerError> {
         || !valid_text(&mapping.provider_version, MAX_TEXT_BYTES)
         || !is_sha256(&mapping.provider_implementation_sha256)
         || !is_sha256(&mapping.provider_configuration_sha256)
-        || !valid_provider_reference(&mapping.provider_reference)
+        || !valid_text(&mapping.provider_reference, MAX_REFERENCE_BYTES)
         || !valid_text(&mapping.secret_version, MAX_TEXT_BYTES)
         || mapping.rotation_generation == 0
         || mapping.declared_taint != mapping.consumer.taint_class()
@@ -1377,18 +1448,6 @@ fn valid_text(value: &str, maximum: usize) -> bool {
         && value.len() <= maximum
         && value == value.trim()
         && !value.chars().any(char::is_control)
-}
-
-fn valid_provider_reference(value: &str) -> bool {
-    valid_text(value, MAX_REFERENCE_BYTES)
-        && (value.contains('/') || value.contains(':'))
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'.' | b'_' | b'-')
-        })
-        && !matches!(value.as_bytes().first(), Some(b'/' | b':'))
-        && !matches!(value.as_bytes().last(), Some(b'/' | b':'))
-        && !value.contains("//")
-        && !value.contains("::")
 }
 
 fn is_sha256(value: &str) -> bool {

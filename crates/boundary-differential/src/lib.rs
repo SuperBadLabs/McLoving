@@ -15,7 +15,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.boundary-differential/v1";
 pub const CASE: &str = "mario-contained-boundaries-zero-authority";
 pub const EVIDENCE_FILE: &str = "boundary-differential.json";
 pub const EVIDENCE_SHA256: &str =
-    "74eb2c88e25a2fac0b0012ced545e1214528dfec6a88e6391421491f4dae4243";
+    "8885756c29cd475477e3c03e77f7474d8e0cd65194430f6b337571e4d1c450a5";
 
 const MAX_EVIDENCE_BYTES: u64 = 262_144;
 const MAX_MANIFEST_BYTES: u64 = 256;
@@ -50,7 +50,7 @@ const EXPECTED_BOUNDARIES: [(&str, &str, &str); 13] = [
     (
         "SECRET-001",
         "mcloving.secret-grant/v1",
-        "77623dbc30c3fb8ae69c47fd0bd8fba97b3cb5367b934f9aac51d22ff46e5b1e",
+        "5daa060108f97557b0eaef63cbfb4134598c213aab38f4e4a31058d7e4161280",
     ),
     (
         "INPUT-001",
@@ -468,7 +468,6 @@ struct Boundary {
     resource_identity: String,
     content_sha256: String,
     generation: u64,
-    positive_receipt_sha256: String,
     fixture_effects: u64,
     production_authority: bool,
 }
@@ -839,7 +838,6 @@ fn verify_boundaries(boundaries: &[Boundary]) -> Result<(), VerificationError> {
             ),
             (&boundary.configuration_sha256, "boundary configuration"),
             (&boundary.content_sha256, "boundary content"),
-            (&boundary.positive_receipt_sha256, "boundary receipt"),
         ] {
             require_digest(value, name)?;
         }
