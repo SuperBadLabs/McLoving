@@ -125,6 +125,13 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
   and .protocol_version == "mcloving.external-connector/v1"
   and .status == "succeeded" and .attempt_count == 1
   and (.request_sha256 | test($d)) and (.signature_base64 | test($s))
+  and (.release_binding.release_receipt_sha256 | test($d))
+  and (.release_binding.release_id | type == "string" and length > 0)
+  and (.release_binding.manifest_sha256 | test($d))
+  and (.release_binding.envelope_sha256 | test($d))
+  and (.release_binding.bundle_sha256 | test($d))
+  and .release_binding.request_payload_sha256 == .request_payload_sha256
+  and (.observer_receipt_signing_public_key_sha256 | test($d))
 ' "${receipt_dir}/EXT-001.json" >/dev/null || fail "EXT-001 contract"
 
 jq --exit-status --arg d "${digest}" --arg s "${base64}" '
@@ -139,6 +146,8 @@ jq --exit-status --arg d "${digest}" --arg s "${base64}" '
   and .post.destination_cursor < .reconciliation.destination_cursor
   and .reconciliation.evidence_sequence == 3
   and (.connector_receipt_sha256 | test($d))
+  and .connector_outcome_authenticated == true
+  and .shared_effect_state_sha256 == .connector_receipt_sha256
 ' "${receipt_dir}/OBS-001.json" >/dev/null || fail "OBS-001 contract"
 
 jq --exit-status '
@@ -174,6 +183,11 @@ for client in CONSUMER-001 ADMIN-001; do
     and (.target.binding_digest | type == "array" and length == 32)
     and .source.binding_digest == .target.binding_digest
     and .rollback.binding_digest == .source.binding_digest
+    and (.trigger_receipt_sha256 | test($d))
+    and (.trigger_id | type == "string" and length > 0)
+    and (.trigger_organization_id | type == "string" and length > 0)
+    and (.trigger_project_id | type == "string" and length > 0)
+    and (.trigger_pipeline_id | type == "string" and length > 0)
   ' "${receipt_dir}/${client}.json" >/dev/null || fail "${client} contract"
 done
 
@@ -414,13 +428,16 @@ while IFS=$'\t' read -r name source target rule expected_effects \
         and .[0].ready.project_id == .[1].initial.project_id
         and .[0].ready.build_id == .[1].initial.build_id
         and .[0].ready.attempt_id == .[1].initial.attempt_id
-        and (.[0].ready.agent.network.egress_allowlist
-          | index("source.contained:443") != null)
+        and (.[1].initial.repository_trees[0].repository_url as $repository_url
+          | .[0].ready.agent.network.egress_allowlist
+          | index($repository_url) != null)
         and .[1].initial.protocol_version == "mcloving.source-acquirer/v1"'
       ;;
     connector_to_observer)
       pair_filter='.[0].status == "succeeded" and .[0].attempt_count == 1
         and .[1].connector_receipt_sha256 == $source_sha
+        and .[1].connector_outcome_authenticated == true
+        and .[1].shared_effect_state_sha256 == $source_sha
         and .[0].tenant_id == .[1].post.tenant_id
         and .[0].project_id == .[1].post.project_id
         and .[0].pipeline_id == .[1].post.pipeline_id
@@ -433,7 +450,7 @@ while IFS=$'\t' read -r name source target rule expected_effects \
         and .[0].effect_class == .[1].post.effect_class
         and .[0].external_ids.release_id == .[1].post.canonical_query.release_id
         and .[0].generation == .[1].post.generation
-        and .[0].outcome_signing_public_key_sha256
+        and .[0].observer_receipt_signing_public_key_sha256
           == .[1].post.receipt_signing_public_key_sha256
         and .[1].post.state.published
         and .[1].pre.phase == "pre_action" and .[1].post.phase == "post_action"
@@ -446,12 +463,23 @@ while IFS=$'\t' read -r name source target rule expected_effects \
         and .[0].target.authority == "mc_loving_target"
         and .[0].rollback.authority == "jenkins_source"
         and .[0].rollback.binding_digest == .[0].source.binding_digest
+        and .[0].trigger_receipt_sha256 == $target_sha
+        and .[0].trigger_id == .[1].trigger_id
+        and .[0].trigger_organization_id == .[1].organization_id
+        and .[0].trigger_project_id == .[1].project_id
+        and .[0].trigger_pipeline_id == .[1].pipeline_id
         and .[0].source.generation == .[1].trigger_generation
         and .[1].status == "pending"'
       ;;
     release_to_connector)
       pair_filter='.[0].deployment_environment == "production"
         and .[0].rollback_manifest_sha256 == null
+        and .[1].release_binding.release_receipt_sha256 == $source_sha
+        and .[0].release_id == .[1].release_binding.release_id
+        and .[0].manifest_sha256 == .[1].release_binding.manifest_sha256
+        and .[0].envelope_sha256 == .[1].release_binding.envelope_sha256
+        and .[0].bundle_sha256 == .[1].release_binding.bundle_sha256
+        and .[1].release_binding.request_payload_sha256 == .[1].request_payload_sha256
         and .[0].release_id == .[1].external_ids.release_id
         and .[1].account_identity == "account/production"
         and .[1].effect_class == "release_publication"

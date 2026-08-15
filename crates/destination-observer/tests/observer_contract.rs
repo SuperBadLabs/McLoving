@@ -33,6 +33,10 @@ use mcloving_destination_observer::{
     SignedDestinationState, StateFieldSchema, content_sha256, destination_state_message,
     observation_receipt_digest, sign_observation_request, verify_observation_receipt,
 };
+use mcloving_external_connector::{
+    OutcomeReceipt as ConnectorOutcomeReceipt, OutcomeStatus as ConnectorOutcomeStatus,
+    verify_outcome_receipt,
+};
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use serde::Serialize;
 use serde_json::json;
@@ -94,8 +98,10 @@ struct DestinationState {
     cursor: AtomicU64,
     observed_at_unix_ms: AtomicI64,
     reads: AtomicU64,
+    shared_effect_published: Option<bool>,
 }
 
+#[derive(Clone)]
 struct Diff003ConnectorBinding {
     tenant_id: Uuid,
     project_id: Uuid,
@@ -108,6 +114,9 @@ struct Diff003ConnectorBinding {
     resource_identity: String,
     effect_class: String,
     release_id: String,
+    receipt_sha256: String,
+    authenticated_outcome: bool,
+    effect_published: bool,
 }
 
 struct Rig {
@@ -129,10 +138,11 @@ impl Rig {
     async fn new() -> Self {
         let request_seed = vec![1_u8; 32];
         let destination_seed = vec![2_u8; 32];
-        let receipt_seed = vec![3_u8; 32];
+        let receipt_seed = vec![4_u8; 32];
         let request_public_key = public_key(&request_seed);
         let destination_public_key = public_key(&destination_seed);
         let receipt_public_key = public_key(&receipt_seed);
+        let connector_binding = diff003_connector_binding();
         let server = Arc::new(DestinationState {
             seed: destination_seed,
             request: Mutex::new(None),
@@ -140,6 +150,9 @@ impl Rig {
             cursor: AtomicU64::new(10),
             observed_at_unix_ms: AtomicI64::new(NOW),
             reads: AtomicU64::new(0),
+            shared_effect_published: connector_binding
+                .as_ref()
+                .map(|binding| binding.effect_published),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -156,7 +169,6 @@ impl Rig {
         }
         let implementation_sha256 = "a".repeat(64);
         let image_sha256 = "b".repeat(64);
-        let connector_binding = diff003_connector_binding();
         let marker_digests = vec![content_sha256(TOKEN), content_sha256(SECRET)];
         let config = ObserverConfig {
             schema_version: CONFIG_SCHEMA_VERSION.to_owned(),
@@ -371,7 +383,23 @@ impl Rig {
 
 fn diff003_connector_binding() -> Option<Diff003ConnectorBinding> {
     let path = std::env::var_os("MCLOVING_DIFF003_CONNECTOR_RECEIPT")?;
-    let connector: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let bytes = fs::read(path).ok()?;
+    let mut connector: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let receipt_sha256 = content_sha256(&bytes);
+    connector.as_object_mut()?.remove("_diff003");
+    connector.as_object_mut()?.remove("release_binding");
+    connector
+        .as_object_mut()?
+        .remove("observer_receipt_signing_public_key_sha256");
+    let outcome: ConnectorOutcomeReceipt = serde_json::from_value(connector.clone()).ok()?;
+    let outcome_public_key = fs::read(std::env::var_os(
+        "MCLOVING_DIFF003_CONNECTOR_OUTCOME_PUBLIC_KEY",
+    )?)
+    .ok()?;
+    if content_sha256(&outcome_public_key) != outcome.outcome_signing_public_key_sha256 {
+        return None;
+    }
+    verify_outcome_receipt(&outcome, &outcome_public_key).ok()?;
     Some(Diff003ConnectorBinding {
         tenant_id: Uuid::parse_str(connector["tenant_id"].as_str()?).ok()?,
         project_id: Uuid::parse_str(connector["project_id"].as_str()?).ok()?,
@@ -384,6 +412,9 @@ fn diff003_connector_binding() -> Option<Diff003ConnectorBinding> {
         resource_identity: connector["resource_identity"].as_str()?.to_owned(),
         effect_class: connector["effect_class"].as_str()?.to_owned(),
         release_id: connector["external_ids"]["release_id"].as_str()?.to_owned(),
+        receipt_sha256,
+        authenticated_outcome: true,
+        effect_published: outcome.status == ConnectorOutcomeStatus::Succeeded,
     })
 }
 
@@ -586,7 +617,9 @@ async fn destination_handler(
         observed_at_unix_ms: server.observed_at_unix_ms.load(Ordering::SeqCst),
         state_schema_version: "release-state/v1".to_owned(),
         confidentiality: Confidentiality::Internal,
-        state: json!({"published": true}),
+        state: json!({
+            "published": server.shared_effect_published.unwrap_or(true),
+        }),
         grant_id: request.read_grant_id.clone(),
         grant_version: request.read_grant_version.clone(),
         grant_scope: request.read_grant_scope.clone(),
@@ -768,6 +801,12 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
                     "post": post,
                     "reconciliation": reconciliation,
                     "connector_receipt_sha256": content_sha256(&connector_receipt),
+                    "connector_outcome_authenticated": rig.connector_binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.authenticated_outcome),
+                    "shared_effect_state_sha256": rig.connector_binding
+                        .as_ref()
+                        .map(|binding| binding.receipt_sha256.clone()),
                 }),
             ),
         )

@@ -436,6 +436,10 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
             .any(|event| event.action == "external_admin_client.rolled_back")
     );
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let trigger_receipt = std::fs::read(std::path::Path::new(&root).join("TRIG-001.json"))
+            .expect("read live DIFF-003 trigger receipt");
+        let trigger: serde_json::Value =
+            serde_json::from_slice(&trigger_receipt).expect("parse live DIFF-003 trigger receipt");
         std::fs::write(
             std::path::Path::new(&root).join("ADMIN-001.json"),
             diff003::receipt(
@@ -462,6 +466,11 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
                         "binding_digest": rollback_receipt.binding_digest,
                         "contract_digest": rollback_receipt.contract_digest,
                     },
+                    "trigger_receipt_sha256": format!("{:x}", Sha256::digest(&trigger_receipt)),
+                    "trigger_id": trigger["trigger_id"],
+                    "trigger_organization_id": trigger["organization_id"],
+                    "trigger_project_id": trigger["project_id"],
+                    "trigger_pipeline_id": trigger["pipeline_id"],
                 }),
             ),
         )

@@ -614,6 +614,10 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
             .any(|event| event.action == "external_read_consumer.rolled_back")
     );
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let trigger_receipt = std::fs::read(std::path::Path::new(&root).join("TRIG-001.json"))
+            .expect("read live DIFF-003 trigger receipt");
+        let trigger: serde_json::Value =
+            serde_json::from_slice(&trigger_receipt).expect("parse live DIFF-003 trigger receipt");
         std::fs::write(
             std::path::Path::new(&root).join("CONSUMER-001.json"),
             diff003::receipt(
@@ -641,6 +645,11 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
                         "contract_digest": receipt.contract_digest,
                     },
                     "current": {"generation": current.0, "authority": current.1},
+                    "trigger_receipt_sha256": format!("{:x}", Sha256::digest(&trigger_receipt)),
+                    "trigger_id": trigger["trigger_id"],
+                    "trigger_organization_id": trigger["organization_id"],
+                    "trigger_project_id": trigger["project_id"],
+                    "trigger_pipeline_id": trigger["pipeline_id"],
                 }),
             ),
         )

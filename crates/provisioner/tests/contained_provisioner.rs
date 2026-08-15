@@ -823,6 +823,8 @@ fn configuration(
 }
 
 fn agent_specification() -> AgentSpecification {
+    let source_transport =
+        diff003_source_transport_authority().unwrap_or_else(|| "source.contained:443".to_owned());
     AgentSpecification {
         agent_class_id: "linux-x86_64-contained".to_owned(),
         template_id: "contained-template-v1".to_owned(),
@@ -841,7 +843,7 @@ fn agent_specification() -> AgentSpecification {
             allow_instance_metadata: false,
             egress_allowlist: BTreeSet::from([
                 "controller.contained:443".to_owned(),
-                "source.contained:443".to_owned(),
+                source_transport,
             ]),
         },
         volumes: VolumePolicy {
@@ -873,6 +875,17 @@ fn agent_specification() -> AgentSpecification {
             trust_class: "trusted-contained".to_owned(),
         },
     }
+}
+
+fn diff003_source_transport_authority() -> Option<String> {
+    let root = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR")?;
+    let source: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("SCM-001.json")).ok()?,
+    )
+    .ok()?;
+    source["initial"]["repository_trees"][0]["repository_url"]
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn provision_request(config: &ProvisionerConfig, implementation_sha256: &str) -> ProvisionRequest {

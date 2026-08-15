@@ -326,11 +326,13 @@ podman create --name "${connector_runner}" --network none \
   --env RUSTUP_TOOLCHAIN=1.97.1 \
   --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
   --env MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions \
+  --env MCLOVING_DIFF003_RELEASE_RECEIPT=/release-receipt/REL-001.json \
   --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target_connector}:/cargo-target:Z" \
   --volume "${connector_boundary_dir}:/receipt:Z" \
   --volume "${connector_assertion_dir}:/assertions:Z" \
+  --volume "${main_boundary_dir}:/release-receipt:ro,Z" \
   --volume "${repo_root}:/work:ro,Z" --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
   cargo test --locked --offline -p mcloving-external-connector \
@@ -354,6 +356,7 @@ podman create --name "${observer_runner}" --network none \
   --env MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR=/receipt \
   --env MCLOVING_DIFF003_ASSERTION_OUTPUT_DIR=/assertions \
   --env MCLOVING_DIFF003_CONNECTOR_RECEIPT=/connector-receipt/EXT-001.json \
+  --env MCLOVING_DIFF003_CONNECTOR_OUTCOME_PUBLIC_KEY=/connector-receipt/EXT-001.outcome-public-key.bin \
   --tmpfs /tmp:rw,nodev,nosuid,size=536870912,mode=0700 \
   --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
   --volume "${cargo_target_observer}:/cargo-target:Z" \
@@ -380,6 +383,8 @@ mkdir -p "${runtime_boundary_dir}"
 cp "${main_boundary_dir}"/*.json "${runtime_boundary_dir}/"
 cp "${connector_boundary_dir}/EXT-001.json" "${runtime_boundary_dir}/"
 cp "${observer_boundary_dir}/OBS-001.json" "${runtime_boundary_dir}/"
+cp "${connector_boundary_dir}/EXT-001.outcome-public-key.bin" \
+  "${evidence}/connector-outcome-public-key.bin"
 
 runtime_assertion_dir="${evidence}/runtime-assertions"
 mkdir -p "${runtime_assertion_dir}"
@@ -605,6 +610,19 @@ for private_marker in \
   marker_hex="$(printf '%s' "${private_marker}" | od -An -v -tx1 | tr -d ' \n')"
   marker_percent="$(printf '%s' "${marker_hex}" | sed 's/../%&/g')"
   marker_nested="$(printf '%s' "${marker_base64}" | base64 -w0)"
+  mixed_percent_pattern=''
+  for ((marker_index = 0; marker_index < ${#private_marker}; marker_index++)); do
+    marker_character="${private_marker:marker_index:1}"
+    printf -v marker_character_hex '%02x' "'${marker_character}"
+    mixed_percent_pattern+="(${marker_character}|%${marker_character_hex})"
+  done
+  printf -v first_marker_hex '%02x' "'${private_marker:0:1}"
+  partially_encoded_probe="%${first_marker_hex}${private_marker:1}"
+  printf '%s' "${partially_encoded_probe}" \
+    | grep -E -i -- "${mixed_percent_pattern}" >/dev/null || {
+      echo "DIFF-003 mixed percent marker scanner self-test failed" >&2
+      exit 1
+    }
   for marker_variant in \
     "${private_marker}" "${marker_base64}" "${marker_base64url}" \
     "${marker_hex}" "${marker_percent}" "${marker_nested}"; do
@@ -633,8 +651,21 @@ for private_marker in \
       fi
     done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
   done
+  if grep -R -E -i -- "${mixed_percent_pattern}" "${evidence}" >/dev/null; then
+    echo "DIFF-003 retained evidence disclosed a partially percent-encoded marker" >&2
+    exit 1
+  fi
+  folded_mixed_percent_pattern=$(printf '%s' "${mixed_percent_pattern}" \
+    | tr '[:upper:]' '[:lower:]')
+  while IFS= read -r -d '' retained_name; do
+    folded_name=$(printf '%s' "${retained_name}" | tr '[:upper:]' '[:lower:]')
+    if [[ "${folded_name}" =~ ${folded_mixed_percent_pattern} ]]; then
+      echo "DIFF-003 retained evidence pathname disclosed a partially percent-encoded marker" >&2
+      exit 1
+    fi
+  done < <(find "${evidence}" -mindepth 1 -printf '%P\0')
 done
-printf 'contents-and-pathnames-raw-base64-base64url-hex-all-case-percent-all-case-nested-base64-clean\n' \
+printf 'contents-and-pathnames-raw-base64-base64url-hex-all-case-percent-mixed-all-case-nested-base64-clean\n' \
   >"${evidence}/encoded-marker-scan.txt"
 comparison_update="${runtime_root}/runtime-comparison.json"
 jq '.secret_marker_disclosures = 0 | .encoded_marker_scan_passed = true' \

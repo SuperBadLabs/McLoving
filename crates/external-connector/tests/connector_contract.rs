@@ -53,6 +53,15 @@ struct DestinationState {
     seed: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct Diff003ReleaseBinding {
+    receipt_sha256: String,
+    release_id: String,
+    manifest_sha256: String,
+    envelope_sha256: String,
+    bundle_sha256: String,
+}
+
 struct Rig {
     _state: TempDir,
     config: ConnectorConfig,
@@ -62,10 +71,12 @@ struct Rig {
     observer_seed: Vec<u8>,
     connector: ExternalConnector,
     calls: Arc<AtomicUsize>,
+    release_binding: Option<Diff003ReleaseBinding>,
 }
 
 impl Rig {
     async fn new(mode: Mode, _class: IdempotencyClass) -> Self {
+        let release_binding = diff003_release_binding();
         let request_seed = vec![1; 32];
         let destination_seed = vec![2; 32];
         let outcome_seed = vec![3; 32];
@@ -114,7 +125,17 @@ impl Rig {
             effect_class: "release_publication".to_owned(),
             action_name: "publish_release".to_owned(),
             action_schema_version: "release-publication/v1".to_owned(),
-            request_payload_schema: BTreeMap::from([("release".to_owned(), JsonKind::String)]),
+            request_payload_schema: if release_binding.is_some() {
+                BTreeMap::from([
+                    ("release_id".to_owned(), JsonKind::String),
+                    ("release_receipt_sha256".to_owned(), JsonKind::String),
+                    ("manifest_sha256".to_owned(), JsonKind::String),
+                    ("envelope_sha256".to_owned(), JsonKind::String),
+                    ("bundle_sha256".to_owned(), JsonKind::String),
+                ])
+            } else {
+                BTreeMap::from([("release".to_owned(), JsonKind::String)])
+            },
             public_output_schema,
             allowed_secret_taints: BTreeSet::from(["release-token".to_owned()]),
             credential_grant_id: "grant/release".to_owned(),
@@ -208,6 +229,7 @@ impl Rig {
             observer_seed,
             connector,
             calls,
+            release_binding,
         }
     }
 
@@ -235,7 +257,18 @@ impl Rig {
             idempotency_class: class,
             action_name: self.config.action_name.clone(),
             action_schema_version: self.config.action_schema_version.clone(),
-            request_payload: json!({"release": "v1.0.0"}),
+            request_payload: self.release_binding.as_ref().map_or_else(
+                || json!({"release": "v1.0.0"}),
+                |binding| {
+                    json!({
+                        "release_id": binding.release_id,
+                        "release_receipt_sha256": binding.receipt_sha256,
+                        "manifest_sha256": binding.manifest_sha256,
+                        "envelope_sha256": binding.envelope_sha256,
+                        "bundle_sha256": binding.bundle_sha256,
+                    })
+                },
+            ),
             credential_grant_id: self.config.credential_grant_id.clone(),
             credential_grant_version: self.config.credential_grant_version.clone(),
             credential_grant_scope: self.config.credential_grant_scope.clone(),
@@ -413,15 +446,46 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
     assert_eq!(replay, first);
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let mut receipt = serde_json::to_value(&first).expect("encode DIFF-003 connector receipt");
+        if let Some(binding) = &rig.release_binding {
+            receipt["release_binding"] = json!({
+                "release_receipt_sha256": binding.receipt_sha256,
+                "release_id": binding.release_id,
+                "manifest_sha256": binding.manifest_sha256,
+                "envelope_sha256": binding.envelope_sha256,
+                "bundle_sha256": binding.bundle_sha256,
+                "request_payload_sha256": first.request_payload_sha256,
+            });
+        }
+        receipt["observer_receipt_signing_public_key_sha256"] = json!(
+            rig.config
+                .observer_binding
+                .receipt_signing_public_key_sha256
+        );
+        std::fs::write(
+            std::path::Path::new(&root).join("EXT-001.outcome-public-key.bin"),
+            public_key_from_seed(&rig.outcome_seed).expect("derive connector outcome public key"),
+        )
+        .expect("write DIFF-003 connector outcome public key");
         std::fs::write(
             std::path::Path::new(&root).join("EXT-001.json"),
-            diff003::receipt(
-                "EXT-001",
-                serde_json::to_value(&first).expect("encode DIFF-003 connector receipt"),
-            ),
+            diff003::receipt("EXT-001", receipt),
         )
         .expect("write DIFF-003 connector receipt");
     }
+}
+
+fn diff003_release_binding() -> Option<Diff003ReleaseBinding> {
+    let path = std::env::var_os("MCLOVING_DIFF003_RELEASE_RECEIPT")?;
+    let bytes = std::fs::read(path).ok()?;
+    let release: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(Diff003ReleaseBinding {
+        receipt_sha256: content_sha256(&bytes),
+        release_id: release["release_id"].as_str()?.to_owned(),
+        manifest_sha256: release["manifest_sha256"].as_str()?.to_owned(),
+        envelope_sha256: release["envelope_sha256"].as_str()?.to_owned(),
+        bundle_sha256: release["bundle_sha256"].as_str()?.to_owned(),
+    })
 }
 
 #[tokio::test]
