@@ -56,7 +56,6 @@ fn join_names(boundary: &str) -> &'static [&'static str] {
         "SCM-001" => &[
             "trigger_capture_to_source",
             "source_later_revision_to_dependency",
-            "secret_grant_to_connector",
             "provisioner_to_source_transport",
         ],
         "SECRET-001" => &["secret_grant_to_connector"],

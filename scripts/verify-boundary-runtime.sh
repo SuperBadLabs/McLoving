@@ -180,6 +180,23 @@ jq --exit-status --arg d "${digest}" '
   and .rollback_manifest_sha256 == null and .rollback_evidence_chain == []
 ' "${receipt_dir}/REL-001.json" >/dev/null || fail "REL-001 contract"
 
+# Every authenticated receipt must advertise exactly the joins for which the
+# certificate names that boundary as source or target. Extra projections are
+# contradictory claims, not harmless metadata.
+for file in "${actual_files[@]}"; do
+  boundary="${file%.json}"
+  expected_join_names=$(jq -r --arg boundary "${boundary}" '
+    [.joins[] | select(
+      .source_boundary == $boundary or .target_boundary == $boundary
+    ) | .name] | sort | .[]
+  ' "${certificate}")
+  actual_join_names=$(jq -r '
+    [._diff003.joins[].name] | sort | .[]
+  ' "${receipt_dir}/${file}")
+  [[ "${actual_join_names}" == "${expected_join_names}" ]] \
+    || fail "${boundary} join projection set is not exact"
+done
+
 # Each certified scenario is bound to an executed focused test. The mapping is
 # deliberately explicit and is itself retained in the exact source seal.
 scenario_map=$(cat <<'MAP'

@@ -605,7 +605,52 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         "offline restart replay must be byte-equivalent JSON"
     );
     assert_eq!(requests.load(Ordering::SeqCst), 3);
-    let outage_denied = second == first && requests.load(Ordering::SeqCst) == 3;
+    let outage_now = unix_ms();
+    let outage_lock = String::from_utf8(lock.clone())
+        .expect("UTF-8 lock")
+        .replace("1.0.0", "2.0.0")
+        .into_bytes();
+    let outage_plan = parse_maven_lock(
+        &outage_lock,
+        &AdapterBindings {
+            adapter_id: "maven-v1".to_owned(),
+            adapter_sha256: "a".repeat(64),
+            source_tree_sha256: "b".repeat(64),
+            resolver_toolchain_id: "contained-toolchain".to_owned(),
+            resolver_toolchain_sha256: "d".repeat(64),
+            source_trust_class: SourceTrustClass::Trusted,
+            repositories: vec![RepositoryBinding {
+                repository_id: "contained-maven".to_owned(),
+                credentialed: true,
+                permits_untrusted_source: false,
+            }],
+        },
+    )
+    .expect("outage exact plan");
+    let mut outage = frame.clone();
+    outage.request.resolution_id = Uuid::new_v4().to_string();
+    outage.request.build_id = Uuid::new_v4().to_string();
+    outage.request.attempt_id = Uuid::new_v4().to_string();
+    outage.request.requested_at_unix_ms = outage_now;
+    outage.request.expires_at_unix_ms = outage_now + 120_000;
+    outage.request.source_provenance.issued_at_unix_ms = outage_now;
+    outage.request.source_provenance.expires_at_unix_ms = outage_now + 120_000;
+    outage.request.logical_lock_path = "dependency-locks/outage-maven.json".to_owned();
+    outage.request.expected_lock_sha256 = outage_plan.lock_sha256;
+    outage.request.expected_graph_sha256 = outage_plan.graph_sha256;
+    outage.lock_base64 = BASE64.encode(&outage_lock);
+    sign_source_request(&mut outage.request, &source_key);
+    let outage_result = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&outage).expect("outage frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    let outage_denied = outage_result["status"] == "error"
+        && outage_result["code"] == "DEP_TRANSPORT_IO_FAILED"
+        && requests.load(Ordering::SeqCst) == 3;
     diff003::record_assertion(
         "dependency_outage_denied",
         "denied",
@@ -613,7 +658,8 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             "repository_aborted": true,
             "repository_requests_before_restart": 3,
             "repository_requests_after_restart": requests.load(Ordering::SeqCst),
-            "offline_receipt_equal": second == first,
+            "uncached_resolution_id": outage.request.resolution_id,
+            "result_code": outage_result["code"],
         }),
         outage_denied,
     );

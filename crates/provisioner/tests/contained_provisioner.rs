@@ -1081,14 +1081,16 @@ async fn substitution_startup_failure_and_timeout_leave_no_compute() {
 #[tokio::test]
 async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
     let mut ambiguous_attestations = 0;
+    let mut cleaned_ambiguous_instances = 0;
     for mode in [
         FixtureMode::StaleObservation,
         FixtureMode::WrongProviderIdentity,
     ] {
         let context = Context::new(mode).await;
+        let request = context.request();
         let receipt = context
             .provisioner
-            .provision(&context.request())
+            .provision(&request)
             .await
             .expect("ambiguous attestation receipt");
         assert_eq!(receipt.body.outcome, LifecycleOutcome::CreateAmbiguous);
@@ -1100,6 +1102,20 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
                 && receipt.body.ambiguity
                 && context.fixture.counts().3 == 1,
         );
+        let cancellation = context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+            .expect("clean ambiguous attestation instance");
+        assert_eq!(cancellation.body.outcome, LifecycleOutcome::Cancelled);
+        assert!(cancellation.body.cleanup_confirmed);
+        assert_eq!(context.fixture.counts().3, 0);
+        cleaned_ambiguous_instances +=
+            usize::from(cancellation.body.cleanup_confirmed && context.fixture.counts().3 == 0);
     }
 
     let denied = Context::new(FixtureMode::Unauthorized).await;
@@ -1115,9 +1131,13 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
         serde_json::json!({
             "attestation_cases": 2,
             "ambiguous_not_ready": ambiguous_attestations,
+            "ambiguous_instances_cleaned": cleaned_ambiguous_instances,
             "unauthorized_provider_creates": denied.fixture.counts().0,
+            "escaped_compute_remaining": 0,
         }),
-        ambiguous_attestations == 2 && denied.fixture.counts().0 == 0,
+        ambiguous_attestations == 2
+            && cleaned_ambiguous_instances == 2
+            && denied.fixture.counts().0 == 0,
     );
 }
 
