@@ -82,6 +82,8 @@ fi
 staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
 runtime_root=$(mktemp -d /tmp/mcloving-mig005a-corpus052-jenkins.XXXXXX)
 authenticated_rehearsal=$(mktemp -d /tmp/mcloving-mig005a-authenticated.XXXXXX)
+home_plugins=$(mktemp -d /tmp/mcloving-mig005a-destination-plugins.XXXXXX)
+template_plugins=$(mktemp -d /tmp/mcloving-mig005a-template-plugins.XXXXXX)
 home="${runtime_root}/destination-home"
 template_home="${runtime_root}/template-home"
 template="${runtime_root}/template-build-2"
@@ -102,6 +104,8 @@ cleanup() {
     rm -rf -- "${staging}"
   fi
   "${privileged[@]}" rm -rf -- "${authenticated_rehearsal}" >/dev/null 2>&1 || true
+  "${privileged[@]}" rm -rf -- "${home_plugins}" >/dev/null 2>&1 || true
+  "${privileged[@]}" rm -rf -- "${template_plugins}" >/dev/null 2>&1 || true
   "${privileged[@]}" rm -rf -- "${runtime_root}" >/dev/null 2>&1 || true
   if [[ "${status}" != 0 ]]; then
     echo "rehearsal-failure-line=${failure_line}" >&2
@@ -286,6 +290,42 @@ verify_and_copy_plugins() {
   test "${expected_plugins[*]}" = "${copied_plugins[*]}"
 }
 
+lock_and_verify_plugins() {
+  local plugin_root=$1
+  local expected_digest relative extra leaf plugin_file mutation_probe
+  local -a expected_plugins actual_plugins
+
+  "${privileged[@]}" chown -R root:root "${plugin_root}"
+  "${privileged[@]}" find "${plugin_root}" -type f -exec chmod 0444 {} +
+  "${privileged[@]}" find "${plugin_root}" -type d -exec chmod 0555 {} +
+  test -z "$(find "${plugin_root}" ! -user root -print -quit)"
+  test -z "$(find "${plugin_root}" -perm /222 -print -quit)"
+  mutation_probe=$(awk 'NR == 1 {sub(/^plugins\//, "", $2); print $2}' \
+    "${plugin_manifest}")
+  if chmod u+w "${plugin_root}/${mutation_probe}" 2>/dev/null \
+    || mv "${plugin_root}" "${plugin_root}.replaced" 2>/dev/null; then
+    echo "verified plugin snapshot remained mutable to the invoking UID" >&2
+    exit 1
+  fi
+  mapfile -t expected_plugins < <(
+    awk '{sub(/^plugins\//, "", $2); print $2}' "${plugin_manifest}" | sort
+  )
+  mapfile -t actual_plugins < <(
+    find "${plugin_root}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
+  )
+  test "${#expected_plugins[@]}" -eq 90
+  test "${expected_plugins[*]}" = "${actual_plugins[*]}"
+  while read -r expected_digest relative extra; do
+    test -z "${extra:-}"
+    leaf=${relative#plugins/}
+    plugin_file="${plugin_root}/${leaf}"
+    test -f "${plugin_file}"
+    test ! -L "${plugin_file}"
+    test "$(stat -c '%h' "${plugin_file}")" -eq 1
+    test "$(sha256sum "${plugin_file}" | awk '{print $1}')" = "${expected_digest}"
+  done < "${plugin_manifest}"
+}
+
 authenticate_history() {
   local source_root=$1
   local output_bundle=$2
@@ -299,8 +339,8 @@ authenticate_history() {
   ) > "${output_receipt}"
 }
 
-mkdir -p "${home}/init.groovy.d" "${home}/plugins" "${job_home}/builds" \
-  "${template_home}/init.groovy.d" "${template_home}/plugins" \
+mkdir -p "${home}/init.groovy.d" "${job_home}/builds" \
+  "${template_home}/init.groovy.d" \
   "${template_job_home}/builds" "${staging}/evidence"
 chmod 700 "${runtime_root}" "${home}" "${template_home}" "${staging}"
 
@@ -346,8 +386,8 @@ cp "${fixture_root}/corpus052-template-noop-shell" \
   "${template_home}/mig005a-nonexecuting-shell"
 chmod 700 "${template_home}/mig005a-nonexecuting-shell"
 cp "${fixture_root}/corpus052-template-job-config.xml" "${template_job_home}/config.xml"
-verify_and_copy_plugins "${plugin_source}" "${home}/plugins"
-verify_and_copy_plugins "${plugin_source}" "${template_home}/plugins"
+verify_and_copy_plugins "${plugin_source}" "${home_plugins}"
+verify_and_copy_plugins "${plugin_source}" "${template_plugins}"
 cp "${plugin_manifest}" "${staging}/evidence/PLUGIN_SHA256SUMS"
 cp -a "${sealed_builds}/1" "${job_home}/builds/1"
 cp "${sealed_builds}/permalinks" "${job_home}/builds/permalinks"
@@ -361,16 +401,20 @@ cmp "${staging}/evidence/authenticated-source-forward-bundle.json" \
 printf '%s\n' 2 > "${template_job_home}/nextBuildNumber"
 chmod -R u+rwX "${home}" "${template_home}"
 podman unshare chown -R 1000:1000 "${home}" "${template_home}"
+lock_and_verify_plugins "${home_plugins}"
+lock_and_verify_plugins "${template_plugins}"
 podman network create --internal "${network}" >/dev/null
 
 start_controller() {
   local controller_home=$1
+  local controller_plugins=$2
   podman run --detach --name "${container}" \
     --network "${network}" \
     --publish "127.0.0.1:${port}:8080" \
     --cpus 4 --memory 4g --pids-limit 2048 \
     --env JAVA_OPTS='-Djenkins.install.runSetupWizard=false' \
     --volume "${controller_home}:/var/jenkins_home:Z" \
+    --volume "${controller_plugins}:/var/jenkins_home/plugins:ro" \
     "${image}" >/dev/null
   for _ in $(seq 1 240); do
     if curl --fail --silent --show-error \
@@ -472,7 +516,7 @@ capture_workflow() {
   fi
 }
 
-start_controller "${template_home}"
+start_controller "${template_home}" "${template_plugins}"
 curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:${port}/job/${job}/build" >/dev/null
 capture_build 2 template
@@ -692,7 +736,7 @@ podman unshare cp "${staging}/nextBuildNumber" "${job_home}/nextBuildNumber"
 podman unshare cp "${staging}/permalinks" "${job_home}/builds/permalinks"
 podman unshare chown -R 1000:1000 "${job_home}"
 
-start_controller "${home}"
+start_controller "${home}" "${home_plugins}"
 capture_build 1 imported
 capture_build 2 imported
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
@@ -716,7 +760,7 @@ podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 stop_controller
 
-start_controller "${home}"
+start_controller "${home}" "${home_plugins}"
 capture_build 1 restarted
 capture_build 2 restarted
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
@@ -805,6 +849,8 @@ find "${staging}" -type f -exec chmod 600 {} +
   sha256sum -c SHA256SUMS >/dev/null
 )
 "${privileged[@]}" rm -rf -- "${authenticated_rehearsal}"
+"${privileged[@]}" rm -rf -- "${home_plugins}"
+"${privileged[@]}" rm -rf -- "${template_plugins}"
 "${privileged[@]}" rm -rf -- "${runtime_root}"
 mv -- "${staging}" "${output_parent}/${output_leaf}"
 completed=1

@@ -41,7 +41,10 @@ proves that UID cannot chmod or replace
 the snapshot, reauthenticates it after lockdown, and reauthenticates
 the exact five-file tree, proves build 1 equals the reverse bundle, and copies
 exactly the committed 90-plugin manifest denominator with digest verification
-before and after each copy. A separate non-authoritative template controller
+before and after each copy. Both verified plugin trees are moved into
+root-owned non-writable snapshots under the sticky temporary boundary,
+reverified after lockdown, proven immutable to the invoking UID, and mounted
+read-only into their controllers. A separate non-authoritative template controller
 creates an exact native `ShellStep` graph through a non-executing shell stub.
 The harness replaces its log and rebuilds the byte-offset `log-index` so the
 complete transferred process log belongs to the exact ShellStep, remaps the

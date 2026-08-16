@@ -292,7 +292,10 @@ could neither restore write access nor replace the snapshot path. It then
 recomputed the independently pinned five-file source-tree digest
 with no-follow reads, proved the authenticated build-1 record equals the
 reverse bundle, and copied exactly the committed 90-plugin manifest denominator while verifying
-every regular, singly linked plugin both before and after copy. A separate
+every regular, singly linked plugin both before and after copy. The two plugin
+trees were then transferred to root-owned non-writable sticky-directory
+snapshots, reverified, proven immutable to the invoking UID, and mounted
+read-only into the template and destination controllers. A separate
 non-authoritative template controller created the exact Jenkins-native
 `ShellStep` structure using a recorded non-executing shell stub; it never ran
 the admitted script, its raw log and byte-offset index were rebuilt so the
