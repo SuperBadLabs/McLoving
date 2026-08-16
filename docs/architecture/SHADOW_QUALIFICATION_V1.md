@@ -1,6 +1,6 @@
 # Shadow qualification v1
 
-Status: SHADOW-001 verifier foundation active; no live shadow receipt or ticket closure yet
+Status: SHADOW-001 complete; deny-authority owner-private session accepted
 
 ## Purpose and boundary
 
@@ -291,9 +291,20 @@ shadow-key replacement and cross-shadow-identity capture transplantation;
 shared signing keys; owner modes, hard links, aliases, create-new publication;
 non-UTF-8 paths; redacted failure output; and size bounds.
 
-The reviewed sidecar source now exists, but its exact head has not yet been
-merged and no owner-private ceremony over that head has been accepted.
+PR #68 passed all nine protected checks and a clean exact-head review with all
+review threads resolved, then squash-merged as protected-main commit
+`dbc3bad735bc45241ee048e1d364ed478eae7e3c`. Post-merge Foundation run
+`31973862276` and Windows run `31973862272` passed on that exact commit.
 
-SHADOW-001 remains ACTIVE until an independently reviewed exact-head
-capture/replay sidecar and owner-private HeMan ceremony produce and verify the
-complete session without disclosing private values.
+The owner-private HeMan ceremony retained at
+`/sn8100/runs/mcloving/shadow001-ceremony-20260816T221103Z` independently
+verified five captured and five replayed ingress events, one exact paired
+trace, zero mismatches, one packaged case, and 227 deterministic rejections.
+It accepted `shadow_qualified=true` and retained
+`production_authority=false`. Session bytes, signing keys, package and
+evidence bytes, and all private pins and digests remain owner-only on HeMan and
+are intentionally absent from GitHub.
+
+This closes SHADOW-001 only for the exact disabled, deny-authority case. It
+grants no production execution, credential, trigger, scheduler, connector,
+effect, canary, cutover, rollback, or decommission authority.
