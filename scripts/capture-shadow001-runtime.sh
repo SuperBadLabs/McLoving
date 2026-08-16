@@ -270,7 +270,7 @@ jq --exit-status '
     and (.HostConfig.Tmpfs["/run/postgresql"] | contains("nodev"))
     and (.HostConfig.Tmpfs["/run/postgresql"] | contains("size=16m"))
 ' "${output_root}/target-postgres-inspect.json" >/dev/null
-jq --exit-status '.[0].Internal == true' \
+jq --exit-status '.[0].internal == true' \
   "${output_root}/target-network-inspect.json" >/dev/null
 grep -Fxq 'SHADOW001_TARGET_NETWORK=public-network-denied' \
   "${output_root}/target-runtime.log"
