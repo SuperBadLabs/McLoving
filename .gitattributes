@@ -1,5 +1,6 @@
 migration/mario-jenkins-oracle-228/corpus-v1/** -text -whitespace
 migration/mario-jenkins-oracle-228/inventory-20260731T064417Z-r2/eligibility-ledger.yaml -text -whitespace
+migration/mario-jenkins-oracle-228/inventory-20260731T064417Z-r2/persistent-state.yaml -text -whitespace
 migration/state-policy-differential-v1/** -text -whitespace
 migration/boundary-differential-v1/** -text -whitespace
 migration/differential-aggregate-v1/** -text -whitespace
