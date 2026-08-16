@@ -79,10 +79,14 @@ and unsupported forward and rollback transforms. The package therefore requires
 `blocking_error=E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE`, one authenticated state
 dependency, `case_specific_rehearsal_receipts=[]`, `packaged_artifacts=[]`,
 `cutover_eligible=false`, and `rollback_eligible=false`. It does not retain
-digest-only pointers to unavailable synthetic MIG-005A objects. Completion
-requires the exact retained source bytes, bounded certified forward and reverse
-objects, destination state, and a case-specific rehearsal whose bytes are
-embedded or immutably retrieved and verified.
+digest-only pointers to unavailable synthetic MIG-005A objects. The exact raw
+build tree is retained privately on HeMan and its exporter-compatible digest
+reproduces the inventory value
+`b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
+It is not yet secret-scanned, sealed as a package input, transformed, or
+rehearsed. Completion requires that sealed source object, bounded certified
+forward and reverse objects, destination state, and a case-specific rehearsal
+whose bytes are embedded or immutably retrieved and verified.
 
 The envelope has no field capable of carrying credential material. Its
 free-form embedded artifacts are accepted only at their exact previously
