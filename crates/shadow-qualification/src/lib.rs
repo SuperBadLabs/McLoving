@@ -47,6 +47,7 @@ const STDERR_LOG_SHA256: &str = "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff
 const STDOUT_LOG_SHA256: &str = "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SIGNATURE_DOMAIN: &[u8] = b"mcloving-shadow-denial-receipt-v1\0";
+const SOURCE_SESSION_BINDING_SCHEMA: &str = "mcloving.jenkins.shadow-source-session-binding/v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationReceipt {
@@ -180,8 +181,21 @@ struct SignedDenialReceipt {
     connector_requests: u64,
     production_effects: u64,
     audit_sha256: String,
+    session_binding_sha256: String,
     signing_public_key_sha256: String,
     signature_base64: String,
+}
+
+#[derive(Serialize)]
+struct SourceSessionBinding<'a> {
+    schema: &'static str,
+    session_id: Uuid,
+    ticket: &'a str,
+    shadow_implementation_head: &'a str,
+    mig007_protected_main: &'a str,
+    migration_package_sha256: &'a str,
+    captured_wall_clock_unix_ms: i64,
+    freeze: Freeze,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -315,6 +329,8 @@ pub fn seal_private_session(
         || session.events.iter().any(|event| {
             event.source.signing_public_key_sha256.is_empty()
                 || event.source.signature_base64.is_empty()
+                || event.source.session_binding_sha256.is_empty()
+                || !event.shadow.session_binding_sha256.is_empty()
                 || !event.shadow.signing_public_key_sha256.is_empty()
                 || !event.shadow.signature_base64.is_empty()
         })
@@ -333,7 +349,8 @@ pub fn seal_private_session(
             "source-capture identity does not match its independent owner pin",
         ));
     }
-    verify_source_captures(&session.events, &source_public_key)?;
+    let session_binding_sha256 = source_session_binding_sha256(&session)?;
+    verify_source_captures(&session.events, &source_public_key, &session_binding_sha256)?;
     let shadow_key = Ed25519KeyPair::from_pkcs8(shadow_replay_pkcs8).map_err(|_| {
         QualificationError::new("E_KEY", "invalid shadow-replay Ed25519 PKCS#8 key")
     })?;
@@ -346,6 +363,7 @@ pub fn seal_private_session(
     session.freeze.shadow_replay_public_key_base64 =
         BASE64.encode(shadow_key.public_key().as_ref());
     for event in &mut session.events {
+        event.shadow.session_binding_sha256 = session_binding_sha256.clone();
         sign_receipt(&mut event.shadow, &shadow_key)?;
     }
     let bytes = canonical_bytes(&session)?;
@@ -435,7 +453,7 @@ fn verify_session(
         expected_verifier_binary_sha256,
     )?;
     verify_comparison_inputs(&session.comparison_inputs)?;
-    verify_events(&session.events, &session.freeze)?;
+    verify_events(&session)?;
     verify_trace(&session.trace)?;
     verify_isolation(&session.isolation)?;
     if session.authority != denied_authority() {
@@ -523,12 +541,19 @@ fn verify_comparison_inputs(inputs: &ComparisonInputs) -> Result<(), Qualificati
     Ok(())
 }
 
-fn verify_events(events: &[PairedEvent], freeze: &Freeze) -> Result<(), QualificationError> {
-    let source_key = decode_public_key(&freeze.source_capture_public_key_base64)?;
-    let shadow_key = decode_public_key(&freeze.shadow_replay_public_key_base64)?;
-    verify_source_captures(events, &source_key)?;
-    for event in events {
-        verify_denial_receipt(&event.shadow, &shadow_key, true, "mcloving-shadow")?;
+fn verify_events(session: &Session) -> Result<(), QualificationError> {
+    let source_key = decode_public_key(&session.freeze.source_capture_public_key_base64)?;
+    let shadow_key = decode_public_key(&session.freeze.shadow_replay_public_key_base64)?;
+    let session_binding_sha256 = source_session_binding_sha256(session)?;
+    verify_source_captures(&session.events, &source_key, &session_binding_sha256)?;
+    for event in &session.events {
+        verify_denial_receipt(
+            &event.shadow,
+            &shadow_key,
+            true,
+            "mcloving-shadow",
+            &session_binding_sha256,
+        )?;
         if event.source.event_id != event.shadow.event_id
             || event.source.event_kind != event.shadow.event_kind
             || event.source.capture_sha256 != event.shadow.capture_sha256
@@ -548,6 +573,7 @@ fn verify_events(events: &[PairedEvent], freeze: &Freeze) -> Result<(), Qualific
 fn verify_source_captures(
     events: &[PairedEvent],
     source_key: &[u8],
+    session_binding_sha256: &str,
 ) -> Result<(), QualificationError> {
     let required_order = ["api", "manual", "schedule", "upstream", "webhook"];
     let required = BTreeSet::from([
@@ -573,7 +599,13 @@ fn verify_source_captures(
                 "shadow session ingress observations are not in canonical order",
             ));
         }
-        verify_denial_receipt(&event.source, source_key, false, "jenkins-source")?;
+        verify_denial_receipt(
+            &event.source,
+            source_key,
+            false,
+            "jenkins-source",
+            session_binding_sha256,
+        )?;
         if !kinds.insert(event.source.event_kind.clone())
             || !ids.insert(event.source.event_id)
             || !captures.insert(event.source.capture_sha256.clone())
@@ -598,7 +630,16 @@ fn verify_denial_receipt(
     public_key: &[u8],
     replayed: bool,
     runner: &str,
+    expected_session_binding_sha256: &str,
 ) -> Result<(), QualificationError> {
+    if !is_sha256(expected_session_binding_sha256)
+        || receipt.session_binding_sha256 != expected_session_binding_sha256
+    {
+        return Err(QualificationError::new(
+            "E_CAPTURE_BINDING",
+            "signed ingress receipt does not bind the exact frozen session",
+        ));
+    }
     if receipt.schema != DENIAL_RECEIPT_SCHEMA
         || receipt.event_id.is_nil()
         || !is_sha256(&receipt.capture_sha256)
@@ -629,6 +670,25 @@ fn verify_denial_receipt(
     UnparsedPublicKey::new(&ED25519, public_key)
         .verify(&message, &signature)
         .map_err(|_| QualificationError::new("E_SIGNATURE", "invalid denial receipt signature"))
+}
+
+fn source_session_binding_sha256(session: &Session) -> Result<String, QualificationError> {
+    let mut freeze = session.freeze.clone();
+    // The authoritative capture is created before the shadow key exists. The
+    // binding covers every other frozen identity and remains stable when seal
+    // derives that distinct shadow identity.
+    freeze.shadow_replay_public_key_base64.clear();
+    let binding = SourceSessionBinding {
+        schema: SOURCE_SESSION_BINDING_SCHEMA,
+        session_id: session.session_id,
+        ticket: &session.ticket,
+        shadow_implementation_head: &session.shadow_implementation_head,
+        mig007_protected_main: &session.mig007_protected_main,
+        migration_package_sha256: &session.migration_package_sha256,
+        captured_wall_clock_unix_ms: session.comparison_inputs.captured_wall_clock_unix_ms,
+        freeze,
+    };
+    Ok(sha256(&canonical_bytes(&binding)?))
 }
 
 fn verify_trace(trace: &TraceComparison) -> Result<(), QualificationError> {
@@ -817,6 +877,7 @@ mod tests {
             connector_requests: 0,
             production_effects: 0,
             audit_sha256: sha256(format!("audit-{runner}-{kind}").as_bytes()),
+            session_binding_sha256: String::new(),
             signing_public_key_sha256: String::new(),
             signature_base64: String::new(),
         }
@@ -846,114 +907,117 @@ mod tests {
                 PairedEvent { source, shadow }
             })
             .collect();
-        (
-            Session {
-                schema: SCHEMA.to_owned(),
-                session_id: Uuid::from_u128(99),
-                ticket: "SHADOW-001".to_owned(),
-                shadow_implementation_head: HEAD.to_owned(),
-                mig007_protected_main: MIG007_PROTECTED_MAIN.to_owned(),
-                migration_package_sha256: package.sha256.clone(),
-                freeze: Freeze {
-                    source_controller: SOURCE_CONTROLLER.to_owned(),
-                    inventory_epoch: INVENTORY_EPOCH.to_owned(),
-                    inventory_sha256: INVENTORY_SHA256.to_owned(),
-                    job_id: JOB_ID.to_owned(),
-                    source_sha256: SOURCE_SHA256.to_owned(),
-                    pipeline_sha256: PIPELINE_SHA256.to_owned(),
-                    source_state: "disabled".to_owned(),
-                    source_generation: OPERATIONAL_GENERATION.to_owned(),
-                    target_state: "disabled".to_owned(),
-                    target_generation: OPERATIONAL_GENERATION.to_owned(),
-                    authz_generation_sha256: TEST_AUTHZ_SHA256.to_owned(),
-                    agent_inputs_sha256: EMPTY_SHA256.to_owned(),
-                    release_id: RELEASE_ID.to_owned(),
-                    release_version: RELEASE_VERSION.to_owned(),
-                    release_profile: RELEASE_PROFILE.to_owned(),
-                    release_envelope_sha256: RELEASE_ENVELOPE_SHA256.to_owned(),
-                    jenkins_image_sha256: JENKINS_IMAGE_SHA256.to_owned(),
-                    jenkins_plugins_sha256: JENKINS_PLUGINS_SHA256.to_owned(),
-                    rust_image_sha256: RUST_IMAGE_SHA256.to_owned(),
-                    postgres_image_sha256: POSTGRES_IMAGE_SHA256.to_owned(),
-                    verifier_binary_sha256: TEST_VERIFIER_SHA256.to_owned(),
-                    source_capture_public_key_base64: BASE64
-                        .encode(source_key.public_key().as_ref()),
-                    shadow_replay_public_key_base64: BASE64
-                        .encode(shadow_key.public_key().as_ref()),
-                },
-                comparison_inputs: ComparisonInputs {
-                    captured_wall_clock_unix_ms: 1_786_895_400_000,
-                    wall_clock_stream_sha256: EMPTY_SHA256.to_owned(),
-                    wall_clock_consumption_events: 0,
-                    semantic_time_dependencies: false,
-                    entropy_stream_sha256: EMPTY_SHA256.to_owned(),
-                    entropy_consumption_events: 0,
-                    semantic_entropy_dependencies: false,
-                    security_entropy_influences_semantics: false,
-                    external_input_receipts: 0,
-                    secret_outcome_receipts: 0,
-                    connector_outcome_receipts: 0,
-                    administrative_operation_receipts: 0,
-                },
-                events,
-                trace: TraceComparison {
-                    certified_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
-                    source_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
-                    target_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
-                    source_log: vec![
-                        NormalizedLogEntry {
-                            sequence: 1,
-                            stream: "stderr".to_owned(),
-                            content_sha256: STDERR_LOG_SHA256.to_owned(),
-                            bytes: 19,
-                        },
-                        NormalizedLogEntry {
-                            sequence: 2,
-                            stream: "stdout".to_owned(),
-                            content_sha256: STDOUT_LOG_SHA256.to_owned(),
-                            bytes: 12,
-                        },
-                    ],
-                    target_log: vec![
-                        NormalizedLogEntry {
-                            sequence: 1,
-                            stream: "stderr".to_owned(),
-                            content_sha256: STDERR_LOG_SHA256.to_owned(),
-                            bytes: 19,
-                        },
-                        NormalizedLogEntry {
-                            sequence: 2,
-                            stream: "stdout".to_owned(),
-                            content_sha256: STDOUT_LOG_SHA256.to_owned(),
-                            bytes: 12,
-                        },
-                    ],
-                    source_result: "SUCCESS".to_owned(),
-                    target_result: "SUCCESS".to_owned(),
-                    artifacts: 0,
-                    external_effect_intents: 0,
-                    isolated_replay_executed: true,
-                    compared_traces: 1,
-                    mismatches: 0,
-                },
-                isolation: Isolation {
-                    source_fixture_identity: "shadow-source-fixture".to_owned(),
-                    target_fixture_identity: "shadow-target-fixture".to_owned(),
-                    source_network_sha256: sha256(b"source-network"),
-                    target_network_sha256: sha256(b"target-network"),
-                    reachability_receipt_sha256: sha256(b"reachability"),
-                    source_and_target_networks_disjoint: true,
-                    production_network_requests: 0,
-                    production_endpoint_mappings: 0,
-                    production_credentials: 0,
-                    host_mounts: 0,
-                    cross_fixture_mounts: 0,
-                    teardown_complete: true,
-                },
-                authority: denied_authority(),
+        let mut session = Session {
+            schema: SCHEMA.to_owned(),
+            session_id: Uuid::from_u128(99),
+            ticket: "SHADOW-001".to_owned(),
+            shadow_implementation_head: HEAD.to_owned(),
+            mig007_protected_main: MIG007_PROTECTED_MAIN.to_owned(),
+            migration_package_sha256: package.sha256.clone(),
+            freeze: Freeze {
+                source_controller: SOURCE_CONTROLLER.to_owned(),
+                inventory_epoch: INVENTORY_EPOCH.to_owned(),
+                inventory_sha256: INVENTORY_SHA256.to_owned(),
+                job_id: JOB_ID.to_owned(),
+                source_sha256: SOURCE_SHA256.to_owned(),
+                pipeline_sha256: PIPELINE_SHA256.to_owned(),
+                source_state: "disabled".to_owned(),
+                source_generation: OPERATIONAL_GENERATION.to_owned(),
+                target_state: "disabled".to_owned(),
+                target_generation: OPERATIONAL_GENERATION.to_owned(),
+                authz_generation_sha256: TEST_AUTHZ_SHA256.to_owned(),
+                agent_inputs_sha256: EMPTY_SHA256.to_owned(),
+                release_id: RELEASE_ID.to_owned(),
+                release_version: RELEASE_VERSION.to_owned(),
+                release_profile: RELEASE_PROFILE.to_owned(),
+                release_envelope_sha256: RELEASE_ENVELOPE_SHA256.to_owned(),
+                jenkins_image_sha256: JENKINS_IMAGE_SHA256.to_owned(),
+                jenkins_plugins_sha256: JENKINS_PLUGINS_SHA256.to_owned(),
+                rust_image_sha256: RUST_IMAGE_SHA256.to_owned(),
+                postgres_image_sha256: POSTGRES_IMAGE_SHA256.to_owned(),
+                verifier_binary_sha256: TEST_VERIFIER_SHA256.to_owned(),
+                source_capture_public_key_base64: BASE64.encode(source_key.public_key().as_ref()),
+                shadow_replay_public_key_base64: BASE64.encode(shadow_key.public_key().as_ref()),
             },
-            package,
-        )
+            comparison_inputs: ComparisonInputs {
+                captured_wall_clock_unix_ms: 1_786_895_400_000,
+                wall_clock_stream_sha256: EMPTY_SHA256.to_owned(),
+                wall_clock_consumption_events: 0,
+                semantic_time_dependencies: false,
+                entropy_stream_sha256: EMPTY_SHA256.to_owned(),
+                entropy_consumption_events: 0,
+                semantic_entropy_dependencies: false,
+                security_entropy_influences_semantics: false,
+                external_input_receipts: 0,
+                secret_outcome_receipts: 0,
+                connector_outcome_receipts: 0,
+                administrative_operation_receipts: 0,
+            },
+            events,
+            trace: TraceComparison {
+                certified_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
+                source_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
+                target_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
+                source_log: vec![
+                    NormalizedLogEntry {
+                        sequence: 1,
+                        stream: "stderr".to_owned(),
+                        content_sha256: STDERR_LOG_SHA256.to_owned(),
+                        bytes: 19,
+                    },
+                    NormalizedLogEntry {
+                        sequence: 2,
+                        stream: "stdout".to_owned(),
+                        content_sha256: STDOUT_LOG_SHA256.to_owned(),
+                        bytes: 12,
+                    },
+                ],
+                target_log: vec![
+                    NormalizedLogEntry {
+                        sequence: 1,
+                        stream: "stderr".to_owned(),
+                        content_sha256: STDERR_LOG_SHA256.to_owned(),
+                        bytes: 19,
+                    },
+                    NormalizedLogEntry {
+                        sequence: 2,
+                        stream: "stdout".to_owned(),
+                        content_sha256: STDOUT_LOG_SHA256.to_owned(),
+                        bytes: 12,
+                    },
+                ],
+                source_result: "SUCCESS".to_owned(),
+                target_result: "SUCCESS".to_owned(),
+                artifacts: 0,
+                external_effect_intents: 0,
+                isolated_replay_executed: true,
+                compared_traces: 1,
+                mismatches: 0,
+            },
+            isolation: Isolation {
+                source_fixture_identity: "shadow-source-fixture".to_owned(),
+                target_fixture_identity: "shadow-target-fixture".to_owned(),
+                source_network_sha256: sha256(b"source-network"),
+                target_network_sha256: sha256(b"target-network"),
+                reachability_receipt_sha256: sha256(b"reachability"),
+                source_and_target_networks_disjoint: true,
+                production_network_requests: 0,
+                production_endpoint_mappings: 0,
+                production_credentials: 0,
+                host_mounts: 0,
+                cross_fixture_mounts: 0,
+                teardown_complete: true,
+            },
+            authority: denied_authority(),
+        };
+        let binding = source_session_binding_sha256(&session).expect("session binding");
+        for event in &mut session.events {
+            event.source.session_binding_sha256 = binding.clone();
+            event.shadow.session_binding_sha256 = binding.clone();
+            sign(&mut event.source, &source_key);
+            sign(&mut event.shadow, &shadow_key);
+        }
+        (session, package)
     }
 
     fn verify_fixture(
@@ -1004,6 +1068,7 @@ mod tests {
         let (mut session, package) = fixture();
         session.freeze.shadow_replay_public_key_base64.clear();
         for event in &mut session.events {
+            event.shadow.session_binding_sha256.clear();
             event.shadow.signing_public_key_sha256.clear();
             event.shadow.signature_base64.clear();
         }
@@ -1060,6 +1125,44 @@ mod tests {
             .code,
             "E_SIGNATURE"
         );
+        let mut transplanted_session = session.clone();
+        transplanted_session.session_id = Uuid::from_u128(100);
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&transplanted_session).expect("transplanted session"),
+                &source_pin,
+                shadow_pkcs8.as_ref(),
+            )
+            .expect_err("source receipts from another session")
+            .code,
+            "E_CAPTURE_BINDING"
+        );
+        let mut transplanted_capture_time = session.clone();
+        transplanted_capture_time
+            .comparison_inputs
+            .captured_wall_clock_unix_ms += 1;
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&transplanted_capture_time).expect("transplanted capture time"),
+                &source_pin,
+                shadow_pkcs8.as_ref(),
+            )
+            .expect_err("source receipts from another capture time")
+            .code,
+            "E_CAPTURE_BINDING"
+        );
+        let mut transplanted_freeze = session.clone();
+        transplanted_freeze.freeze.job_id = "another-disabled-job".to_owned();
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&transplanted_freeze).expect("transplanted freeze"),
+                &source_pin,
+                shadow_pkcs8.as_ref(),
+            )
+            .expect_err("source receipts from another frozen case")
+            .code,
+            "E_CAPTURE_BINDING"
+        );
         let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
         let source_pair =
             Ed25519KeyPair::from_pkcs8(source_pkcs8.as_ref()).expect("source key pair");
@@ -1081,9 +1184,12 @@ mod tests {
         session.freeze.source_capture_public_key_base64 =
             BASE64.encode(source_key.public_key().as_ref());
         session.freeze.shadow_replay_public_key_base64.clear();
+        let binding = source_session_binding_sha256(&session).expect("source binding");
         for event in &mut session.events {
+            event.source.session_binding_sha256 = binding.clone();
             event.source.signing_public_key_sha256 = sha256(source_key.public_key().as_ref());
             sign(&mut event.source, source_key);
+            event.shadow.session_binding_sha256.clear();
             event.shadow.signing_public_key_sha256.clear();
             event.shadow.signature_base64.clear();
         }

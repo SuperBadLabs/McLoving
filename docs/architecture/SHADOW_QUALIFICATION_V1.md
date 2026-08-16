@@ -89,6 +89,17 @@ keys, and requires exact one-to-one joins. Omission, duplication, event-ID
 reuse, capture substitution, class substitution, divergent state/outcome, or
 signature mutation fails closed.
 
+Every source receipt signature also covers one canonical session-binding
+digest derived from the ceremony UUID, capture wall-clock instant, migration
+package, reviewed implementation heads, source controller, inventory, job,
+source and pipeline, disabled generations, authorization, release, runtime,
+verifier, and source-capture identity freeze. The shadow-key field is excluded
+because that distinct identity is derived only after the authoritative capture.
+The verifier recomputes this digest from the complete session. Consequently,
+an authentic receipt set from another job, controller, inventory, package,
+freeze, capture instant, or session cannot be transplanted into the current
+ceremony.
+
 `generate-keys` creates the two keys directly as owner-private PKCS#8 files and
 publishes a separate owner-private digest pin for the source-capture public key.
 The source private key is reserved for and may be consumed only by the
@@ -96,7 +107,8 @@ independently reviewed live capture sidecar; it is not an input to `seal`.
 `seal` accepts only a canonical
 template containing five already-signed source receipts under the independently
 pinned capture identity while the shadow key and every shadow signature field
-remain empty. It authenticates the source key pin and all source signatures,
+remain empty. It authenticates the source key pin, exact session binding, and
+all source signatures,
 derives only the shadow public identity, signs only the five replay receipts,
 runs the complete MIG-007 and SHADOW-001 verification stack in memory—including
 the separately supplied source-capture, authorization, and verifier pins—and
@@ -159,6 +171,7 @@ omission, duplication, substitution, and signature mutation; package/runtime
 drift; undeclared inputs; production reachability; unknown fields;
 noncanonical presentation; session-pin substitution; caller-supplied
 shadow signatures; forged or substituted source signatures and source-key pins;
+cross-session, cross-capture-time, and cross-freeze receipt transplantation;
 shared signing keys; owner modes, hard links, aliases, create-new publication;
 non-UTF-8 paths; redacted failure output; and size bounds.
 
