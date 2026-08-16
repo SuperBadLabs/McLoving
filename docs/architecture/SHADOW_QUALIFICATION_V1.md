@@ -192,6 +192,17 @@ preexisting trigger-property shape in `finally`, then re-hashes both the live
 Jenkinsfile and raw job configuration and requires equality with their
 pre-probe values before emitting the source marker.
 
+The sidecar independently inspects Mario's live source container and network
+immediately before and after the probe. Both bounded observations must be
+byte-identical and prove the pinned Jenkins image is running with a read-only
+root, no privilege, added capability, device, or shared PID namespace, only the
+three expected Jenkins mounts, and exclusive membership in the internal
+`jenkins-oracle-net` network with no reachable connector peer or production
+endpoint mapping. Only after this containment proof and the zero-build/queue
+observation does the sidecar add zero credential-grant, connector-request, and
+production-effect counts. Both live boundary observations are hashed into the
+source fixture and network identities that the source signatures authenticate.
+
 The target phase builds the exact controller-store ingress test, admitted-case
 controller test, and controller executable offline. It copies only those exact
 executables into a stopped container, then runs them with a read-only root,
@@ -216,6 +227,9 @@ supplied private package, package pin, and authorization-generation pin after
 the live boundary resample has matched that pin, and publishes the
 source-authenticated, shadow-unsigned template. Runtime
 observations and topology details remain owner-private.
+Immediately before `prepare`, it also re-reads worktree status, `HEAD`, and
+the commit tree and requires exact equality with the clean identities captured
+before the build.
 
 ## Verification surface
 

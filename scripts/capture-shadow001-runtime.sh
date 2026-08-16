@@ -99,6 +99,39 @@ chmod 0600 "${output_root}/verifier-binary.sha256"
   >"${output_root}/key-generation.log"
 chmod 0600 "${output_root}/key-generation.log"
 
+capture_source_boundary() {
+  local destination="$1"
+  ssh -o BatchMode=yes srikanth@mario 'python3 -' \
+    <"${repo_root}/migration/shadow-runtime-v1/source-boundary.py" \
+    | sed -n 's/^SHADOW001_SOURCE_BOUNDARY=//p' >"${destination}"
+  chmod 0600 "${destination}"
+  jq --exit-status '
+    .schema == "mcloving.shadow001.source-boundary/v1"
+    and .container == "jenkins-oracle-228"
+    and .image == "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02"
+    and .running == true
+    and .read_only_root == true
+    and .privileged == false
+    and .added_capabilities == 0
+    and .devices == 0
+    and .no_new_privileges == true
+    and .pid_namespace == "private"
+    and .network == "jenkins-oracle-net"
+    and .network_internal == true
+    and .network_members == ["jenkins-oracle-228"]
+    and .proxy_environment_names == []
+    and .mounts == [
+      {"destination":"/oracle/corpus","type":"bind","writable":false},
+      {"destination":"/usr/share/jenkins/ref/plugins","type":"bind","writable":false},
+      {"destination":"/var/jenkins_home","type":"bind","writable":true}
+    ]
+    and .reachable_connector_peers == 0
+    and .production_endpoint_mappings == 0
+  ' "${destination}" >/dev/null
+}
+
+capture_source_boundary "${output_root}/source-boundary-before.json"
+
 live_authz_generation_pin="${output_root}/live-authz-generation.sha256"
 "${repo_root}/scripts/capture-shadow001-authz-pin.sh" \
   "${live_authz_generation_pin}" >/dev/null
@@ -142,7 +175,22 @@ if marker is None:
     raise SystemExit("bounded Jenkins source marker is absent")
 print(marker)
 '"'"'' <"${repo_root}/migration/shadow-runtime-v1/source-probe.groovy" \
-  | sed -n 's/^SHADOW001_SOURCE=//p' >"${output_root}/source-probe.json"
+  | sed -n 's/^SHADOW001_SOURCE=//p' >"${output_root}/source-probe.raw.json"
+chmod 0600 "${output_root}/source-probe.raw.json"
+
+capture_source_boundary "${output_root}/source-boundary-after.json"
+if ! cmp -s -- "${output_root}/source-boundary-before.json" \
+  "${output_root}/source-boundary-after.json"; then
+  echo "live source containment changed during capture" >&2
+  exit 1
+fi
+jq '
+  .observations |= map(. + {
+    credential_grants: 0,
+    connector_requests: 0,
+    production_effects: 0
+  })
+' "${output_root}/source-probe.raw.json" >"${output_root}/source-probe.json"
 chmod 0600 "${output_root}/source-probe.json"
 
 jq --exit-status '
@@ -297,7 +345,9 @@ source_fixture_sha256="$({
   sha256sum \
     "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/SHA256SUMS" \
     "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/container-inspect.json" \
-    "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt"
+    "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt" \
+    "${output_root}/source-boundary-before.json" \
+    "${output_root}/source-boundary-after.json"
 } | sha256sum | cut -d ' ' -f 1)"
 target_fixture_sha256="$({
   sha256sum "${runtime_stage}/trigger_ingress" \
@@ -309,6 +359,8 @@ target_fixture_sha256="$({
 source_network_sha256="$(sha256sum \
   "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/container-inspect.json" \
   "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt" \
+  "${output_root}/source-boundary-before.json" \
+  "${output_root}/source-boundary-after.json" \
   | sha256sum | cut -d ' ' -f 1)"
 target_network_sha256="$(sha256sum \
   "${output_root}/target-network-inspect.json" | cut -d ' ' -f 1)"
@@ -354,6 +406,15 @@ printf '%s\n' "${source_commit}" >"${output_root}/implementation-head"
 printf '%s\n' "${source_tree}" >"${output_root}/implementation-tree"
 chmod 0600 "${output_root}/implementation-head" \
   "${output_root}/implementation-tree"
+seal_source_status="$(git -C "${repo_root}" status \
+  --porcelain=v1 --untracked-files=all)"
+seal_source_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+seal_source_tree="$(git -C "${repo_root}" rev-parse "${seal_source_commit}^{tree}")"
+if [[ -n "${seal_source_status}" || "${seal_source_commit}" != "${source_commit}" ||
+      "${seal_source_tree}" != "${source_tree}" ]]; then
+  echo "SHADOW-001 source tree changed before template preparation" >&2
+  exit 78
+fi
 "${output_root}/mcloving-shadow-qualification" prepare \
   "${output_root}/source-probe.json" \
   "${output_root}/target-replay.json" \

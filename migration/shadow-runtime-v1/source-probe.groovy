@@ -55,9 +55,6 @@ def record = { kind, path, accepted, before, after, detail ->
     outcome: !accepted && before == after ? 'disabled_pre_queue' : 'unexpected_activity',
     queued_builds: after.queued,
     scheduled_attempts: after.builds - original.builds,
-    credential_grants: 0,
-    connector_requests: 0,
-    production_effects: 0,
     detail: detail
   ])
 }
