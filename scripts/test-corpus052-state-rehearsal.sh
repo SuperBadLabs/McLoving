@@ -94,6 +94,8 @@ jq --exit-status '
   and .build_count == 2
   and .next_build_number == 3
   and .previous_result == "succeeded"
+  and .imported_previous_build_number == 1
+  and .imported_previous_result == "aborted"
   and .log_count == 2
   and .actual_process_execution == true
   and .external_effects == 0

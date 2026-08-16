@@ -259,10 +259,15 @@ closed.
 The exact retained run used the pinned PostgreSQL image above. Forward import,
 exact replay, independent retrieval, one durable externally effect-free
 McLoving build, reverse import, and independent reverse retrieval all passed.
-The McLoving build actually executed the exact pinned `/bin/sh -xe` process,
-captured its stdout and stderr as two ordered durable log records, produced
-`Hello World`, preserved zero external effects, advanced history to build 2,
-and produced reverse `next_build_number=3`.
+The McLoving admission derived build 2 and its aborted build 1 predecessor from
+the canonical forward bundle retrieved from durable destination storage. It
+persisted that receipt/cursor/predecessor binding in the DAG contract, proved
+the exact contract by idempotent durable replay, and reverified the same link in
+terminal attempt truth before reverse preparation. The build then executed the
+exact pinned `/bin/sh -xe` process, captured its stdout and stderr as two
+ordered durable log records, produced `Hello World`, preserved zero external
+effects, advanced history to build 2, and produced reverse
+`next_build_number=3`.
 The exact forward bundle, reverse bundle, and relocated evidence manifest all
 verify in the owner-only HeMan evidence package. Their private digests are not
 published to GitHub.

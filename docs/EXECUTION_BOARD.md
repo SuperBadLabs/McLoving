@@ -659,7 +659,7 @@ boundary is too large or authority-sensitive to share a pull request safely.
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
 | Library compiler | `MIG-005` | DONE | `MIG-002`, `MIG-003` are done | Separate deny-authority worker/ledger PR; exact 228-file reconciliation and prefetched-source verification are complete |
-| State transforms | `MIG-005A` | DONE | Exact admitted-case corrective closure verified | The exact one-build `build-history` denominator now has bounded deterministic forward/reverse transforms, idempotent PostgreSQL import/retrieval proof, an externally effect-free McLoving continuation, and pinned Jenkins reverse-import/restart/next-build continuity; private source bytes and seal metadata remain only on HeMan |
+| State transforms | `MIG-005A` | DONE | Exact admitted-case corrective closure verified | The exact one-build `build-history` denominator now has bounded deterministic forward/reverse transforms, idempotent PostgreSQL import/retrieval proof, a durable imported-cursor/predecessor-bound effect-free McLoving continuation, and pinned Jenkins reverse-import/restart/next-build continuity; private source bytes and seal metadata remain only on HeMan |
 
 ### Parity substrate lanes
 
