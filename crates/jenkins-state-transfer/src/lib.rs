@@ -18,6 +18,7 @@ use sha2::{Digest as _, Sha256};
 
 const MAX_XML_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
+const ADMITTED_JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
 const EXPECTED_PATHS: [&str; 5] = [
     "1/build.xml",
     "1/log",
@@ -77,6 +78,11 @@ pub fn normalize_single_aborted_workflow(
     validate_text(&binding.source_job_id, "source job ID")?;
     validate_text(&binding.target_pipeline_id, "target pipeline ID")?;
     validate_text(&binding.provenance, "binding provenance")?;
+    if binding.source_job_id != ADMITTED_JOB_ID || binding.target_pipeline_id != ADMITTED_JOB_ID {
+        return Err(invalid(
+            "source and target job identities do not match the exact admitted job",
+        ));
+    }
 
     let build_xml = history_file(history, "1/build.xml")?;
     let flow_xml = history_file(history, "1/workflow-completed/flowNodeStore.xml")?;
@@ -332,8 +338,8 @@ pub fn prepare_reverse_history(
         next_build_number - 1
     );
 
-    let source_export_bytes =
-        canonical_bytes(&bundle).map_err(|error| HistoryError::Serialization(error.to_string()))?;
+    let source_export_bytes = serde_json::to_vec(&(STATE_TRANSFER_SCHEMA_V1, &bundle.jobs))
+        .map_err(|error| HistoryError::Serialization(error.to_string()))?;
     bundle.binding = TransferBinding {
         schema: STATE_TRANSFER_SCHEMA_V1.to_owned(),
         direction: TransferDirection::McLovingToJenkins,
@@ -770,7 +776,30 @@ mod tests {
             job.persistent_dependencies[0].value_digest,
             parsed.bundle.jobs[0].persistent_dependencies[0].value_digest
         );
+        let source_export_bytes =
+            serde_json::to_vec(&(STATE_TRANSFER_SCHEMA_V1, &reverse.bundle.jobs)).unwrap();
+        assert_eq!(
+            reverse.bundle.binding.source_export_digest,
+            sha256(&source_export_bytes)
+        );
         transform(&reverse.bundle, &reverse.expected, &BTreeMap::new()).unwrap();
+    }
+
+    #[test]
+    fn divergent_exact_job_binding_fails_closed() {
+        let mut source_substitution = binding();
+        source_substitution.source_job_id = "corpus-052-substituted".to_owned();
+        assert!(matches!(
+            normalize_single_aborted_workflow(&history(), &source_substitution),
+            Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
+        ));
+
+        let mut target_substitution = binding();
+        target_substitution.target_pipeline_id = "corpus-052-substituted".to_owned();
+        assert!(matches!(
+            normalize_single_aborted_workflow(&history(), &target_substitution),
+            Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
+        ));
     }
 
     #[test]
