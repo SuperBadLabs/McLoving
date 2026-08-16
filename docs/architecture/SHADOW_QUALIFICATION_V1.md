@@ -181,12 +181,15 @@ controller test, and controller executable offline. It copies only those exact
 executables into a stopped container, then runs them with a read-only root,
 empty host-mount set, dropped capabilities, no-new-privileges, bounded
 resources, and a fresh PostgreSQL peer on a new internal-only network. The
+PostgreSQL peer also has a read-only root and exactly one explicit data tmpfs;
+both container inspections must prove empty host-mount sets, and both
+inspections are bound into the target-fixture identity. The
 runtime test emits the target receipt only after all five real target entry
 points return `PipelineDisabled` with zero build rows. The admitted-case test
 emits the trace receipt only after the exact process and normalized logs,
 terminal result, empty artifact/input/credential/effect surfaces, and empty
 user workspace are proven. A public-network negative must pass, the runtime
-mount set and internal network are inspected, and both containers and their
+mount sets, PostgreSQL tmpfs, and internal network are inspected, and both containers and their
 network are removed before the isolation observation can state teardown
 complete. The sidecar finally invokes `prepare` against the independently
 supplied private package, package pin, and authorization-generation pin and

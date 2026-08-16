@@ -1992,6 +1992,18 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
     .await
     .expect("count builds after disabled typed ingress attempts");
     assert_eq!(queued_builds, 0);
+    let scheduled_attempts = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM attempts AS a
+         JOIN nodes AS n ON n.id = a.node_id
+         JOIN builds AS b ON b.id = n.build_id
+         WHERE b.organization_id = $1 AND b.pipeline_id = $2",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count attempts after disabled typed ingress attempts");
+    assert_eq!(scheduled_attempts, 0);
 
     if let Ok(path) = std::env::var("MCLOVING_DIFF002_INGRESS_OUTPUT") {
         std::fs::write(
@@ -2017,7 +2029,7 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
                     "unexpected_activity"
                 },
                 "queued_builds": queued_builds,
-                "scheduled_attempts": queued_builds,
+                "scheduled_attempts": scheduled_attempts,
                 "credential_grants": 0,
                 "connector_requests": 0,
                 "production_effects": 0,

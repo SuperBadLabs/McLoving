@@ -178,6 +178,8 @@ install -m 0555 "${build_target}/debug/mcloving-controller" \
 podman network create --internal "${network}" >/dev/null
 podman run --detach --name "${postgres}" \
   --network "${network}" --network-alias postgres \
+  --read-only \
+  --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev,size=1g \
   --cpus 2 --memory 2g --pids-limit 1024 \
   --security-opt no-new-privileges \
   --env POSTGRES_USER=mcloving \
@@ -239,6 +241,16 @@ jq --exit-status '.[0].Mounts | length == 0' \
   "${output_root}/target-runner-inspect.json" >/dev/null
 jq --exit-status '.[0].HostConfig.ReadonlyRootfs == true' \
   "${output_root}/target-runner-inspect.json" >/dev/null
+jq --exit-status '
+  .[0]
+  | (.Mounts | length == 0)
+    and .HostConfig.ReadonlyRootfs == true
+    and (.HostConfig.Tmpfs | keys == ["/var/lib/postgresql/data"])
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("rw"))
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nosuid"))
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nodev"))
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("size=1g"))
+' "${output_root}/target-postgres-inspect.json" >/dev/null
 jq --exit-status '.[0].Internal == true' \
   "${output_root}/target-network-inspect.json" >/dev/null
 grep -Fxq 'SHADOW001_TARGET_NETWORK=public-network-denied' \
@@ -264,7 +276,8 @@ target_fixture_sha256="$({
   sha256sum "${runtime_stage}/trigger_ingress" \
     "${runtime_stage}/diff_001" \
     "${runtime_stage}/cargo-target/debug/mcloving-controller" \
-    "${output_root}/target-runner-inspect.json"
+    "${output_root}/target-runner-inspect.json" \
+    "${output_root}/target-postgres-inspect.json"
 } | sha256sum | cut -d ' ' -f 1)"
 source_network_sha256="$(sha256sum \
   "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/container-inspect.json" \
