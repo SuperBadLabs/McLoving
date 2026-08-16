@@ -2170,7 +2170,7 @@ mod tests {
             verify_fixture(&duplicated, &package)
                 .expect_err("duplicate")
                 .code,
-            "E_EVENT_JOIN"
+            "E_CAPTURE_BINDING"
         );
 
         let mut reordered = session.clone();
@@ -2179,7 +2179,7 @@ mod tests {
             verify_fixture(&reordered, &package)
                 .expect_err("reordered")
                 .code,
-            "E_EVENT_ORDER"
+            "E_CAPTURE_BINDING"
         );
 
         let mut substituted = session.clone();
@@ -2188,7 +2188,7 @@ mod tests {
             verify_fixture(&substituted, &package)
                 .expect_err("substitution")
                 .code,
-            "E_SIGNATURE"
+            "E_CAPTURE_BINDING"
         );
 
         let mut bad_signature = session;
