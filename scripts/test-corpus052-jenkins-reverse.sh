@@ -88,8 +88,8 @@ cleanup() {
   rm -rf -- "${authenticated_rehearsal}"
   if [[ "${completed}" != 1 ]]; then
     rm -rf -- "${staging}"
-    echo "kept failed Jenkins runtime at ${runtime_root}" >&2
   fi
+  podman unshare rm -rf -- "${runtime_root}" >/dev/null 2>&1 || true
   exit "${status}"
 }
 trap cleanup EXIT
@@ -392,9 +392,12 @@ if rg --quiet 'Hello World|\+ echo' "${staging}/evidence/template-build-2.log"; 
   echo "serialization template executed the admitted workload" >&2
   exit 1
 fi
-test "$(sed -n '1p' "${template_home}/mig005a-template-shell-invocation.txt")" = 2
-test "$(sed -n '2p' "${template_home}/mig005a-template-shell-invocation.txt")" = -xe
-rg --quiet '/script\.sh$' "${template_home}/mig005a-template-shell-invocation.txt"
+test "$(podman unshare sed -n '1p' \
+  "${template_home}/mig005a-template-shell-invocation.txt")" = 2
+test "$(podman unshare sed -n '2p' \
+  "${template_home}/mig005a-template-shell-invocation.txt")" = -xe
+podman unshare rg --quiet '/script\.sh$' \
+  "${template_home}/mig005a-template-shell-invocation.txt"
 capture_workflow 2 template
 podman inspect "${container}" > "${staging}/evidence/template-container-inspect.json"
 stop_controller
