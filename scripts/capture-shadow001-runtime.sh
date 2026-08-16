@@ -141,6 +141,9 @@ jq --exit-status '
   .schema == "mcloving.shadow001.jenkins-source-probe/v1"
   and .job_id == "corpus-052-cinqict_jenkinsdev"
   and .source_state == "disabled"
+  and .definition_kind == "org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition"
+  and .source_sha256 == "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100"
+  and .source_config_sha256 == "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97"
   and .captured_wall_clock_unix_ms > 0
   and .original_activity == .terminal_activity
   and .original_activity.queued == 0

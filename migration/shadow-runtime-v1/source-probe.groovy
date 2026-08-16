@@ -11,6 +11,7 @@ import hudson.triggers.TimerTrigger
 import jenkins.model.Jenkins
 import jenkins.triggers.ReverseBuildTrigger
 import jenkins.util.TimeDuration
+import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
 import org.jenkinsci.plugins.workflow.job.WorkflowJob
 import org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty
 import org.kohsuke.stapler.HttpResponses
@@ -24,6 +25,14 @@ def job = jenkins.getItemByFullName(jobName, WorkflowJob.class)
 assert job != null
 assert job.disabled
 assert job.triggers.isEmpty()
+assert job.definition instanceof CpsFlowDefinition
+def sha256 = { byte[] bytes ->
+  java.security.MessageDigest.getInstance('SHA-256')
+    .digest(bytes).encodeHex().toString()
+}
+def definitionKind = job.definition.class.name
+def sourceSha256 = sha256(job.definition.script.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+def sourceConfigSha256 = sha256(job.getConfigFile().getFile().bytes)
 def originalTriggerProperty =
   job.getProperty(PipelineTriggersJobProperty.class)
 
@@ -129,6 +138,9 @@ println('SHADOW001_SOURCE=' + JsonOutput.toJson([
   schema: schema,
   job_id: jobName,
   source_state: 'disabled',
+  definition_kind: definitionKind,
+  source_sha256: sourceSha256,
+  source_config_sha256: sourceConfigSha256,
   captured_wall_clock_unix_ms: capturedWallClockUnixMs,
   original_activity: original,
   terminal_activity: terminal,

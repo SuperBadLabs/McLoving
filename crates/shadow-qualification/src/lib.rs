@@ -25,6 +25,7 @@ pub const MIG007_PROTECTED_MAIN: &str = "4b2d38a6aa2988d4320731475bfad5a6815ac99
 const MAX_SESSION_BYTES: usize = 262_144;
 const JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
 const SOURCE_CONTROLLER: &str = "mario/jenkins-oracle-228";
+const SOURCE_DEFINITION_KIND: &str = "org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition";
 const INVENTORY_EPOCH: &str = "mario-oracle-20260731T064417Z-r2";
 const SOURCE_SHA256: &str = "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100";
 const PIPELINE_SHA256: &str = "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc";
@@ -203,6 +204,10 @@ struct SourceSessionBinding<'a> {
     migration_package_sha256: &'a str,
     captured_wall_clock_unix_ms: i64,
     freeze: Freeze,
+    comparison_inputs: &'a ComparisonInputs,
+    trace: &'a TraceComparison,
+    isolation: &'a Isolation,
+    authority: &'a Authority,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -312,6 +317,9 @@ struct SourceProbe {
     schema: String,
     job_id: String,
     source_state: String,
+    definition_kind: String,
+    source_sha256: String,
+    source_config_sha256: String,
     captured_wall_clock_unix_ms: i64,
     original_activity: ActivityObservation,
     terminal_activity: ActivityObservation,
@@ -645,6 +653,9 @@ fn validate_runtime_observations(
     if source.schema != SOURCE_PROBE_SCHEMA
         || source.job_id != JOB_ID
         || source.source_state != "disabled"
+        || source.definition_kind != SOURCE_DEFINITION_KIND
+        || source.source_sha256 != SOURCE_SHA256
+        || source.source_config_sha256 != OPERATIONAL_GENERATION
         || source.captured_wall_clock_unix_ms <= 0
         || source.original_activity != source.terminal_activity
         || source.original_activity.builds != 1
@@ -1177,6 +1188,10 @@ fn source_session_binding_sha256(session: &Session) -> Result<String, Qualificat
         migration_package_sha256: &session.migration_package_sha256,
         captured_wall_clock_unix_ms: session.comparison_inputs.captured_wall_clock_unix_ms,
         freeze: session.freeze.clone(),
+        comparison_inputs: &session.comparison_inputs,
+        trace: &session.trace,
+        isolation: &session.isolation,
+        authority: &session.authority,
     };
     Ok(sha256(&canonical_bytes(&binding)?))
 }
@@ -1410,6 +1425,9 @@ mod tests {
             schema: SOURCE_PROBE_SCHEMA.to_owned(),
             job_id: JOB_ID.to_owned(),
             source_state: "disabled".to_owned(),
+            definition_kind: SOURCE_DEFINITION_KIND.to_owned(),
+            source_sha256: SOURCE_SHA256.to_owned(),
+            source_config_sha256: OPERATIONAL_GENERATION.to_owned(),
             captured_wall_clock_unix_ms: 1_786_904_213_797,
             original_activity: ActivityObservation {
                 builds: 1,
@@ -1784,6 +1802,38 @@ mod tests {
             .code,
             "E_RUNTIME_OBSERVATION"
         );
+        let mut changed_source_identity = source_probe();
+        changed_source_identity.source_sha256 = sha256(b"changed-live-source");
+        let changed_source_identity_bytes =
+            serde_json::to_vec(&changed_source_identity).expect("changed source identity");
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &changed_source_identity_bytes,
+                &isolation_bytes,
+                &package_sha256,
+                &source_pin,
+                &shadow_public,
+            ))
+            .expect_err("live source drift")
+            .code,
+            "E_RUNTIME_OBSERVATION"
+        );
+        let mut changed_source_generation = source_probe();
+        changed_source_generation.source_config_sha256 = sha256(b"changed-live-configuration");
+        let changed_source_generation_bytes =
+            serde_json::to_vec(&changed_source_generation).expect("changed source generation");
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &changed_source_generation_bytes,
+                &isolation_bytes,
+                &package_sha256,
+                &source_pin,
+                &shadow_public,
+            ))
+            .expect_err("live configuration generation drift")
+            .code,
+            "E_RUNTIME_OBSERVATION"
+        );
         let valid_source_bytes = serde_json::to_vec(&source_probe()).expect("source");
         assert_eq!(
             prepare_source_authenticated_template(&inputs!(
@@ -1981,6 +2031,24 @@ mod tests {
                 shadow_pkcs8.as_ref(),
             )
             .expect_err("source receipts from another frozen case")
+            .code,
+            "E_CAPTURE_BINDING"
+        );
+        let mut substituted_isolation = session.clone();
+        substituted_isolation.isolation.source_fixture_identity =
+            "substituted-source-fixture".to_owned();
+        substituted_isolation.isolation.target_fixture_identity =
+            "substituted-target-fixture".to_owned();
+        substituted_isolation.isolation.source_network_sha256 = sha256(b"other-source-network");
+        substituted_isolation.isolation.target_network_sha256 = sha256(b"other-target-network");
+        substituted_isolation.isolation.reachability_receipt_sha256 = sha256(b"other-reachability");
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&substituted_isolation).expect("substituted isolation"),
+                &source_pin,
+                shadow_pkcs8.as_ref(),
+            )
+            .expect_err("source receipts must authenticate isolation evidence")
             .code,
             "E_CAPTURE_BINDING"
         );

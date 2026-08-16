@@ -93,7 +93,9 @@ Every source receipt signature also covers one canonical session-binding
 digest derived from the ceremony UUID, capture wall-clock instant, migration
 package, reviewed implementation heads, source controller, inventory, job,
 source and pipeline, disabled generations, authorization, release, runtime,
-verifier, source-capture identity, and precommitted shadow-replay identity.
+verifier, source-capture identity, precommitted shadow-replay identity, complete
+comparison inputs, paired trace, isolation evidence, and denied-authority
+ledger.
 The verifier recomputes this digest from the complete session. Consequently,
 an authentic receipt set from another job, controller, inventory, package,
 freeze, capture instant, or session cannot be transplanted into the current
@@ -173,7 +175,10 @@ and only the bounded `SHADOW001_SOURCE` marker returns. Neither signing private
 key leaves the owner-private HeMan output directory. The probe exercises the
 real disabled `WorkflowJob` through five distinct Jenkins entry points in
 canonical API/manual/schedule/upstream/webhook order, asserts unchanged build,
-queue, next-build, trigger, and disabled state, and restores the exact
+queue, next-build, trigger, and disabled state, captures the live inline
+Jenkinsfile and raw job-configuration digests before any temporary trigger is
+installed, and requires both to match the accepted source and operational
+generation before a source receipt can be signed. It restores the exact
 preexisting trigger-property shape in `finally`.
 
 The target phase builds the exact controller-store ingress test, admitted-case
@@ -189,8 +194,8 @@ points return `PipelineDisabled` with zero build rows. The admitted-case test
 emits the trace receipt only after the exact process and normalized logs,
 terminal result, empty artifact/input/credential/effect surfaces, and empty
 user workspace are proven. A public-network negative must pass, the runtime
-mount sets, PostgreSQL tmpfs, and internal network are inspected, and both containers and their
-network are removed before the isolation observation can state teardown
+mount sets, PostgreSQL tmpfs, and internal network are inspected, and both
+containers and their network are removed before the isolation observation can state teardown
 complete. The sidecar finally invokes `prepare` against the independently
 supplied private package, package pin, and authorization-generation pin and
 publishes the source-authenticated, shadow-unsigned template. Runtime
