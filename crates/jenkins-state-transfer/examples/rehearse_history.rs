@@ -327,6 +327,7 @@ async fn main() -> Result<(), AnyError> {
             "forward_bundle_digest": encode(forward_receipt.bundle_digest),
             "reverse_receipt_id": reverse_receipt.id,
             "reverse_bundle_digest": encode(reverse_receipt.bundle_digest),
+            "reverse_transform_implementation_sha256": encode(sha256(&reverse_executable)),
             "build_count": continuation.build_number,
             "next_build_number": continuation.build_number + 1,
             "previous_result": "succeeded",

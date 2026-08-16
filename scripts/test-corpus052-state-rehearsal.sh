@@ -103,6 +103,9 @@ jq --exit-status '
   and .forward_retrieval_verified == true
   and .reverse_retrieval_verified == true
 ' "${staging}/mcloving/rehearsal-summary.json" >/dev/null
+test "$(sha256sum "${repo_root}/target/debug/examples/rehearse_history" | awk '{print $1}')" = \
+  "$(jq -r '.reverse_transform_implementation_sha256' \
+    "${staging}/mcloving/rehearsal-summary.json")"
 test "$(cat "${staging}/mcloving/mcloving-build-2.log")" = \
   $'Hello World\n+ echo Hello World'
 

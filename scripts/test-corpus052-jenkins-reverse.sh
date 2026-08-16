@@ -299,8 +299,17 @@ jq --sort-keys '.binding | {
   transform_configuration_digest,
   conflict_policy
 }' "${reverse_bundle}" > "${staging}/evidence/reverse-transform-binding.json"
-cmp "${staging}/evidence/authenticated-transform-binding.json" \
-  "${staging}/evidence/reverse-transform-binding.json"
+jq --exit-status \
+  --slurpfile forward \
+    "${staging}/evidence/authenticated-source-forward-bundle.json" '
+  (.binding.transform_implementation_digest | type) == "array"
+  and (.binding.transform_implementation_digest | length) == 32
+  and .binding.transform_implementation_digest
+    != $forward[0].binding.transform_implementation_digest
+  and .binding.transform_configuration_digest
+    == $forward[0].binding.transform_configuration_digest
+  and .binding.conflict_policy == $forward[0].binding.conflict_policy
+' "${reverse_bundle}" >/dev/null
 
 cp "${fixture_root}/init.groovy" "${home}/init.groovy.d/10-mig005a.groovy"
 cp "${fixture_root}/corpus052-job-config.xml" "${job_home}/config.xml"
