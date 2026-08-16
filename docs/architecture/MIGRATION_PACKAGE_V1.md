@@ -1,6 +1,6 @@
 # Migration package v1
 
-Status: `MIG-007` implementation complete pending exact-head review, CI, and protected-main merge
+Status: `MIG-007` complete on protected `main`; owner-private package remains deny-authority and shadow-only
 
 ## Purpose and boundary
 
