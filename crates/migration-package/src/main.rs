@@ -77,7 +77,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 verification,
             };
             let bytes = generate_private(Path::new(repository), &inputs)?;
-            publish_new_file(Path::new(output), &bytes)?;
+            publish_new_private_file(Path::new(output), &bytes)?;
         }
         [
             _,
@@ -127,7 +127,32 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
 fn publish_new_file(output: &Path, bytes: &[u8]) -> io::Result<()> {
-    publish_new_file_with(output, bytes, sync_open_directory, remove_relative_file)
+    publish_new_file_with_policy(
+        output,
+        bytes,
+        false,
+        sync_open_directory,
+        remove_relative_file,
+    )
+}
+
+#[cfg(unix)]
+fn publish_new_private_file(output: &Path, bytes: &[u8]) -> io::Result<()> {
+    publish_new_file_with_policy(
+        output,
+        bytes,
+        true,
+        sync_open_directory,
+        remove_relative_file,
+    )
+}
+
+#[cfg(not(unix))]
+fn publish_new_private_file(_output: &Path, _bytes: &[u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "owner-private package publication is unsupported on this platform",
+    ))
 }
 
 #[cfg(not(unix))]
@@ -142,6 +167,21 @@ fn publish_new_file(_output: &Path, _bytes: &[u8]) -> io::Result<()> {
 fn publish_new_file_with<SyncDirectory, RemovePublished>(
     output: &Path,
     bytes: &[u8],
+    sync_directory: SyncDirectory,
+    remove_published: RemovePublished,
+) -> io::Result<()>
+where
+    SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
+    RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
+{
+    publish_new_file_with_policy(output, bytes, false, sync_directory, remove_published)
+}
+
+#[cfg(unix)]
+fn publish_new_file_with_policy<SyncDirectory, RemovePublished>(
+    output: &Path,
+    bytes: &[u8],
+    require_owner_only_parent: bool,
     mut sync_directory: SyncDirectory,
     mut remove_published: RemovePublished,
 ) -> io::Result<()>
@@ -168,6 +208,15 @@ where
         rustix::fs::Mode::empty(),
     )
     .map_err(os_error)?;
+    if require_owner_only_parent {
+        let metadata = rustix::fs::fstat(&parent_directory).map_err(os_error)?;
+        if metadata.st_mode & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private package parent must be an owner-only plain directory",
+            ));
+        }
+    }
     let (mut temporary, mut file) = create_temporary_sibling(&parent_directory, file_name)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -519,6 +568,19 @@ mod tests {
         let second_link = directory.path().join("second-link.json");
         fs::hard_link(&input, second_link).unwrap();
         assert!(read_private_regular_bounded(&input, 128).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_publication_rejects_a_broad_parent_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        let output = directory.path().join("private-package.json");
+
+        assert!(publish_new_private_file(&output, b"private").is_err());
+        assert!(!output.exists());
     }
 
     #[cfg(not(unix))]
