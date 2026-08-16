@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-08-15
+Updated: 2026-08-16
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
