@@ -169,8 +169,11 @@ Before that ceremony, `scripts/capture-shadow001-authz-pin.sh` independently
 captures the live Mario realm, authorization-strategy, stable user-seed, and
 job ACL decision generation into one create-new owner-private digest pin. It
 publishes no realm, seed, decision, or digest value to operational output.
-It then submits the fixed Groovy probe to Mario through an authenticated
-crumb-bearing session; the Mario credential is read and used only on Mario,
+Immediately before source capture, the runtime sidecar repeats that bounded
+capture into a second owner-private pin and requires byte-for-byte equality
+with the independently supplied pin. Authorization drift aborts before the
+source probe or package preparation. It then submits the fixed Groovy probe to
+Mario through an authenticated crumb-bearing session; the Mario credential is read and used only on Mario,
 and only the bounded `SHADOW001_SOURCE` marker returns. Neither signing private
 key leaves the owner-private HeMan output directory. The probe exercises the
 real disabled `WorkflowJob` through five distinct Jenkins entry points in
@@ -199,8 +202,9 @@ user workspace are proven. A public-network negative must pass, the runtime
 mount sets, both PostgreSQL tmpfs mounts, and internal network are inspected, and both
 containers and their network are removed before the isolation observation can state teardown
 complete. The sidecar finally invokes `prepare` against the independently
-supplied private package, package pin, and authorization-generation pin and
-publishes the source-authenticated, shadow-unsigned template. Runtime
+supplied private package, package pin, and authorization-generation pin after
+the live boundary resample has matched that pin, and publishes the
+source-authenticated, shadow-unsigned template. Runtime
 observations and topology details remain owner-private.
 
 ## Verification surface

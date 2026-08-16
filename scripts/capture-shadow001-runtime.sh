@@ -9,7 +9,7 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../tools/versions.env
 source "${repo_root}/tools/versions.env"
-for command in chmod cut find git grep install jq mktemp podman python3 \
+for command in chmod cmp cut find git grep install jq mktemp podman python3 \
   realpath sed sha256sum sort ssh; do
   command -v "${command}" >/dev/null || {
     echo "required command is unavailable: ${command}" >&2
@@ -98,6 +98,14 @@ chmod 0600 "${output_root}/verifier-binary.sha256"
   "${output_root}/shadow-replay-public.base64" \
   >"${output_root}/key-generation.log"
 chmod 0600 "${output_root}/key-generation.log"
+
+live_authz_generation_pin="${output_root}/live-authz-generation.sha256"
+"${repo_root}/scripts/capture-shadow001-authz-pin.sh" \
+  "${live_authz_generation_pin}" >/dev/null
+if ! cmp -s -- "${authz_generation_pin}" "${live_authz_generation_pin}"; then
+  echo "live authorization generation changed after the independent pin" >&2
+  exit 1
+fi
 
 ssh -o BatchMode=yes srikanth@mario 'python3 -c '"'"'
 import base64, http.cookiejar, json, sys, urllib.parse, urllib.request
@@ -250,8 +258,8 @@ jq --exit-status '
   | (.Mounts | length == 0)
     and .HostConfig.ReadonlyRootfs == true
     and (.HostConfig.Tmpfs | keys == [
-      "/var/lib/postgresql/data",
-      "/run/postgresql"
+      "/run/postgresql",
+      "/var/lib/postgresql/data"
     ])
     and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("rw"))
     and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nosuid"))
