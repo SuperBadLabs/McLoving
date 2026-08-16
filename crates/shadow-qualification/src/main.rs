@@ -463,7 +463,12 @@ mod tests {
     use super::*;
 
     fn private_directory() -> tempfile::TempDir {
-        let directory = tempfile::tempdir_in("/private/tmp").expect("private root");
+        let temporary_root = if Path::new("/private/tmp").is_dir() {
+            Path::new("/private/tmp")
+        } else {
+            Path::new("/tmp")
+        };
+        let directory = tempfile::tempdir_in(temporary_root).expect("private root");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
             .expect("private mode");
         directory
