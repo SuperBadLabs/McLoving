@@ -641,6 +641,7 @@ fn verify_exact_state(
                 "reverse bundle is missing the completed imported build",
             )
         })?;
+    validate_completed_build_logs(imported_build, &state.forward_evidence, expected_log)?;
     validate_state_transfer_sidecars(&state.reverse_evidence, reverse_bytes, imported_build)?;
     validate_workflow_receipts(
         &state.reverse_evidence,
@@ -793,6 +794,47 @@ fn verify_exact_state(
             "evidence/jenkins-container-inspect.json",
         ],
     )?;
+    Ok(())
+}
+
+fn validate_completed_build_logs(
+    imported_build: &mcloving_state_transfer::BuildState,
+    archive: &EvidenceArchive,
+    expected_aggregate: &[u8],
+) -> Result<(), PackageError> {
+    let paths = [
+        "mcloving/mcloving-build-2-log-0.txt",
+        "mcloving/mcloving-build-2-log-1.txt",
+    ];
+    if imported_build.logs.len() != paths.len() {
+        return Err(PackageError::new(
+            "E_PRIVATE_LOG",
+            "completed build log denominator is divergent",
+        ));
+    }
+    let mut aggregate = Vec::new();
+    for (index, (log, path)) in imported_build.logs.iter().zip(paths).enumerate() {
+        let contents = archive_file(archive, path)?;
+        let digest = parse_digest(&sha256(contents))?;
+        if log.sequence != index as u64
+            || log.content_digest != digest
+            || log.bytes != contents.len() as u64
+            || log.retrieval.content_digest != digest
+            || log.retrieval.media_type != "text/plain"
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_LOG",
+                format!("completed build log entry {index} is not bound to its captured chunk"),
+            ));
+        }
+        aggregate.extend_from_slice(contents);
+    }
+    if aggregate != expected_aggregate {
+        return Err(PackageError::new(
+            "E_PRIVATE_LOG",
+            "captured log chunks do not reconstruct the completed console output",
+        ));
+    }
     Ok(())
 }
 

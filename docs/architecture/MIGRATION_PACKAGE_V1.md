@@ -145,7 +145,9 @@ explicit verification and reconciliation. The private verifier rejects
 group/other access on every traversed sealed-source directory and member, and
 joins the retained Jenkins build, import receipt, and native-provenance
 sidecars exactly to the authenticated reverse bundle and all-false authority
-ledger. Restart continuity includes the original build-1 result and log, the
+ledger. The completed build's ordered normalized log entries are joined by
+digest, byte length, retrieval digest, and media type to both captured stream
+chunks and their exact aggregate. Restart continuity includes the original build-1 result and log, the
 retained build cursor and complete permalink set after continued build 3, and
 both ceremonies' exclusive container attachment to their captured internal
 Podman networks.
