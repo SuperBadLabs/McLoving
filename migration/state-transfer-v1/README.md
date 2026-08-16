@@ -40,13 +40,16 @@ the exact five-file tree, proves build 1 equals the reverse bundle, and copies
 exactly the committed 90-plugin manifest denominator with digest verification
 before and after each copy. A separate non-authoritative template controller
 creates an exact native `ShellStep` graph through a non-executing shell stub.
-The harness replaces its log, remaps every native workflow timestamp into the
-canonical transferred interval, replaces the nonrepresentable template queue
-ID with Jenkins unknown sentinel `-1`, removes template cause/queue-timing
-actions, retains the exact canonical trigger in a typed sidecar, proves no
-template marker or provenance remains, and
-destroys the controller. The fresh destination controller then loads the
-reverse-imported history without
+The harness replaces its log and rebuilds the byte-offset `log-index` so the
+complete transferred process log belongs to the exact ShellStep, remaps the
+ShellStep start/end to the exact durable attempt while keeping every other
+native workflow timestamp inside the canonical transferred interval, replaces
+the nonrepresentable template queue ID with Jenkins unknown sentinel `-1`,
+removes template cause/queue-timing actions, retains the exact canonical
+trigger in a typed sidecar, proves no template marker or provenance remains,
+byte-verifies the canonical trigger sidecar after install, restart, and
+archival, and destroys the controller. The fresh destination controller then
+loads the reverse-imported history without
 executing build 2, verifies native workflow and log retrieval across restart,
 executes build 3 once, proves contiguous numbering, and denies public network
 egress. Both harnesses retain only owner-private evidence and grant no

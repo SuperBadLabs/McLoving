@@ -205,6 +205,20 @@ test "$(sha256sum "${stderr_payload}" | awk '{print $1}')" = "${expected_stderr_
 test "$(wc -c < "${stdout_payload}" | tr -d ' ')" = 12
 test "$(wc -c < "${stderr_payload}" | tr -d ' ')" = 19
 test "$(cat "${log_payload}")" = $'Hello World\n+ echo Hello World'
+build_started=$(jq -r '.jobs[0].builds[1].started_at_unix_ms' "${reverse_bundle}")
+build_ended=$(jq -r '.jobs[0].builds[1].ended_at_unix_ms' "${reverse_bundle}")
+attempt_started=$(jq -r \
+  '.jobs[0].builds[1].graph_nodes[0].attempts[0].started_at_unix_ms' \
+  "${reverse_bundle}")
+attempt_ended=$(jq -r \
+  '.jobs[0].builds[1].graph_nodes[0].attempts[0].ended_at_unix_ms' \
+  "${reverse_bundle}")
+[[ "${build_started}" =~ ^[0-9]+$ && "${build_ended}" =~ ^[0-9]+$ ]]
+[[ "${attempt_started}" =~ ^[0-9]+$ && "${attempt_ended}" =~ ^[0-9]+$ ]]
+test "${build_started}" -le "${attempt_started}"
+test "${attempt_started}" -le "${attempt_ended}"
+test "${attempt_ended}" -le "${build_ended}"
+build_duration=$((build_ended - build_started))
 
 verify_and_copy_plugins() {
   local source_root=$1
@@ -361,7 +375,10 @@ capture_build() {
 capture_workflow() {
   local number=$1
   local prefix=$2
-  local stage_id
+  local expected_shell_log=${3:-}
+  local expected_shell_started=${4:-}
+  local expected_shell_ended=${5:-}
+  local stage_id shell_id extracted_shell_log
   curl --fail --silent --show-error \
     "http://127.0.0.1:${port}/job/${job}/${number}/wfapi/describe" \
     -o "${staging}/evidence/${prefix}-build-${number}-workflow.json"
@@ -383,6 +400,41 @@ capture_workflow() {
           | select(.name == "Shell Script" and .status == "SUCCESS")]
          | length) == 1
   ' "${staging}/evidence/${prefix}-build-${number}-stage.json" >/dev/null
+  shell_id=$(jq -r \
+    '.stageFlowNodes[] | select(.name == "Shell Script") | .id' \
+    "${staging}/evidence/${prefix}-build-${number}-stage.json")
+  [[ "${shell_id}" =~ ^[0-9]+$ ]]
+  curl --fail --silent --show-error \
+    "http://127.0.0.1:${port}/job/${job}/${number}/execution/node/${shell_id}/wfapi/log" \
+    -o "${staging}/evidence/${prefix}-build-${number}-shell-log.json"
+  jq --exit-status --arg shell_id "${shell_id}" '
+    .nodeId == $shell_id
+    and .nodeStatus == "SUCCESS"
+    and .hasMore == false
+    and (.text | type) == "string"
+    and .length == (.text | utf8bytelength)
+  ' "${staging}/evidence/${prefix}-build-${number}-shell-log.json" >/dev/null
+  if [[ -n "${expected_shell_log}" ]]; then
+    [[ "${expected_shell_started}" =~ ^[0-9]+$ ]]
+    [[ "${expected_shell_ended}" =~ ^[0-9]+$ ]]
+    jq --exit-status \
+      --arg shell_id "${shell_id}" \
+      --argjson started "${expected_shell_started}" \
+      --argjson duration "$((expected_shell_ended - expected_shell_started))" '
+      [.stageFlowNodes[]
+       | select(.id == $shell_id
+                and .name == "Shell Script"
+                and .status == "SUCCESS"
+                and .startTimeMillis == $started
+                and .durationMillis == $duration)]
+      | length == 1
+    ' "${staging}/evidence/${prefix}-build-${number}-stage.json" >/dev/null
+    extracted_shell_log="${staging}/evidence/${prefix}-build-${number}-shell-log.txt"
+    jq -j '.text' \
+      "${staging}/evidence/${prefix}-build-${number}-shell-log.json" \
+      > "${extracted_shell_log}"
+    cmp "${expected_shell_log}" "${extracted_shell_log}"
+  fi
 }
 
 start_controller "${template_home}"
@@ -410,6 +462,10 @@ case "$(basename -- "${invoked_script}")" in
   *) exit 1 ;;
 esac
 capture_workflow 2 template
+shell_node_id=$(jq -r \
+  '.stageFlowNodes[] | select(.name == "Shell Script") | .id' \
+  "${staging}/evidence/template-build-2-stage.json")
+[[ "${shell_node_id}" =~ ^[0-9]+$ ]]
 podman inspect "${container}" > "${staging}/evidence/template-container-inspect.json"
 stop_controller
 
@@ -427,6 +483,9 @@ chmod 600 "${staging}/imported-build-2.log"
 cat "${stderr_payload}" >> "${staging}/imported-build-2.log"
 cmp "${log_payload}" "${staging}/imported-build-2.log"
 podman unshare cp "${staging}/imported-build-2.log" "${template}/log"
+printf '0 %s\n' "${shell_node_id}" > "${staging}/imported-build-2.log-index"
+podman unshare cp "${staging}/imported-build-2.log-index" "${template}/log-index"
+test "$(podman unshare cat "${template}/log-index")" = "0 ${shell_node_id}"
 jq --sort-keys '.jobs[0].builds[1]' "${reverse_bundle}" \
   > "${staging}/mcloving-state-transfer-build.json"
 jq --sort-keys '
@@ -471,9 +530,6 @@ podman unshare cp "${staging}/mcloving-native-provenance.json" \
   "${template}/mcloving-native-provenance.json"
 podman unshare cp "${staging}/mcloving-state-transfer-receipt.json" \
   "${template}/mcloving-state-transfer-receipt.json"
-build_started=$(jq -r '.jobs[0].builds[1].started_at_unix_ms' "${reverse_bundle}")
-build_ended=$(jq -r '.jobs[0].builds[1].ended_at_unix_ms' "${reverse_bundle}")
-build_duration=$((build_ended - build_started))
 podman unshare sed -E -i \
   -e "s#<timestamp>[0-9]+</timestamp>#<timestamp>${build_started}</timestamp>#g" \
   -e "s#<duration>[0-9]+</duration>#<duration>${build_duration}</duration>#g" \
@@ -517,6 +573,26 @@ BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
       "<startTime>${mapped}</startTime>"
     }ge;
   ' "${flow_store}"
+SHELL_NODE_ID="${shell_node_id}" ATTEMPT_STARTED="${attempt_started}" \
+  ATTEMPT_ENDED="${attempt_ended}" podman unshare perl -0pi -e '
+    my $shell_id = $ENV{SHELL_NODE_ID};
+    my $shell_end_id = $shell_id + 1;
+    my $started = $ENV{ATTEMPT_STARTED};
+    my $ended = $ENV{ATTEMPT_ENDED};
+    my $starts = s{
+      (<entry>(?:(?!</entry>).)*?<node\ class="cps\.n\.StepAtomNode"
+       (?:(?!</entry>).)*?<id>\Q$shell_id\E</id>
+       (?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>
+       (?:(?!</entry>).)*?</entry>)
+    }{$1$started$2}gsx;
+    my $ends = s{
+      (<entry>(?:(?!</entry>).)*?<node\ class="cps\.n\.StepEndNode"
+       (?:(?!</entry>).)*?<id>\Q$shell_end_id\E</id>
+       (?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>
+       (?:(?!</entry>).)*?</entry>)
+    }{$1$ended$2}gsx;
+    die "ShellStep timing target mismatch\n" unless $starts == 1 && $ends == 1;
+  ' "${flow_store}"
 BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
   podman unshare perl -0ne '
     my @times = /<startTime>([0-9]+)<\/startTime>/g;
@@ -554,7 +630,9 @@ jq --exit-status '
 ' "${staging}/evidence/imported-build-2.json" >/dev/null
 test "$(cat "${staging}/evidence/imported-build-2.log")" = \
   $'Hello World\n+ echo Hello World'
-capture_workflow 2 imported
+capture_workflow 2 imported "${log_payload}" "${attempt_started}" "${attempt_ended}"
+podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
+  "${staging}/mcloving-native-provenance.json"
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 stop_controller
 
@@ -572,7 +650,9 @@ jq --exit-status '
 ' "${staging}/evidence/restarted-build-2.json" >/dev/null
 test "$(cat "${staging}/evidence/restarted-build-2.log")" = \
   $'Hello World\n+ echo Hello World'
-capture_workflow 2 restarted
+capture_workflow 2 restarted "${log_payload}" "${attempt_started}" "${attempt_ended}"
+podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
+  "${staging}/mcloving-native-provenance.json"
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:${port}/job/${job}/build" >/dev/null
@@ -601,13 +681,19 @@ mapfile -t build_directories < <(
 test "${build_directories[*]}" = '1 2 3'
 podman unshare test -f "${job_home}/builds/2/mcloving-state-transfer-build.json"
 podman unshare test -f "${job_home}/builds/2/mcloving-state-transfer-receipt.json"
+podman unshare test -f "${job_home}/builds/2/mcloving-native-provenance.json"
+podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
+  "${staging}/mcloving-native-provenance.json"
 test "$(jq -r '.reverse_bundle_digest' \
   "${staging}/mcloving-state-transfer-receipt.json")" = "${reverse_digest}"
 test "$(jq -r '.production_authority' \
   "${staging}/mcloving-state-transfer-receipt.json")" = false
 podman unshare cp -a "${job_home}" "${staging}/evidence/jenkins-job-after"
 podman unshare chown -R 0:0 "${staging}/evidence/jenkins-job-after"
+cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-native-provenance.json" \
+  "${staging}/mcloving-native-provenance.json"
 rm -f -- "${staging}/imported-build-2.log" \
+  "${staging}/imported-build-2.log-index" \
   "${staging}/mcloving-state-transfer-build.json" \
   "${staging}/mcloving-native-provenance.json" \
   "${staging}/mcloving-state-transfer-receipt.json" \

@@ -278,10 +278,14 @@ reverse bundle, and copied exactly the committed 90-plugin manifest denominator 
 every regular, singly linked plugin both before and after copy. A separate
 non-authoritative template controller created the exact Jenkins-native
 `ShellStep` structure using a recorded non-executing shell stub; it never ran
-the admitted script, its complete graph was reconciled to canonical transferred
-timestamps, its unrepresentable native queue ID was set to Jenkins sentinel
-`-1`, its template cause and queue-timing actions were removed in favor of an
-exact typed canonical-trigger sidecar, and it was checked free of the template
+the admitted script, its raw log and byte-offset index were rebuilt so the
+exact ShellStep owns both transferred process records, its ShellStep timing was
+reconciled to the exact durable attempt and all other graph timestamps bounded
+inside the canonical build interval, its unrepresentable native queue ID was
+set to Jenkins sentinel `-1`, its template cause and queue-timing actions were
+removed in favor of an
+exact typed canonical-trigger sidecar that was byte-verified after install,
+restart, and archival, and it was checked free of the template
 marker and provenance before being destroyed ahead of
 the destination proof. A fresh destination controller
 then loaded private build 1 as `ABORTED`, loaded the reverse-imported build 2 as
