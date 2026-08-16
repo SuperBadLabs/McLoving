@@ -29,6 +29,7 @@ members = [
   "crates/provisioner",
   "crates/release-provenance",
   "crates/secret-broker",
+  "crates/shadow-qualification",
   "crates/source-acquirer",
   "crates/state-machine",
   "crates/state-policy-differential",
