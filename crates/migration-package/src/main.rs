@@ -1,8 +1,14 @@
 use std::env;
+#[cfg(unix)]
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
+#[cfg(all(test, unix))]
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Read as _, Write as _};
 use std::path::Path;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mcloving_migration_package::{MAX_PACKAGE_BYTES, generate, verify};
@@ -18,12 +24,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = env::args().collect::<Vec<_>>();
     match arguments.as_slice() {
         [_, command, repository] if command == "generate" => {
-            io::stdout()
-                .lock()
-                .write_all(&generate(Path::new(repository))?)?;
+            let repository = Path::new(repository);
+            let bytes = generate(repository)?;
+            verify(&bytes, repository)?;
+            io::stdout().lock().write_all(&bytes)?;
         }
         [_, command, repository, output] if command == "generate" => {
-            let bytes = generate(Path::new(repository))?;
+            let repository = Path::new(repository);
+            let bytes = generate(repository)?;
+            verify(&bytes, repository)?;
             publish_new_file(Path::new(output), &bytes)?;
         }
         [_, command, package, repository] if command == "verify" => {
@@ -50,9 +59,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(unix)]
 fn publish_new_file(output: &Path, bytes: &[u8]) -> io::Result<()> {
+    publish_new_file_with(output, bytes, sync_open_directory, remove_relative_file)
+}
+
+#[cfg(not(unix))]
+fn publish_new_file(_output: &Path, _bytes: &[u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "safe descriptor-relative package publication is unsupported on this platform; use stdout and an external atomic publisher",
+    ))
+}
+
+#[cfg(unix)]
+fn publish_new_file_with<SyncDirectory, RemovePublished>(
+    output: &Path,
+    bytes: &[u8],
+    mut sync_directory: SyncDirectory,
+    mut remove_published: RemovePublished,
+) -> io::Result<()>
+where
+    SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
+    RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
+{
     let file_name = output.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -63,45 +96,109 @@ fn publish_new_file(output: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let (temporary, mut file) = create_temporary_sibling(parent, file_name)?;
+    let parent_directory = rustix::fs::open(
+        parent,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(os_error)?;
+    let (mut temporary, mut file) = create_temporary_sibling(&parent_directory, file_name)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
-    fs::hard_link(&temporary.path, output)?;
-    if let Err(error) = sync_directory(parent) {
-        let _ = fs::remove_file(output);
-        let _ = sync_directory(parent);
-        return Err(error);
+    if let Err(error) = rustix::fs::linkat(
+        &parent_directory,
+        temporary.name.as_os_str(),
+        &parent_directory,
+        file_name,
+        rustix::fs::AtFlags::empty(),
+    ) {
+        if error == rustix::io::Errno::EXIST {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "package destination already exists; verify and reconcile it before retrying",
+            ));
+        }
+        return Err(os_error(error));
+    }
+    if let Err(publication_error) = sync_directory(&parent_directory) {
+        match remove_published(&parent_directory, file_name) {
+            Ok(()) => match sync_directory(&parent_directory) {
+                Ok(()) => return Err(publication_error),
+                Err(rollback_sync_error) => {
+                    return Err(ambiguous_publication_error(
+                        &publication_error,
+                        "destination removal could not be made durable",
+                        &rollback_sync_error,
+                    ));
+                }
+            },
+            Err(rollback_remove_error) => {
+                return Err(ambiguous_publication_error(
+                    &publication_error,
+                    "destination removal failed",
+                    &rollback_remove_error,
+                ));
+            }
+        }
     }
 
     // Publication is complete and durable. A failed best-effort cleanup must
     // not report generation as failed and make a retry collide with the
     // already-published, complete destination.
-    if fs::remove_file(&temporary.path).is_ok() {
-        let _ = sync_directory(parent);
+    if temporary.remove().is_ok() {
+        let _ = sync_directory(&parent_directory);
     }
     Ok(())
 }
 
-fn create_temporary_sibling(parent: &Path, file_name: &OsStr) -> io::Result<(TemporaryPath, File)> {
+#[cfg(unix)]
+fn ambiguous_publication_error(
+    publication_error: &io::Error,
+    rollback_stage: &str,
+    rollback_error: &io::Error,
+) -> io::Error {
+    io::Error::other(format!(
+        "E_PUBLICATION_ROLLBACK_AMBIGUOUS: parent-directory sync failed ({publication_error}); {rollback_stage} ({rollback_error}); destination state is poisoned and requires explicit verification and reconciliation"
+    ))
+}
+
+#[cfg(unix)]
+fn create_temporary_sibling<'a>(
+    parent: &'a rustix::fd::OwnedFd,
+    file_name: &OsStr,
+) -> io::Result<(TemporaryPath<'a>, File)> {
     for _ in 0..128 {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let mut temporary_name = OsString::from(".");
         temporary_name.push(file_name);
         temporary_name.push(format!(".{}.{}.tmp", std::process::id(), sequence));
-        let path = parent.join(temporary_name);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        match options.open(&path) {
-            Ok(file) => return Ok((TemporaryPath { path }, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+        match rustix::fs::openat(
+            parent,
+            temporary_name.as_os_str(),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+        ) {
+            Ok(file) => {
+                return Ok((
+                    TemporaryPath {
+                        parent,
+                        name: temporary_name,
+                        active: true,
+                    },
+                    File::from(file),
+                ));
+            }
+            Err(error) if error == rustix::io::Errno::EXIST => continue,
+            Err(error) => return Err(os_error(error)),
         }
     }
     Err(io::Error::new(
@@ -110,39 +207,43 @@ fn create_temporary_sibling(parent: &Path, file_name: &OsStr) -> io::Result<(Tem
     ))
 }
 
-fn sync_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(path)?.sync_all()
-    }
-    #[cfg(windows)]
-    {
-        // FlushFileBuffers requires write access that an unprivileged process
-        // cannot obtain for a directory handle. Match the executor's explicit
-        // Windows durability boundary: flush the payload above, validate that
-        // the parent is a plain directory, and leave directory-entry power-loss
-        // survival to the persistent-host reboot gate.
-        let metadata = fs::symlink_metadata(path)?;
-        use std::os::windows::fs::MetadataExt as _;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "package parent is not a plain directory",
-            ))
-        }
+#[cfg(unix)]
+fn sync_open_directory(parent: &rustix::fd::OwnedFd) -> io::Result<()> {
+    rustix::fs::fsync(parent).map_err(os_error)
+}
+
+#[cfg(unix)]
+fn remove_relative_file(parent: &rustix::fd::OwnedFd, name: &OsStr) -> io::Result<()> {
+    rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty()).map_err(os_error)
+}
+
+#[cfg(unix)]
+fn os_error(error: rustix::io::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error.raw_os_error())
+}
+
+#[cfg(unix)]
+struct TemporaryPath<'a> {
+    parent: &'a rustix::fd::OwnedFd,
+    name: OsString,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl TemporaryPath<'_> {
+    fn remove(&mut self) -> io::Result<()> {
+        remove_relative_file(self.parent, &self.name)?;
+        self.active = false;
+        Ok(())
     }
 }
 
-struct TemporaryPath {
-    path: std::path::PathBuf,
-}
-
-impl Drop for TemporaryPath {
+#[cfg(unix)]
+impl Drop for TemporaryPath<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if self.active {
+            let _ = remove_relative_file(self.parent, &self.name);
+        }
     }
 }
 
@@ -185,6 +286,7 @@ fn read_regular_bounded(path: &Path) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn publication_is_atomic_and_leaves_no_staging_name() {
         let directory = tempfile::tempdir().unwrap();
@@ -196,6 +298,7 @@ mod tests {
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn publication_never_replaces_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
@@ -205,7 +308,90 @@ mod tests {
         let error = publish_new_file(&output, b"replacement package").unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("verify and reconcile"));
         assert_eq!(fs::read(&output).unwrap(), b"existing package");
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_publication_rollback_is_reported_as_poisoned() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("migration-package.json");
+
+        let error = publish_new_file_with(
+            &output,
+            b"complete package",
+            |_| Err(io::Error::other("injected directory sync failure")),
+            |_, _| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected rollback failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error
+                .to_string()
+                .contains("E_PUBLICATION_ROLLBACK_AMBIGUOUS")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("requires explicit verification and reconciliation")
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"complete package");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_survives_parent_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let moved_parent = root.path().join("moved-parent");
+        fs::create_dir(&parent).unwrap();
+        let output = parent.join("migration-package.json");
+        let original_parent = parent.clone();
+        let moved_parent_for_sync = moved_parent.clone();
+        let mut replaced = false;
+
+        publish_new_file_with(
+            &output,
+            b"complete package",
+            |directory| {
+                if !replaced {
+                    fs::rename(&original_parent, &moved_parent_for_sync)?;
+                    fs::create_dir(&original_parent)?;
+                    replaced = true;
+                }
+                sync_open_directory(directory)
+            },
+            remove_relative_file,
+        )
+        .unwrap();
+
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read(moved_parent.join("migration-package.json")).unwrap(),
+            b"complete package"
+        );
+        assert_eq!(fs::read_dir(&moved_parent).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn file_publication_is_explicitly_unsupported() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("migration-package.json");
+
+        let error = publish_new_file(&output, b"complete package").unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(!output.exists());
     }
 }

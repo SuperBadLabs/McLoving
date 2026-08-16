@@ -1679,6 +1679,7 @@ dependencies = [
  "mcloving-jenkins-compiler-admission",
  "mcloving-jenkins-mapping-catalog",
  "mcloving-state-policy-differential",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",

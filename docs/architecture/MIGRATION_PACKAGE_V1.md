@@ -105,6 +105,22 @@ Linux and hosted Windows compile, lint, and execute the verifier. The CLI opens
 the supplied package once with platform no-follow semantics, validates a
 bounded regular-file handle, reads at most 1 MiB, and then verifies only the
 captured bytes.
+On Unix, output publication opens the plain parent directory once without
+following a final symlink and holds that directory handle through the entire
+transaction. It creates and syncs an owner-private temporary sibling, creates
+the destination through an atomic no-clobber hard link, syncs the held parent,
+and cleans up or rolls back only through descriptor-relative operations on that
+same directory. Renaming or replacing the original parent path cannot redirect
+publication, durability, rollback, or temporary-file cleanup. If the
+publication sync fails, rollback must both remove the destination and make that
+removal durable. A failed removal or rollback sync returns
+`E_PUBLICATION_ROLLBACK_AMBIGUOUS`; the destination is treated as poisoned and
+requires explicit verification and reconciliation. An already-present
+destination is never replaced and likewise requires verification before retry.
+File publication is explicitly unsupported on Windows because the current CLI
+cannot provide the same descriptor-relative durability boundary there; Windows
+operators must generate to standard output and use an independently reviewed
+atomic publisher. Verification remains supported on both platforms.
 
 This incomplete package is not an admissible input to `SHADOW-001`. It does
 not make the job shadow- or canary-eligible and grants no production, credential,
