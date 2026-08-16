@@ -167,7 +167,10 @@ clean exact head on HeMan it first builds and pins the exact verifier and
 atomically creates the distinct source and precommitted shadow key identities.
 Before that ceremony, `scripts/capture-shadow001-authz-pin.sh` independently
 captures the live Mario realm, authorization-strategy, stable user-seed, and
-job ACL decision generation into one create-new owner-private digest pin. It
+job ACL decision generation into one create-new owner-private digest pin. The
+generation also hashes the exact controller and job configuration bytes, so a
+global or job ACL edit changes the pin even when the sampled principal retains
+the same four effective decisions. It
 publishes no realm, seed, decision, or digest value to operational output.
 Immediately before source capture, the runtime sidecar repeats that bounded
 capture into a second owner-private pin and requires byte-for-byte equality
@@ -182,7 +185,9 @@ queue, next-build, trigger, and disabled state, captures the live inline
 Jenkinsfile and raw job-configuration digests before any temporary trigger is
 installed, and requires both to match the accepted source and operational
 generation before a source receipt can be signed. It restores the exact
-preexisting trigger-property shape in `finally`.
+preexisting trigger-property shape in `finally`, then re-hashes both the live
+Jenkinsfile and raw job configuration and requires equality with their
+pre-probe values before emitting the source marker.
 
 The target phase builds the exact controller-store ingress test, admitted-case
 controller test, and controller executable offline. It copies only those exact

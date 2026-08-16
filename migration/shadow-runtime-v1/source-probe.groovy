@@ -128,9 +128,15 @@ try {
 }
 
 def terminal = activity()
+def terminalSourceSha256 = sha256(
+  job.definition.script.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+def terminalSourceConfigSha256 = sha256(job.getConfigFile().getFile().bytes)
 assert terminal == original
 assert job.disabled
 assert job.triggers.isEmpty()
+assert job.definition.class.name == definitionKind
+assert terminalSourceSha256 == sourceSha256
+assert terminalSourceConfigSha256 == sourceConfigSha256
 assert results*.kind == ['api', 'manual', 'schedule', 'upstream', 'webhook']
 assert results.every { result -> result.outcome == 'disabled_pre_queue' }
 

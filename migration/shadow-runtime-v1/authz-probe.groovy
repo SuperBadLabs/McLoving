@@ -18,6 +18,10 @@ assert user != null
 assert seed != null && !seed.isEmpty()
 
 def authentication = user.impersonate2()
+def sha256 = { byte[] bytes ->
+  MessageDigest.getInstance('SHA-256')
+    .digest(bytes).encodeHex().toString()
+}
 def binding = [
   schema: 'mcloving.shadow001.jenkins-authz-generation/v1',
   source_controller: 'mario/jenkins-oracle-228',
@@ -26,6 +30,8 @@ def binding = [
   job_disabled: job.disabled,
   security_realm: jenkins.securityRealm.class.name,
   authorization_strategy: jenkins.authorizationStrategy.class.name,
+  controller_config_sha256: sha256(jenkins.getConfigFile().getFile().bytes),
+  job_config_sha256: sha256(job.getConfigFile().getFile().bytes),
   principal: [
     user_id: user.id,
     seed: seed
