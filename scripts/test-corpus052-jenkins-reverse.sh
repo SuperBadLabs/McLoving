@@ -18,7 +18,7 @@ owner_pinned_rehearsal_manifest_sha256=$5
 plugin_source=$6
 requested_output=$7
 fixture_root="${repo_root}/migration/state-transfer-v1/fixtures"
-plugin_manifest="${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/PLUGIN_SHA256SUMS"
+source_plugin_manifest="${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/PLUGIN_SHA256SUMS"
 plugin_manifest_sha256='e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0'
 source_reverse_bundle="${requested_transform_root}/reverse-bundle.json"
 source_rehearsal_summary="${requested_transform_root}/rehearsal-summary.json"
@@ -59,8 +59,8 @@ if [[ ! "${expected_tree_sha256}" =~ ^[0-9a-f]{64}$ ]] \
   echo "expected tree and owner-pinned manifest digests must be lowercase SHA-256" >&2
   exit 65
 fi
-if [[ ! -f "${plugin_manifest}" || -L "${plugin_manifest}" ]] \
-  || [[ $(sha256sum "${plugin_manifest}" | awk '{print $1}') != "${plugin_manifest_sha256}" ]]; then
+if [[ ! -f "${source_plugin_manifest}" || -L "${source_plugin_manifest}" ]] \
+  || [[ $(stat -c '%h' "${source_plugin_manifest}") -ne 1 ]]; then
   echo "pinned Jenkins plugin manifest is missing or divergent" >&2
   exit 66
 fi
@@ -82,6 +82,8 @@ fi
 staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
 runtime_root=$(mktemp -d /tmp/mcloving-mig005a-corpus052-jenkins.XXXXXX)
 authenticated_rehearsal=$(mktemp -d /tmp/mcloving-mig005a-authenticated.XXXXXX)
+authenticated_plugin_manifest=$(mktemp -d \
+  /tmp/mcloving-mig005a-plugin-manifest.XXXXXX)
 home_plugins=$(mktemp -d /tmp/mcloving-mig005a-destination-plugins.XXXXXX)
 template_plugins=$(mktemp -d /tmp/mcloving-mig005a-template-plugins.XXXXXX)
 home="${runtime_root}/destination-home"
@@ -103,6 +105,8 @@ cleanup() {
     rm -rf -- "${staging}"
   fi
   "${privileged[@]}" rm -rf -- "${authenticated_rehearsal}" >/dev/null 2>&1 || true
+  "${privileged[@]}" rm -rf -- "${authenticated_plugin_manifest}" \
+    >/dev/null 2>&1 || true
   "${privileged[@]}" rm -rf -- "${home_plugins}" >/dev/null 2>&1 || true
   "${privileged[@]}" rm -rf -- "${template_plugins}" >/dev/null 2>&1 || true
   "${privileged[@]}" rm -rf -- "${runtime_root}" >/dev/null 2>&1 || true
@@ -112,6 +116,34 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT
+
+# Copy the manifest once, authenticate the copied bytes against the compiled
+# digest, and transfer that inode and its directory outside the invoking UID's
+# mutation authority. Every later plugin copy, verification, mount, and
+# retained receipt consumes only this locked snapshot.
+plugin_manifest="${authenticated_plugin_manifest}/PLUGIN_SHA256SUMS"
+cp --no-dereference --reflink=never "${source_plugin_manifest}" \
+  "${plugin_manifest}"
+test -f "${plugin_manifest}"
+test ! -L "${plugin_manifest}"
+test "$(stat -c '%h' "${plugin_manifest}")" -eq 1
+test "$(sha256sum "${plugin_manifest}" | awk '{print $1}')" = \
+  "${plugin_manifest_sha256}"
+"${privileged[@]}" chown -R "0:${snapshot_group}" \
+  "${authenticated_plugin_manifest}"
+"${privileged[@]}" chmod 0440 "${plugin_manifest}"
+"${privileged[@]}" chmod 0550 "${authenticated_plugin_manifest}"
+test -z "$(find "${authenticated_plugin_manifest}" ! -user root -print -quit)"
+test -z "$(find "${authenticated_plugin_manifest}" \
+  ! -group "${snapshot_group}" -print -quit)"
+if chmod u+w "${plugin_manifest}" 2>/dev/null \
+  || mv "${authenticated_plugin_manifest}" \
+    "${authenticated_plugin_manifest}.replaced" 2>/dev/null; then
+  echo "authenticated plugin manifest remained mutable to the invoking UID" >&2
+  exit 1
+fi
+test "$(sha256sum "${plugin_manifest}" | awk '{print $1}')" = \
+  "${plugin_manifest_sha256}"
 
 test "$(sha256sum "${rehearsal_manifest}" | awk '{print $1}')" = \
   "${owner_pinned_rehearsal_manifest_sha256}"

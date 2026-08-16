@@ -75,6 +75,14 @@ impl ParsedHistory {
     }
 }
 
+/// Exact admitted forward history reconstructed under independently pinned
+/// implementation trust. The inner value is intentionally opaque so direct
+/// normalization cannot mint the token required by reverse preparation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedForwardHistory {
+    parsed: ParsedHistory,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReverseBinding {
     pub source: SystemIdentity,
@@ -194,7 +202,7 @@ pub fn authenticate_forward_bundle(
     history: &SealedHistory,
     candidate: &StateBundle,
     expected_transform_implementation_digest: Digest,
-) -> Result<ParsedHistory, HistoryError> {
+) -> Result<AuthenticatedForwardHistory, HistoryError> {
     authenticate_forward_bundle_inner(
         history,
         candidate,
@@ -208,7 +216,7 @@ fn authenticate_forward_bundle_inner(
     candidate: &StateBundle,
     expected_transform_implementation_digest: Digest,
     require_admitted_tree: bool,
-) -> Result<ParsedHistory, HistoryError> {
+) -> Result<AuthenticatedForwardHistory, HistoryError> {
     let normalized = normalize_single_aborted_workflow_inner(
         history,
         &admitted_forward_binding(expected_transform_implementation_digest),
@@ -219,7 +227,7 @@ fn authenticate_forward_bundle_inner(
             "forward candidate differs from exact admitted normalization",
         ));
     }
-    Ok(normalized)
+    Ok(AuthenticatedForwardHistory { parsed: normalized })
 }
 
 pub fn admitted_forward_binding(transform_implementation_digest: Digest) -> ImportBinding {
@@ -451,11 +459,11 @@ pub fn digest_tree(files: &BTreeMap<String, Vec<u8>>) -> Result<Digest, HistoryE
 /// build-history dependency, and runs the canonical state-transfer validator
 /// before returning any reverse bytes.
 pub fn prepare_reverse_history(
-    authenticated_forward: &ParsedHistory,
+    authenticated_forward: &AuthenticatedForwardHistory,
     completed_build: BuildState,
     binding: &ReverseBinding,
 ) -> Result<ParsedHistory, HistoryError> {
-    let forward = &authenticated_forward.bundle;
+    let forward = &authenticated_forward.parsed.bundle;
     validate_text(&binding.provenance, "reverse binding provenance")?;
     if forward.binding.direction != TransferDirection::JenkinsToMcLoving {
         return Err(invalid(
@@ -1013,9 +1021,10 @@ mod tests {
 
     #[test]
     fn completed_mcloving_build_prepares_valid_exact_reverse_history() {
-        let parsed = normalize_test_workflow(&history(), &binding()).unwrap();
+        let authenticated = authenticated_history();
+        let parsed = &authenticated.parsed;
         let reverse = prepare_reverse_history(
-            &parsed,
+            &authenticated,
             completed_build(&parsed.bundle.jobs[0].builds[0]),
             &reverse_binding(&parsed.bundle),
         )
@@ -1059,7 +1068,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(authenticated, parsed);
+        assert_eq!(authenticated.parsed, parsed);
 
         let mut substituted = parsed.bundle.clone();
         substituted.jobs[0].builds[0].result = BuildResult::Succeeded;
@@ -1147,11 +1156,12 @@ mod tests {
 
     #[test]
     fn reverse_history_rejects_gap_duplicate_and_noninverse_identity() {
-        let parsed = normalize_test_workflow(&history(), &binding()).unwrap();
+        let authenticated = authenticated_history();
+        let parsed = &authenticated.parsed;
         let mut gap = completed_build(&parsed.bundle.jobs[0].builds[0]);
         gap.number = 3;
         assert!(matches!(
-            prepare_reverse_history(&parsed, gap, &reverse_binding(&parsed.bundle)),
+            prepare_reverse_history(&authenticated, gap, &reverse_binding(&parsed.bundle)),
             Err(HistoryError::Invalid(message)) if message.contains("exact next number")
         ));
 
@@ -1159,7 +1169,7 @@ mod tests {
         duplicate.source_build_id = parsed.bundle.jobs[0].builds[0].source_build_id.clone();
         assert!(matches!(
             prepare_reverse_history(
-                &parsed,
+                &authenticated,
                 duplicate,
                 &reverse_binding(&parsed.bundle)
             ),
@@ -1170,32 +1180,33 @@ mod tests {
         divergent.destination.generation = "substituted-generation".to_owned();
         assert!(matches!(
             prepare_reverse_history(
-                &parsed,
+                &authenticated,
                 completed_build(&parsed.bundle.jobs[0].builds[0]),
                 &divergent
             ),
             Err(HistoryError::Invalid(message)) if message.contains("do not invert")
         ));
 
-        let mut unrelated = parsed.clone();
-        unrelated.bundle.jobs[0].source_job_id = "unrelated-source-job".to_owned();
-        unrelated.bundle.jobs[0].target_pipeline_id = "unrelated-target-job".to_owned();
+        let mut unrelated = authenticated.clone();
+        unrelated.parsed.bundle.jobs[0].source_job_id = "unrelated-source-job".to_owned();
+        unrelated.parsed.bundle.jobs[0].target_pipeline_id = "unrelated-target-job".to_owned();
         assert!(matches!(
             prepare_reverse_history(
                 &unrelated,
                 completed_build(&parsed.bundle.jobs[0].builds[0]),
-                &reverse_binding(&unrelated.bundle)
+                &reverse_binding(&unrelated.parsed.bundle)
             ),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
         ));
 
-        let mut substituted_system = parsed.clone();
-        substituted_system.bundle.binding.source.generation = "substituted-generation".to_owned();
+        let mut substituted_system = authenticated.clone();
+        substituted_system.parsed.bundle.binding.source.generation =
+            "substituted-generation".to_owned();
         assert!(matches!(
             prepare_reverse_history(
                 &substituted_system,
                 completed_build(&parsed.bundle.jobs[0].builds[0]),
-                &reverse_binding(&substituted_system.bundle)
+                &reverse_binding(&substituted_system.parsed.bundle)
             ),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
         ));
@@ -1276,6 +1287,16 @@ mod tests {
         binding: &ImportBinding,
     ) -> Result<ParsedHistory, HistoryError> {
         normalize_single_aborted_workflow_inner(history, binding, false)
+    }
+
+    fn authenticated_history() -> AuthenticatedForwardHistory {
+        let history = history();
+        let expected_implementation = sha256(b"independently-pinned-forward-transform");
+        let parsed =
+            normalize_test_workflow(&history, &admitted_forward_binding(expected_implementation))
+                .unwrap();
+        authenticate_forward_bundle_inner(&history, &parsed.bundle, expected_implementation, false)
+            .unwrap()
     }
 
     fn history() -> SealedHistory {
