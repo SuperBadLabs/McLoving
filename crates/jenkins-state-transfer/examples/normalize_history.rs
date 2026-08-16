@@ -5,9 +5,10 @@ use std::io::{Read, Result as IoResult, Write as _};
 use std::path::Path;
 
 use mcloving_jenkins_state_transfer::{
-    ImportBinding, SealedHistory, digest_tree, normalize_single_aborted_workflow,
+    ImportBinding, SealedHistory, admitted_destination_identity, admitted_source_identity,
+    digest_tree, normalize_single_aborted_workflow,
 };
-use mcloving_state_transfer::{BuildResult, Digest, SystemIdentity, sha256, transform};
+use mcloving_state_transfer::{BuildResult, Digest, sha256, transform};
 
 const PATHS: [&str; 5] = [
     "1/build.xml",
@@ -45,18 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             opaque_evidence_id: arguments[3].clone(),
         },
         &ImportBinding {
-            source: SystemIdentity {
-                kind: "jenkins".to_owned(),
-                instance_id: "jenkins/mario/jenkins-oracle-228".to_owned(),
-                generation: "offline-frozen-source-state".to_owned(),
-                configuration_digest: sha256(b"mario-jenkins-oracle-228-frozen-profile"),
-            },
-            destination: SystemIdentity {
-                kind: "mcloving".to_owned(),
-                instance_id: "mcloving/disposable-postgres".to_owned(),
-                generation: "migration-18".to_owned(),
-                configuration_digest: sha256(b"mcloving-postgresql-v18-effect-free"),
-            },
+            source: admitted_source_identity(),
+            destination: admitted_destination_identity(),
             transform_implementation_digest: sha256(&executable),
             transform_configuration_digest: sha256(b"corpus052-single-aborted-workflow-v1"),
             provenance: "MIG-005A owner-held exact admitted-case source".to_owned(),

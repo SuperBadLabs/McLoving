@@ -70,6 +70,24 @@ pub enum HistoryError {
     Serialization(String),
 }
 
+pub fn admitted_source_identity() -> SystemIdentity {
+    SystemIdentity {
+        kind: "jenkins".to_owned(),
+        instance_id: "jenkins/mario/jenkins-oracle-228".to_owned(),
+        generation: "offline-frozen-source-state".to_owned(),
+        configuration_digest: sha256(b"mario-jenkins-oracle-228-frozen-profile"),
+    }
+}
+
+pub fn admitted_destination_identity() -> SystemIdentity {
+    SystemIdentity {
+        kind: "mcloving".to_owned(),
+        instance_id: "mcloving/disposable-postgres".to_owned(),
+        generation: "migration-18".to_owned(),
+        configuration_digest: sha256(b"mcloving-postgresql-v18-effect-free"),
+    }
+}
+
 pub fn normalize_single_aborted_workflow(
     history: &SealedHistory,
     binding: &ImportBinding,
@@ -81,6 +99,13 @@ pub fn normalize_single_aborted_workflow(
     if binding.source_job_id != ADMITTED_JOB_ID || binding.target_pipeline_id != ADMITTED_JOB_ID {
         return Err(invalid(
             "source and target job identities do not match the exact admitted job",
+        ));
+    }
+    if binding.source != admitted_source_identity()
+        || binding.destination != admitted_destination_identity()
+    {
+        return Err(invalid(
+            "source and destination systems do not match the exact admitted identities",
         ));
     }
 
@@ -285,6 +310,21 @@ pub fn prepare_reverse_history(
     if forward.jobs.len() != 1 {
         return Err(invalid(
             "reverse preparation requires exactly one admitted job",
+        ));
+    }
+    if forward.binding.source != admitted_source_identity()
+        || forward.binding.destination != admitted_destination_identity()
+    {
+        return Err(invalid(
+            "forward systems do not match the exact admitted identities",
+        ));
+    }
+    let forward_job = &forward.jobs[0];
+    if forward_job.source_job_id != ADMITTED_JOB_ID
+        || forward_job.target_pipeline_id != ADMITTED_JOB_ID
+    {
+        return Err(invalid(
+            "forward job identities do not match the exact admitted job",
         ));
     }
     if binding.source.kind != "mcloving" || binding.destination.kind != "jenkins" {
@@ -803,6 +843,23 @@ mod tests {
     }
 
     #[test]
+    fn divergent_exact_system_binding_fails_closed() {
+        let mut source_substitution = binding();
+        source_substitution.source.configuration_digest = sha256(b"substituted-source-profile");
+        assert!(matches!(
+            normalize_single_aborted_workflow(&history(), &source_substitution),
+            Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
+        ));
+
+        let mut destination_substitution = binding();
+        destination_substitution.destination.generation = "substituted-generation".to_owned();
+        assert!(matches!(
+            normalize_single_aborted_workflow(&history(), &destination_substitution),
+            Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
+        ));
+    }
+
+    #[test]
     fn reverse_history_rejects_gap_duplicate_and_noninverse_identity() {
         let parsed = normalize_single_aborted_workflow(&history(), &binding()).unwrap();
         let mut gap = completed_build(&parsed.bundle.jobs[0].builds[0]);
@@ -832,6 +889,29 @@ mod tests {
                 &divergent
             ),
             Err(HistoryError::Invalid(message)) if message.contains("do not invert")
+        ));
+
+        let mut unrelated = parsed.bundle.clone();
+        unrelated.jobs[0].source_job_id = "unrelated-source-job".to_owned();
+        unrelated.jobs[0].target_pipeline_id = "unrelated-target-job".to_owned();
+        assert!(matches!(
+            prepare_reverse_history(
+                &unrelated,
+                completed_build(&parsed.bundle.jobs[0].builds[0]),
+                &reverse_binding(&unrelated)
+            ),
+            Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
+        ));
+
+        let mut substituted_system = parsed.bundle.clone();
+        substituted_system.binding.source.generation = "substituted-generation".to_owned();
+        assert!(matches!(
+            prepare_reverse_history(
+                &substituted_system,
+                completed_build(&parsed.bundle.jobs[0].builds[0]),
+                &reverse_binding(&substituted_system)
+            ),
+            Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
         ));
     }
 
@@ -921,18 +1001,8 @@ mod tests {
 
     fn binding() -> ImportBinding {
         ImportBinding {
-            source: SystemIdentity {
-                kind: "jenkins".to_owned(),
-                instance_id: "jenkins/mario/jenkins-oracle-228".to_owned(),
-                generation: "offline-frozen-source-state".to_owned(),
-                configuration_digest: sha256(b"jenkins-source-configuration"),
-            },
-            destination: SystemIdentity {
-                kind: "mcloving".to_owned(),
-                instance_id: "mcloving/disposable-postgres".to_owned(),
-                generation: "migration-18".to_owned(),
-                configuration_digest: sha256(b"mcloving-destination-configuration"),
-            },
+            source: admitted_source_identity(),
+            destination: admitted_destination_identity(),
             transform_implementation_digest: sha256(b"jenkins-state-transfer-test"),
             transform_configuration_digest: sha256(b"corpus052-transform-configuration"),
             provenance: "MIG-005A exact admitted-case test".to_owned(),
