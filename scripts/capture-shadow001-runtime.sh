@@ -183,7 +183,7 @@ podman run --detach --name "${postgres}" \
   --network "${network}" --network-alias postgres \
   --read-only \
   --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev,size=1g \
-  --tmpfs /var/run/postgresql:rw,nosuid,nodev,size=16m \
+  --tmpfs /run/postgresql:rw,nosuid,nodev,size=16m \
   --cpus 2 --memory 2g --pids-limit 1024 \
   --security-opt no-new-privileges \
   --env POSTGRES_USER=mcloving \
@@ -251,16 +251,16 @@ jq --exit-status '
     and .HostConfig.ReadonlyRootfs == true
     and (.HostConfig.Tmpfs | keys == [
       "/var/lib/postgresql/data",
-      "/var/run/postgresql"
+      "/run/postgresql"
     ])
     and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("rw"))
     and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nosuid"))
     and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nodev"))
     and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("size=1g"))
-    and (.HostConfig.Tmpfs["/var/run/postgresql"] | contains("rw"))
-    and (.HostConfig.Tmpfs["/var/run/postgresql"] | contains("nosuid"))
-    and (.HostConfig.Tmpfs["/var/run/postgresql"] | contains("nodev"))
-    and (.HostConfig.Tmpfs["/var/run/postgresql"] | contains("size=16m"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("rw"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("nosuid"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("nodev"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("size=16m"))
 ' "${output_root}/target-postgres-inspect.json" >/dev/null
 jq --exit-status '.[0].Internal == true' \
   "${output_root}/target-network-inspect.json" >/dev/null

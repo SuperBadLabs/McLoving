@@ -187,7 +187,8 @@ executables into a stopped container, then runs them with a read-only root,
 empty host-mount set, dropped capabilities, no-new-privileges, bounded
 resources, and a fresh PostgreSQL peer on a new internal-only network. The
 PostgreSQL peer also has a read-only root and exactly two explicit tmpfs mounts
-for its data and Unix-socket directories;
+for its data directory and the resolved `/run/postgresql` backing directory for
+the image's `/var/run/postgresql` Unix-socket path;
 both container inspections must prove empty host-mount sets, and both
 inspections are bound into the target-fixture identity. The
 runtime test emits the target receipt only after all five real target entry
