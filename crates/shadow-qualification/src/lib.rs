@@ -325,7 +325,7 @@ pub fn seal_private_session(
         ));
     }
     if session.freeze.source_capture_public_key_base64.is_empty()
-        || !session.freeze.shadow_replay_public_key_base64.is_empty()
+        || session.freeze.shadow_replay_public_key_base64.is_empty()
         || session.events.iter().any(|event| {
             event.source.signing_public_key_sha256.is_empty()
                 || event.source.signature_base64.is_empty()
@@ -341,6 +341,8 @@ pub fn seal_private_session(
         ));
     }
     let source_public_key = decode_public_key(&session.freeze.source_capture_public_key_base64)?;
+    let expected_shadow_public_key =
+        decode_public_key(&session.freeze.shadow_replay_public_key_base64)?;
     if !is_sha256(expected_source_capture_public_key_sha256)
         || sha256(&source_public_key) != expected_source_capture_public_key_sha256
     {
@@ -349,19 +351,23 @@ pub fn seal_private_session(
             "source-capture identity does not match its independent owner pin",
         ));
     }
-    let session_binding_sha256 = source_session_binding_sha256(&session)?;
-    verify_source_captures(&session.events, &source_public_key, &session_binding_sha256)?;
     let shadow_key = Ed25519KeyPair::from_pkcs8(shadow_replay_pkcs8).map_err(|_| {
         QualificationError::new("E_KEY", "invalid shadow-replay Ed25519 PKCS#8 key")
     })?;
+    if shadow_key.public_key().as_ref() != expected_shadow_public_key {
+        return Err(QualificationError::new(
+            "E_SHADOW_REPLAY_KEY",
+            "shadow-replay key does not match the source-authenticated ceremony identity",
+        ));
+    }
     if source_public_key == shadow_key.public_key().as_ref() {
         return Err(QualificationError::new(
             "E_KEY",
             "source-capture and shadow-replay keys must be distinct",
         ));
     }
-    session.freeze.shadow_replay_public_key_base64 =
-        BASE64.encode(shadow_key.public_key().as_ref());
+    let session_binding_sha256 = source_session_binding_sha256(&session)?;
+    verify_source_captures(&session.events, &source_public_key, &session_binding_sha256)?;
     for event in &mut session.events {
         event.shadow.session_binding_sha256 = session_binding_sha256.clone();
         sign_receipt(&mut event.shadow, &shadow_key)?;
@@ -673,11 +679,6 @@ fn verify_denial_receipt(
 }
 
 fn source_session_binding_sha256(session: &Session) -> Result<String, QualificationError> {
-    let mut freeze = session.freeze.clone();
-    // The authoritative capture is created before the shadow key exists. The
-    // binding covers every other frozen identity and remains stable when seal
-    // derives that distinct shadow identity.
-    freeze.shadow_replay_public_key_base64.clear();
     let binding = SourceSessionBinding {
         schema: SOURCE_SESSION_BINDING_SCHEMA,
         session_id: session.session_id,
@@ -686,7 +687,7 @@ fn source_session_binding_sha256(session: &Session) -> Result<String, Qualificat
         mig007_protected_main: &session.mig007_protected_main,
         migration_package_sha256: &session.migration_package_sha256,
         captured_wall_clock_unix_ms: session.comparison_inputs.captured_wall_clock_unix_ms,
-        freeze,
+        freeze: session.freeze.clone(),
     };
     Ok(sha256(&canonical_bytes(&binding)?))
 }
@@ -1065,17 +1066,13 @@ mod tests {
 
     #[test]
     fn authenticated_source_template_is_sealed_with_a_distinct_shadow_key() {
-        let (mut session, package) = fixture();
-        session.freeze.shadow_replay_public_key_base64.clear();
-        for event in &mut session.events {
-            event.shadow.session_binding_sha256.clear();
-            event.shadow.signing_public_key_sha256.clear();
-            event.shadow.signature_base64.clear();
-        }
+        let (_, package) = fixture();
         let source_key = pair(7);
         let source_pin = sha256(source_key.public_key().as_ref());
         let random = SystemRandom::new();
         let shadow_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("shadow key");
+        let shadow_pair = Ed25519KeyPair::from_pkcs8(shadow_pkcs8.as_ref()).expect("shadow pair");
+        let session = source_template_for_keys(&source_key, &shadow_pair);
         let sealed = seal_private_session(
             &canonical_bytes(&session).expect("template"),
             &source_pin,
@@ -1093,6 +1090,36 @@ mod tests {
         .expect("verified");
         assert_eq!(receipt.captured_events, 5);
         assert!(!receipt.production_authority);
+
+        let replacement_shadow_pkcs8 =
+            Ed25519KeyPair::generate_pkcs8(&random).expect("replacement shadow key");
+        let replacement_shadow_pair = Ed25519KeyPair::from_pkcs8(replacement_shadow_pkcs8.as_ref())
+            .expect("replacement shadow pair");
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&session).expect("precommitted template"),
+                &source_pin,
+                replacement_shadow_pkcs8.as_ref(),
+            )
+            .expect_err("replacement shadow identity")
+            .code,
+            "E_SHADOW_REPLAY_KEY"
+        );
+        let mut rebound_shadow_identity = session.clone();
+        rebound_shadow_identity
+            .freeze
+            .shadow_replay_public_key_base64 =
+            BASE64.encode(replacement_shadow_pair.public_key().as_ref());
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&rebound_shadow_identity).expect("rebound shadow identity"),
+                &source_pin,
+                replacement_shadow_pkcs8.as_ref(),
+            )
+            .expect_err("capture transplanted to another shadow identity")
+            .code,
+            "E_CAPTURE_BINDING"
+        );
 
         let mut substituted = session.clone();
         let substituted_source = pair(11);
@@ -1166,7 +1193,7 @@ mod tests {
         let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
         let source_pair =
             Ed25519KeyPair::from_pkcs8(source_pkcs8.as_ref()).expect("source key pair");
-        let same_key_template = source_template_for_key(&source_pair);
+        let same_key_template = source_template_for_keys(&source_pair, &source_pair);
         assert_eq!(
             seal_private_session(
                 &canonical_bytes(&same_key_template).expect("same-key template"),
@@ -1179,11 +1206,15 @@ mod tests {
         );
     }
 
-    fn source_template_for_key(source_key: &Ed25519KeyPair) -> Session {
+    fn source_template_for_keys(
+        source_key: &Ed25519KeyPair,
+        shadow_key: &Ed25519KeyPair,
+    ) -> Session {
         let (mut session, _) = fixture();
         session.freeze.source_capture_public_key_base64 =
             BASE64.encode(source_key.public_key().as_ref());
-        session.freeze.shadow_replay_public_key_base64.clear();
+        session.freeze.shadow_replay_public_key_base64 =
+            BASE64.encode(shadow_key.public_key().as_ref());
         let binding = source_session_binding_sha256(&session).expect("source binding");
         for event in &mut session.events {
             event.source.session_binding_sha256 = binding.clone();

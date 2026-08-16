@@ -9,6 +9,7 @@ use std::io::{Read as _, Write as _};
 use std::path::Component;
 use std::path::Path;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use mcloving_migration_package::{MAX_PRIVATE_PACKAGE_BYTES, PrivateVerificationInputs};
 use mcloving_shadow_qualification::{
     IndependentPins, VerificationReceipt, seal_private_session, verify_private_session,
@@ -45,7 +46,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     let command = arguments.get(1).and_then(|value| value.to_str());
     match (command, arguments) {
-        (Some("generate-keys"), [_, _, source_key, source_key_pin, shadow_key]) => {
+        (
+            Some("generate-keys"),
+            [
+                _,
+                _,
+                source_key,
+                source_key_pin,
+                shadow_key,
+                shadow_public_key,
+            ],
+        ) => {
             let random = SystemRandom::new();
             let source = Ed25519KeyPair::generate_pkcs8(&random)
                 .map_err(|_| "could not generate source-capture Ed25519 key")?;
@@ -53,42 +64,24 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
                 .map_err(|_| "could not generate shadow-replay Ed25519 key")?;
             let source_pair = Ed25519KeyPair::from_pkcs8(source.as_ref())
                 .map_err(|_| "could not load generated source-capture key")?;
+            let shadow_pair = Ed25519KeyPair::from_pkcs8(shadow.as_ref())
+                .map_err(|_| "could not load generated shadow-replay key")?;
             let source_pin_bytes = format!("{}\n", digest_hex(source_pair.public_key().as_ref()));
-            publish_owner_private(Path::new(source_key), source.as_ref())?;
-            if let Err(error) =
-                publish_owner_private(Path::new(source_key_pin), source_pin_bytes.as_bytes())
-            {
-                rollback_new_private(Path::new(source_key)).map_err(|rollback| {
-                    io::Error::other(format!(
-                        "source-key-pin publication failed ({error}); source-key rollback failed ({rollback}); reconcile both paths"
-                    ))
-                })?;
-                return Err(error.into());
-            }
-            if let Err(error) = publish_owner_private(Path::new(shadow_key), shadow.as_ref()) {
-                let pin_rollback = rollback_new_private(Path::new(source_key_pin));
-                let key_rollback = rollback_new_private(Path::new(source_key));
-                if let (Err(pin), Err(key)) = (&pin_rollback, &key_rollback) {
-                    return Err(io::Error::other(format!(
-                        "shadow-key publication failed ({error}); source-pin rollback failed ({pin}); source-key rollback failed ({key}); reconcile all paths"
-                    ))
-                    .into());
-                }
-                pin_rollback.map_err(|rollback| {
-                    io::Error::other(format!(
-                        "shadow-key publication failed ({error}); source-pin rollback failed ({rollback}); reconcile all paths"
-                    ))
-                })?;
-                key_rollback.map_err(|rollback| {
-                    io::Error::other(format!(
-                        "shadow-key publication failed ({error}); source-key rollback failed ({rollback}); reconcile all paths"
-                    ))
-                })?;
-                return Err(error.into());
-            }
+            let shadow_public_key_bytes =
+                format!("{}\n", BASE64.encode(shadow_pair.public_key().as_ref()));
+            publish_owner_private_bundle(&[
+                (Path::new(source_key), source.as_ref()),
+                (Path::new(source_key_pin), source_pin_bytes.as_bytes()),
+                (Path::new(shadow_key), shadow.as_ref()),
+                (
+                    Path::new(shadow_public_key),
+                    shadow_public_key_bytes.as_bytes(),
+                ),
+            ])?;
             println!("source_capture_key_created=true");
             println!("source_capture_key_pin_created=true");
             println!("shadow_replay_key_created=true");
+            println!("shadow_replay_public_identity_created=true");
         }
         (
             Some("seal"),
@@ -473,6 +466,26 @@ fn publish_owner_private(_path: &Path, _bytes: &[u8]) -> io::Result<()> {
     ))
 }
 
+fn publish_owner_private_bundle(outputs: &[(&Path, &[u8])]) -> io::Result<()> {
+    let mut published: Vec<&Path> = Vec::with_capacity(outputs.len());
+    for (path, bytes) in outputs {
+        if let Err(publication_error) = publish_owner_private(path, bytes) {
+            let mut rollback_failed = false;
+            for published_path in published.iter().rev() {
+                rollback_failed |= rollback_new_private(published_path).is_err();
+            }
+            if rollback_failed {
+                return Err(io::Error::other(
+                    "key-bundle publication and rollback failed; reconcile all output paths",
+                ));
+            }
+            return Err(publication_error);
+        }
+        published.push(*path);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn rollback_new_private(path: &Path) -> io::Result<()> {
     let (parent, leaf) = open_owner_parent(path)?;
@@ -629,17 +642,19 @@ mod tests {
     }
 
     #[test]
-    fn key_generation_publishes_an_independent_source_identity_pin() {
+    fn key_generation_publishes_precommitted_source_and_shadow_identities() {
         let directory = private_directory();
         let source = directory.path().join("source.pkcs8");
         let source_pin = directory.path().join("source-public.sha256");
         let shadow = directory.path().join("shadow.pkcs8");
+        let shadow_public = directory.path().join("shadow-public.base64");
         let arguments = vec![
             OsString::from("mcloving-shadow-qualification"),
             OsString::from("generate-keys"),
             source.as_os_str().to_owned(),
             source_pin.as_os_str().to_owned(),
             shadow.as_os_str().to_owned(),
+            shadow_public.as_os_str().to_owned(),
         ];
 
         run_with_arguments(&arguments).expect("generate keys and pin");
@@ -651,6 +666,12 @@ mod tests {
         );
         let shadow_bytes = read_owner_private(&shadow, 1_024).expect("shadow key");
         let shadow_pair = Ed25519KeyPair::from_pkcs8(&shadow_bytes).expect("shadow pair");
+        let shadow_public_bytes =
+            read_owner_private(&shadow_public, 128).expect("shadow public identity");
+        assert_eq!(
+            shadow_public_bytes,
+            format!("{}\n", BASE64.encode(shadow_pair.public_key().as_ref())).as_bytes()
+        );
         assert_ne!(
             source_pair.public_key().as_ref(),
             shadow_pair.public_key().as_ref()
@@ -663,6 +684,7 @@ mod tests {
         let source = directory.path().join("source.pkcs8");
         let source_pin = directory.path().join("source-public.sha256");
         let shadow = directory.path().join("shadow.pkcs8");
+        let shadow_public = directory.path().join("shadow-public.base64");
         fs::write(&shadow, b"preexisting").expect("preexisting shadow");
         fs::set_permissions(&shadow, fs::Permissions::from_mode(0o600)).expect("shadow mode");
         let arguments = vec![
@@ -671,12 +693,43 @@ mod tests {
             source.as_os_str().to_owned(),
             source_pin.as_os_str().to_owned(),
             shadow.as_os_str().to_owned(),
+            shadow_public.as_os_str().to_owned(),
         ];
 
         assert!(run_with_arguments(&arguments).is_err());
         assert!(!source.exists());
         assert!(!source_pin.exists());
+        assert!(!shadow_public.exists());
         assert_eq!(fs::read(&shadow).expect("unchanged shadow"), b"preexisting");
+    }
+
+    #[test]
+    fn key_generation_rolls_back_all_keys_when_shadow_identity_is_preexisting() {
+        let directory = private_directory();
+        let source = directory.path().join("source.pkcs8");
+        let source_pin = directory.path().join("source-public.sha256");
+        let shadow = directory.path().join("shadow.pkcs8");
+        let shadow_public = directory.path().join("shadow-public.base64");
+        fs::write(&shadow_public, b"preexisting").expect("preexisting identity");
+        fs::set_permissions(&shadow_public, fs::Permissions::from_mode(0o600))
+            .expect("identity mode");
+        let arguments = vec![
+            OsString::from("mcloving-shadow-qualification"),
+            OsString::from("generate-keys"),
+            source.as_os_str().to_owned(),
+            source_pin.as_os_str().to_owned(),
+            shadow.as_os_str().to_owned(),
+            shadow_public.as_os_str().to_owned(),
+        ];
+
+        assert!(run_with_arguments(&arguments).is_err());
+        assert!(!source.exists());
+        assert!(!source_pin.exists());
+        assert!(!shadow.exists());
+        assert_eq!(
+            fs::read(&shadow_public).expect("unchanged identity"),
+            b"preexisting"
+        );
     }
 
     #[test]

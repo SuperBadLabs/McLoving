@@ -52,7 +52,7 @@ unsafe path components, redirectable foreign ancestors, a non-owner or broad
 immediate parent, nonregular or multiply linked inputs, broad file modes, and
 files above their byte ceiling. Publication is create-new, mode `0600`,
 file-synced, and parent-directory-synced; an incomplete two-file session/pin or
-three-file source-key/source-pin/shadow-key publication is rolled back and
+four-file source-key/source-pin/shadow-key/shadow-public-identity publication is rolled back and
 otherwise reported as requiring manual reconciliation.
 
 ## Frozen identity
@@ -93,23 +93,27 @@ Every source receipt signature also covers one canonical session-binding
 digest derived from the ceremony UUID, capture wall-clock instant, migration
 package, reviewed implementation heads, source controller, inventory, job,
 source and pipeline, disabled generations, authorization, release, runtime,
-verifier, and source-capture identity freeze. The shadow-key field is excluded
-because that distinct identity is derived only after the authoritative capture.
+verifier, source-capture identity, and precommitted shadow-replay identity.
 The verifier recomputes this digest from the complete session. Consequently,
 an authentic receipt set from another job, controller, inventory, package,
 freeze, capture instant, or session cannot be transplanted into the current
-ceremony.
+ceremony, and the same source capture cannot be resealed under a different
+shadow identity.
 
-`generate-keys` creates the two keys directly as owner-private PKCS#8 files and
-publishes a separate owner-private digest pin for the source-capture public key.
+`generate-keys` creates the two keys directly as owner-private PKCS#8 files,
+publishes a separate owner-private digest pin for the source-capture public key,
+and publishes the owner-private Base64 shadow public identity that the capture
+sidecar must embed before it signs. The four-file bundle is create-new and
+rolls back as one unit on partial publication.
 The source private key is reserved for and may be consumed only by the
 independently reviewed live capture sidecar; it is not an input to `seal`.
 `seal` accepts only a canonical
 template containing five already-signed source receipts under the independently
-pinned capture identity while the shadow key and every shadow signature field
-remain empty. It authenticates the source key pin, exact session binding, and
-all source signatures,
-derives only the shadow public identity, signs only the five replay receipts,
+pinned capture identity and the precommitted shadow public identity while every
+shadow signature field remains empty. It authenticates the source key pin,
+exact session binding, all source signatures, and exact equality between the
+precommitted shadow public identity and the supplied shadow private key, then
+signs only the five replay receipts,
 runs the complete MIG-007 and SHADOW-001 verification stack in memory—including
 the separately supplied source-capture, authorization, and verifier pins—and
 only then publishes the session and its independent owner pin. A sealing caller
@@ -172,6 +176,7 @@ drift; undeclared inputs; production reachability; unknown fields;
 noncanonical presentation; session-pin substitution; caller-supplied
 shadow signatures; forged or substituted source signatures and source-key pins;
 cross-session, cross-capture-time, and cross-freeze receipt transplantation;
+shadow-key replacement and cross-shadow-identity capture transplantation;
 shared signing keys; owner modes, hard links, aliases, create-new publication;
 non-UTF-8 paths; redacted failure output; and size bounds.
 
