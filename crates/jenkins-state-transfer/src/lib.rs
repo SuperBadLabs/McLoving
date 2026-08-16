@@ -240,10 +240,10 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                 let decoded = reference.decode().map_err(|error| {
                     invalid(format!("invalid job configuration reference: {error}"))
                 })?;
-                let value =
-                    quick_xml::escape::unescape(&format!("&{decoded};")).map_err(|error| {
-                        invalid(format!("invalid job configuration reference: {error}"))
-                    })?;
+                let encoded = format!("&{decoded};");
+                let value = quick_xml::escape::unescape(&encoded).map_err(|error| {
+                    invalid(format!("invalid job configuration reference: {error}"))
+                })?;
                 push_job_config_text(&mut tokens, value.trim());
             }
             Ok(Event::End(end)) => {
