@@ -37,6 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "admitted_state_dependencies={}",
                 receipt.admitted_state_dependencies
             );
+            println!("package_complete={}", receipt.package_complete);
             println!("production_authority={}", receipt.production_authority);
         }
         _ => {
@@ -111,17 +112,28 @@ fn create_temporary_sibling(parent: &Path, file_name: &OsStr) -> io::Result<(Tem
 
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    let directory = File::open(path)?;
+    {
+        File::open(path)?.sync_all()
+    }
     #[cfg(windows)]
-    let directory = {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)?
-    };
-    directory.sync_all()
+    {
+        // FlushFileBuffers requires write access that an unprivileged process
+        // cannot obtain for a directory handle. Match the executor's explicit
+        // Windows durability boundary: flush the payload above, validate that
+        // the parent is a plain directory, and leave directory-entry power-loss
+        // survival to the persistent-host reboot gate.
+        let metadata = fs::symlink_metadata(path)?;
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "package parent is not a plain directory",
+            ))
+        }
+    }
 }
 
 struct TemporaryPath {

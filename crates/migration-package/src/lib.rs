@@ -21,7 +21,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.migration-package/v1";
 pub const PACKAGE_ID: &str = "mario-corpus-052-disabled-v1";
 pub const PACKAGE_FILE: &str = "migration-package.json";
 pub const MAX_PACKAGE_BYTES: usize = 1_048_576;
-pub const PACKAGE_SHA256: &str = "390f7ff92dcd8a493b9f926df6d881d12c2c4078776f592a351cf5d05b065ceb";
+pub const PACKAGE_SHA256: &str = "304f75f7c85f11b4fb15ce11f5cf65e5dc69168e3ef85b03a9b3eabdbb3d4ed9";
 
 const REQUEST_ID: &str = "mig003-golden";
 const SOURCE_FILE: &str =
@@ -32,6 +32,10 @@ const CORPUS_INDEX: &str = "migration/mario-jenkins-oracle-228/corpus-v1/corpus-
 const AGGREGATE_ROOT: &str = "migration/differential-aggregate-v1";
 const AGGREGATE_FILE: &str = "migration/differential-aggregate-v1/differential-aggregate.json";
 const STATE_POLICY_FILE: &str = "migration/state-policy-differential-v1/state-policy.json";
+const ELIGIBILITY_LEDGER_FILE: &str =
+    "migration/mario-jenkins-oracle-228/inventory-20260731T064417Z-r2/eligibility-ledger.yaml";
+const PERSISTENT_STATE_FILE: &str =
+    "migration/mario-jenkins-oracle-228/inventory-20260731T064417Z-r2/persistent-state.yaml";
 
 const SOURCE_CONFIG_SHA256: &str =
     "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97";
@@ -53,6 +57,10 @@ const MAPPING_LOCK_SHA256: &str =
     "e8af0a08f60b7e179667e80ab19b2e8d0a119e185faa5faa4edb810e169ab203";
 const STATE_POLICY_SHA256: &str =
     "70607ab0b64cb35c5b875dea7b1f94db14e6df7e931671e2f96828e1c7a52a78";
+const ELIGIBILITY_LEDGER_SHA256: &str =
+    "436c76718f537ce199e4177e4db9998aad4b661176ff25d5daef17e082e4e636";
+const PERSISTENT_STATE_SHA256: &str =
+    "527700913d3f730a0f51c70ee40fb0be3a06c2385d92a69bf5a919d7536634b1";
 const WORKER_IMAGE_SHA256: &str =
     "8459b3b080d4239daffa2d5ba632c707dfbd18657b0176fb0e6340ff5dd45548";
 
@@ -73,6 +81,7 @@ pub struct VerificationReceipt {
     pub packaged_cases: usize,
     pub rejected_cases: usize,
     pub admitted_state_dependencies: usize,
+    pub package_complete: bool,
     pub production_authority: bool,
 }
 
@@ -135,6 +144,8 @@ struct Identities {
     mapping_lock_sha256: String,
     differential_aggregate_sha256: String,
     state_policy_sha256: String,
+    eligibility_ledger_sha256: String,
+    persistent_state_inventory_sha256: String,
     release_id: String,
     release_version: String,
     release_profile: String,
@@ -162,11 +173,83 @@ struct Artifacts {
 #[serde(deny_unknown_fields)]
 struct StateTransferDisposition {
     status: String,
-    admitted_state_dependencies: Vec<String>,
+    blocking_error: String,
+    admitted_state_dependencies: Vec<StateDependency>,
     case_specific_rehearsal_receipts: Vec<String>,
     packaged_artifacts: Vec<String>,
     cutover_eligible: bool,
     rollback_eligible: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StateDependency {
+    id: String,
+    kind: String,
+    record_count: usize,
+    record_source_sha256: String,
+    record_subject_sha256: String,
+    restore_target: String,
+    conflict_policy: String,
+    retention_policy_id: String,
+    retention_policy_sha256: String,
+    retention_deadline: String,
+    forward_mapping_id: String,
+    forward_disposition: String,
+    forward_evidence_sha256: String,
+    rollback_mapping_id: String,
+    rollback_disposition: String,
+    rollback_evidence_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct EligibilityLedger {
+    jobs: Vec<EligibilityJob>,
+}
+
+#[derive(Deserialize)]
+struct EligibilityJob {
+    job_id: String,
+    persistent_state_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PersistentStateLedger {
+    jobs: Vec<PersistentStateJob>,
+}
+
+#[derive(Deserialize)]
+struct PersistentStateJob {
+    job_id: String,
+    records: Vec<PersistentStateRecord>,
+}
+
+#[derive(Deserialize)]
+struct PersistentStateRecord {
+    id: String,
+    kind: String,
+    record_count: RecordCount,
+    source_sha256: String,
+    restore_target: String,
+    conflict_policy: String,
+    retention_policy_id: String,
+    retention_policy_sha256: String,
+    retention_deadline: String,
+    forward_transform: StateTransform,
+    rollback_transform: StateTransform,
+}
+
+#[derive(Deserialize)]
+struct RecordCount {
+    count: usize,
+    subject_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct StateTransform {
+    mapping_id: String,
+    disposition: String,
+    evidence_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -220,12 +303,13 @@ pub fn generate(repository_root: &Path) -> Result<Vec<u8>, PackageError> {
         state_policy_json: read_utf8(repository_root, STATE_POLICY_FILE)?,
     };
     let dispositions = dispositions_from_index(&artifacts.corpus_index_tsv)?;
+    let state_transfer = expected_state_transfer(repository_root)?;
     render(&MigrationPackage {
         schema: SCHEMA.into(),
         package_id: PACKAGE_ID.into(),
         identities: expected_identities(),
         artifacts,
-        state_transfer: expected_state_transfer(),
+        state_transfer,
         dispositions,
         authority: expected_authority(),
     })
@@ -259,7 +343,7 @@ pub fn verify(bytes: &[u8], repository_root: &Path) -> Result<VerificationReceip
     if package.identities != expected_identities() {
         return Err(PackageError::new("E_IDENTITY", "identity binding mismatch"));
     }
-    if package.state_transfer != expected_state_transfer() {
+    if package.state_transfer != expected_state_transfer(repository_root)? {
         return Err(PackageError::new(
             "E_STATE_TRANSFER",
             "state-transfer disposition or dependency denominator mismatch",
@@ -349,12 +433,16 @@ pub fn verify(bytes: &[u8], repository_root: &Path) -> Result<VerificationReceip
     let rejected_cases = package
         .dispositions
         .iter()
-        .filter(|entry| entry.package_status == "deterministically_rejected")
+        .filter(|entry| {
+            entry
+                .package_status
+                .starts_with("deterministically_rejected")
+        })
         .count();
-    if packaged_cases != 1 || rejected_cases != 227 || package.dispositions.len() != 228 {
+    if packaged_cases != 0 || rejected_cases != 228 || package.dispositions.len() != 228 {
         return Err(PackageError::new(
             "E_DENOMINATOR",
-            "package must classify exactly one admitted and 227 rejected cases",
+            "incomplete package must reject all 228 cases",
         ));
     }
 
@@ -364,6 +452,7 @@ pub fn verify(bytes: &[u8], repository_root: &Path) -> Result<VerificationReceip
         packaged_cases,
         rejected_cases,
         admitted_state_dependencies: package.state_transfer.admitted_state_dependencies.len(),
+        package_complete: false,
         production_authority: false,
     })
 }
@@ -447,6 +536,8 @@ fn expected_identities() -> Identities {
         mapping_lock_sha256: MAPPING_LOCK_SHA256.into(),
         differential_aggregate_sha256: mcloving_differential_aggregate::EVIDENCE_SHA256.into(),
         state_policy_sha256: STATE_POLICY_SHA256.into(),
+        eligibility_ledger_sha256: ELIGIBILITY_LEDGER_SHA256.into(),
+        persistent_state_inventory_sha256: PERSISTENT_STATE_SHA256.into(),
         release_id: RELEASE_ID.into(),
         release_version: RELEASE_VERSION.into(),
         release_profile: RELEASE_PROFILE.into(),
@@ -456,15 +547,84 @@ fn expected_identities() -> Identities {
     }
 }
 
-fn expected_state_transfer() -> StateTransferDisposition {
-    StateTransferDisposition {
-        status: "not_applicable_stateless_source".into(),
-        admitted_state_dependencies: Vec::new(),
+fn expected_state_transfer(
+    repository_root: &Path,
+) -> Result<StateTransferDisposition, PackageError> {
+    let eligibility_bytes = read_utf8(repository_root, ELIGIBILITY_LEDGER_FILE)?;
+    let persistent_state_bytes = read_utf8(repository_root, PERSISTENT_STATE_FILE)?;
+    if sha256(eligibility_bytes.as_bytes()) != ELIGIBILITY_LEDGER_SHA256
+        || sha256(persistent_state_bytes.as_bytes()) != PERSISTENT_STATE_SHA256
+    {
+        return Err(PackageError::new(
+            "E_STATE_INVENTORY",
+            "state-inventory digest mismatch",
+        ));
+    }
+    let eligibility: EligibilityLedger = serde_saphyr::from_str(&eligibility_bytes)
+        .map_err(|error| PackageError::new("E_STATE_INVENTORY", error.to_string()))?;
+    let eligible_jobs = eligibility
+        .jobs
+        .iter()
+        .filter(|job| job.job_id == ADMITTED_JOB_ID)
+        .collect::<Vec<_>>();
+    if eligible_jobs.len() != 1 || eligible_jobs[0].persistent_state_ids != ["build-history"] {
+        return Err(PackageError::new(
+            "E_STATE_INVENTORY",
+            "admitted job state-dependency set mismatch",
+        ));
+    }
+    let persistent_state: PersistentStateLedger =
+        serde_saphyr::from_str(&persistent_state_bytes)
+            .map_err(|error| PackageError::new("E_STATE_INVENTORY", error.to_string()))?;
+    let state_jobs = persistent_state
+        .jobs
+        .iter()
+        .filter(|job| job.job_id == ADMITTED_JOB_ID)
+        .collect::<Vec<_>>();
+    if state_jobs.len() != 1 || state_jobs[0].records.len() != 1 {
+        return Err(PackageError::new(
+            "E_STATE_INVENTORY",
+            "admitted job state-record denominator mismatch",
+        ));
+    }
+    let record = &state_jobs[0].records[0];
+    if record.id != "build-history"
+        || record.record_count.count != 1
+        || record.forward_transform.disposition != "unsupported"
+        || record.rollback_transform.disposition != "unsupported"
+    {
+        return Err(PackageError::new(
+            "E_STATE_INVENTORY",
+            "admitted build-history transfer classification mismatch",
+        ));
+    }
+    let dependency = StateDependency {
+        id: record.id.clone(),
+        kind: record.kind.clone(),
+        record_count: record.record_count.count,
+        record_source_sha256: record.source_sha256.clone(),
+        record_subject_sha256: record.record_count.subject_sha256.clone(),
+        restore_target: record.restore_target.clone(),
+        conflict_policy: record.conflict_policy.clone(),
+        retention_policy_id: record.retention_policy_id.clone(),
+        retention_policy_sha256: record.retention_policy_sha256.clone(),
+        retention_deadline: record.retention_deadline.clone(),
+        forward_mapping_id: record.forward_transform.mapping_id.clone(),
+        forward_disposition: record.forward_transform.disposition.clone(),
+        forward_evidence_sha256: record.forward_transform.evidence_sha256.clone(),
+        rollback_mapping_id: record.rollback_transform.mapping_id.clone(),
+        rollback_disposition: record.rollback_transform.disposition.clone(),
+        rollback_evidence_sha256: record.rollback_transform.evidence_sha256.clone(),
+    };
+    Ok(StateTransferDisposition {
+        status: "incomplete_state_transfer_unsupported".into(),
+        blocking_error: "E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE".into(),
+        admitted_state_dependencies: vec![dependency],
         case_specific_rehearsal_receipts: Vec::new(),
         packaged_artifacts: Vec::new(),
         cutover_eligible: false,
         rollback_eligible: false,
-    }
+    })
 }
 
 fn expected_authority() -> Authority {
@@ -540,7 +700,7 @@ fn dispositions_from_index(index: &str) -> Result<Vec<Disposition>, PackageError
             migration_class: fields[20].into(),
             worker_disposition: fields[21].into(),
             package_status: if admitted {
-                "packaged_disabled_certified"
+                "deterministically_rejected_state_transfer_incomplete"
             } else {
                 "deterministically_rejected"
             }
@@ -611,9 +771,10 @@ mod tests {
             ))
         );
         let receipt = verify(&bytes, &root()).unwrap();
-        assert_eq!(receipt.packaged_cases, 1);
-        assert_eq!(receipt.rejected_cases, 227);
-        assert_eq!(receipt.admitted_state_dependencies, 0);
+        assert_eq!(receipt.packaged_cases, 0);
+        assert_eq!(receipt.rejected_cases, 228);
+        assert_eq!(receipt.admitted_state_dependencies, 1);
+        assert!(!receipt.package_complete);
         assert!(!receipt.production_authority);
     }
 
@@ -650,13 +811,10 @@ mod tests {
     }
 
     #[test]
-    fn invented_state_dependency_fails_closed() {
+    fn omitted_state_dependency_fails_closed() {
         let package: MigrationPackage = serde_json::from_slice(&generated()).unwrap();
         let bytes = mutate(package, |value| {
-            value
-                .state_transfer
-                .admitted_state_dependencies
-                .push("invented".into());
+            value.state_transfer.admitted_state_dependencies.clear();
         });
         assert_eq!(
             verify(&bytes, &root()).unwrap_err().code,

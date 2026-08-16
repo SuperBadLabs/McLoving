@@ -1,12 +1,12 @@
 # Migration package v1
 
-Status: `MIG-007` implementation
+Status: `MIG-007` incomplete implementation; `MIG-005A` corrective work required
 
 ## Purpose and boundary
 
 `mcloving.jenkins.migration-package/v1` is a deterministic, reviewable,
-deny-authority envelope over the exact artifacts needed to reproduce the sole
-currently certified migration case. It does not compile new Jenkins source,
+deny-authority envelope over the exact artifacts and blockers for the sole
+currently code-equivalent migration candidate. It does not compile new Jenkins source,
 rerun a state transform, expand the certified denominator, enable the source
 job, deploy McLoving, or transfer any production authority.
 
@@ -30,9 +30,14 @@ The envelope binds and embeds:
 - the canonical MIG-006 aggregate and DIFF-002 state-policy evidence;
 - the reviewed v0.1.0 release identity, envelope, evidence-manifest, and
   verification-receipt digests; and
-- an exact state-transfer disposition for the stateless admitted source.
+- the exact eligibility-ledger and persistent-state inventory digests; and
+- a normalized record for the candidate's one retained `build-history`
+  dependency, including its count, source/subject identities, retention and
+  conflict policy, and unsupported forward/rollback transform dispositions.
 
-Exactly one disposition is `packaged_disabled_certified`. The other 227 are
+There are zero packaged cases. The admitted compiler case is
+`deterministically_rejected_state_transfer_incomplete` with
+`E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE`; the other 227 are
 `deterministically_rejected` with `E_SOURCE_NOT_ADMITTED`. The package does
 not reinterpret the historical parser/model reach denominator. Each row keeps
 the source index's `source_certified_equivalence=false` truth separate from
@@ -56,25 +61,28 @@ It then:
 5. passes the embedded DIFF-002 JSON to the canonical state-policy verifier;
 6. invokes the canonical MIG-006 verifier over the sealed repository evidence;
    and
-7. independently rebuilds the ordered disposition ledger from the embedded
-   corpus index and requires 1 admitted plus 227 rejected cases.
+7. authenticates and parses the sealed eligibility and persistent-state
+   inventories, requiring the exact one-record `build-history` dependency and
+   its unsupported forward/rollback classifications; and
+8. independently rebuilds the ordered disposition ledger from the embedded
+   corpus index and requires zero packaged plus 228 rejected cases.
 
 There is no alternative compiler, mapping, differential, or state-transform
 logic in the package verifier.
 
 ## State and credential truth
 
-The admitted source is a single literal shell step with no persistent
-cross-build state dependency. Therefore
-`admitted_state_dependencies=[]` and
-`case_specific_rehearsal_receipts=[]` are exact, non-vacuous denominator
-statements tied to that reviewed source. The package additionally requires
-`status=not_applicable_stateless_source`, `packaged_artifacts=[]`,
+The source text is simple, but the job is stateful. The sealed inventory records
+one retained build under `build-history`, an indefinite retention deadline,
+and unsupported forward and rollback transforms. The package therefore requires
+`status=incomplete_state_transfer_unsupported`,
+`blocking_error=E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE`, one authenticated state
+dependency, `case_specific_rehearsal_receipts=[]`, `packaged_artifacts=[]`,
 `cutover_eligible=false`, and `rollback_eligible=false`. It does not retain
-digest-only pointers to the synthetic MIG-005A rehearsal, because verification
-cannot authenticate an unavailable object. Any later stateful or
-authority-transfer package must embed the bounded certified objects or require
-an immutable content-addressed object source and verify the retrieved bytes.
+digest-only pointers to unavailable synthetic MIG-005A objects. Completion
+requires the exact retained source bytes, bounded certified forward and reverse
+objects, destination state, and a case-specific rehearsal whose bytes are
+embedded or immutably retrieved and verified.
 
 The envelope has no field capable of carrying credential material. Its
 free-form embedded artifacts are accepted only at their exact previously
@@ -84,13 +92,13 @@ bit is false and the source operational state is disabled.
 ## Seal and portability
 
 The canonical package SHA-256 is
-`390f7ff92dcd8a493b9f926df6d881d12c2c4078776f592a351cf5d05b065ceb`.
+`304f75f7c85f11b4fb15ce11f5cf65e5dc69168e3ef85b03a9b3eabdbb3d4ed9`.
 The package and seal are marked non-translatable in `.gitattributes`.
 Linux and hosted Windows compile, lint, and execute the verifier. The CLI opens
 the supplied package once with platform no-follow semantics, validates a
 bounded regular-file handle, reads at most 1 MiB, and then verifies only the
 captured bytes.
 
-This package is an input to later effect-free `SHADOW-001` qualification. It
-does not make the job canary-eligible and grants no production, credential,
+This incomplete package is not an admissible input to `SHADOW-001`. It does
+not make the job shadow- or canary-eligible and grants no production, credential,
 trigger, scheduler, effect, cutover, rollback, or decommission authority.

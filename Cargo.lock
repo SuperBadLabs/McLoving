@@ -1680,6 +1680,7 @@ dependencies = [
  "mcloving-jenkins-mapping-catalog",
  "mcloving-state-policy-differential",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sha2",
  "tempfile",

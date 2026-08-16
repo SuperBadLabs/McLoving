@@ -13,6 +13,7 @@ mcloving-jenkins-mapping-catalog = { version = "0.0.0", path = "../jenkins-mappi
 mcloving-state-policy-differential = { version = "0.0.0", path = "../state-policy-differential" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
+serde-saphyr = "=1.0.0-rc.2"
 sha2 = "=0.10.9"
 
 [dev-dependencies]

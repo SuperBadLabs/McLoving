@@ -1,8 +1,8 @@
 # MIG-007 migration package v1
 
-This directory contains the deterministic review package for the sole
-MIG-006-certified corpus case, `corpus-052-cinqict_jenkinsdev`. The source and
-imported operational state are disabled. The package grants no trigger,
+This directory contains the deterministic, fail-closed review package for the
+sole MIG-006-certified corpus case, `corpus-052-cinqict_jenkinsdev`. The source
+and imported operational state are disabled. The package grants no trigger,
 scheduler, credential, runner, connector, effect, canary, cutover, rollback,
 or decommission authority.
 
@@ -10,13 +10,19 @@ The canonical JSON envelope embeds the exact source export, compiler response,
 strict pipeline YAML, `JOBSTATE-001` import YAML, compiler trace, mapping
 catalog and lock, full 228-case corpus disposition ledger, MIG-006 aggregate,
 and DIFF-002 state-policy receipt. It binds the reviewed v0.1.0 release
-envelope/evidence/verification digests. The admitted job has zero persistent
-state dependencies, so its state-transfer disposition is explicitly
-`not_applicable_stateless_source`: the package contains no digest-only
-MIG-005A artifact claim, no case-specific rehearsal receipt, and no cutover or
-rollback eligibility. A later package that needs state transfer must carry or
-immutably retrieve and verify every claimed transform, manifest, bundle, and
-receipt object.
+envelope/evidence/verification digests plus the exact eligibility-ledger and
+persistent-state inventory digests.
+
+The admitted job is not stateless: the sealed inventory records one retained
+`build-history` object and classifies both its forward and rollback transforms
+as unsupported. The envelope authenticates and normalizes that dependency,
+sets `status=incomplete_state_transfer_unsupported`, and rejects the candidate
+with `E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE`. There are zero packaged cases and
+228 deterministic rejections. No case-specific rehearsal, state artifact,
+cutover eligibility, or rollback eligibility is claimed. MIG-007 therefore
+remains incomplete until the exact retained source object, bidirectional
+transforms, destination state, and case-specific rehearsal receipts are
+available and verifiable.
 
 Reproduce and verify from the repository root:
 
