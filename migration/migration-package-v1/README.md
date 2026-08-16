@@ -22,10 +22,12 @@ with `E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE`. There are zero packaged cases and
 cutover eligibility, or rollback eligibility is claimed. MIG-007 therefore
 remains incomplete. The exact retained source tree is still private on HeMan;
 its exporter-compatible digest has been reproduced as
-`b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`,
-but it has not yet passed the repository's secret-scan/sealing process or been
-converted by certified bidirectional transforms. Completion still requires
-that sealed source object, destination state, and case-specific rehearsal
+`b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
+It passed the pinned networkless Gitleaks scan with zero findings and is
+retained owner-read-only under an internal source-seal receipt kept only on
+HeMan; no source bytes or private seal metadata enter the repository. It has
+not been converted by certified bidirectional transforms. Completion still
+requires those transforms, destination state, and case-specific rehearsal
 receipts to be packaged and verifiable.
 
 Reproduce and verify from the repository root:

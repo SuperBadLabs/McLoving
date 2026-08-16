@@ -83,10 +83,13 @@ digest-only pointers to unavailable synthetic MIG-005A objects. The exact raw
 build tree is retained privately on HeMan and its exporter-compatible digest
 reproduces the inventory value
 `b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
-It is not yet secret-scanned, sealed as a package input, transformed, or
-rehearsed. Completion requires that sealed source object, bounded certified
-forward and reverse objects, destination state, and a case-specific rehearsal
-whose bytes are embedded or immutably retrieved and verified.
+The private tree passed the pinned networkless Gitleaks scan with zero findings
+and is retained owner-read-only under an internal source-seal receipt kept only
+on HeMan; no source bytes or private seal metadata enter the repository. It is
+not yet transformed, rehearsed, or admitted as a complete package input.
+Completion requires bounded certified forward and reverse objects, destination
+state, and a case-specific rehearsal whose bytes are embedded or immutably
+retrieved and verified.
 
 The envelope has no field capable of carrying credential material. Its
 free-form embedded artifacts are accepted only at their exact previously
