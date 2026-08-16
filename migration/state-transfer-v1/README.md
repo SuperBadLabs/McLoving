@@ -29,8 +29,10 @@ denominator, proves idempotent forward/reverse persistence against a fresh
 PostgreSQL instance, and executes one externally effect-free McLoving build.
 Then run `scripts/test-corpus052-jenkins-reverse.sh` with the sealed directory,
 the independently pinned public tree digest, its opaque evidence identifier,
-that transform output, the pinned private plugin profile, and a new output
-directory. Before any controller starts, it reauthenticates the exact five-file
+that transform output, an owner-private independently retained digest of the
+enclosing rehearsal manifest, the pinned private plugin profile, and a new
+output directory. Before any controller starts, it authenticates and verifies
+the complete rehearsal manifest, reauthenticates the exact five-file
 tree, proves build 1 equals the reverse bundle, and copies exactly the committed
 90-plugin manifest denominator with digest verification before and after each
 copy. A separate non-authoritative template controller creates only native

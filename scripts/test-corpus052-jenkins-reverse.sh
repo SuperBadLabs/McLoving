@@ -2,8 +2,8 @@
 set -euo pipefail
 umask 077
 
-if [[ $# -ne 6 ]]; then
-  echo "usage: $0 SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID TRANSFORM_ROOT JENKINS_PLUGIN_SOURCE OUTPUT_ROOT" >&2
+if [[ $# -ne 7 ]]; then
+  echo "usage: $0 SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID TRANSFORM_ROOT OWNER_PINNED_REHEARSAL_MANIFEST_SHA256 JENKINS_PLUGIN_SOURCE OUTPUT_ROOT" >&2
   exit 64
 fi
 
@@ -12,13 +12,16 @@ sealed_builds=$1
 expected_tree_sha256=$2
 opaque_evidence_id=$3
 transform_root=$4
-plugin_source=$5
-requested_output=$6
+owner_pinned_rehearsal_manifest_sha256=$5
+plugin_source=$6
+requested_output=$7
 fixture_root="${repo_root}/migration/state-transfer-v1/fixtures"
 plugin_manifest="${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/PLUGIN_SHA256SUMS"
 plugin_manifest_sha256='e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0'
 reverse_bundle="${transform_root}/reverse-bundle.json"
 rehearsal_summary="${transform_root}/rehearsal-summary.json"
+rehearsal_root=$(realpath -e "${transform_root}/..")
+rehearsal_manifest="${rehearsal_root}/SHA256SUMS"
 log_payload="${transform_root}/mcloving-build-2.log"
 stdout_payload="${transform_root}/mcloving-build-2-log-0.txt"
 stderr_payload="${transform_root}/mcloving-build-2-log-1.txt"
@@ -37,8 +40,9 @@ for path in "${sealed_builds}" "${transform_root}" "${plugin_source}"; do
     exit 66
   fi
 done
-if [[ ! "${expected_tree_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "expected tree digest must be lowercase SHA-256" >&2
+if [[ ! "${expected_tree_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+  || [[ ! "${owner_pinned_rehearsal_manifest_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "expected tree and owner-pinned manifest digests must be lowercase SHA-256" >&2
   exit 65
 fi
 if [[ ! -f "${plugin_manifest}" || -L "${plugin_manifest}" ]] \
@@ -54,7 +58,27 @@ for path in "${reverse_bundle}" "${rehearsal_summary}" "${log_payload}" \
   fi
 done
 
+if [[ $(basename -- "${transform_root}") != mcloving \
+  || ! -f "${rehearsal_manifest}" || -L "${rehearsal_manifest}" \
+  || $(stat -c '%h' "${rehearsal_manifest}") -ne 1 ]]; then
+  echo "rehearsal manifest boundary is missing or nonregular" >&2
+  exit 66
+fi
+test "$(sha256sum "${rehearsal_manifest}" | awk '{print $1}')" = \
+  "${owner_pinned_rehearsal_manifest_sha256}"
+awk '
+  NF != 2 || $2 ~ /^\// || $2 ~ /(^|\/)\.\.(\/|$)/ || $2 ~ /\\/ { exit 1 }
+' "${rehearsal_manifest}"
+(
+  cd "${rehearsal_root}"
+  sha256sum --check --strict SHA256SUMS >/dev/null
+)
+
 reverse_digest=$(sha256sum "${reverse_bundle}" | awk '{print $1}')
+test "$(awk '$2 == "mcloving/reverse-bundle.json" { print $1 }' \
+  "${rehearsal_manifest}")" = "${reverse_digest}"
+test "$(awk '$2 == "mcloving/reverse-bundle.json" { count += 1 } END { print count + 0 }' \
+  "${rehearsal_manifest}")" -eq 1
 test "${reverse_digest}" = "$(jq -r '.reverse_bundle_digest' "${rehearsal_summary}")"
 jq --exit-status --arg job "${job}" '
   .binding.schema == "mcloving.state-transfer/v1"

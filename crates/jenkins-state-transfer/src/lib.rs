@@ -5,6 +5,9 @@
 //! content digests, and opaque retrieval locators.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Read as _;
+use std::path::Path;
 
 use mcloving_state_transfer::{
     AttemptState, AttemptTerminalReason, BuildResult, BuildState, ConflictPolicy, DataBinding,
@@ -18,6 +21,7 @@ use sha2::{Digest as _, Sha256};
 
 const MAX_XML_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 const ADMITTED_JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
 const ADMITTED_TREE_DIGEST: Digest = [
     0xb4, 0x7c, 0xc3, 0xe1, 0xc1, 0x9e, 0x1d, 0x48, 0x6a, 0x2d, 0xf2, 0xfc, 0x76, 0x34, 0x3e, 0x30,
@@ -51,8 +55,18 @@ pub struct ImportBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedHistory {
-    pub bundle: StateBundle,
-    pub expected: ExpectedBinding,
+    bundle: StateBundle,
+    expected: ExpectedBinding,
+}
+
+impl ParsedHistory {
+    pub fn bundle(&self) -> &StateBundle {
+        &self.bundle
+    }
+
+    pub fn expected(&self) -> &ExpectedBinding {
+        &self.expected
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +108,117 @@ pub fn admitted_destination_identity() -> SystemIdentity {
 
 pub const fn admitted_tree_digest() -> Digest {
     ADMITTED_TREE_DIGEST
+}
+
+pub fn load_admitted_history(
+    root: &Path,
+    opaque_evidence_id: String,
+) -> Result<SealedHistory, HistoryError> {
+    require_plain_directory(root)?;
+    require_plain_directory(&root.join("1"))?;
+    require_plain_directory(&root.join("1/workflow-completed"))?;
+    let actual = regular_files(root)?;
+    let expected = EXPECTED_PATHS
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(invalid("sealed source file denominator is divergent"));
+    }
+
+    let mut files = BTreeMap::new();
+    let mut total = 0_u64;
+    for relative in EXPECTED_PATHS {
+        let path = root.join(relative);
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| invalid(format!("cannot open sealed source entry: {error}")))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| invalid(format!("cannot inspect sealed source entry: {error}")))?;
+        if !metadata.is_file() {
+            return Err(invalid(format!(
+                "sealed source entry {relative} is not regular"
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.nlink() != 1 {
+                return Err(invalid(format!(
+                    "sealed source entry {relative} is hard-linked"
+                )));
+            }
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| invalid("sealed source byte count overflow"))?;
+        if total > MAX_SOURCE_BYTES {
+            return Err(invalid("sealed source exceeds byte limit"));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.by_ref()
+            .take(metadata.len() + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| invalid(format!("cannot read sealed source entry: {error}")))?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(invalid(format!(
+                "sealed source entry {relative} changed while reading"
+            )));
+        }
+        files.insert(relative.to_owned(), bytes);
+    }
+    let history = SealedHistory {
+        files,
+        expected_tree_digest: ADMITTED_TREE_DIGEST,
+        opaque_evidence_id,
+    };
+    validate_history_input(&history, true)?;
+    Ok(history)
+}
+
+pub fn authenticate_forward_bundle(
+    history: &SealedHistory,
+    candidate: &StateBundle,
+) -> Result<ParsedHistory, HistoryError> {
+    authenticate_forward_bundle_inner(history, candidate, true)
+}
+
+fn authenticate_forward_bundle_inner(
+    history: &SealedHistory,
+    candidate: &StateBundle,
+    require_admitted_tree: bool,
+) -> Result<ParsedHistory, HistoryError> {
+    let job = candidate
+        .jobs
+        .first()
+        .ok_or_else(|| invalid("forward candidate has no admitted job"))?;
+    let normalized = normalize_single_aborted_workflow_inner(
+        history,
+        &ImportBinding {
+            source: candidate.binding.source.clone(),
+            destination: candidate.binding.destination.clone(),
+            transform_implementation_digest: candidate.binding.transform_implementation_digest,
+            transform_configuration_digest: candidate.binding.transform_configuration_digest,
+            provenance: candidate.binding.provenance.clone(),
+            source_job_id: job.source_job_id.clone(),
+            target_pipeline_id: job.target_pipeline_id.clone(),
+        },
+        require_admitted_tree,
+    )?;
+    if normalized.bundle != *candidate {
+        return Err(invalid(
+            "forward candidate differs from exact admitted normalization",
+        ));
+    }
+    Ok(normalized)
 }
 
 pub fn normalize_single_aborted_workflow(
@@ -313,10 +438,11 @@ pub fn digest_tree(files: &BTreeMap<String, Vec<u8>>) -> Result<Digest, HistoryE
 /// build-history dependency, and runs the canonical state-transfer validator
 /// before returning any reverse bytes.
 pub fn prepare_reverse_history(
-    forward: &StateBundle,
+    authenticated_forward: &ParsedHistory,
     completed_build: BuildState,
     binding: &ReverseBinding,
 ) -> Result<ParsedHistory, HistoryError> {
+    let forward = &authenticated_forward.bundle;
     validate_text(&binding.provenance, "reverse binding provenance")?;
     if forward.binding.direction != TransferDirection::JenkinsToMcLoving {
         return Err(invalid(
@@ -428,6 +554,50 @@ pub fn prepare_reverse_history(
     transform(&bundle, &expected, &BTreeMap::new())
         .map_err(|error| invalid(format!("reverse bundle validation failed: {error}")))?;
     Ok(ParsedHistory { bundle, expected })
+}
+
+fn regular_files(root: &Path) -> Result<BTreeSet<String>, HistoryError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| invalid(format!("cannot enumerate sealed source: {error}")))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| invalid(format!("cannot read sealed source entry: {error}")))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| invalid(format!("cannot inspect sealed source entry: {error}")))?;
+            if file_type.is_symlink() {
+                return Err(invalid("sealed source contains a symbolic link"));
+            }
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| invalid("sealed source entry escapes its root"))?
+                    .to_str()
+                    .ok_or_else(|| invalid("sealed source path is not UTF-8"))?
+                    .replace('\\', "/");
+                files.insert(relative);
+            } else {
+                return Err(invalid("sealed source contains an unsupported file type"));
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn require_plain_directory(path: &Path) -> Result<(), HistoryError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| invalid(format!("cannot inspect sealed source directory: {error}")))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(invalid("sealed source parent is not a plain directory"))
+    }
 }
 
 fn validate_history_input(
@@ -816,7 +986,7 @@ mod tests {
     fn completed_mcloving_build_prepares_valid_exact_reverse_history() {
         let parsed = normalize_test_workflow(&history(), &binding()).unwrap();
         let reverse = prepare_reverse_history(
-            &parsed.bundle,
+            &parsed,
             completed_build(&parsed.bundle.jobs[0].builds[0]),
             &reverse_binding(&parsed.bundle),
         )
@@ -844,6 +1014,23 @@ mod tests {
             sha256(&source_export_bytes)
         );
         transform(&reverse.bundle, &reverse.expected, &BTreeMap::new()).unwrap();
+    }
+
+    #[test]
+    fn reverse_requires_an_exact_freshly_normalized_forward_bundle() {
+        let history = history();
+        let parsed = normalize_test_workflow(&history, &binding()).unwrap();
+        let authenticated =
+            authenticate_forward_bundle_inner(&history, &parsed.bundle, false).unwrap();
+        assert_eq!(authenticated, parsed);
+
+        let mut substituted = parsed.bundle.clone();
+        substituted.jobs[0].builds[0].result = BuildResult::Succeeded;
+        assert!(matches!(
+            authenticate_forward_bundle_inner(&history, &substituted, false),
+            Err(HistoryError::Invalid(message))
+                if message.contains("exact admitted normalization")
+        ));
     }
 
     #[test]
@@ -886,7 +1073,7 @@ mod tests {
         let mut gap = completed_build(&parsed.bundle.jobs[0].builds[0]);
         gap.number = 3;
         assert!(matches!(
-            prepare_reverse_history(&parsed.bundle, gap, &reverse_binding(&parsed.bundle)),
+            prepare_reverse_history(&parsed, gap, &reverse_binding(&parsed.bundle)),
             Err(HistoryError::Invalid(message)) if message.contains("exact next number")
         ));
 
@@ -894,7 +1081,7 @@ mod tests {
         duplicate.source_build_id = parsed.bundle.jobs[0].builds[0].source_build_id.clone();
         assert!(matches!(
             prepare_reverse_history(
-                &parsed.bundle,
+                &parsed,
                 duplicate,
                 &reverse_binding(&parsed.bundle)
             ),
@@ -905,32 +1092,32 @@ mod tests {
         divergent.destination.generation = "substituted-generation".to_owned();
         assert!(matches!(
             prepare_reverse_history(
-                &parsed.bundle,
+                &parsed,
                 completed_build(&parsed.bundle.jobs[0].builds[0]),
                 &divergent
             ),
             Err(HistoryError::Invalid(message)) if message.contains("do not invert")
         ));
 
-        let mut unrelated = parsed.bundle.clone();
-        unrelated.jobs[0].source_job_id = "unrelated-source-job".to_owned();
-        unrelated.jobs[0].target_pipeline_id = "unrelated-target-job".to_owned();
+        let mut unrelated = parsed.clone();
+        unrelated.bundle.jobs[0].source_job_id = "unrelated-source-job".to_owned();
+        unrelated.bundle.jobs[0].target_pipeline_id = "unrelated-target-job".to_owned();
         assert!(matches!(
             prepare_reverse_history(
                 &unrelated,
                 completed_build(&parsed.bundle.jobs[0].builds[0]),
-                &reverse_binding(&unrelated)
+                &reverse_binding(&unrelated.bundle)
             ),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
         ));
 
-        let mut substituted_system = parsed.bundle.clone();
-        substituted_system.binding.source.generation = "substituted-generation".to_owned();
+        let mut substituted_system = parsed.clone();
+        substituted_system.bundle.binding.source.generation = "substituted-generation".to_owned();
         assert!(matches!(
             prepare_reverse_history(
                 &substituted_system,
                 completed_build(&parsed.bundle.jobs[0].builds[0]),
-                &reverse_binding(&substituted_system)
+                &reverse_binding(&substituted_system.bundle)
             ),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
         ));

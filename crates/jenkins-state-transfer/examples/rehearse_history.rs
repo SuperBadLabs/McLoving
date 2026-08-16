@@ -9,7 +9,10 @@ use mcloving_controller_store::{
     ClaimRequest, DagNodeKind, NewDagBuild, NewDagNode, NewLogChunk, PipelinePutOutcome,
     PipelineWrite, Store, TerminalOutcome,
 };
-use mcloving_jenkins_state_transfer::{ReverseBinding, prepare_reverse_history};
+use mcloving_jenkins_state_transfer::{
+    ReverseBinding, admitted_tree_digest, authenticate_forward_bundle, load_admitted_history,
+    prepare_reverse_history,
+};
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, DataBinding, DataClassification, ExpectedBinding,
     GraphNodeState, LogState, RecordProvenance, RetrievalMetadata, StateBundle, canonical_bytes,
@@ -33,18 +36,23 @@ async fn main() -> Result<(), AnyError> {
         return Err("exact state-transfer rehearsal requires Unix no-follow file access".into());
     }
     let arguments = env::args().collect::<Vec<_>>();
-    if arguments.len() != 3 {
-        return Err("usage: rehearse_history FORWARD_BUNDLE NEW_OUTPUT_DIRECTORY".into());
+    if arguments.len() != 6 {
+        return Err("usage: rehearse_history SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID FORWARD_BUNDLE NEW_OUTPUT_DIRECTORY".into());
     }
-    let forward_bytes = read_bounded(Path::new(&arguments[1]))?;
+    if parse_digest(&arguments[2])? != admitted_tree_digest() {
+        return Err("expected tree digest is not the exact admitted digest".into());
+    }
+    let history = load_admitted_history(Path::new(&arguments[1]), arguments[3].clone())?;
+    let forward_bytes = read_bounded(Path::new(&arguments[4]))?;
     let forward: StateBundle = serde_json::from_slice(&forward_bytes)?;
     if canonical_bytes(&forward)? != forward_bytes {
         return Err("forward bundle bytes are not canonical".into());
     }
     let forward_expected = expected(&forward)?;
     transform(&forward, &forward_expected, &BTreeMap::new())?;
+    let authenticated_forward = authenticate_forward_bundle(&history, &forward)?;
 
-    let output = Path::new(&arguments[2]);
+    let output = Path::new(&arguments[5]);
     fs::create_dir(output)?;
     let database_url = env::var("MCLOVING_TEST_DATABASE_URL")?;
     let pool = PgPoolOptions::new()
@@ -240,7 +248,7 @@ async fn main() -> Result<(), AnyError> {
         .await?;
     let completed = completed_build(&forward, &graph, &logs)?;
     let reverse = prepare_reverse_history(
-        &forward,
+        &authenticated_forward,
         completed,
         &ReverseBinding {
             source: forward.binding.destination.clone(),
@@ -250,13 +258,13 @@ async fn main() -> Result<(), AnyError> {
             provenance: "MIG-005A contained corpus-052 reverse reconciliation".to_owned(),
         },
     )?;
-    let reverse_plan = transform(&reverse.bundle, &reverse.expected, &BTreeMap::new())?;
+    let reverse_plan = transform(reverse.bundle(), reverse.expected(), &BTreeMap::new())?;
     let reverse_receipt = store
         .import_state_transfer(
             organization_id,
             project_id,
-            &reverse.bundle,
-            &reverse.expected,
+            reverse.bundle(),
+            reverse.expected(),
             "migration:corpus052-reverse",
         )
         .await?;
@@ -490,4 +498,19 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), AnyError> {
 
 fn encode(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn parse_digest(value: &str) -> Result<[u8; 32], AnyError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("expected digest is not canonical lowercase SHA-256".into());
+    }
+    let mut digest = [0_u8; 32];
+    for (index, output) in digest.iter_mut().enumerate() {
+        *output = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(digest)
 }

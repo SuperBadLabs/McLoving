@@ -82,6 +82,7 @@ MCLOVING_TEST_DATABASE_URL="postgres://mcloving@127.0.0.1:${port}/mcloving" \
   cargo run --locked --quiet \
   --manifest-path "${repo_root}/Cargo.toml" \
   -p mcloving-jenkins-state-transfer --example rehearse_history -- \
+  "${sealed_builds}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
   "${staging}/forward-bundle.json" "${staging}/mcloving"
 
 podman inspect "${container}" > "${staging}/evidence/postgres-container-inspect.json"
