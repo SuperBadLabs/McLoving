@@ -580,14 +580,12 @@ SHELL_NODE_ID="${shell_node_id}" ATTEMPT_STARTED="${attempt_started}" \
     my $started = $ENV{ATTEMPT_STARTED};
     my $ended = $ENV{ATTEMPT_ENDED};
     my $starts = s{
-      (<entry>(?:(?!</entry>).)*?<node\ class="cps\.n\.StepAtomNode"
-       (?:(?!</entry>).)*?<id>\Q$shell_id\E</id>
+      (<entry>(?:(?!</entry>).)*?<id>\Q$shell_id\E</id>
        (?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>
        (?:(?!</entry>).)*?</entry>)
     }{$1$started$2}gsx;
     my $ends = s{
-      (<entry>(?:(?!</entry>).)*?<node\ class="cps\.n\.StepEndNode"
-       (?:(?!</entry>).)*?<id>\Q$shell_end_id\E</id>
+      (<entry>(?:(?!</entry>).)*?<id>\Q$shell_end_id\E</id>
        (?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>
        (?:(?!</entry>).)*?</entry>)
     }{$1$ended$2}gsx;
