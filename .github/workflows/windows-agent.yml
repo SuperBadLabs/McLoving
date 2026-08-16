@@ -70,18 +70,27 @@ jobs:
       - name: Check Windows differential aggregate
         shell: pwsh
         run: cargo +1.97.1 check --locked -p mcloving-differential-aggregate
+      - name: Check Windows migration package
+        shell: pwsh
+        run: cargo +1.97.1 check --locked -p mcloving-migration-package
       - name: Lint Windows production agent
         shell: pwsh
         run: cargo +1.97.1 clippy --locked -p mcloving-agent --bin mcloving-agent -- -D warnings
       - name: Lint Windows differential aggregate
         shell: pwsh
         run: cargo +1.97.1 clippy --locked -p mcloving-differential-aggregate --all-targets -- -D warnings
+      - name: Lint Windows migration package
+        shell: pwsh
+        run: cargo +1.97.1 clippy --locked -p mcloving-migration-package --all-targets -- -D warnings
       - name: Run Windows-specific runtime tests
         shell: pwsh
         run: cargo +1.97.1 test --locked -p mcloving-agent-runtime -p mcloving-agent -p mcloving-windows-job
       - name: Run Windows differential aggregate tests
         shell: pwsh
         run: cargo +1.97.1 test --locked -p mcloving-differential-aggregate
+      - name: Run Windows migration package tests
+        shell: pwsh
+        run: cargo +1.97.1 test --locked -p mcloving-migration-package
       - name: Build debug agent for native service gate
         shell: pwsh
         run: cargo +1.97.1 build --locked -p mcloving-agent

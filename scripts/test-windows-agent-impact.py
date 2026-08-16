@@ -111,7 +111,10 @@ class WindowsAgentImpactTests(unittest.TestCase):
 
     def test_windows_verifier_source_triggers(self) -> None:
         run_windows, reason = IMPACT.classify(
-            {"crates/differential-aggregate/src/lib.rs"},
+            {
+                "crates/differential-aggregate/src/lib.rs",
+                "crates/migration-package/src/lib.rs",
+            },
             {Path("bins/agent"), Path("crates/domain")},
             {Path("bins/agent"), Path("crates/domain")},
             "same",

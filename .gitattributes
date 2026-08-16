@@ -3,3 +3,4 @@ migration/mario-jenkins-oracle-228/inventory-20260731T064417Z-r2/eligibility-led
 migration/state-policy-differential-v1/** -text -whitespace
 migration/boundary-differential-v1/** -text -whitespace
 migration/differential-aggregate-v1/** -text -whitespace
+migration/migration-package-v1/** -text -whitespace

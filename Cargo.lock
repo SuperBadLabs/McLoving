@@ -1671,6 +1671,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-migration-package"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-differential-aggregate",
+ "mcloving-jenkins-compiler-admission",
+ "mcloving-jenkins-mapping-catalog",
+ "mcloving-state-policy-differential",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "mcloving-object-store"
 version = "0.0.0"
 dependencies = [
