@@ -189,8 +189,8 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
     assert_eq!(stderr.attempt_id, admission.attempt_id);
     assert_eq!(stdout.fence, status.fence);
     assert_eq!(stderr.fence, status.fence);
+    assert_eq!(stdout.sequence, 0);
     assert_eq!(stderr.sequence, 1);
-    assert_eq!(stdout.sequence, 2);
     assert!(artifacts.is_empty());
     assert!(tests.is_empty());
     assert!(approvals.is_empty());
@@ -229,13 +229,16 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
     if let Ok(path) = std::env::var("MCLOVING_SHADOW001_TRACE_OUTPUT") {
         let normalized_log = json!([
             {
-                "sequence": stderr.sequence,
+                // The fixed `sh -xe` semantics put xtrace before command stdout.
+                // Raw persistence is separately asserted as stdout 0/stderr 1;
+                // this comparison trace has its own canonical 1-based order.
+                "sequence": 1,
                 "stream": "stderr",
                 "content_sha256": "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
                 "bytes": 19,
             },
             {
-                "sequence": stdout.sequence,
+                "sequence": 2,
                 "stream": "stdout",
                 "content_sha256": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
                 "bytes": 12,

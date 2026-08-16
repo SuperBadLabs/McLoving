@@ -151,7 +151,10 @@ The current denial session also binds the exact DIFF-001 certified trace for the
 sole admitted case, one isolated source/target replay, equal successful
 normalized results, the exact newline-inclusive bounded and ordered
 `+ echo Hello World` stderr and `Hello World` stdout records, zero artifacts or
-effect intents, and zero mismatches. This trace
+effect intents, and zero mismatches. The target's raw two-spool publication
+order is independently asserted as stdout sequence zero and stderr sequence
+one; the comparison receipt then maps the fixed `sh -xe` semantic order to the
+canonical one-based stderr/stdout trace. This trace
 join does not by itself claim live production execution; it proves the
 effect-free executable semantics that accompany the current live disabled
 denial observations.
