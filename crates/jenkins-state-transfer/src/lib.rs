@@ -306,10 +306,11 @@ fn parse_retained_workflow_nodes(
                 if path.len() == 1 && path[0] != "linked-hash-map" {
                     return Err(invalid("retained workflow XML root is divergent"));
                 }
-                if path.len() == 2 && path[1] == "entry" {
-                    if current.replace(RetainedWorkflowEntry::default()).is_some() {
-                        return Err(invalid("retained workflow entries overlap"));
-                    }
+                if path.len() == 2
+                    && path[1] == "entry"
+                    && current.replace(RetainedWorkflowEntry::default()).is_some()
+                {
+                    return Err(invalid("retained workflow entries overlap"));
                 }
                 if let (Some(entry), Some(field)) =
                     (current.as_mut(), retained_workflow_field(&path))
@@ -545,10 +546,10 @@ fn verify_retained_log_index(
         if offset < previous_offset || offset > console_log.len() as u64 {
             return Err(invalid("retained log offsets are divergent"));
         }
-        if let Some((active_id, start)) = active {
-            if active_id == expected_shell_id {
-                shell_chunks.push(&console_log[start..offset as usize]);
-            }
+        if let Some((active_id, start)) = active
+            && active_id == expected_shell_id
+        {
+            shell_chunks.push(&console_log[start..offset as usize]);
         }
         active = if fields.len() == 2 {
             if active.is_some() {
