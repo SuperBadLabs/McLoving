@@ -819,11 +819,8 @@ fn validate_retained_permalinks(archive: &EvidenceArchive) -> Result<(), Package
     }
     let expected = BTreeMap::from([
         ("lastCompletedBuild", "3"),
-        ("lastFailedBuild", "-1"),
         ("lastStableBuild", "3"),
         ("lastSuccessfulBuild", "3"),
-        ("lastUnstableBuild", "-1"),
-        ("lastUnsuccessfulBuild", "1"),
     ]);
     if actual != expected {
         return Err(PackageError::new(
