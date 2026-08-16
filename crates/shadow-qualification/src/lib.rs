@@ -2113,7 +2113,7 @@ mod tests {
                 verify_fixture(&candidate, &package)
                     .expect_err("authority denied")
                     .code,
-                "E_AUTHORITY"
+                "E_CAPTURE_BINDING"
             );
         }
     }
@@ -2272,7 +2272,7 @@ mod tests {
             verify_fixture(&isolation, &package)
                 .expect_err("production reachability")
                 .code,
-            "E_ISOLATION"
+            "E_CAPTURE_BINDING"
         );
     }
 
@@ -2286,7 +2286,7 @@ mod tests {
             verify_fixture(&divergent, &package)
                 .expect_err("divergent logs")
                 .code,
-            "E_TRACE"
+            "E_CAPTURE_BINDING"
         );
 
         let mut reordered = session.clone();
@@ -2296,7 +2296,7 @@ mod tests {
             verify_fixture(&reordered, &package)
                 .expect_err("reordered logs")
                 .code,
-            "E_TRACE_LOG"
+            "E_CAPTURE_BINDING"
         );
 
         let mut effect = session;
@@ -2305,7 +2305,7 @@ mod tests {
             verify_fixture(&effect, &package)
                 .expect_err("effect intent")
                 .code,
-            "E_TRACE"
+            "E_CAPTURE_BINDING"
         );
     }
 
