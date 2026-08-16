@@ -108,7 +108,7 @@ pub struct RetainedBuildRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum JobConfigToken {
     Start(String, Vec<(String, String)>),
-    Text(String),
+    Text(String, String),
     End(String),
 }
 
@@ -212,7 +212,7 @@ fn job_config_token_category(token: &JobConfigToken) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        JobConfigToken::Text(_) => "text".to_owned(),
+        JobConfigToken::Text(path, _) => format!("text:{path}"),
         JobConfigToken::End(name) => format!("end:{name}"),
     }
 }
@@ -262,7 +262,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                     invalid(format!("invalid job configuration escape: {error}"))
                 })?;
                 if !inside_job_action_payload(&stack) {
-                    push_job_config_text(&mut tokens, &value);
+                    push_job_config_text(&mut tokens, &stack, &value);
                 }
             }
             Ok(Event::CData(text)) => {
@@ -270,7 +270,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                     invalid(format!("invalid job configuration CDATA: {error}"))
                 })?;
                 if !inside_job_action_payload(&stack) {
-                    push_job_config_text(&mut tokens, &value);
+                    push_job_config_text(&mut tokens, &stack, &value);
                 }
             }
             Ok(Event::GeneralRef(reference)) => {
@@ -282,7 +282,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                     invalid(format!("invalid job configuration reference: {error}"))
                 })?;
                 if !inside_job_action_payload(&stack) {
-                    push_job_config_text(&mut tokens, &value);
+                    push_job_config_text(&mut tokens, &stack, &value);
                 }
             }
             Ok(Event::End(end)) => {
@@ -343,10 +343,11 @@ fn remove_false_remove_last_build_default(tokens: Vec<JobConfigToken>) -> Vec<Jo
             tokens.get(index..index + 3),
             Some([
                 JobConfigToken::Start(name, attributes),
-                JobConfigToken::Text(value),
+                JobConfigToken::Text(path, value),
                 JobConfigToken::End(end),
             ]) if name == "removeLastBuild"
                 && attributes.is_empty()
+                && path == "flow-definition/properties/jenkins.model.BuildDiscarderProperty/strategy/removeLastBuild"
                 && value == "false"
                 && end == name
         );
@@ -393,16 +394,19 @@ fn job_config_start_token<R>(
     Ok((name, attributes))
 }
 
-fn push_job_config_text(tokens: &mut Vec<JobConfigToken>, value: &str) {
+fn push_job_config_text(tokens: &mut Vec<JobConfigToken>, stack: &[String], value: &str) {
     let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
     let value = normalized.trim();
     if value.is_empty() {
         return;
     }
-    if let Some(JobConfigToken::Text(existing)) = tokens.last_mut() {
+    let path = stack.join("/");
+    if let Some(JobConfigToken::Text(existing_path, existing)) = tokens.last_mut()
+        && existing_path == &path
+    {
         existing.push_str(value);
     } else {
-        tokens.push(JobConfigToken::Text(value.to_owned()));
+        tokens.push(JobConfigToken::Text(path, value.to_owned()));
     }
 }
 
