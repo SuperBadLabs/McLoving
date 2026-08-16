@@ -821,7 +821,7 @@ fn validate_retained_build_record(
 ) -> Result<(), PackageError> {
     let retained = parse_retained_build_record(archive_file(archive, retained_path)?)
         .map_err(|error| PackageError::new("E_PRIVATE_RETAINED_BUILD", error.to_string()))?;
-    if retained.number != expected_number || retained.result != BuildResult::Succeeded {
+    if retained.result != BuildResult::Succeeded {
         return Err(PackageError::new(
             "E_PRIVATE_RETAINED_BUILD",
             format!("{retained_path} has divergent identity or result"),
@@ -830,7 +830,7 @@ fn validate_retained_build_record(
     for path in api_paths {
         let api: Value = serde_json::from_slice(archive_file(archive, path)?)
             .map_err(|error| PackageError::new("E_PRIVATE_RETAINED_BUILD", error.to_string()))?;
-        if api.get("number") != Some(&Value::from(retained.number))
+        if api.get("number") != Some(&Value::from(expected_number))
             || api.get("result") != Some(&Value::from("SUCCESS"))
             || api.get("timestamp") != Some(&Value::from(retained.started_at_unix_ms))
             || api.get("duration") != Some(&Value::from(retained.duration_ms))

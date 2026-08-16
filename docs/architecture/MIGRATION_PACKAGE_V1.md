@@ -151,7 +151,7 @@ sidecars exactly to the authenticated reverse bundle and all-false authority
 ledger. The completed build's ordered normalized log entries are joined by
 digest, byte length, retrieval digest, and media type to both captured stream
 chunks and their exact aggregate. Restart continuity includes the original build-1 result and log, the
-retained build-2/build-3 XML identities/results/timings joined to their API
+retained build-2/build-3 manifest-path identities and XML results/timings joined to their API
 receipts, the retained build cursor and complete permalink set after continued build 3, and
 both ceremonies' exclusive container attachment to their captured internal
 Podman networks.

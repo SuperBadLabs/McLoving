@@ -39,7 +39,7 @@ sealed source tree, and joins the retained Jenkins build/import/provenance
 sidecars to the authenticated reverse bundle. It proves the effect-free
 McLoving build and binds both ordered normalized log entries to their captured
 stream chunks, plus Jenkins restart, build-1 retention, next-build/permalink
-continuity, retained build-2/build-3 XML-to-API identity/result/timing joins,
+continuity, retained build-2/build-3 manifest-path/XML-to-API result/timing joins,
 and exclusive attachment to the captured internal networks. Private
 publication succeeds only after durable staging-link cleanup. It verifies one
 packaged case and 227 deterministic rejections,

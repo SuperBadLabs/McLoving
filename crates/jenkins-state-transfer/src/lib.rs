@@ -97,7 +97,6 @@ pub struct ReverseBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetainedBuildRecord {
-    pub number: u64,
     pub result: BuildResult,
     pub started_at_unix_ms: i64,
     pub duration_ms: i64,
@@ -129,7 +128,7 @@ pub fn parse_retained_build_record(bytes: &[u8]) -> Result<RetainedBuildRecord, 
     if bytes.len() > MAX_XML_BYTES {
         return Err(invalid("retained Jenkins build XML exceeds its byte limit"));
     }
-    let direct = ["number", "timestamp", "duration", "result"]
+    let direct = ["timestamp", "duration", "result"]
         .into_iter()
         .collect::<BTreeSet<_>>();
     let fields = selected_xml_text(bytes, "flow-build", |path| {
@@ -138,9 +137,6 @@ pub fn parse_retained_build_record(bytes: &[u8]) -> Result<RetainedBuildRecord, 
                 .last()
                 .is_some_and(|name| direct.contains(name.as_str()))
     })?;
-    let number = require_single(&fields, "number", None)?
-        .parse::<u64>()
-        .map_err(|_| invalid("retained Jenkins build number is malformed"))?;
     let started_at_unix_ms = parse_i64(
         require_single(&fields, "timestamp", None)?,
         "retained timestamp",
@@ -158,7 +154,6 @@ pub fn parse_retained_build_record(bytes: &[u8]) -> Result<RetainedBuildRecord, 
         _ => return Err(invalid("retained Jenkins build result is unsupported")),
     };
     Ok(RetainedBuildRecord {
-        number,
         result,
         started_at_unix_ms,
         duration_ms,
@@ -1544,14 +1539,13 @@ mod tests {
 
     #[test]
     fn retained_build_projection_is_exact_and_duplicate_safe() {
-        let xml = br#"<flow-build><number>2</number><timestamp>2000</timestamp><duration>20</duration><result>SUCCESS</result></flow-build>"#;
+        let xml = br#"<flow-build><timestamp>2000</timestamp><duration>20</duration><result>SUCCESS</result></flow-build>"#;
         let record = parse_retained_build_record(xml).unwrap();
-        assert_eq!(record.number, 2);
         assert_eq!(record.result, BuildResult::Succeeded);
         assert_eq!(record.started_at_unix_ms, 2_000);
         assert_eq!(record.duration_ms, 20);
 
-        let duplicated = br#"<flow-build><number>2</number><number>3</number><timestamp>2000</timestamp><duration>20</duration><result>SUCCESS</result></flow-build>"#;
+        let duplicated = br#"<flow-build><timestamp>2000</timestamp><timestamp>3000</timestamp><duration>20</duration><result>SUCCESS</result></flow-build>"#;
         assert!(parse_retained_build_record(duplicated).is_err());
     }
 }
