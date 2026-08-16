@@ -423,6 +423,7 @@ printf '%s\n' \
   'production_authority=false' \
   > "${staging}/evidence/template-boundary.txt"
 cp "${stdout_payload}" "${staging}/imported-build-2.log"
+chmod 600 "${staging}/imported-build-2.log"
 cat "${stderr_payload}" >> "${staging}/imported-build-2.log"
 cmp "${log_payload}" "${staging}/imported-build-2.log"
 podman unshare cp "${staging}/imported-build-2.log" "${template}/log"
