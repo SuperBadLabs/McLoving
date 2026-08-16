@@ -648,7 +648,17 @@ fn verify_exact_state(
                 "authenticated forward bundle is missing source build 1",
             )
         })?;
-    validate_build_one_state(&state.reverse_evidence, source_build)?;
+    let authenticated_source_build_xml = history.files.get("1/build.xml").ok_or_else(|| {
+        PackageError::new(
+            "E_PRIVATE_SOURCE_BUILD",
+            "authenticated source is missing build 1 metadata",
+        )
+    })?;
+    validate_build_one_state(
+        &state.reverse_evidence,
+        source_build,
+        authenticated_source_build_xml,
+    )?;
     let imported_build = reverse
         .jobs
         .first()
@@ -842,6 +852,7 @@ fn validate_retained_job_configuration(archive: &EvidenceArchive) -> Result<(), 
 fn validate_build_one_state(
     archive: &EvidenceArchive,
     source: &BuildState,
+    authenticated_source_xml: &[u8],
 ) -> Result<(), PackageError> {
     let expected_source = serde_json::to_value(source)
         .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
@@ -860,14 +871,17 @@ fn validate_build_one_state(
     }
 
     let retained_path = "evidence/jenkins-job-after/builds/1/build.xml";
+    let authenticated = parse_retained_source_build_record(authenticated_source_xml)
+        .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
     let retained = parse_retained_source_build_record(archive_file(archive, retained_path)?)
         .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
-    if retained.queue_id != source.source_queue_id
-        || retained.result != source.result
-        || retained.queued_at_unix_ms != source.queued_at_unix_ms
-        || retained.started_at_unix_ms != source.started_at_unix_ms
-        || retained.ended_at_unix_ms != source.ended_at_unix_ms
-        || retained.actor_subject != source.trigger.actor_subject
+    if retained != authenticated
+        || authenticated.queue_id != source.source_queue_id
+        || authenticated.result != source.result
+        || authenticated.queued_at_unix_ms != source.queued_at_unix_ms
+        || authenticated.started_at_unix_ms != source.started_at_unix_ms
+        || authenticated.ended_at_unix_ms != source.ended_at_unix_ms
+        || authenticated.actor_subject != source.trigger.actor_subject
     {
         return Err(PackageError::new(
             "E_PRIVATE_SOURCE_BUILD",
@@ -881,15 +895,6 @@ fn validate_build_one_state(
             "authenticated source queue identity is nonnumeric",
         )
     })?;
-    let duration = source
-        .ended_at_unix_ms
-        .checked_sub(source.started_at_unix_ms)
-        .ok_or_else(|| {
-            PackageError::new(
-                "E_PRIVATE_SOURCE_BUILD",
-                "authenticated source build timing is not monotonic",
-            )
-        })?;
     for path in [
         "evidence/imported-build-1.json",
         "evidence/restarted-build-1.json",
@@ -920,8 +925,8 @@ fn validate_build_one_state(
         if api.get("number") != Some(&Value::from(source.number))
             || api.get("result") != Some(&Value::from("ABORTED"))
             || api.get("queueId") != Some(&Value::from(queue_id))
-            || api.get("timestamp") != Some(&Value::from(source.started_at_unix_ms))
-            || api.get("duration") != Some(&Value::from(duration))
+            || api.get("timestamp") != Some(&Value::from(authenticated.timestamp_unix_ms))
+            || api.get("duration") != Some(&Value::from(authenticated.duration_ms))
             || causes.len() != 1
             || actors != [source.trigger.actor_subject.as_str()]
         {

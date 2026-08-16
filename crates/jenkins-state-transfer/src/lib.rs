@@ -109,6 +109,8 @@ pub struct RetainedBuildRecord {
 pub struct RetainedSourceBuildRecord {
     pub queue_id: String,
     pub result: BuildResult,
+    pub timestamp_unix_ms: i64,
+    pub duration_ms: i64,
     pub queued_at_unix_ms: i64,
     pub started_at_unix_ms: i64,
     pub ended_at_unix_ms: i64,
@@ -190,6 +192,8 @@ pub fn parse_retained_source_build_record(
     Ok(RetainedSourceBuildRecord {
         queue_id: parsed.queue_id,
         result: parsed.result,
+        timestamp_unix_ms: parsed.timestamp,
+        duration_ms: parsed.duration,
         queued_at_unix_ms: parsed.queued_at,
         started_at_unix_ms: parsed.started_at,
         ended_at_unix_ms: parsed.ended_at,
@@ -1459,6 +1463,8 @@ struct ParsedBuild {
     queue_id: String,
     number: u64,
     result: BuildResult,
+    timestamp: i64,
+    duration: i64,
     queued_at: i64,
     started_at: i64,
     ended_at: i64,
@@ -1505,6 +1511,8 @@ fn parse_build(bytes: &[u8]) -> Result<ParsedBuild, HistoryError> {
         queue_id,
         number: 1,
         result,
+        timestamp,
+        duration,
         queued_at,
         started_at,
         ended_at,
@@ -2225,8 +2233,10 @@ mod tests {
         let record = parse_retained_source_build_record(BUILD_XML).unwrap();
         assert_eq!(record.queue_id, "92");
         assert_eq!(record.result, BuildResult::Aborted);
+        assert_eq!(record.timestamp_unix_ms, 1_233);
+        assert_eq!(record.duration_ms, 376);
         assert_eq!(record.queued_at_unix_ms, 1_232);
-        assert_eq!(record.started_at_unix_ms, 1_233);
+        assert_eq!(record.started_at_unix_ms, 1_239);
         assert_eq!(record.ended_at_unix_ms, 1_609);
         assert_eq!(record.actor_subject, "oracle-admin");
 
