@@ -14,7 +14,7 @@ use mcloving_shadow_qualification::{
     IndependentPins, VerificationReceipt, seal_private_session, verify_private_session,
 };
 use ring::rand::SystemRandom;
-use ring::signature::Ed25519KeyPair;
+use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use sha2::{Digest as _, Sha256};
 
 const MAX_SESSION_BYTES: usize = 262_144;
@@ -45,22 +45,49 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     let command = arguments.get(1).and_then(|value| value.to_str());
     match (command, arguments) {
-        (Some("generate-keys"), [_, _, source_key, shadow_key]) => {
+        (Some("generate-keys"), [_, _, source_key, source_key_pin, shadow_key]) => {
             let random = SystemRandom::new();
             let source = Ed25519KeyPair::generate_pkcs8(&random)
                 .map_err(|_| "could not generate source-capture Ed25519 key")?;
             let shadow = Ed25519KeyPair::generate_pkcs8(&random)
                 .map_err(|_| "could not generate shadow-replay Ed25519 key")?;
+            let source_pair = Ed25519KeyPair::from_pkcs8(source.as_ref())
+                .map_err(|_| "could not load generated source-capture key")?;
+            let source_pin_bytes = format!("{}\n", digest_hex(source_pair.public_key().as_ref()));
             publish_owner_private(Path::new(source_key), source.as_ref())?;
-            if let Err(error) = publish_owner_private(Path::new(shadow_key), shadow.as_ref()) {
+            if let Err(error) =
+                publish_owner_private(Path::new(source_key_pin), source_pin_bytes.as_bytes())
+            {
                 rollback_new_private(Path::new(source_key)).map_err(|rollback| {
                     io::Error::other(format!(
-                        "shadow key publication failed ({error}); source-key rollback failed ({rollback}); reconcile both paths"
+                        "source-key-pin publication failed ({error}); source-key rollback failed ({rollback}); reconcile both paths"
+                    ))
+                })?;
+                return Err(error.into());
+            }
+            if let Err(error) = publish_owner_private(Path::new(shadow_key), shadow.as_ref()) {
+                let pin_rollback = rollback_new_private(Path::new(source_key_pin));
+                let key_rollback = rollback_new_private(Path::new(source_key));
+                if let (Err(pin), Err(key)) = (&pin_rollback, &key_rollback) {
+                    return Err(io::Error::other(format!(
+                        "shadow-key publication failed ({error}); source-pin rollback failed ({pin}); source-key rollback failed ({key}); reconcile all paths"
+                    ))
+                    .into());
+                }
+                pin_rollback.map_err(|rollback| {
+                    io::Error::other(format!(
+                        "shadow-key publication failed ({error}); source-pin rollback failed ({rollback}); reconcile all paths"
+                    ))
+                })?;
+                key_rollback.map_err(|rollback| {
+                    io::Error::other(format!(
+                        "shadow-key publication failed ({error}); source-key rollback failed ({rollback}); reconcile all paths"
                     ))
                 })?;
                 return Err(error.into());
             }
             println!("source_capture_key_created=true");
+            println!("source_capture_key_pin_created=true");
             println!("shadow_replay_key_created=true");
         }
         (
@@ -69,7 +96,7 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
                 _,
                 _,
                 template,
-                source_key,
+                source_capture_key_pin,
                 shadow_key,
                 session,
                 session_pin,
@@ -90,13 +117,11 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
                 .to_str()
                 .ok_or("expected implementation head is not UTF-8")?;
             let template_bytes = read_owner_private(Path::new(template), MAX_SESSION_BYTES)?;
-            let source_key = read_owner_private(Path::new(source_key), 1_024)?;
             let shadow_key = read_owner_private(Path::new(shadow_key), 1_024)?;
-            let session_bytes = seal_private_session(&template_bytes, &source_key, &shadow_key)?;
-            let computed_session_pin = digest_hex(&session_bytes);
             let paths = PackageInputPaths {
                 package,
                 package_pin,
+                source_capture_key_pin,
                 forward_manifest_pin,
                 forward_implementation_pin,
                 reverse_manifest_pin,
@@ -105,9 +130,13 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
                 verifier_binary_pin,
             };
             let (package_bytes, pins) = read_package_inputs(&paths)?;
+            let session_bytes =
+                seal_private_session(&template_bytes, &pins.source_capture_key, &shadow_key)?;
+            let computed_session_pin = digest_hex(&session_bytes);
             let package_inputs = private_inputs(sealed_history, &pins);
             let independent_pins = IndependentPins {
                 session_sha256: &computed_session_pin,
+                source_capture_public_key_sha256: &pins.source_capture_key,
                 authz_generation_sha256: &pins.authz_generation,
                 verifier_binary_sha256: &pins.verifier_binary,
                 shadow_implementation_head: expected_head,
@@ -141,6 +170,7 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
                 session_pin,
                 package,
                 package_pin,
+                source_capture_key_pin,
                 repository,
                 sealed_history,
                 forward_manifest_pin,
@@ -160,6 +190,7 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
             let paths = PackageInputPaths {
                 package,
                 package_pin,
+                source_capture_key_pin,
                 forward_manifest_pin,
                 forward_implementation_pin,
                 reverse_manifest_pin,
@@ -171,6 +202,7 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
             let package_inputs = private_inputs(sealed_history, &pins);
             let independent_pins = IndependentPins {
                 session_sha256: &session_pin,
+                source_capture_public_key_sha256: &pins.source_capture_key,
                 authz_generation_sha256: &pins.authz_generation,
                 verifier_binary_sha256: &pins.verifier_binary,
                 shadow_implementation_head: expected_head,
@@ -191,6 +223,7 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
 
 struct OwnerPins {
     package: String,
+    source_capture_key: String,
     forward_manifest: String,
     forward_implementation: String,
     reverse_manifest: String,
@@ -202,6 +235,7 @@ struct OwnerPins {
 struct PackageInputPaths<'a> {
     package: &'a OsStr,
     package_pin: &'a OsStr,
+    source_capture_key_pin: &'a OsStr,
     forward_manifest_pin: &'a OsStr,
     forward_implementation_pin: &'a OsStr,
     reverse_manifest_pin: &'a OsStr,
@@ -215,6 +249,7 @@ fn read_package_inputs(paths: &PackageInputPaths<'_>) -> io::Result<(Vec<u8>, Ow
         read_owner_private(Path::new(paths.package), MAX_PRIVATE_PACKAGE_BYTES)?,
         OwnerPins {
             package: read_owner_pin(Path::new(paths.package_pin))?,
+            source_capture_key: read_owner_pin(Path::new(paths.source_capture_key_pin))?,
             forward_manifest: read_owner_pin(Path::new(paths.forward_manifest_pin))?,
             forward_implementation: read_owner_pin(Path::new(paths.forward_implementation_pin))?,
             reverse_manifest: read_owner_pin(Path::new(paths.reverse_manifest_pin))?,
@@ -594,6 +629,57 @@ mod tests {
     }
 
     #[test]
+    fn key_generation_publishes_an_independent_source_identity_pin() {
+        let directory = private_directory();
+        let source = directory.path().join("source.pkcs8");
+        let source_pin = directory.path().join("source-public.sha256");
+        let shadow = directory.path().join("shadow.pkcs8");
+        let arguments = vec![
+            OsString::from("mcloving-shadow-qualification"),
+            OsString::from("generate-keys"),
+            source.as_os_str().to_owned(),
+            source_pin.as_os_str().to_owned(),
+            shadow.as_os_str().to_owned(),
+        ];
+
+        run_with_arguments(&arguments).expect("generate keys and pin");
+        let source_bytes = read_owner_private(&source, 1_024).expect("source key");
+        let source_pair = Ed25519KeyPair::from_pkcs8(&source_bytes).expect("source pair");
+        assert_eq!(
+            read_owner_pin(&source_pin).expect("source pin"),
+            digest_hex(source_pair.public_key().as_ref())
+        );
+        let shadow_bytes = read_owner_private(&shadow, 1_024).expect("shadow key");
+        let shadow_pair = Ed25519KeyPair::from_pkcs8(&shadow_bytes).expect("shadow pair");
+        assert_ne!(
+            source_pair.public_key().as_ref(),
+            shadow_pair.public_key().as_ref()
+        );
+    }
+
+    #[test]
+    fn key_generation_rolls_back_source_outputs_when_shadow_is_preexisting() {
+        let directory = private_directory();
+        let source = directory.path().join("source.pkcs8");
+        let source_pin = directory.path().join("source-public.sha256");
+        let shadow = directory.path().join("shadow.pkcs8");
+        fs::write(&shadow, b"preexisting").expect("preexisting shadow");
+        fs::set_permissions(&shadow, fs::Permissions::from_mode(0o600)).expect("shadow mode");
+        let arguments = vec![
+            OsString::from("mcloving-shadow-qualification"),
+            OsString::from("generate-keys"),
+            source.as_os_str().to_owned(),
+            source_pin.as_os_str().to_owned(),
+            shadow.as_os_str().to_owned(),
+        ];
+
+        assert!(run_with_arguments(&arguments).is_err());
+        assert!(!source.exists());
+        assert!(!source_pin.exists());
+        assert_eq!(fs::read(&shadow).expect("unchanged shadow"), b"preexisting");
+    }
+
+    #[test]
     fn public_failure_output_never_reflects_private_parser_values() {
         let sentinel = "DO-NOT-DISCLOSE-PRIVATE-SENTINEL";
         let malformed = format!(r#""{sentinel}""#);
@@ -614,14 +700,15 @@ mod tests {
             OsString::from("mcloving-shadow-qualification"),
             OsString::from("verify"),
         ];
-        arguments.extend((0..13).map(|index| OsString::from(format!("argument-{index}"))));
+        arguments.extend((0..14).map(|index| OsString::from(format!("argument-{index}"))));
         arguments[2] = OsString::from_vec(b"/tmp/private-\xff-path".to_vec());
-        arguments[14] = OsString::from("a".repeat(40));
+        arguments[15] = OsString::from("a".repeat(40));
 
         let result = std::panic::catch_unwind(|| run_with_arguments(&arguments));
         let error = result
             .expect("non-UTF-8 path must not panic")
             .expect_err("missing private input must fail");
+        assert_ne!(error.to_string(), "usage error");
         assert_eq!(public_error_code(&*error), "SHADOW_QUALIFICATION_FAILED");
     }
 }

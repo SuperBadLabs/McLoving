@@ -64,6 +64,7 @@ pub struct VerificationReceipt {
 
 pub struct IndependentPins<'a> {
     pub session_sha256: &'a str,
+    pub source_capture_public_key_sha256: &'a str,
     pub authz_generation_sha256: &'a str,
     pub verifier_binary_sha256: &'a str,
     pub shadow_implementation_head: &'a str,
@@ -274,6 +275,7 @@ pub fn verify_private_session(
     verify_session(
         session_bytes,
         independent_pins.shadow_implementation_head,
+        independent_pins.source_capture_public_key_sha256,
         independent_pins.authz_generation_sha256,
         independent_pins.verifier_binary_sha256,
         &VerifiedPackage {
@@ -284,13 +286,14 @@ pub fn verify_private_session(
     )
 }
 
-/// Canonicalizes and signs an owner-private session template whose key and
-/// signature fields are empty. The returned bytes are structurally verified,
-/// but the caller must still compose [`verify_private_session`] before durable
-/// publication so the private MIG-007 package and owner pins are authenticated.
+/// Authenticates independently signed source-capture receipts and signs only
+/// the shadow-replay half of an owner-private session template. The returned
+/// bytes are structurally verified, but the caller must still compose
+/// [`verify_private_session`] before durable publication so the private MIG-007
+/// package and all owner pins are authenticated.
 pub fn seal_private_session(
     template_bytes: &[u8],
-    source_capture_pkcs8: &[u8],
+    expected_source_capture_public_key_sha256: &str,
     shadow_replay_pkcs8: &[u8],
 ) -> Result<Vec<u8>, QualificationError> {
     if template_bytes.is_empty() || template_bytes.len() > MAX_SESSION_BYTES {
@@ -307,44 +310,49 @@ pub fn seal_private_session(
             "shadow session template is not canonical pretty JSON",
         ));
     }
-    if !session.freeze.source_capture_public_key_base64.is_empty()
+    if session.freeze.source_capture_public_key_base64.is_empty()
         || !session.freeze.shadow_replay_public_key_base64.is_empty()
         || session.events.iter().any(|event| {
-            !event.source.signing_public_key_sha256.is_empty()
-                || !event.source.signature_base64.is_empty()
+            event.source.signing_public_key_sha256.is_empty()
+                || event.source.signature_base64.is_empty()
                 || !event.shadow.signing_public_key_sha256.is_empty()
                 || !event.shadow.signature_base64.is_empty()
         })
     {
         return Err(QualificationError::new(
-            "E_UNSIGNED_TEMPLATE",
-            "session template contains a caller-supplied key identity or signature",
+            "E_CAPTURE_TEMPLATE",
+            "session template must contain only preauthenticated source-capture receipts",
         ));
     }
-    let source_key = Ed25519KeyPair::from_pkcs8(source_capture_pkcs8).map_err(|_| {
-        QualificationError::new("E_KEY", "invalid source-capture Ed25519 PKCS#8 key")
-    })?;
+    let source_public_key = decode_public_key(&session.freeze.source_capture_public_key_base64)?;
+    if !is_sha256(expected_source_capture_public_key_sha256)
+        || sha256(&source_public_key) != expected_source_capture_public_key_sha256
+    {
+        return Err(QualificationError::new(
+            "E_SOURCE_CAPTURE_KEY",
+            "source-capture identity does not match its independent owner pin",
+        ));
+    }
+    verify_source_captures(&session.events, &source_public_key)?;
     let shadow_key = Ed25519KeyPair::from_pkcs8(shadow_replay_pkcs8).map_err(|_| {
         QualificationError::new("E_KEY", "invalid shadow-replay Ed25519 PKCS#8 key")
     })?;
-    if source_key.public_key().as_ref() == shadow_key.public_key().as_ref() {
+    if source_public_key == shadow_key.public_key().as_ref() {
         return Err(QualificationError::new(
             "E_KEY",
             "source-capture and shadow-replay keys must be distinct",
         ));
     }
-    session.freeze.source_capture_public_key_base64 =
-        BASE64.encode(source_key.public_key().as_ref());
     session.freeze.shadow_replay_public_key_base64 =
         BASE64.encode(shadow_key.public_key().as_ref());
     for event in &mut session.events {
-        sign_receipt(&mut event.source, &source_key)?;
         sign_receipt(&mut event.shadow, &shadow_key)?;
     }
     let bytes = canonical_bytes(&session)?;
     verify_session(
         &bytes,
         &session.shadow_implementation_head,
+        expected_source_capture_public_key_sha256,
         &session.freeze.authz_generation_sha256,
         &session.freeze.verifier_binary_sha256,
         &VerifiedPackage {
@@ -382,6 +390,7 @@ fn verify_session_pin(
 fn verify_session(
     bytes: &[u8],
     expected_shadow_implementation_head: &str,
+    expected_source_capture_public_key_sha256: &str,
     expected_authz_generation_sha256: &str,
     expected_verifier_binary_sha256: &str,
     package: &VerifiedPackage,
@@ -421,6 +430,7 @@ fn verify_session(
     }
     verify_freeze(
         &session.freeze,
+        expected_source_capture_public_key_sha256,
         expected_authz_generation_sha256,
         expected_verifier_binary_sha256,
     )?;
@@ -450,12 +460,15 @@ fn verify_session(
 
 fn verify_freeze(
     freeze: &Freeze,
+    expected_source_capture_public_key_sha256: &str,
     expected_authz_generation_sha256: &str,
     expected_verifier_binary_sha256: &str,
 ) -> Result<(), QualificationError> {
     let source_key = decode_public_key(&freeze.source_capture_public_key_base64)?;
     let shadow_key = decode_public_key(&freeze.shadow_replay_public_key_base64)?;
     if source_key == shadow_key
+        || !is_sha256(expected_source_capture_public_key_sha256)
+        || sha256(&source_key) != expected_source_capture_public_key_sha256
         || freeze.source_controller != SOURCE_CONTROLLER
         || freeze.inventory_epoch != INVENTORY_EPOCH
         || freeze.inventory_sha256 != INVENTORY_SHA256
@@ -511,6 +524,31 @@ fn verify_comparison_inputs(inputs: &ComparisonInputs) -> Result<(), Qualificati
 }
 
 fn verify_events(events: &[PairedEvent], freeze: &Freeze) -> Result<(), QualificationError> {
+    let source_key = decode_public_key(&freeze.source_capture_public_key_base64)?;
+    let shadow_key = decode_public_key(&freeze.shadow_replay_public_key_base64)?;
+    verify_source_captures(events, &source_key)?;
+    for event in events {
+        verify_denial_receipt(&event.shadow, &shadow_key, true, "mcloving-shadow")?;
+        if event.source.event_id != event.shadow.event_id
+            || event.source.event_kind != event.shadow.event_kind
+            || event.source.capture_sha256 != event.shadow.capture_sha256
+            || event.source.state != event.shadow.state
+            || event.source.generation != event.shadow.generation
+            || event.source.outcome != event.shadow.outcome
+        {
+            return Err(QualificationError::new(
+                "E_EVENT_JOIN",
+                "source capture and shadow replay do not form a unique exact pair",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_source_captures(
+    events: &[PairedEvent],
+    source_key: &[u8],
+) -> Result<(), QualificationError> {
     let required_order = ["api", "manual", "schedule", "upstream", "webhook"];
     let required = BTreeSet::from([
         "api".to_owned(),
@@ -525,8 +563,6 @@ fn verify_events(events: &[PairedEvent], freeze: &Freeze) -> Result<(), Qualific
             "shadow session must contain exactly five ingress classes",
         ));
     }
-    let source_key = decode_public_key(&freeze.source_capture_public_key_base64)?;
-    let shadow_key = decode_public_key(&freeze.shadow_replay_public_key_base64)?;
     let mut kinds = BTreeSet::new();
     let mut ids = BTreeSet::new();
     let mut captures = BTreeSet::new();
@@ -537,21 +573,14 @@ fn verify_events(events: &[PairedEvent], freeze: &Freeze) -> Result<(), Qualific
                 "shadow session ingress observations are not in canonical order",
             ));
         }
-        verify_denial_receipt(&event.source, &source_key, false, "jenkins-source")?;
-        verify_denial_receipt(&event.shadow, &shadow_key, true, "mcloving-shadow")?;
-        if event.source.event_id != event.shadow.event_id
-            || event.source.event_kind != event.shadow.event_kind
-            || event.source.capture_sha256 != event.shadow.capture_sha256
-            || event.source.state != event.shadow.state
-            || event.source.generation != event.shadow.generation
-            || event.source.outcome != event.shadow.outcome
-            || !kinds.insert(event.source.event_kind.clone())
+        verify_denial_receipt(&event.source, source_key, false, "jenkins-source")?;
+        if !kinds.insert(event.source.event_kind.clone())
             || !ids.insert(event.source.event_id)
             || !captures.insert(event.source.capture_sha256.clone())
         {
             return Err(QualificationError::new(
                 "E_EVENT_JOIN",
-                "source capture and shadow replay do not form a unique exact pair",
+                "source captures are not unique",
             ));
         }
     }
@@ -753,6 +782,10 @@ mod tests {
         Ed25519KeyPair::from_seed_unchecked(&[seed_byte; 32]).expect("test key")
     }
 
+    fn source_pin() -> String {
+        sha256(pair(7).public_key().as_ref())
+    }
+
     fn sign(receipt: &mut SignedDenialReceipt, key: &Ed25519KeyPair) {
         receipt.signature_base64.clear();
         receipt.signature_base64 = BASE64.encode(
@@ -930,6 +963,7 @@ mod tests {
         verify_session(
             &canonical_bytes(session).expect("fixture bytes"),
             HEAD,
+            &source_pin(),
             TEST_AUTHZ_SHA256,
             TEST_VERIFIER_SHA256,
             package,
@@ -966,28 +1000,27 @@ mod tests {
     }
 
     #[test]
-    fn canonical_unsigned_template_is_sealed_with_distinct_keys() {
+    fn authenticated_source_template_is_sealed_with_a_distinct_shadow_key() {
         let (mut session, package) = fixture();
-        session.freeze.source_capture_public_key_base64.clear();
         session.freeze.shadow_replay_public_key_base64.clear();
         for event in &mut session.events {
-            event.source.signing_public_key_sha256.clear();
-            event.source.signature_base64.clear();
             event.shadow.signing_public_key_sha256.clear();
             event.shadow.signature_base64.clear();
         }
+        let source_key = pair(7);
+        let source_pin = sha256(source_key.public_key().as_ref());
         let random = SystemRandom::new();
-        let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
         let shadow_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("shadow key");
         let sealed = seal_private_session(
             &canonical_bytes(&session).expect("template"),
-            source_pkcs8.as_ref(),
+            &source_pin,
             shadow_pkcs8.as_ref(),
         )
         .expect("sealed");
         let receipt = verify_session(
             &sealed,
             HEAD,
+            &source_pin,
             TEST_AUTHZ_SHA256,
             TEST_VERIFIER_SHA256,
             &package,
@@ -996,22 +1029,45 @@ mod tests {
         assert_eq!(receipt.captured_events, 5);
         assert!(!receipt.production_authority);
 
-        let mut supplied = session;
-        supplied.events[0].source.signature_base64 = "caller-controlled".to_owned();
+        let mut substituted = session.clone();
+        let substituted_source = pair(11);
+        substituted.freeze.source_capture_public_key_base64 =
+            BASE64.encode(substituted_source.public_key().as_ref());
+        for event in &mut substituted.events {
+            event.source.signing_public_key_sha256 =
+                sha256(substituted_source.public_key().as_ref());
+            sign(&mut event.source, &substituted_source);
+        }
         assert_eq!(
             seal_private_session(
-                &canonical_bytes(&supplied).expect("supplied template"),
-                source_pkcs8.as_ref(),
+                &canonical_bytes(&substituted).expect("substituted template"),
+                &source_pin,
                 shadow_pkcs8.as_ref(),
             )
-            .expect_err("caller signature")
+            .expect_err("unpinned source identity")
             .code,
-            "E_UNSIGNED_TEMPLATE"
+            "E_SOURCE_CAPTURE_KEY"
         );
+        let mut forged_source = session.clone();
+        forged_source.events[0].source.signature_base64 = BASE64.encode([0_u8; 64]);
         assert_eq!(
             seal_private_session(
-                &canonical_bytes(&session_for_same_key()).expect("same-key template"),
-                source_pkcs8.as_ref(),
+                &canonical_bytes(&forged_source).expect("forged source template"),
+                &source_pin,
+                shadow_pkcs8.as_ref(),
+            )
+            .expect_err("forged source receipt")
+            .code,
+            "E_SIGNATURE"
+        );
+        let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
+        let source_pair =
+            Ed25519KeyPair::from_pkcs8(source_pkcs8.as_ref()).expect("source key pair");
+        let same_key_template = source_template_for_key(&source_pair);
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&same_key_template).expect("same-key template"),
+                &sha256(source_pair.public_key().as_ref()),
                 source_pkcs8.as_ref(),
             )
             .expect_err("same key")
@@ -1020,13 +1076,14 @@ mod tests {
         );
     }
 
-    fn session_for_same_key() -> Session {
+    fn source_template_for_key(source_key: &Ed25519KeyPair) -> Session {
         let (mut session, _) = fixture();
-        session.freeze.source_capture_public_key_base64.clear();
+        session.freeze.source_capture_public_key_base64 =
+            BASE64.encode(source_key.public_key().as_ref());
         session.freeze.shadow_replay_public_key_base64.clear();
         for event in &mut session.events {
-            event.source.signing_public_key_sha256.clear();
-            event.source.signature_base64.clear();
+            event.source.signing_public_key_sha256 = sha256(source_key.public_key().as_ref());
+            sign(&mut event.source, source_key);
             event.shadow.signing_public_key_sha256.clear();
             event.shadow.signature_base64.clear();
         }
@@ -1138,6 +1195,20 @@ mod tests {
             verify_session(
                 &session_bytes,
                 HEAD,
+                &sha256(b"wrong-independent-source-key-pin"),
+                TEST_AUTHZ_SHA256,
+                TEST_VERIFIER_SHA256,
+                &package,
+            )
+            .expect_err("independent source-capture key pin")
+            .code,
+            "E_FREEZE"
+        );
+        assert_eq!(
+            verify_session(
+                &session_bytes,
+                HEAD,
+                &source_pin(),
                 &sha256(b"wrong-independent-authz-pin"),
                 TEST_VERIFIER_SHA256,
                 &package,
@@ -1150,6 +1221,7 @@ mod tests {
             verify_session(
                 &session_bytes,
                 HEAD,
+                &source_pin(),
                 TEST_AUTHZ_SHA256,
                 &sha256(b"wrong-independent-verifier-pin"),
                 &package,
@@ -1246,6 +1318,7 @@ mod tests {
             verify_session(
                 &compact,
                 HEAD,
+                &source_pin(),
                 TEST_AUTHZ_SHA256,
                 TEST_VERIFIER_SHA256,
                 &package,
@@ -1265,6 +1338,7 @@ mod tests {
             verify_session(
                 &bytes,
                 HEAD,
+                &source_pin(),
                 TEST_AUTHZ_SHA256,
                 TEST_VERIFIER_SHA256,
                 &package,
@@ -1278,6 +1352,7 @@ mod tests {
             verify_session(
                 &vec![b' '; MAX_SESSION_BYTES + 1],
                 HEAD,
+                &source_pin(),
                 TEST_AUTHZ_SHA256,
                 TEST_VERIFIER_SHA256,
                 &package,

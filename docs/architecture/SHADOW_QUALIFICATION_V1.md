@@ -29,8 +29,8 @@ cutover, rollback, or decommission authority.
 The caller supplies:
 
 - canonical private session bytes;
-- independently owner-held session, live authorization-generation, and exact
-  verifier-binary pins;
+- independently owner-held session, source-capture public-key, live
+  authorization-generation, and exact verifier-binary pins;
 - the exact owner-private MIG-007 package bytes;
 - the existing owner-held package, forward-manifest, reverse-manifest, and
   transform-implementation pins;
@@ -38,8 +38,8 @@ The caller supplies:
 - the exact reviewed SHADOW-001 implementation head.
 
 The verifier authenticates the session against its owner pin and compares the
-session's variable authorization and verifier identities with their two
-independent owner pins. The package verifier then authenticates the package,
+session's source-capture, variable authorization, and verifier identities with
+their three independent owner pins. The package verifier then authenticates the package,
 source, state-transfer evidence, and owner pins before the session is
 considered. The session binds the package digest internally. Operational
 output must never print either private digest or any package,
@@ -52,8 +52,8 @@ unsafe path components, redirectable foreign ancestors, a non-owner or broad
 immediate parent, nonregular or multiply linked inputs, broad file modes, and
 files above their byte ceiling. Publication is create-new, mode `0600`,
 file-synced, and parent-directory-synced; an incomplete two-file session/pin or
-two-key publication is rolled back and otherwise reported as requiring manual
-reconciliation.
+three-file source-key/source-pin/shadow-key publication is rolled back and
+otherwise reported as requiring manual reconciliation.
 
 ## Frozen identity
 
@@ -89,15 +89,21 @@ keys, and requires exact one-to-one joins. Omission, duplication, event-ID
 reuse, capture substitution, class substitution, divergent state/outcome, or
 signature mutation fails closed.
 
-`generate-keys` creates the two keys directly as owner-private PKCS#8 files.
-`seal` accepts only a canonical template whose public-key identities and every
-signature field are empty, derives those identities from the two private keys,
-signs each role's five receipts, runs the complete MIG-007 and SHADOW-001
-verification stack in memory—including the separately supplied authorization
-and verifier-binary pins—and only then publishes the session and its independent
-owner pin. A caller cannot inject a preexisting signature, self-endorse either
-variable freeze value, or reuse one key for both roles through the sealing
-interface.
+`generate-keys` creates the two keys directly as owner-private PKCS#8 files and
+publishes a separate owner-private digest pin for the source-capture public key.
+The source private key is reserved for and may be consumed only by the
+independently reviewed live capture sidecar; it is not an input to `seal`.
+`seal` accepts only a canonical
+template containing five already-signed source receipts under the independently
+pinned capture identity while the shadow key and every shadow signature field
+remain empty. It authenticates the source key pin and all source signatures,
+derives only the shadow public identity, signs only the five replay receipts,
+runs the complete MIG-007 and SHADOW-001 verification stack in memory—including
+the separately supplied source-capture, authorization, and verifier pins—and
+only then publishes the session and its independent owner pin. A sealing caller
+cannot manufacture or replace authoritative observations, self-endorse a
+variable freeze value, inject a shadow signature, or reuse one key for both
+roles through the sealing interface.
 
 The admitted case has no live external input, secret outcome, connector
 outcome, administrative operation, semantic time, or semantic entropy
@@ -152,8 +158,9 @@ Focused tests cover the positive exact session; every authority bit; event
 omission, duplication, substitution, and signature mutation; package/runtime
 drift; undeclared inputs; production reachability; unknown fields;
 noncanonical presentation; session-pin substitution; caller-supplied
-signatures; shared signing keys; owner modes, hard links, aliases, create-new
-publication; and size bounds.
+shadow signatures; forged or substituted source signatures and source-key pins;
+shared signing keys; owner modes, hard links, aliases, create-new publication;
+non-UTF-8 paths; redacted failure output; and size bounds.
 
 SHADOW-001 remains ACTIVE until an independently reviewed exact-head
 capture/replay sidecar and owner-private HeMan ceremony produce and verify the
