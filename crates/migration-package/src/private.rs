@@ -20,6 +20,8 @@ const MIG005A_PROTECTED_MAIN: &str = "9932cf42d3337f7cfa092c094daf3498e26eface";
 const MIG006_PROTECTED_MAIN: &str = "2a8f983838b4bd063bd029b3e164f7ac36c20439";
 const MAX_EVIDENCE_FILES: usize = 96;
 const MAX_EVIDENCE_FILE_BYTES: usize = 512 * 1024;
+const ADMITTED_JENKINS_JOB_CONFIG: &[u8] =
+    include_bytes!("../../../migration/state-transfer-v1/fixtures/corpus052-job-config.xml");
 
 pub const MAX_PRIVATE_PACKAGE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -719,24 +721,14 @@ fn verify_exact_state(
         &["evidence/continued-build-3.json"],
         3,
     )?;
+    validate_retained_job_configuration(&state.reverse_evidence)?;
     let source_build_1_log = history.files.get("1/log").ok_or_else(|| {
         PackageError::new(
             "E_PRIVATE_CONTINUITY",
             "authenticated source is missing build 1 log",
         )
     })?;
-    if archive_file(&state.reverse_evidence, "evidence/imported-build-1.log")?
-        != archive_file(&state.reverse_evidence, "evidence/restarted-build-1.log")?
-        || archive_file(
-            &state.reverse_evidence,
-            "evidence/jenkins-job-after/builds/1/log",
-        )? != source_build_1_log
-    {
-        return Err(PackageError::new(
-            "E_PRIVATE_CONTINUITY",
-            "restarted or retained build 1 log is divergent",
-        ));
-    }
+    validate_build_one_logs(&state.reverse_evidence, source_build_1_log)?;
     for path in [
         "evidence/imported-build-2.log",
         "evidence/restarted-build-2.log",
@@ -750,6 +742,11 @@ fn verify_exact_state(
             ));
         }
     }
+    validate_retained_console_log(
+        &state.reverse_evidence,
+        "evidence/jenkins-job-after/builds/2/log",
+        expected_log,
+    )?;
     let continued_log = archive_file(&state.reverse_evidence, "evidence/continued-build-3.log")?;
     if !continued_log
         .windows(b"Hello World".len())
@@ -760,6 +757,11 @@ fn verify_exact_state(
             "continued build log omits the admitted process output",
         ));
     }
+    validate_retained_console_log(
+        &state.reverse_evidence,
+        "evidence/jenkins-job-after/builds/3/log",
+        continued_log,
+    )?;
     let template_log = archive_file(&state.reverse_evidence, "evidence/template-build-2.log")?;
     if !template_log
         .windows(b"MIG005A_SERIALIZATION_TEMPLATE_ONLY".len())
@@ -810,6 +812,50 @@ fn verify_exact_state(
             "evidence/jenkins-container-inspect.json",
         ],
     )?;
+    Ok(())
+}
+
+fn validate_retained_job_configuration(archive: &EvidenceArchive) -> Result<(), PackageError> {
+    let path = "evidence/jenkins-job-after/config.xml";
+    if archive_file(archive, path)? != ADMITTED_JENKINS_JOB_CONFIG {
+        return Err(PackageError::new(
+            "E_PRIVATE_JOB_CONFIG",
+            "retained Jenkins job configuration is divergent from the reviewed fixture",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_build_one_logs(
+    archive: &EvidenceArchive,
+    authenticated_source_log: &[u8],
+) -> Result<(), PackageError> {
+    for path in [
+        "evidence/imported-build-1.log",
+        "evidence/restarted-build-1.log",
+        "evidence/jenkins-job-after/builds/1/log",
+    ] {
+        if archive_file(archive, path)? != authenticated_source_log {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                format!("{path} is divergent from the authenticated source log"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_retained_console_log(
+    archive: &EvidenceArchive,
+    retained_path: &str,
+    verified_capture: &[u8],
+) -> Result<(), PackageError> {
+    if archive_file(archive, retained_path)? != verified_capture {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            format!("{retained_path} is divergent from its verified console capture"),
+        ));
+    }
     Ok(())
 }
 
@@ -1607,6 +1653,22 @@ fn encode_digest(digest: Digest) -> String {
 mod tests {
     use super::*;
 
+    fn test_archive(files: &[(&str, &str)]) -> EvidenceArchive {
+        EvidenceArchive {
+            role: "test".into(),
+            manifest_sha256: "0".repeat(64),
+            manifest: String::new(),
+            files: files
+                .iter()
+                .map(|(path, contents)| EvidenceFile {
+                    path: (*path).into(),
+                    sha256: sha256(contents.as_bytes()),
+                    contents: (*contents).into(),
+                })
+                .collect(),
+        }
+    }
+
     fn workflow_archive(shell_status: &str) -> EvidenceArchive {
         let shell_text = "+ echo Hello World\nHello World\n";
         let files = [
@@ -1766,6 +1828,45 @@ mod tests {
         let mut divergent = expected;
         divergent["production_authority"] = Value::Bool(true);
         assert!(validate_exact_json_sidecar(&archive, path, &divergent).is_err());
+    }
+
+    #[test]
+    fn retained_job_configuration_is_bound_to_the_reviewed_fixture() {
+        let path = "evidence/jenkins-job-after/config.xml";
+        let reviewed = std::str::from_utf8(ADMITTED_JENKINS_JOB_CONFIG).unwrap();
+        validate_retained_job_configuration(&test_archive(&[(path, reviewed)])).unwrap();
+
+        let divergent = reviewed.replace("<disabled>false</disabled>", "<disabled>true</disabled>");
+        assert!(validate_retained_job_configuration(&test_archive(&[(path, &divergent)])).is_err());
+    }
+
+    #[test]
+    fn every_build_one_log_is_bound_to_the_authenticated_source() {
+        let source = "authenticated source log\n";
+        let paths = [
+            "evidence/imported-build-1.log",
+            "evidence/restarted-build-1.log",
+            "evidence/jenkins-job-after/builds/1/log",
+        ];
+        let exact = test_archive(&[(paths[0], source), (paths[1], source), (paths[2], source)]);
+        validate_build_one_logs(&exact, source.as_bytes()).unwrap();
+
+        let identically_corrupted_captures = test_archive(&[
+            (paths[0], "corrupted\n"),
+            (paths[1], "corrupted\n"),
+            (paths[2], source),
+        ]);
+        assert!(
+            validate_build_one_logs(&identically_corrupted_captures, source.as_bytes()).is_err()
+        );
+    }
+
+    #[test]
+    fn retained_console_log_is_bound_to_its_verified_capture() {
+        let path = "evidence/jenkins-job-after/builds/2/log";
+        let archive = test_archive(&[(path, "verified output\n")]);
+        validate_retained_console_log(&archive, path, b"verified output\n").unwrap();
+        assert!(validate_retained_console_log(&archive, path, b"different output\n").is_err());
     }
 
     #[cfg(unix)]

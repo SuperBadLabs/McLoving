@@ -95,8 +95,10 @@ reverse archives in one owner-only canonical JSON envelope retained on HeMan.
 It reconstructs both transforms only after their implementation identities
 match separately supplied owner-private pins, then cross-checks those identities and configuration against the
 independent rehearsal summary and Jenkins binding receipts, authenticates the
-sealed five-file source tree, and verifies ordered logs, results, restart, and
-next-build continuity. Its verified denominator is one packaged case and 227
+sealed five-file source tree, binds the retained Jenkins job configuration to
+the reviewed public fixture, joins every imported, restarted, and retained
+build-one log to the authenticated source, and verifies retained console logs,
+ordered logs, results, restart, and next-build continuity. Its verified denominator is one packaged case and 227
 deterministic rejections. It is package-complete and deny-authority
 shadow-eligible, but not canary-, cutover-, rollback-, or production-authority
 eligible.
