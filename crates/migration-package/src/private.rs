@@ -1406,7 +1406,9 @@ fn require_private_parent_custody(path: &Path) -> Result<(), PackageError> {
         let trusted_sticky_root = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
         if !metadata.file_type().is_dir()
             || metadata.file_type().is_symlink()
-            || (metadata.mode() & 0o022 != 0 && !trusted_sticky_root)
+            || (metadata.mode() & 0o022 != 0
+                && metadata.uid() != nix::unistd::geteuid().as_raw()
+                && !trusted_sticky_root)
             || (immediate
                 && (metadata.uid() != nix::unistd::geteuid().as_raw()
                     || metadata.mode() & 0o077 != 0))

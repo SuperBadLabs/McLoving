@@ -7,7 +7,7 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Read as _, Write as _};
-use std::path::Path;
+use std::path::{Component, Path};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -418,10 +418,6 @@ fn read_regular_bounded_with_policy(
 ) -> io::Result<Vec<u8>> {
     #[cfg(not(unix))]
     let _ = require_owner_only;
-    #[cfg(unix)]
-    if require_owner_only {
-        require_private_parent_custody(path)?;
-    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -435,6 +431,13 @@ fn read_regular_bounded_with_policy(
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
+    #[cfg(unix)]
+    let mut file = if require_owner_only {
+        open_private_regular_descriptor(path)?
+    } else {
+        options.open(path)?
+    };
+    #[cfg(not(unix))]
     let mut file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.len() > limit as u64 {
@@ -471,6 +474,76 @@ fn read_regular_bounded_with_policy(
 }
 
 #[cfg(unix)]
+fn open_private_regular_descriptor(path: &Path) -> io::Result<File> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let components = absolute
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(Ok(name)),
+            Component::RootDir | Component::CurDir => None,
+            Component::ParentDir | Component::Prefix(_) => Some(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "owner-private path contains an unsafe component",
+            ))),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let (leaf, parents) = components.split_last().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "owner-private path has no file name",
+        )
+    })?;
+    let directory_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::CLOEXEC;
+    let mut directory =
+        rustix::fs::open(Path::new("/"), directory_flags, rustix::fs::Mode::empty())
+            .map_err(os_error)?;
+    let effective_uid = nix::unistd::geteuid().as_raw();
+    for component in parents {
+        directory = rustix::fs::openat(
+            &directory,
+            *component,
+            directory_flags,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(os_error)?;
+        let metadata = rustix::fs::fstat(&directory).map_err(os_error)?;
+        let trusted_sticky_root = metadata.st_uid == 0 && metadata.st_mode & 0o1000 != 0;
+        if metadata.st_mode & 0o022 != 0 && metadata.st_uid != effective_uid && !trusted_sticky_root
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-private path traverses a redirectable foreign directory",
+            ));
+        }
+    }
+    let parent_metadata = rustix::fs::fstat(&directory).map_err(os_error)?;
+    if parent_metadata.st_uid != effective_uid || parent_metadata.st_mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "owner-private input parent has the wrong owner or broad permissions",
+        ));
+    }
+    let file = rustix::fs::openat(
+        &directory,
+        *leaf,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(os_error)?;
+    Ok(File::from(file))
+}
+
+#[cfg(unix)]
 fn require_private_parent_custody(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -486,7 +559,9 @@ fn require_private_parent_custody(path: &Path) -> io::Result<()> {
         let trusted_sticky_root = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
         if !metadata.file_type().is_dir()
             || metadata.file_type().is_symlink()
-            || (metadata.mode() & 0o022 != 0 && !trusted_sticky_root)
+            || (metadata.mode() & 0o022 != 0
+                && metadata.uid() != nix::unistd::geteuid().as_raw()
+                && !trusted_sticky_root)
             || (immediate
                 && (metadata.uid() != nix::unistd::geteuid().as_raw()
                     || metadata.mode() & 0o077 != 0))
