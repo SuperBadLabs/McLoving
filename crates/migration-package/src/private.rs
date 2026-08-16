@@ -1500,7 +1500,11 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o750)).unwrap();
         let error =
             load_admitted_history_owner_only(root.path(), "opaque-private-id".into()).unwrap_err();
-        assert!(error.to_string().contains("group or other access"));
+        assert!(
+            error
+                .to_string()
+                .contains("wrong owner or grants group/other access")
+        );
 
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(root.path().join("1")).unwrap();
