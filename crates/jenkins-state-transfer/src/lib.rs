@@ -314,6 +314,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
             ));
         }
     }
+    let tokens = normalize_job_config_text_tokens(tokens);
     if !stack.is_empty()
         || !matches!(
             tokens.first(),
@@ -322,9 +323,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
     {
         return Err(invalid("retained Jenkins job configuration is incomplete"));
     }
-    Ok(remove_false_remove_last_build_default(
-        normalize_job_config_text_tokens(tokens),
-    ))
+    Ok(remove_false_remove_last_build_default(tokens))
 }
 
 fn inside_job_action_payload(stack: &[String]) -> bool {
