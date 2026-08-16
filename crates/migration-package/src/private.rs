@@ -708,17 +708,17 @@ fn verify_exact_state(
             "authenticated source is missing build 1 log",
         )
     })?;
-    for path in [
-        "evidence/imported-build-1.log",
-        "evidence/restarted-build-1.log",
-        "evidence/jenkins-job-after/builds/1/log",
-    ] {
-        if archive_file(&state.reverse_evidence, path)? != source_build_1_log {
-            return Err(PackageError::new(
-                "E_PRIVATE_CONTINUITY",
-                format!("{path} differs from the authenticated source build 1 log"),
-            ));
-        }
+    if archive_file(&state.reverse_evidence, "evidence/imported-build-1.log")?
+        != archive_file(&state.reverse_evidence, "evidence/restarted-build-1.log")?
+        || archive_file(
+            &state.reverse_evidence,
+            "evidence/jenkins-job-after/builds/1/log",
+        )? != source_build_1_log
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "restarted or retained build 1 log is divergent",
+        ));
     }
     for path in [
         "evidence/imported-build-2.log",
