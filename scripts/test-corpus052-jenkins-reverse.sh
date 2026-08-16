@@ -339,8 +339,8 @@ authenticate_history() {
   ) > "${output_receipt}"
 }
 
-mkdir -p "${home}/init.groovy.d" "${job_home}/builds" \
-  "${template_home}/init.groovy.d" \
+mkdir -p "${home}/init.groovy.d" "${home}/plugins" "${job_home}/builds" \
+  "${template_home}/init.groovy.d" "${template_home}/plugins" \
   "${template_job_home}/builds" "${staging}/evidence"
 chmod 700 "${runtime_root}" "${home}" "${template_home}" "${staging}"
 
@@ -408,13 +408,24 @@ podman network create --internal "${network}" >/dev/null
 start_controller() {
   local controller_home=$1
   local controller_plugins=$2
+  local expected_digest relative extra leaf
+  local -a plugin_mounts=()
+  while read -r expected_digest relative extra; do
+    test -z "${extra:-}"
+    leaf=${relative#plugins/}
+    plugin_mounts+=(
+      --volume
+      "${controller_plugins}/${leaf}:/var/jenkins_home/plugins/${leaf}:ro"
+    )
+  done < "${plugin_manifest}"
+  test "${#plugin_mounts[@]}" -eq 180
   podman run --detach --name "${container}" \
     --network "${network}" \
     --publish "127.0.0.1:${port}:8080" \
     --cpus 4 --memory 4g --pids-limit 2048 \
     --env JAVA_OPTS='-Djenkins.install.runSetupWizard=false' \
     --volume "${controller_home}:/var/jenkins_home:Z" \
-    --volume "${controller_plugins}:/var/jenkins_home/plugins:ro" \
+    "${plugin_mounts[@]}" \
     "${image}" >/dev/null
   for _ in $(seq 1 240); do
     if curl --fail --silent --show-error \

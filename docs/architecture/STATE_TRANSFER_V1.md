@@ -295,7 +295,8 @@ reverse bundle, and copied exactly the committed 90-plugin manifest denominator 
 every regular, singly linked plugin both before and after copy. The two plugin
 trees were then transferred to root-owned non-writable sticky-directory
 snapshots, reverified, proven immutable to the invoking UID, and mounted
-read-only into the template and destination controllers. A separate
+as 90 individual read-only `.jpi` files over distinct writable expansion
+directories in the template and destination controllers. A separate
 non-authoritative template controller created the exact Jenkins-native
 `ShellStep` structure using a recorded non-executing shell stub; it never ran
 the admitted script, its raw log and byte-offset index were rebuilt so the
