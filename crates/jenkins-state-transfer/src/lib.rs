@@ -272,7 +272,7 @@ pub fn verify_retained_workflow_storage(
     }
     for (id, node) in &nodes {
         let numeric_id = validate_numeric_id(id, "retained workflow node ID")?;
-        for reference in node.parent_ids.iter().chain(node.start_id.iter()) {
+        for reference in &node.parent_ids {
             let numeric_reference =
                 validate_numeric_id(reference, "retained workflow node reference")?;
             if !nodes.contains_key(reference) || numeric_reference >= numeric_id {
@@ -2342,7 +2342,7 @@ mod tests {
         );
         let detached_shell = String::from_utf8(flow.to_vec()).unwrap().replace(
             "<parentIds><string>3</string></parentIds><id>4</id>",
-            "<parentIds><string>2</string></parentIds><id>4</id>",
+            "<parentIds><string>2</string></parentIds><id>4</id><startId>3</startId>",
         );
         assert!(
             verify_retained_workflow_storage(
