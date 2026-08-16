@@ -154,6 +154,8 @@ test "$(cat "${staging}/mcloving/mcloving-build-2.log")" = \
   $'+ echo Hello World\nHello World'
 rm -rf -- "${client_build_root}"
 
+find "${staging}" -type d -exec chmod 0700 {} +
+find "${staging}" -type f -exec chmod 0600 {} +
 (
   cd "${staging}"
   find . -type f ! -name SHA256SUMS -printf '%P\0' \
