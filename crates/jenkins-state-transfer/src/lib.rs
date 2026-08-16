@@ -322,7 +322,9 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
     {
         return Err(invalid("retained Jenkins job configuration is incomplete"));
     }
-    Ok(remove_false_remove_last_build_default(tokens))
+    Ok(remove_false_remove_last_build_default(
+        normalize_job_config_text_tokens(tokens),
+    ))
 }
 
 fn inside_job_action_payload(stack: &[String]) -> bool {
@@ -361,6 +363,19 @@ fn remove_false_remove_last_build_default(tokens: Vec<JobConfigToken>) -> Vec<Jo
     normalized
 }
 
+fn normalize_job_config_text_tokens(tokens: Vec<JobConfigToken>) -> Vec<JobConfigToken> {
+    tokens
+        .into_iter()
+        .filter_map(|token| match token {
+            JobConfigToken::Text(path, value) => {
+                let value = value.trim();
+                (!value.is_empty()).then(|| JobConfigToken::Text(path, value.to_owned()))
+            }
+            token => Some(token),
+        })
+        .collect()
+}
+
 fn job_config_start_token<R>(
     reader: &Reader<R>,
     start: &BytesStart<'_>,
@@ -396,17 +411,16 @@ fn job_config_start_token<R>(
 
 fn push_job_config_text(tokens: &mut Vec<JobConfigToken>, stack: &[String], value: &str) {
     let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
-    let value = normalized.trim();
-    if value.is_empty() {
+    if normalized.is_empty() {
         return;
     }
     let path = stack.join("/");
     if let Some(JobConfigToken::Text(existing_path, existing)) = tokens.last_mut()
         && existing_path == &path
     {
-        existing.push_str(value);
+        existing.push_str(&normalized);
     } else {
-        tokens.push(JobConfigToken::Text(path, value.to_owned()));
+        tokens.push(JobConfigToken::Text(path, normalized));
     }
 }
 
@@ -1827,6 +1841,14 @@ mod tests {
         verify_retained_job_configuration(rewritten_plugins.as_bytes(), reviewed).unwrap();
         verify_retained_job_configuration(reviewed_text.replace('\n', "\r\n").as_bytes(), reviewed)
             .unwrap();
+        let escaped_script = reviewed_text
+            .replace("<script><![CDATA[", "<script>")
+            .replace("]]></script>", "</script>")
+            .replace(
+                "sh 'echo \"Hello World\"'",
+                "sh 'echo &quot;Hello World&quot;'",
+            );
+        verify_retained_job_configuration(escaped_script.as_bytes(), reviewed).unwrap();
 
         for divergent in [
             reviewed_text.replace("<disabled>false</disabled>", "<disabled>true</disabled>"),
