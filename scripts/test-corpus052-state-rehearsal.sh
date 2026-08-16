@@ -83,15 +83,39 @@ forward_bundle_transform_sha256=$(jq -r \
   '.binding.transform_implementation_digest[]' "${staging}/forward-bundle.json" \
   | awk '{printf "%02x", $1} END {print ""}')
 test "${forward_transform_sha256}" = "${forward_bundle_transform_sha256}"
-cargo build --locked --quiet \
-  --manifest-path "${repo_root}/Cargo.toml" \
+resolved_cargo_home=${CARGO_HOME:-}
+if [[ -z "${resolved_cargo_home}" ]]; then
+  resolved_cargo_home=$(realpath -e "$(dirname -- "$(command -v cargo)")/..")
+fi
+client_build_root="${staging}/client-build"
+mkdir -p "${client_build_root}"
+client_build_mounts=(
+  --volume "${repo_root}:/workspace:ro"
+  --volume "${resolved_cargo_home}/registry:/usr/local/cargo/registry:ro"
+  --volume "${client_build_root}:/target:Z"
+)
+if [[ -d "${resolved_cargo_home}/git" ]]; then
+  client_build_mounts+=(
+    --volume "${resolved_cargo_home}/git:/usr/local/cargo/git:ro"
+  )
+fi
+podman run --rm --network none \
+  --cpus 2 --memory 4g --pids-limit 1024 \
+  --env CARGO_HOME=/usr/local/cargo \
+  --env CARGO_TARGET_DIR=/target \
+  --workdir /workspace \
+  "${client_build_mounts[@]}" \
+  "${MCLOVING_RUST_IMAGE}" \
+  cargo build --locked --offline --quiet \
   -p mcloving-jenkins-state-transfer --example rehearse_history
+client_executable="${client_build_root}/debug/examples/rehearse_history"
+test -x "${client_executable}"
 
 podman run --rm --name "${client}" \
   --network "${network}" \
   --cpus 2 --memory 2g --pids-limit 1024 \
   --env MCLOVING_TEST_DATABASE_URL="postgres://mcloving@${container}:5432/mcloving" \
-  --volume "${repo_root}/target/debug/examples/rehearse_history:/usr/local/bin/rehearse_history:ro" \
+  --volume "${client_executable}:/usr/local/bin/rehearse_history:ro" \
   --volume "${sealed_builds}:/sealed-builds:ro" \
   --volume "${staging}:/rehearsal-output:Z" \
   "${MCLOVING_RUST_IMAGE}" \
@@ -119,11 +143,12 @@ jq --exit-status '
   and .reverse_retrieval_verified == true
   and .reverse_replay_verified == true
 ' "${staging}/mcloving/rehearsal-summary.json" >/dev/null
-test "$(sha256sum "${repo_root}/target/debug/examples/rehearse_history" | awk '{print $1}')" = \
+test "$(sha256sum "${client_executable}" | awk '{print $1}')" = \
   "$(jq -r '.reverse_transform_implementation_sha256' \
     "${staging}/mcloving/rehearsal-summary.json")"
 test "$(cat "${staging}/mcloving/mcloving-build-2.log")" = \
   $'+ echo Hello World\nHello World'
+rm -rf -- "${client_build_root}"
 
 (
   cd "${staging}"

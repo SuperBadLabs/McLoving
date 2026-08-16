@@ -258,7 +258,10 @@ closed.
 
 The exact retained run used the pinned PostgreSQL image above without a
 host-published database port; the pinned Rust rehearsal client ran beside it on
-the same private internal container network. Forward import,
+the same private internal container network. The client executable was built
+offline inside that pinned Rust image from the locked source and read-only
+Cargo cache, so the retained executable digest binds the runtime-compatible
+binary rather than a host-ABI build. Forward import,
 exact replay, independent retrieval, one durable externally effect-free
 McLoving build, reverse import, and independent reverse retrieval all passed.
 The McLoving admission derived build 2 and its aborted build 1 predecessor from

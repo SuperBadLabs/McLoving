@@ -30,7 +30,9 @@ private output directory. It verifies and normalizes the exact five-file
 denominator, proves idempotent forward/reverse persistence against a fresh
 PostgreSQL instance, and executes one externally effect-free McLoving build.
 PostgreSQL has no host-published port: the pinned Rust rehearsal client runs
-beside it on the same private internal container network.
+beside it on the same private internal container network. That client is built
+offline inside the pinned Rust image from the locked repository and read-only
+Cargo cache, avoiding host/container ABI drift.
 Then run `scripts/test-corpus052-jenkins-reverse.sh` with the sealed directory,
 the independently pinned public tree digest, its opaque evidence identifier,
 that transform output, an owner-private independently retained digest of the
