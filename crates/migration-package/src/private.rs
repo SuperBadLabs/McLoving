@@ -878,7 +878,7 @@ fn validate_private_network_topology(
         let attached = container
             .pointer("/NetworkSettings/Networks")
             .and_then(Value::as_object);
-        if network_mode != Some(name)
+        if network_mode != Some("bridge")
             || attached.is_none_or(|attached| attached.len() != 1 || !attached.contains_key(name))
         {
             return Err(PackageError::new(
