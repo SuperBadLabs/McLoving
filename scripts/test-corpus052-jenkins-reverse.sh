@@ -477,6 +477,8 @@ stop_controller() {
 capture_build() {
   local number=$1
   local prefix=$2
+  local retained_log=${3:-}
+  local expected_retained_log=${4:-}
   for _ in $(seq 1 240); do
     if podman exec "${container}" curl --fail --silent --show-error \
       "http://127.0.0.1:8080/job/${job}/${number}/api/json" \
@@ -485,6 +487,19 @@ capture_build() {
       podman exec "${container}" curl --fail --silent --show-error \
         "http://127.0.0.1:8080/job/${job}/${number}/consoleText" \
         > "${staging}/evidence/${prefix}-build-${number}.log"
+      if [[ -n "${retained_log}" ]]; then
+        podman unshare test -f "${retained_log}"
+        podman unshare test ! -L "${retained_log}"
+        if [[ -n "${expected_retained_log}" ]]; then
+          podman unshare cmp "${retained_log}" "${expected_retained_log}"
+        fi
+        podman unshare cat "${retained_log}" \
+          > "${staging}/evidence/${prefix}-build-${number}.log"
+        if [[ -n "${expected_retained_log}" ]]; then
+          cmp "${staging}/evidence/${prefix}-build-${number}.log" \
+            "${expected_retained_log}"
+        fi
+      fi
       return 0
     fi
     sleep 0.5
@@ -779,7 +794,7 @@ podman unshare cp "${staging}/permalinks" "${job_home}/builds/permalinks"
 podman unshare chown -R 1000:1000 "${job_home}"
 
 start_controller "${home}" "${home_plugins}"
-capture_build 1 imported
+capture_build 1 imported "${job_home}/builds/1/log" "${sealed_builds}/1/log"
 capture_build 2 imported
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
   "${staging}/evidence/imported-build-1.json" >/dev/null
@@ -803,7 +818,7 @@ test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 stop_controller
 
 start_controller "${home}" "${home_plugins}"
-capture_build 1 restarted
+capture_build 1 restarted "${job_home}/builds/1/log" "${sealed_builds}/1/log"
 capture_build 2 restarted
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
   "${staging}/evidence/restarted-build-1.json" >/dev/null
@@ -826,7 +841,7 @@ podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 podman exec "${container}" curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:8080/job/${job}/build" >/dev/null
-capture_build 3 continued
+capture_build 3 continued "${job_home}/builds/3/log"
 jq --exit-status '.number == 3 and .result == "SUCCESS"' \
   "${staging}/evidence/continued-build-3.json" >/dev/null
 rg --quiet 'Hello World' "${staging}/evidence/continued-build-3.log"
@@ -870,6 +885,15 @@ cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-state-transfer-rece
   "${staging}/mcloving-state-transfer-receipt.json"
 cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-state-transfer-build.json" \
   "${staging}/mcloving-state-transfer-build.json"
+cmp "${staging}/evidence/imported-build-1.log" "${sealed_builds}/1/log"
+cmp "${staging}/evidence/restarted-build-1.log" "${sealed_builds}/1/log"
+cmp "${staging}/evidence/jenkins-job-after/builds/1/log" "${sealed_builds}/1/log"
+cmp "${staging}/evidence/jenkins-job-after/builds/2/log" \
+  "${staging}/evidence/imported-build-2.log"
+cmp "${staging}/evidence/jenkins-job-after/builds/2/log" \
+  "${staging}/evidence/restarted-build-2.log"
+cmp "${staging}/evidence/jenkins-job-after/builds/3/log" \
+  "${staging}/evidence/continued-build-3.log"
 rm -f -- "${staging}/imported-build-2.log" \
   "${staging}/imported-build-2.log-index" \
   "${staging}/mcloving-state-transfer-build.json" \
