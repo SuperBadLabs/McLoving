@@ -6,7 +6,7 @@ use std::path::Path;
 
 use mcloving_jenkins_state_transfer::{
     ImportBinding, SealedHistory, admitted_destination_identity, admitted_source_identity,
-    digest_tree, normalize_single_aborted_workflow,
+    admitted_tree_digest, digest_tree, normalize_single_aborted_workflow,
 };
 use mcloving_state_transfer::{BuildResult, Digest, sha256, transform};
 
@@ -34,6 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let root = Path::new(&arguments[1]);
     let expected_tree_digest = parse_digest(&arguments[2])?;
+    if expected_tree_digest != admitted_tree_digest() {
+        return Err("expected tree digest is not the exact admitted digest".into());
+    }
     let files = load_exact_files(root)?;
     if digest_tree(&files)? != expected_tree_digest {
         return Err("sealed source digest mismatch".into());

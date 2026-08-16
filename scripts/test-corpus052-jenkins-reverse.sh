@@ -76,6 +76,23 @@ jq --exit-status --arg job "${job}" '
   and .jobs[0].builds[1].logs[0].bytes == 12
   and .jobs[0].builds[1].logs[1].bytes == 19
 ' "${reverse_bundle}" >/dev/null
+test "$(jq -r '.binding.source.instance_id' "${reverse_bundle}")" = \
+  'mcloving/disposable-postgres'
+test "$(jq -r '.binding.source.generation' "${reverse_bundle}")" = 'migration-18'
+test "$(jq -r '.binding.destination.instance_id' "${reverse_bundle}")" = \
+  'jenkins/mario/jenkins-oracle-228'
+test "$(jq -r '.binding.destination.generation' "${reverse_bundle}")" = \
+  'offline-frozen-source-state'
+expected_source_configuration=$(printf '%s' 'mcloving-postgresql-v18-effect-free' \
+  | sha256sum | awk '{print $1}')
+expected_destination_configuration=$(printf '%s' 'mario-jenkins-oracle-228-frozen-profile' \
+  | sha256sum | awk '{print $1}')
+actual_source_configuration=$(jq -r '.binding.source.configuration_digest[]' \
+  "${reverse_bundle}" | awk '{printf "%02x", $1} END {print ""}')
+actual_destination_configuration=$(jq -r '.binding.destination.configuration_digest[]' \
+  "${reverse_bundle}" | awk '{printf "%02x", $1} END {print ""}')
+test "${actual_source_configuration}" = "${expected_source_configuration}"
+test "${actual_destination_configuration}" = "${expected_destination_configuration}"
 expected_stdout_digest=$(jq -r '
   .jobs[0].builds[1].logs[0].content_digest[]
 ' "${reverse_bundle}" | awk '{printf "%02x", $1} END {print ""}')
@@ -182,6 +199,19 @@ jq --sort-keys '.jobs[0].builds[0]' "${reverse_bundle}" \
   > "${staging}/evidence/reverse-source-build-1.json"
 cmp "${staging}/evidence/authenticated-source-build-1.json" \
   "${staging}/evidence/reverse-source-build-1.json"
+jq --sort-keys '.binding | {
+  transform_implementation_digest,
+  transform_configuration_digest,
+  conflict_policy
+}' "${staging}/evidence/authenticated-source-forward-bundle.json" \
+  > "${staging}/evidence/authenticated-transform-binding.json"
+jq --sort-keys '.binding | {
+  transform_implementation_digest,
+  transform_configuration_digest,
+  conflict_policy
+}' "${reverse_bundle}" > "${staging}/evidence/reverse-transform-binding.json"
+cmp "${staging}/evidence/authenticated-transform-binding.json" \
+  "${staging}/evidence/reverse-transform-binding.json"
 
 cp "${fixture_root}/init.groovy" "${home}/init.groovy.d/10-mig005a.groovy"
 cp "${fixture_root}/corpus052-job-config.xml" "${job_home}/config.xml"
@@ -336,6 +366,19 @@ jq --exit-status '.number == 2 and .result == "SUCCESS"' \
 test "$(cat "${staging}/evidence/imported-build-2.log")" = \
   $'Hello World\n+ echo Hello World'
 capture_workflow 2 imported
+test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
+stop_controller
+
+start_controller "${home}"
+capture_build 1 restarted
+capture_build 2 restarted
+jq --exit-status '.number == 1 and .result == "ABORTED"' \
+  "${staging}/evidence/restarted-build-1.json" >/dev/null
+jq --exit-status '.number == 2 and .result == "SUCCESS"' \
+  "${staging}/evidence/restarted-build-2.json" >/dev/null
+test "$(cat "${staging}/evidence/restarted-build-2.log")" = \
+  $'Hello World\n+ echo Hello World'
+capture_workflow 2 restarted
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:${port}/job/${job}/build" >/dev/null

@@ -19,6 +19,10 @@ use sha2::{Digest as _, Sha256};
 const MAX_XML_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
 const ADMITTED_JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
+const ADMITTED_TREE_DIGEST: Digest = [
+    0xb4, 0x7c, 0xc3, 0xe1, 0xc1, 0x9e, 0x1d, 0x48, 0x6a, 0x2d, 0xf2, 0xfc, 0x76, 0x34, 0x3e, 0x30,
+    0x31, 0xee, 0x37, 0x0a, 0x79, 0x56, 0x4f, 0xe8, 0x8a, 0x47, 0x1a, 0xdb, 0xf6, 0xe5, 0x31, 0x07,
+];
 const EXPECTED_PATHS: [&str; 5] = [
     "1/build.xml",
     "1/log",
@@ -88,11 +92,23 @@ pub fn admitted_destination_identity() -> SystemIdentity {
     }
 }
 
+pub const fn admitted_tree_digest() -> Digest {
+    ADMITTED_TREE_DIGEST
+}
+
 pub fn normalize_single_aborted_workflow(
     history: &SealedHistory,
     binding: &ImportBinding,
 ) -> Result<ParsedHistory, HistoryError> {
-    validate_history_input(history)?;
+    normalize_single_aborted_workflow_inner(history, binding, true)
+}
+
+fn normalize_single_aborted_workflow_inner(
+    history: &SealedHistory,
+    binding: &ImportBinding,
+    require_admitted_tree: bool,
+) -> Result<ParsedHistory, HistoryError> {
+    validate_history_input(history, require_admitted_tree)?;
     validate_text(&binding.source_job_id, "source job ID")?;
     validate_text(&binding.target_pipeline_id, "target pipeline ID")?;
     validate_text(&binding.provenance, "binding provenance")?;
@@ -414,7 +430,10 @@ pub fn prepare_reverse_history(
     Ok(ParsedHistory { bundle, expected })
 }
 
-fn validate_history_input(history: &SealedHistory) -> Result<(), HistoryError> {
+fn validate_history_input(
+    history: &SealedHistory,
+    require_admitted_tree: bool,
+) -> Result<(), HistoryError> {
     validate_text(&history.opaque_evidence_id, "opaque evidence ID")?;
     let actual_paths = history
         .files
@@ -442,7 +461,9 @@ fn validate_history_input(history: &SealedHistory) -> Result<(), HistoryError> {
     {
         return Err(invalid("sealed history exceeds a byte limit"));
     }
-    if digest_tree(&history.files)? != history.expected_tree_digest {
+    if (require_admitted_tree && history.expected_tree_digest != ADMITTED_TREE_DIGEST)
+        || digest_tree(&history.files)? != history.expected_tree_digest
+    {
         return Err(HistoryError::TreeDigest);
     }
     Ok(())
@@ -771,7 +792,7 @@ mod tests {
     #[test]
     fn exact_aborted_history_normalizes_and_validates() {
         let history = history();
-        let parsed = normalize_single_aborted_workflow(&history, &binding()).unwrap();
+        let parsed = normalize_test_workflow(&history, &binding()).unwrap();
         transform(&parsed.bundle, &parsed.expected, &BTreeMap::new()).unwrap();
 
         let job = &parsed.bundle.jobs[0];
@@ -793,7 +814,7 @@ mod tests {
 
     #[test]
     fn completed_mcloving_build_prepares_valid_exact_reverse_history() {
-        let parsed = normalize_single_aborted_workflow(&history(), &binding()).unwrap();
+        let parsed = normalize_test_workflow(&history(), &binding()).unwrap();
         let reverse = prepare_reverse_history(
             &parsed.bundle,
             completed_build(&parsed.bundle.jobs[0].builds[0]),
@@ -830,14 +851,14 @@ mod tests {
         let mut source_substitution = binding();
         source_substitution.source_job_id = "corpus-052-substituted".to_owned();
         assert!(matches!(
-            normalize_single_aborted_workflow(&history(), &source_substitution),
+            normalize_test_workflow(&history(), &source_substitution),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
         ));
 
         let mut target_substitution = binding();
         target_substitution.target_pipeline_id = "corpus-052-substituted".to_owned();
         assert!(matches!(
-            normalize_single_aborted_workflow(&history(), &target_substitution),
+            normalize_test_workflow(&history(), &target_substitution),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted job")
         ));
     }
@@ -847,21 +868,21 @@ mod tests {
         let mut source_substitution = binding();
         source_substitution.source.configuration_digest = sha256(b"substituted-source-profile");
         assert!(matches!(
-            normalize_single_aborted_workflow(&history(), &source_substitution),
+            normalize_test_workflow(&history(), &source_substitution),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
         ));
 
         let mut destination_substitution = binding();
         destination_substitution.destination.generation = "substituted-generation".to_owned();
         assert!(matches!(
-            normalize_single_aborted_workflow(&history(), &destination_substitution),
+            normalize_test_workflow(&history(), &destination_substitution),
             Err(HistoryError::Invalid(message)) if message.contains("exact admitted identities")
         ));
     }
 
     #[test]
     fn reverse_history_rejects_gap_duplicate_and_noninverse_identity() {
-        let parsed = normalize_single_aborted_workflow(&history(), &binding()).unwrap();
+        let parsed = normalize_test_workflow(&history(), &binding()).unwrap();
         let mut gap = completed_build(&parsed.bundle.jobs[0].builds[0]);
         gap.number = 3;
         assert!(matches!(
@@ -920,7 +941,18 @@ mod tests {
         let mut history = history();
         history.files.get_mut("1/log").unwrap().push(b'!');
         assert_eq!(
-            normalize_single_aborted_workflow(&history, &binding()),
+            normalize_test_workflow(&history, &binding()),
+            Err(HistoryError::TreeDigest)
+        );
+    }
+
+    #[test]
+    fn caller_supplied_self_consistent_tree_digest_is_not_admitted() {
+        let mut substituted = history();
+        substituted.files.get_mut("1/log").unwrap().push(b'!');
+        substituted.expected_tree_digest = digest_tree(&substituted.files).unwrap();
+        assert_eq!(
+            normalize_single_aborted_workflow(&substituted, &binding()),
             Err(HistoryError::TreeDigest)
         );
     }
@@ -933,7 +965,7 @@ mod tests {
             .insert("1/injected".to_owned(), b"unexpected".to_vec());
         extra_file.expected_tree_digest = digest_tree(&extra_file.files).unwrap();
         assert!(matches!(
-            normalize_single_aborted_workflow(&extra_file, &binding()),
+            normalize_test_workflow(&extra_file, &binding()),
             Err(HistoryError::Invalid(message)) if message.contains("file denominator")
         ));
 
@@ -947,7 +979,7 @@ mod tests {
         );
         extra_node.expected_tree_digest = digest_tree(&extra_node.files).unwrap();
         assert!(matches!(
-            normalize_single_aborted_workflow(&extra_node, &binding()),
+            normalize_test_workflow(&extra_node, &binding()),
             Err(HistoryError::Invalid(message)) if message.contains("node denominator")
         ));
     }
@@ -961,7 +993,7 @@ mod tests {
                 .to_vec(),
         );
         entity.expected_tree_digest = digest_tree(&entity.files).unwrap();
-        assert!(normalize_single_aborted_workflow(&entity, &binding()).is_err());
+        assert!(normalize_test_workflow(&entity, &binding()).is_err());
 
         let mut permalink = history();
         permalink
@@ -969,9 +1001,16 @@ mod tests {
             .insert("permalinks".to_owned(), b"lastCompletedBuild 2\n".to_vec());
         permalink.expected_tree_digest = digest_tree(&permalink.files).unwrap();
         assert!(matches!(
-            normalize_single_aborted_workflow(&permalink, &binding()),
+            normalize_test_workflow(&permalink, &binding()),
             Err(HistoryError::Invalid(message)) if message.contains("permalink")
         ));
+    }
+
+    fn normalize_test_workflow(
+        history: &SealedHistory,
+        binding: &ImportBinding,
+    ) -> Result<ParsedHistory, HistoryError> {
+        normalize_single_aborted_workflow_inner(history, binding, false)
     }
 
     fn history() -> SealedHistory {
