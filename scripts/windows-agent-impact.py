@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-ANCHOR_PACKAGE = "mcloving-agent"
+ANCHOR_PACKAGES = {"mcloving-agent", "mcloving-migration-package"}
 ALWAYS_RUN_PATHS = {
     ".cargo/config",
     ".cargo/config.toml",
@@ -34,6 +34,7 @@ WINDOWS_VERIFIER_DIRECTORIES = {
     Path("crates/migration-package"),
     Path("crates/state-policy-differential"),
 }
+WINDOWS_VERIFIER_INPUT_DIRECTORIES = {Path("migration")}
 
 
 def run(*args: str, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
@@ -127,17 +128,18 @@ def package_key(package: dict[str, Any]) -> tuple[str, str, str]:
 def closure(metadata: dict[str, Any], tree: Path) -> tuple[set[Path], str]:
     packages = {package["id"]: package for package in metadata["packages"]}
     nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-    anchors = [
-        package["id"]
+    anchors = {
+        package["name"]: package["id"]
         for package in metadata["packages"]
-        if package["name"] == ANCHOR_PACKAGE and package.get("source") is None
-    ]
-    if len(anchors) != 1:
+        if package["name"] in ANCHOR_PACKAGES and package.get("source") is None
+    }
+    if "mcloving-agent" not in anchors:
         raise RuntimeError(
-            f"expected one workspace package named {ANCHOR_PACKAGE}, found {len(anchors)}"
+            "expected workspace package mcloving-agent, "
+            f"found {sorted(anchors)}"
         )
 
-    pending = anchors
+    pending = list(anchors.values())
     package_ids: set[str] = set()
     while pending:
         package_id = pending.pop()
@@ -233,18 +235,21 @@ def classify(
         return True, f"gate definition changed: {always[0]}"
 
     for path in sorted(paths):
+        for directory in WINDOWS_VERIFIER_INPUT_DIRECTORIES:
+            if path_is_within(path, directory):
+                return True, f"Windows verifier input changed: {path}"
         for directory in WINDOWS_VERIFIER_DIRECTORIES:
             if path_is_within(path, directory):
                 return True, f"Windows verifier source changed: {path}"
         for directory in base_directories | head_directories:
             if path_is_within(path, directory):
-                return True, f"agent dependency source changed: {path}"
+                return True, f"Windows dependency source changed: {path}"
 
     if base_closure != head_closure:
-        return True, "resolved agent dependency closure changed"
+        return True, "resolved Windows dependency closure changed"
     if base_policy != head_policy:
         return True, "workspace build policy changed"
-    return False, "no Windows agent production or test dependency changed"
+    return False, "no Windows production or verifier dependency changed"
 
 
 def emit_result(run_windows: bool, reason: str) -> None:

@@ -36,7 +36,10 @@ The envelope binds and embeds:
 
 Exactly one disposition is `packaged_disabled_certified`. The other 227 are
 `deterministically_rejected` with `E_SOURCE_NOT_ADMITTED`. The package does
-not reinterpret the historical parser/model reach denominator.
+not reinterpret the historical parser/model reach denominator. Each row keeps
+the source index's `source_certified_equivalence=false` truth separate from
+the later `mig006_certified_equivalence` result; only the admitted case has the
+latter set to true.
 
 ## Canonical verification
 
@@ -79,7 +82,7 @@ bit is false and the source operational state is disabled.
 ## Seal and portability
 
 The canonical package SHA-256 is
-`ecfd929553a48012f218207aa4093139f8b200e652d335bf5eab376e059e2d28`.
+`9f68159216d385bf9b14deb3bb3957bdb7e79e1ed77ca374786da5676c07b13c`.
 The package and seal are marked non-translatable in `.gitattributes`.
 Linux and hosted Windows compile, lint, and execute the verifier. The CLI opens
 the supplied package once with platform no-follow semantics, validates a

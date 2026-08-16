@@ -63,7 +63,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "AmanPathak-DevOps_EKS-Terraform-GitHub-Actions.Jenkinsfile",
@@ -71,7 +72,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "BBVA_mirrorgate.Jenkinsfile",
@@ -79,7 +81,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Ben1980_jenkinsexample.Jenkinsfile",
@@ -87,7 +90,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Blazemeter_taurus.Jenkinsfile",
@@ -95,7 +99,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Chabane_mitosis-microservice-spark-cassandra.Jenkinsfile",
@@ -103,7 +108,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "DeekshithSN_Jenkinsfile.Jenkinsfile",
@@ -111,7 +117,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "HariSekhon_DevOps-Bash-tools.Jenkinsfile",
@@ -119,7 +126,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "HariSekhon_Jenkins.Jenkinsfile",
@@ -127,7 +135,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "HariSekhon_Nagios-Plugins.Jenkinsfile",
@@ -135,7 +144,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "HariSekhon_Templates.Jenkinsfile",
@@ -143,7 +153,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Jotschi_maven-release-workflow-test.Jenkinsfile",
@@ -151,7 +162,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "MrRameshRajendran_Hybrid_MultiCloud_Overlay.Jenkinsfile",
@@ -159,7 +171,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ORCID_ORCID-Source.Jenkinsfile",
@@ -167,7 +180,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Primus19_jenkins-pipeline-deploy-to-eks.Jenkinsfile",
@@ -175,7 +189,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Rapter1990_springbootmicroservicedailybuffer.Jenkinsfile",
@@ -183,7 +198,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "RitheeshBaradwaj_JenkinsPipeline.Jenkinsfile",
@@ -191,7 +207,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Romeh_spring-boot-ignite.Jenkinsfile",
@@ -199,7 +216,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Romeh_spring-boot-sample-app.Jenkinsfile",
@@ -207,7 +225,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Statemood_jenkins-library.Jenkinsfile",
@@ -215,7 +234,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "SumanReddy568_Selenium-Python-Pytest-framework.Jenkinsfile",
@@ -223,7 +243,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "SumitKr88_multiscanpipeline-jenkins-fastlane-ios.Jenkinsfile",
@@ -231,7 +252,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "SumitM01_CI-CD-for-Docker-Kubernetes-using-Jenkins.Jenkinsfile",
@@ -239,7 +261,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "TTFHW_jenkins_pipeline_java_maven.Jenkinsfile",
@@ -247,7 +270,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "TTFHW_jenkins_pipeline_shell_scripts.Jenkinsfile",
@@ -255,7 +279,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "TechPrimers_jenkins-example.Jenkinsfile",
@@ -263,7 +288,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Terradue_DotNet4One.Jenkinsfile",
@@ -271,7 +297,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Terradue_DotNetOpenSearchClient.Jenkinsfile",
@@ -279,7 +306,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "TomCzHen_jenkins-android-sample.Jenkinsfile",
@@ -287,7 +315,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "Tynab_crm-project.Jenkinsfile",
@@ -295,7 +324,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "VAD37_unity-jenkinsfile.Jenkinsfile",
@@ -303,7 +333,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "adamrushuk_powershell-pipeline.Jenkinsfile",
@@ -311,7 +342,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ahmedmourshedi_Automation-Testing-of-ECommerce-WebsiteUsingSelenium.Jenkinsfile",
@@ -319,7 +351,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "aiwithqasim_Capstone-Project-Devops.Jenkinsfile",
@@ -327,7 +360,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "alanmacgowan_WebApplication.Jenkinsfile",
@@ -335,7 +369,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "alexguzun_jenkins-pipeline-gitflow-maven.Jenkinsfile",
@@ -343,7 +378,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "allcloud-io_jenkins-pipeline-tutorial.Jenkinsfile",
@@ -351,7 +387,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "arun-gupta_docker-jenkins-pipeline.Jenkinsfile",
@@ -359,7 +396,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "aws-samples_ecs-bg-external-controller.Jenkinsfile",
@@ -367,7 +405,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "awslabs_aws-codepipeline-plugin-for-jenkins.Jenkinsfile",
@@ -375,7 +414,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "bcgov_openshift-wiki.Jenkinsfile",
@@ -383,7 +423,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "beifei1_fire-cloud.Jenkinsfile",
@@ -391,7 +432,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "bmustiata_jenny.Jenkinsfile",
@@ -399,7 +441,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "boozallen_devsecops-example-helloworld.Jenkinsfile",
@@ -407,7 +450,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "bszeti_kubernetes-integration-test.Jenkinsfile",
@@ -415,7 +459,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "buildit_jenkins-pipeline-libraries.Jenkinsfile",
@@ -423,7 +468,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "camiloribeiro_cdeasy.Jenkinsfile",
@@ -431,7 +477,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "captjt_jenkins-pipeline-express.Jenkinsfile",
@@ -439,7 +486,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "charlires_golang-docker-jenkins.Jenkinsfile",
@@ -447,7 +495,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "choiis_Cpp-IOCP-Server.Jenkinsfile",
@@ -455,7 +504,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "chrsoo_microservices.Jenkinsfile",
@@ -463,7 +513,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cinqict_jenkinsdev.Jenkinsfile",
@@ -471,7 +522,8 @@
       "migration_class": "admitted-compile-only",
       "worker_disposition": "compiled-disabled-import",
       "package_status": "packaged_disabled_certified",
-      "certified_equivalence": true
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": true
     },
     {
       "file": "clintmod_unit-testing-jenkinsfile.Jenkinsfile",
@@ -479,7 +531,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cloud-bulldozer_scale-ci-pipeline.Jenkinsfile",
@@ -487,7 +540,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cloudogu_ces-build-lib.Jenkinsfile",
@@ -495,7 +549,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cloudogu_continuous-delivery-slides.Jenkinsfile",
@@ -503,7 +558,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cloudogu_gitops-build-lib.Jenkinsfile",
@@ -511,7 +567,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cloudogu_gitops-playground.Jenkinsfile",
@@ -519,7 +576,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cloudogu_reveal.js-docker-example.Jenkinsfile",
@@ -527,7 +585,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "concur_jenkins-yml-workflowLibs.Jenkinsfile",
@@ -535,7 +594,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "cvitter_jenkins-pipeline-examples.Jenkinsfile",
@@ -543,7 +603,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "darinpope_jenkinsfile-library.Jenkinsfile",
@@ -551,7 +612,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "devops-ws_learn-pipeline-java.Jenkinsfile",
@@ -559,7 +621,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "eggsy84_gcp-spring-boot-app.Jenkinsfile",
@@ -567,7 +630,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "eldada_jenkins-pipeline-kubernetes.Jenkinsfile",
@@ -575,7 +639,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "esign-consulting_logistics.Jenkinsfile",
@@ -583,7 +648,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "everflux_angular-jenkinsfile.Jenkinsfile",
@@ -591,7 +657,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "evry-ace_jenkins-ace-library.Jenkinsfile",
@@ -599,7 +666,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "executeautomation_JenkinsPipeline.Jenkinsfile",
@@ -607,7 +675,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "fabric8io_fabric8-pipeline-library.Jenkinsfile",
@@ -615,7 +684,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "fabric8io_fabric8-platform.Jenkinsfile",
@@ -623,7 +693,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "fatimajamali81_jenkins-iis-cicd-pipeline.Jenkinsfile",
@@ -631,7 +702,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "gdemengin_pipeline-logparser.Jenkinsfile",
@@ -639,7 +711,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "gfkse_jenkins-shared-library.Jenkinsfile",
@@ -647,7 +720,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "griddynamics-archive_mpl.Jenkinsfile",
@@ -655,7 +729,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "hakdogan_jenkins-pipeline.Jenkinsfile",
@@ -663,7 +738,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "hamitmizrak_Devops_Jenkinsfile.Jenkinsfile",
@@ -671,7 +747,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "holdennguyen_cicd-pipeline-java-webapp.Jenkinsfile",
@@ -679,7 +756,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "hungbang_spring-boot-aws-docdb-example.Jenkinsfile",
@@ -687,7 +765,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ishrivatsa_terraform-vault-jenkins.Jenkinsfile",
@@ -695,7 +774,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "j8kin_habr-jenkinsfile.Jenkinsfile",
@@ -703,7 +783,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jalogut_jenkinsfile-basic-sample.Jenkinsfile",
@@ -711,7 +792,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jalogut_jenkinsfile-shared-library-sample.Jenkinsfile",
@@ -719,7 +801,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkins-infra_jenkins.io.Jenkinsfile",
@@ -727,7 +810,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkins-infra_pipeline-library.Jenkinsfile",
@@ -735,7 +819,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkins-infra_update-center2.Jenkinsfile",
@@ -743,7 +828,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkins-zh_jenkins-cli.Jenkinsfile",
@@ -751,7 +837,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_JenkinsPipelineUnit.Jenkinsfile",
@@ -759,7 +846,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_amazon-ecs-plugin.Jenkinsfile",
@@ -767,7 +855,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_artifact-promotion-plugin.Jenkinsfile",
@@ -775,7 +864,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_badge-plugin.Jenkinsfile",
@@ -783,7 +873,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_bitbucket-push-and-pull-request-plugin.Jenkinsfile",
@@ -791,7 +882,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_ci.jenkins.io-runner.Jenkinsfile",
@@ -799,7 +891,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_code-coverage-api-plugin.Jenkinsfile",
@@ -807,7 +900,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_config-driven-pipeline-plugin.Jenkinsfile",
@@ -815,7 +909,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_configuration-as-code-plugin.Jenkinsfile",
@@ -823,7 +918,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_credentials-plugin.Jenkinsfile",
@@ -831,7 +927,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_declarative-pipeline-migration-assistant-plugin.Jenkinsfile",
@@ -839,7 +936,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_dependency-track-plugin.Jenkinsfile",
@@ -847,7 +945,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_dingtalk-plugin.Jenkinsfile",
@@ -855,7 +954,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_docker-agents.Jenkinsfile",
@@ -863,7 +963,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_docker-inbound-agent.Jenkinsfile",
@@ -871,7 +972,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_docker-plugin.Jenkinsfile",
@@ -879,7 +981,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_docker-workflow-plugin.Jenkinsfile",
@@ -887,7 +990,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_docker.Jenkinsfile",
@@ -895,7 +999,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_gitea-plugin.Jenkinsfile",
@@ -903,7 +1008,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_github-branch-source-plugin.Jenkinsfile",
@@ -911,7 +1017,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_github-pr-comment-build-plugin.Jenkinsfile",
@@ -919,7 +1026,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_gitlab-branch-source-plugin.Jenkinsfile",
@@ -927,7 +1035,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_groovy-sandbox.Jenkinsfile",
@@ -935,7 +1044,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_hashicorp-vault-pipeline-plugin.Jenkinsfile",
@@ -943,7 +1053,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_hashicorp-vault-plugin.Jenkinsfile",
@@ -951,7 +1062,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_http-request-plugin.Jenkinsfile",
@@ -959,7 +1071,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_hubot-steps-plugin.Jenkinsfile",
@@ -967,7 +1080,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jacoco-plugin.Jenkinsfile",
@@ -975,7 +1089,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jenkins-test-harness.Jenkinsfile",
@@ -983,7 +1098,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jenkins.Jenkinsfile",
@@ -991,7 +1107,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jenkinsfile-runner-test-framework.Jenkinsfile",
@@ -999,7 +1116,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jenkinsfile-runner.Jenkinsfile",
@@ -1007,7 +1125,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jira-plugin.Jenkinsfile",
@@ -1015,7 +1134,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jira-steps-plugin.Jenkinsfile",
@@ -1023,7 +1143,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_jira-trigger-plugin.Jenkinsfile",
@@ -1031,7 +1152,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_job-dsl-plugin.Jenkinsfile",
@@ -1039,7 +1161,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_labelled-steps-plugin.Jenkinsfile",
@@ -1047,7 +1170,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_multiple-scms-plugin.Jenkinsfile",
@@ -1055,7 +1179,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_nested-data-reporting-plugin.Jenkinsfile",
@@ -1063,7 +1188,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_opentelemetry-plugin.Jenkinsfile",
@@ -1071,7 +1197,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_performance-plugin.Jenkinsfile",
@@ -1079,7 +1206,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-as-yaml-plugin.Jenkinsfile",
@@ -1087,7 +1215,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-aws-plugin.Jenkinsfile",
@@ -1095,7 +1224,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-cloudwatch-logs-plugin.Jenkinsfile",
@@ -1103,7 +1233,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-github-lib-plugin.Jenkinsfile",
@@ -1111,7 +1242,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-githubnotify-step-plugin.Jenkinsfile",
@@ -1119,7 +1251,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-gitstatuswrapper-plugin.Jenkinsfile",
@@ -1127,7 +1260,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-graph-view-plugin.Jenkinsfile",
@@ -1135,7 +1269,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-maven-plugin.Jenkinsfile",
@@ -1143,7 +1278,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-model-definition-plugin.Jenkinsfile",
@@ -1151,7 +1287,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-stage-view-plugin.Jenkinsfile",
@@ -1159,7 +1296,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_pipeline-utility-steps-plugin.Jenkinsfile",
@@ -1167,7 +1305,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_plot-plugin.Jenkinsfile",
@@ -1175,7 +1314,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_plugin-installation-manager-tool.Jenkinsfile",
@@ -1183,7 +1323,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_qy-wechat-notification-plugin.Jenkinsfile",
@@ -1191,7 +1332,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_remote-file-plugin.Jenkinsfile",
@@ -1199,7 +1341,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_remoting.Jenkinsfile",
@@ -1207,7 +1350,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_role-strategy-plugin.Jenkinsfile",
@@ -1215,7 +1359,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_simple-build-for-pipeline-plugin.Jenkinsfile",
@@ -1223,7 +1368,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_ssh-steps-plugin.Jenkinsfile",
@@ -1231,7 +1377,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_stashnotifier-plugin.Jenkinsfile",
@@ -1239,7 +1386,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_subversion-plugin.Jenkinsfile",
@@ -1247,7 +1395,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_swarm-plugin.Jenkinsfile",
@@ -1255,7 +1404,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_tekton-client-plugin.Jenkinsfile",
@@ -1263,7 +1413,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_warnings-ng-plugin.Jenkinsfile",
@@ -1271,7 +1422,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_webhook-step-plugin.Jenkinsfile",
@@ -1279,7 +1431,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_workflow-basic-steps-plugin.Jenkinsfile",
@@ -1287,7 +1440,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_workflow-job-plugin.Jenkinsfile",
@@ -1295,7 +1449,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jenkinsci_workflow-multibranch-plugin.Jenkinsfile",
@@ -1303,7 +1458,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jerearista_python-jenkinsfile-testing.Jenkinsfile",
@@ -1311,7 +1467,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jjasghar_jenkinsfile_cookbook_pipeline.Jenkinsfile",
@@ -1319,7 +1476,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "judexzhu_Jenkins-Pipeline-CI-CD-with-Helm-on-Kubernetes.Jenkinsfile",
@@ -1327,7 +1485,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "jussaragranja_SeleniumEasyTest2.Jenkinsfile",
@@ -1335,7 +1494,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "juvalen_mb-checker.Jenkinsfile",
@@ -1343,7 +1503,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "k11h-de_zap-jenkins.Jenkinsfile",
@@ -1351,7 +1512,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "kenych_jenkins_config_as_code.Jenkinsfile",
@@ -1359,7 +1521,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "kesselborn_jenkinsfile.Jenkinsfile",
@@ -1367,7 +1530,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "kishorebhatia_pipeline-as-code-demo.Jenkinsfile",
@@ -1375,7 +1539,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "kitconcept_jenkins-pipeline-examples.Jenkinsfile",
@@ -1383,7 +1548,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "krasi-georgiev_cd-demo.Jenkinsfile",
@@ -1391,7 +1557,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ksuther_jenkins-jenkinsfile-include.Jenkinsfile",
@@ -1399,7 +1566,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "liatrio_pipeline-library.Jenkinsfile",
@@ -1407,7 +1575,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "linuxacademy_cicd-pipeline-train-schedule-autodeploy.Jenkinsfile",
@@ -1415,7 +1584,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "linuxacademy_cicd-pipeline-train-schedule-canary.Jenkinsfile",
@@ -1423,7 +1593,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "linuxacademy_cicd-pipeline-train-schedule-cd.Jenkinsfile",
@@ -1431,7 +1602,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "linuxacademy_cicd-pipeline-train-schedule-dockerdeploy.Jenkinsfile",
@@ -1439,7 +1611,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "linuxacademy_cicd-pipeline-train-schedule-kubernetes.Jenkinsfile",
@@ -1447,7 +1620,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ljpengelen_jenkinsfile.Jenkinsfile",
@@ -1455,7 +1629,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "llknur_jenkinsfile-pipeline-project.Jenkinsfile",
@@ -1463,7 +1638,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "maajor_Blender-Geometry-CI.Jenkinsfile",
@@ -1471,7 +1647,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "macg33zr_pipelineUnit.Jenkinsfile",
@@ -1479,7 +1656,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "maxyermayank_jenkins-pipeline-demo-api.Jenkinsfile",
@@ -1487,7 +1665,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "maxyermayank_jenkins-pipeline-demo-pwa.Jenkinsfile",
@@ -1495,7 +1674,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "mercedes-benz_pipeliner.Jenkinsfile",
@@ -1503,7 +1683,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "merken_netCoreBuild.Jenkinsfile",
@@ -1511,7 +1692,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "metersphere_jenkins-plugin.Jenkinsfile",
@@ -1519,7 +1701,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "microsoft_movie-db-java-on-azure.Jenkinsfile",
@@ -1527,7 +1710,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "mindstix-labs_qa-automation-accelerator.Jenkinsfile",
@@ -1535,7 +1719,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "mjah_kubernetes-jenkins-cicd-pipeline-example.Jenkinsfile",
@@ -1543,7 +1728,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "mjuuso_provisioning_example.Jenkinsfile",
@@ -1551,7 +1737,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "mmelmesary_Automated-DevOps-Project.Jenkinsfile",
@@ -1559,7 +1746,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "mraible_ng-demo.Jenkinsfile",
@@ -1567,7 +1755,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "msfidelis_jenkins-ecs-slaves.Jenkinsfile",
@@ -1575,7 +1764,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "murphysecurity_murphysec-jenkins-tools.Jenkinsfile",
@@ -1583,7 +1773,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "narasimhavuppala_jenkins-calculator.Jenkinsfile",
@@ -1591,7 +1782,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "narottamgla_selenium-bdd-cucumber.Jenkinsfile",
@@ -1599,7 +1791,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "netcorebcn_quiz.Jenkinsfile",
@@ -1607,7 +1800,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "nikoly_selenium-grid-docker.Jenkinsfile",
@@ -1615,7 +1809,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ocf_ircbot.Jenkinsfile",
@@ -1623,7 +1818,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ocf_ocflib.Jenkinsfile",
@@ -1631,7 +1827,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ocf_ocfweb.Jenkinsfile",
@@ -1639,7 +1836,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ocf_slackbridge.Jenkinsfile",
@@ -1647,7 +1845,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "pavankjadda_BookStore.Jenkinsfile",
@@ -1655,7 +1854,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "pawnu_PythonSecurityPipeline.Jenkinsfile",
@@ -1663,7 +1863,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "planetpratik_CMake-Jenkins-CPP.Jenkinsfile",
@@ -1671,7 +1872,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "prashantgohel321_DevOps-Project-Two-Tier-Flask-App.Jenkinsfile",
@@ -1679,7 +1881,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "qiuhuanhen_springboot-DDD.Jenkinsfile",
@@ -1687,7 +1890,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "releaseworks_hellonode.Jenkinsfile",
@@ -1695,7 +1899,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "restalion_python-jenkins-pipeline.Jenkinsfile",
@@ -1703,7 +1908,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "ricardozanini_soccer-stats.Jenkinsfile",
@@ -1711,7 +1917,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "rmkanda_secure-pipeline-java-demo.Jenkinsfile",
@@ -1719,7 +1926,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "roryeckel_codex-jenkinsfile.Jenkinsfile",
@@ -1727,7 +1935,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "rosineygp_mkdkr.Jenkinsfile",
@@ -1735,7 +1944,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "saidsef_alpine-jenkins-dockerfile.Jenkinsfile",
@@ -1743,7 +1953,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "saidsef_jenkins-pipeline-examples.Jenkinsfile",
@@ -1751,7 +1962,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "shazforiot_Jenkins-integration-with-kubernetes.Jenkinsfile",
@@ -1759,7 +1971,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "shipping-docker_simple-jerkins.Jenkinsfile",
@@ -1767,7 +1980,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "sidd-harth_apigee-cicd.Jenkinsfile",
@@ -1775,7 +1989,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "sixeyed_jenkins-pipeline-demos.Jenkinsfile",
@@ -1783,7 +1998,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "stakater_GitWebhookProxy.Jenkinsfile",
@@ -1791,7 +2007,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "tknerr_jenkins-pipes-helloworld.Jenkinsfile",
@@ -1799,7 +2016,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "tomasbjerre_bitbucket-server-jenkins-release-tags.Jenkinsfile",
@@ -1807,7 +2025,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "varunpalekar_php-ci-cd.Jenkinsfile",
@@ -1815,7 +2034,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "vineet68sharma_CI-CD-Docker.Jenkinsfile",
@@ -1823,7 +2043,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "vinsguru_docker-selenium-jenkinsfile.Jenkinsfile",
@@ -1831,7 +2052,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "vskurikhin_DayBook3.Jenkinsfile",
@@ -1839,7 +2061,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "wanghaoxi3000_advproject.Jenkinsfile",
@@ -1847,7 +2070,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "wildec2_java-selenium-framework.Jenkinsfile",
@@ -1855,7 +2079,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "yashpimple_Jenkins-CI-CD-with-GitHub-Integration.Jenkinsfile",
@@ -1863,7 +2088,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "zhangjian-ai_AutomationTestPlat.Jenkinsfile",
@@ -1871,7 +2097,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     },
     {
       "file": "zowe_jenkins-library.Jenkinsfile",
@@ -1879,7 +2106,8 @@
       "migration_class": "unsupported",
       "worker_disposition": "E_SOURCE_NOT_ADMITTED",
       "package_status": "deterministically_rejected",
-      "certified_equivalence": false
+      "source_certified_equivalence": false,
+      "mig006_certified_equivalence": false
     }
   ],
   "authority": {

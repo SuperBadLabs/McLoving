@@ -21,7 +21,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.migration-package/v1";
 pub const PACKAGE_ID: &str = "mario-corpus-052-disabled-v1";
 pub const PACKAGE_FILE: &str = "migration-package.json";
 pub const MAX_PACKAGE_BYTES: usize = 1_048_576;
-pub const PACKAGE_SHA256: &str = "ecfd929553a48012f218207aa4093139f8b200e652d335bf5eab376e059e2d28";
+pub const PACKAGE_SHA256: &str = "9f68159216d385bf9b14deb3bb3957bdb7e79e1ed77ca374786da5676c07b13c";
 
 const REQUEST_ID: &str = "mig003-golden";
 const SOURCE_FILE: &str =
@@ -204,7 +204,8 @@ struct Disposition {
     migration_class: String,
     worker_disposition: String,
     package_status: String,
-    certified_equivalence: bool,
+    source_certified_equivalence: bool,
+    mig006_certified_equivalence: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -577,7 +578,8 @@ fn dispositions_from_index(index: &str) -> Result<Vec<Disposition>, PackageError
                 "deterministically_rejected"
             }
             .into(),
-            certified_equivalence: admitted,
+            source_certified_equivalence: fields[22] == "true",
+            mig006_certified_equivalence: admitted,
         });
     }
     dispositions.sort();
