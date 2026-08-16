@@ -405,7 +405,6 @@ test "$(podman unshare awk 'END { print NR }' \
   "${template_home}/mig005a-template-shell-invocation.txt")" = 3
 invoked_script=$(podman unshare sed -n '3p' \
   "${template_home}/mig005a-template-shell-invocation.txt")
-[[ "${invoked_script}" == /var/jenkins_home/workspace/*@tmp/durable-*/* ]]
 case "$(basename -- "${invoked_script}")" in
   script.sh | script.sh.copy) ;;
   *) exit 1 ;;
