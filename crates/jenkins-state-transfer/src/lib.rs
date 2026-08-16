@@ -182,11 +182,39 @@ pub fn verify_retained_job_configuration(
     let actual = canonical_job_configuration(bytes)?;
     let expected = canonical_job_configuration(reviewed)?;
     if actual != expected {
-        return Err(invalid(
-            "retained Jenkins job configuration is behaviorally divergent",
-        ));
+        let index = actual
+            .iter()
+            .zip(&expected)
+            .position(|(actual, expected)| actual != expected)
+            .unwrap_or_else(|| actual.len().min(expected.len()));
+        let actual_category = actual
+            .get(index)
+            .map(job_config_token_category)
+            .unwrap_or_else(|| "end-of-document".to_owned());
+        let expected_category = expected
+            .get(index)
+            .map(job_config_token_category)
+            .unwrap_or_else(|| "end-of-document".to_owned());
+        return Err(invalid(format!(
+            "retained Jenkins job configuration is behaviorally divergent at token {index}: {actual_category} != {expected_category}"
+        )));
     }
     Ok(())
+}
+
+fn job_config_token_category(token: &JobConfigToken) -> String {
+    match token {
+        JobConfigToken::Start(name, attributes) => format!(
+            "start:{name}[{}]",
+            attributes
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        JobConfigToken::Text(_) => "text".to_owned(),
+        JobConfigToken::End(name) => format!("end:{name}"),
+    }
 }
 
 fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, HistoryError> {
