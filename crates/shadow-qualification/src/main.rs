@@ -23,9 +23,19 @@ const MAX_PIN_BYTES: usize = 65;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("shadow qualification failed: {error}");
+        eprintln!(
+            "shadow qualification failed: {}",
+            public_error_code(&*error)
+        );
         std::process::exit(1);
     }
+}
+
+fn public_error_code(_error: &(dyn std::error::Error + 'static)) -> &'static str {
+    // Owner-private inputs can appear inside parser and I/O error strings. Keep the
+    // process boundary deliberately non-reflective; detailed diagnosis belongs in
+    // the owner-private evidence package, never captured stderr.
+    "SHADOW_QUALIFICATION_FAILED"
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -563,5 +573,20 @@ mod tests {
         assert_eq!(fs::read(&output).expect("unchanged"), b"complete");
         rollback_new_private(&output).expect("rollback");
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn public_failure_output_never_reflects_private_parser_values() {
+        let sentinel = "DO-NOT-DISCLOSE-PRIVATE-SENTINEL";
+        let malformed = format!(r#""{sentinel}""#);
+        let error = serde_json::from_str::<u64>(&malformed).expect_err("malformed");
+        assert!(error.to_string().contains(sentinel));
+
+        let output = format!("shadow qualification failed: {}", public_error_code(&error));
+        assert_eq!(
+            output,
+            "shadow qualification failed: SHADOW_QUALIFICATION_FAILED"
+        );
+        assert!(!output.contains(sentinel));
     }
 }
