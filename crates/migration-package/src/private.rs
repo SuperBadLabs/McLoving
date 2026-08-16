@@ -666,6 +666,7 @@ fn verify_exact_state(
     validate_workflow_receipts(&state.reverse_evidence, "template", 2, None, None)?;
     for (path, number, result) in [
         ("evidence/imported-build-1.json", 1, "ABORTED"),
+        ("evidence/restarted-build-1.json", 1, "ABORTED"),
         ("evidence/imported-build-2.json", 2, "SUCCESS"),
         ("evidence/restarted-build-2.json", 2, "SUCCESS"),
         ("evidence/continued-build-3.json", 3, "SUCCESS"),
@@ -698,6 +699,24 @@ fn verify_exact_state(
             return Err(PackageError::new(
                 "E_PRIVATE_CONTINUITY",
                 format!("{path} has divergent imported execution provenance"),
+            ));
+        }
+    }
+    let source_build_1_log = history.files.get("1/log").ok_or_else(|| {
+        PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "authenticated source is missing build 1 log",
+        )
+    })?;
+    for path in [
+        "evidence/imported-build-1.log",
+        "evidence/restarted-build-1.log",
+        "evidence/jenkins-job-after/builds/1/log",
+    ] {
+        if archive_file(&state.reverse_evidence, path)? != source_build_1_log {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                format!("{path} differs from the authenticated source build 1 log"),
             ));
         }
     }
@@ -746,6 +765,130 @@ fn verify_exact_state(
             "E_PRIVATE_CONTINUITY",
             "network-denial receipt is divergent",
         ));
+    }
+    if archive_file(
+        &state.reverse_evidence,
+        "evidence/jenkins-job-after/nextBuildNumber",
+    )? != b"4\n"
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "retained Jenkins next-build cursor is divergent",
+        ));
+    }
+    validate_retained_permalinks(&state.reverse_evidence)?;
+    validate_private_network_topology(
+        &state.forward_evidence,
+        "evidence/private-network-inspect.json",
+        &[
+            "evidence/postgres-container-inspect.json",
+            "evidence/rust-client-container-inspect.json",
+        ],
+    )?;
+    validate_private_network_topology(
+        &state.reverse_evidence,
+        "evidence/private-network-inspect.json",
+        &[
+            "evidence/template-container-inspect.json",
+            "evidence/jenkins-container-inspect.json",
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_retained_permalinks(archive: &EvidenceArchive) -> Result<(), PackageError> {
+    let text = std::str::from_utf8(archive_file(
+        archive,
+        "evidence/jenkins-job-after/builds/permalinks",
+    )?)
+    .map_err(|error| PackageError::new("E_PRIVATE_CONTINUITY", error.to_string()))?;
+    let mut actual = BTreeMap::new();
+    for line in text.lines() {
+        let (name, number) = line.split_once(' ').ok_or_else(|| {
+            PackageError::new("E_PRIVATE_CONTINUITY", "retained permalink is malformed")
+        })?;
+        if name.is_empty()
+            || number.parse::<i64>().is_err()
+            || actual.insert(name, number).is_some()
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                "retained permalink is duplicated or malformed",
+            ));
+        }
+    }
+    let expected = BTreeMap::from([
+        ("lastCompletedBuild", "3"),
+        ("lastFailedBuild", "-1"),
+        ("lastStableBuild", "3"),
+        ("lastSuccessfulBuild", "3"),
+        ("lastUnstableBuild", "-1"),
+        ("lastUnsuccessfulBuild", "1"),
+    ]);
+    if actual != expected {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "retained Jenkins permalinks do not match continued build 3",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_private_network_topology(
+    archive: &EvidenceArchive,
+    network_path: &str,
+    container_paths: &[&str],
+) -> Result<(), PackageError> {
+    let network: Value = serde_json::from_slice(archive_file(archive, network_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_NETWORK", error.to_string()))?;
+    let networks = network
+        .as_array()
+        .filter(|values| values.len() == 1)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_NETWORK",
+                "private network denominator is divergent",
+            )
+        })?;
+    let network = &networks[0];
+    let name = network
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        .ok_or_else(|| PackageError::new("E_PRIVATE_NETWORK", "private network has no identity"))?;
+    if network.get("internal") != Some(&Value::Bool(true)) {
+        return Err(PackageError::new(
+            "E_PRIVATE_NETWORK",
+            "captured network is not internal",
+        ));
+    }
+    for path in container_paths {
+        let inspect: Value = serde_json::from_slice(archive_file(archive, path)?)
+            .map_err(|error| PackageError::new("E_PRIVATE_NETWORK", error.to_string()))?;
+        let containers = inspect
+            .as_array()
+            .filter(|values| values.len() == 1)
+            .ok_or_else(|| {
+                PackageError::new(
+                    "E_PRIVATE_NETWORK",
+                    format!("{path} denominator is divergent"),
+                )
+            })?;
+        let container = &containers[0];
+        let network_mode = container
+            .pointer("/HostConfig/NetworkMode")
+            .and_then(Value::as_str);
+        let attached = container
+            .pointer("/NetworkSettings/Networks")
+            .and_then(Value::as_object);
+        if network_mode != Some(name)
+            || attached.is_none_or(|attached| attached.len() != 1 || !attached.contains_key(name))
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_NETWORK",
+                format!("{path} is not exclusively attached to the captured internal network"),
+            ));
+        }
     }
     Ok(())
 }

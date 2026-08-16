@@ -36,7 +36,8 @@ and independent binding receipts, enforces effective-owner identity plus
 owner-only modes throughout the
 sealed source tree, and joins the retained Jenkins build/import/provenance
 sidecars to the authenticated reverse bundle. It proves the effect-free
-McLoving build plus Jenkins restart and next-build continuity. Private
+McLoving build plus Jenkins restart, build-1 retention, next-build/permalink
+continuity, and exclusive attachment to the captured internal networks. Private
 publication succeeds only after durable staging-link cleanup. It verifies one
 packaged case and 227 deterministic rejections,
 sets `package_complete=true` and `shadow_eligible=true`, and keeps every

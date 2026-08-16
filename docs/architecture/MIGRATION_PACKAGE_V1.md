@@ -145,7 +145,10 @@ explicit verification and reconciliation. The private verifier rejects
 group/other access on every traversed sealed-source directory and member, and
 joins the retained Jenkins build, import receipt, and native-provenance
 sidecars exactly to the authenticated reverse bundle and all-false authority
-ledger.
+ledger. Restart continuity includes the original build-1 result and log, the
+retained build cursor and complete permalink set after continued build 3, and
+both ceremonies' exclusive container attachment to their captured internal
+Podman networks.
 The verified private package is 704,617 bytes and remains solely under
 `/sn8100/runs/mcloving/mig005a-corpus052-corrective-20260816T034309Z/`.
 Neither package grants production, credential, trigger, scheduler, effect,
