@@ -215,8 +215,8 @@ three expected Jenkins mounts, and exclusive membership in the internal
 `jenkins-oracle-net` network with no reachable connector peer or production
 endpoint mapping. Static containment is supplemented by a concurrent live
 effect monitor: a temporary credentials-provider observer rejects any Jenkins
-credential lookup; an outbound packet capture in the container network
-namespace rejects any request attempt other than replies from the already-open
+credential lookup; an outbound all-interface packet capture in the container
+network namespace, including loopback, rejects any request attempt other than replies from the already-open
 Jenkins control port; and recursive inotify watches reject every mutation in
 the writable Jenkins home except the exact temporary target-job configuration
 and SCM-polling-log writes whose original bytes and log timestamp the probe

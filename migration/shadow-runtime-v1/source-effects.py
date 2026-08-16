@@ -146,7 +146,7 @@ def start_network_monitor(capture: pathlib.Path) -> subprocess.Popen[str]:
             "-Q",
             "out",
             "-i",
-            "eth0",
+            "any",
             "-U",
             "-n",
             "-w",
