@@ -627,7 +627,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_publication_reports_staging_cleanup_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let output = directory.path().join("private-package.json");
 
         let error =
@@ -643,7 +646,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_publication_reports_nondurable_cleanup() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let output = directory.path().join("private-package.json");
         let mut syncs = 0;
 
