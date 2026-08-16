@@ -1,4 +1,6 @@
 import groovy.json.JsonOutput
+import com.cloudbees.plugins.credentials.CredentialsProvider
+import com.cloudbees.plugins.credentials.domains.DomainRequirement
 import hudson.model.Action
 import hudson.model.Cause
 import hudson.model.CauseAction
@@ -6,6 +8,8 @@ import hudson.model.Job
 import hudson.model.Result
 import hudson.model.Run
 import hudson.model.TaskListener
+import hudson.model.Item
+import hudson.model.ItemGroup
 import hudson.triggers.SCMTrigger
 import hudson.triggers.TimerTrigger
 import jenkins.model.Jenkins
@@ -17,6 +21,41 @@ import org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty
 import org.kohsuke.stapler.HttpResponses
 import org.kohsuke.stapler.StaplerRequest2
 import org.kohsuke.stapler.StaplerResponse2
+import org.acegisecurity.Authentication as AcegiAuthentication
+import org.springframework.security.core.Authentication as SpringAuthentication
+
+class ShadowCredentialObserver extends CredentialsProvider {
+  final java.util.concurrent.atomic.AtomicLong lookups =
+    new java.util.concurrent.atomic.AtomicLong()
+
+  @Override
+  List getCredentials(Class type, ItemGroup itemGroup,
+      AcegiAuthentication authentication, List<DomainRequirement> requirements) {
+    lookups.incrementAndGet()
+    []
+  }
+
+  @Override
+  List getCredentials(Class type, Item item,
+      AcegiAuthentication authentication, List<DomainRequirement> requirements) {
+    lookups.incrementAndGet()
+    []
+  }
+
+  @Override
+  List getCredentialsInItemGroup(Class type, ItemGroup itemGroup,
+      SpringAuthentication authentication, List<DomainRequirement> requirements) {
+    lookups.incrementAndGet()
+    []
+  }
+
+  @Override
+  List getCredentialsInItem(Class type, Item item,
+      SpringAuthentication authentication, List<DomainRequirement> requirements) {
+    lookups.incrementAndGet()
+    []
+  }
+}
 
 def schema = 'mcloving.shadow001.jenkins-source-probe/v1'
 def jobName = 'corpus-052-cinqict_jenkinsdev'
@@ -35,12 +74,22 @@ def sourceSha256 = sha256(job.definition.script.getBytes(java.nio.charset.Standa
 def sourceConfigSha256 = sha256(job.getConfigFile().getFile().bytes)
 def originalTriggerProperty =
   job.getProperty(PipelineTriggersJobProperty.class)
+def scmPollingLog = new File(job.rootDir, 'scm-polling.log')
+def originalScmPollingLogExists = scmPollingLog.exists()
+def originalScmPollingLog = originalScmPollingLogExists ? scmPollingLog.bytes : null
+def originalScmPollingLogSha256 =
+  originalScmPollingLogExists ? sha256(originalScmPollingLog) : null
+def originalScmPollingLogModified = originalScmPollingLogExists ? scmPollingLog.lastModified() : 0L
+def credentialObserver = new ShadowCredentialObserver()
+def credentialProviders = CredentialsProvider.all()
+credentialProviders.add(credentialObserver)
 
 def activity = {
   [
     builds: job.builds.size(),
     queued: jenkins.queue.items.count { item -> item.task == job },
-    next_build_number: job.nextBuildNumber
+    next_build_number: job.nextBuildNumber,
+    credential_lookups: credentialObserver.lookups.get()
   ]
 }
 def original = activity()
@@ -55,6 +104,7 @@ def record = { kind, path, accepted, before, after, detail ->
     outcome: !accepted && before == after ? 'disabled_pre_queue' : 'unexpected_activity',
     queued_builds: after.queued,
     scheduled_attempts: after.builds - original.builds,
+    credential_grants: after.credential_lookups - before.credential_lookups,
     detail: detail
   ])
 }
@@ -122,6 +172,13 @@ try {
       job.triggers.isEmpty()) {
     job.removeProperty(PipelineTriggersJobProperty.class)
   }
+  if (originalScmPollingLogExists) {
+    scmPollingLog.bytes = originalScmPollingLog
+    assert scmPollingLog.setLastModified(originalScmPollingLogModified)
+  } else if (scmPollingLog.exists()) {
+    assert scmPollingLog.delete()
+  }
+  credentialProviders.remove(credentialObserver)
 }
 
 def terminal = activity()
@@ -134,6 +191,10 @@ assert job.triggers.isEmpty()
 assert job.definition.class.name == definitionKind
 assert terminalSourceSha256 == sourceSha256
 assert terminalSourceConfigSha256 == sourceConfigSha256
+assert scmPollingLog.exists() == originalScmPollingLogExists
+assert !originalScmPollingLogExists ||
+  sha256(scmPollingLog.bytes) == originalScmPollingLogSha256
+assert !originalScmPollingLogExists || scmPollingLog.lastModified() == originalScmPollingLogModified
 assert results*.kind == ['api', 'manual', 'schedule', 'upstream', 'webhook']
 assert results.every { result -> result.outcome == 'disabled_pre_queue' }
 

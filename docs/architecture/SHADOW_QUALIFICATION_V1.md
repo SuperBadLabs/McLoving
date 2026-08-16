@@ -115,7 +115,11 @@ pinned capture identity and the precommitted shadow public identity while every
 shadow signature field remains empty. It authenticates the source key pin,
 exact session binding, all source signatures, and exact equality between the
 precommitted shadow public identity and the supplied shadow private key, then
-signs only the five replay receipts,
+signs only the five replay receipts. The source-authenticated binding contains
+an unsigned projection of both halves of every paired event, including both
+audit digests and every denial count, while excluding only the fields populated
+by signing. An intermediary therefore cannot replace replay evidence between
+`prepare` and `seal` without invalidating all source signatures. `seal` then
 runs the complete MIG-007 and SHADOW-001 verification stack in memory—including
 the separately supplied source-capture, authorization, and verifier pins—and
 only then publishes the session and its independent owner pin. A sealing caller
@@ -185,8 +189,11 @@ the same four effective decisions. It
 publishes no realm, seed, decision, or digest value to operational output.
 Immediately before source capture, the runtime sidecar repeats that bounded
 capture into a second owner-private pin and requires byte-for-byte equality
-with the independently supplied pin. Authorization drift aborts before the
-source probe or package preparation. It then submits the fixed Groovy probe to
+with the independently supplied pin. Immediately before template preparation,
+after source capture, replay, teardown, and the final repository check, it
+captures authorization a third time and again requires exact equality.
+Authorization drift at either boundary aborts before a source-authenticated
+template can be created. It then submits the fixed Groovy probe to
 Mario through an authenticated crumb-bearing session; the Mario credential is read and used only on Mario,
 and only the bounded `SHADOW001_SOURCE` marker returns. Neither signing private
 key leaves the owner-private HeMan output directory. The probe exercises the
@@ -206,10 +213,20 @@ byte-identical and prove the pinned Jenkins image is running with a read-only
 root, no privilege, added capability, device, or shared PID namespace, only the
 three expected Jenkins mounts, and exclusive membership in the internal
 `jenkins-oracle-net` network with no reachable connector peer or production
-endpoint mapping. Only after this containment proof and the zero-build/queue
-observation does the sidecar add zero credential-grant, connector-request, and
-production-effect counts. Both live boundary observations are hashed into the
-source fixture and network identities that the source signatures authenticate.
+endpoint mapping. Static containment is supplemented by a concurrent live
+effect monitor: a temporary credentials-provider observer rejects any Jenkins
+credential lookup; an outbound packet capture in the container network
+namespace rejects any request attempt other than replies from the already-open
+Jenkins control port; and recursive inotify watches reject every mutation in
+the writable Jenkins home except the exact temporary target-job configuration
+and SCM-polling-log writes whose original bytes and log timestamp the probe
+restores and verifies. The monitor must
+observe those probe-control mutations, which proves it was active, while
+reporting zero unclassified home mutation and zero outbound request. Only those
+dynamically observed zeros become credential-grant, connector-request, and
+production-effect counts. The effect receipt and both live boundary
+observations are hashed into the source fixture and network identities that the
+source signatures authenticate.
 
 The target phase builds the exact controller-store ingress test, admitted-case
 controller test, and controller executable offline. It copies only those exact

@@ -10,7 +10,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../tools/versions.env
 source "${repo_root}/tools/versions.env"
 for command in chmod cmp cut find git grep install jq mktemp podman python3 \
-  realpath sed sha256sum sort ssh; do
+  realpath sed sha256sum sort ssh tar; do
   command -v "${command}" >/dev/null || {
     echo "required command is unavailable: ${command}" >&2
     exit 69
@@ -140,43 +140,34 @@ if ! cmp -s -- "${authz_generation_pin}" "${live_authz_generation_pin}"; then
   exit 1
 fi
 
-ssh -o BatchMode=yes srikanth@mario 'python3 -c '"'"'
-import base64, http.cookiejar, json, sys, urllib.parse, urllib.request
-base = "http://100.127.170.90:18080"
-password = open(
-    "/home/srikanth/jenkins-oracle-228/runner/admin-password",
-    encoding="utf-8",
-).read().strip()
-authorization = "Basic " + base64.b64encode(
-    ("oracle-admin:" + password).encode()
-).decode()
-jar = http.cookiejar.CookieJar()
-opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-crumb_request = urllib.request.Request(
-    base + "/crumbIssuer/api/json",
-    headers={"Authorization": authorization},
-)
-crumb = json.load(opener.open(crumb_request, timeout=15))
-payload = urllib.parse.urlencode({"script": sys.stdin.read()}).encode()
-headers = {
-    "Authorization": authorization,
-    "Content-Type": "application/x-www-form-urlencoded",
-    crumb["crumbRequestField"]: crumb["crumb"],
-}
-response = opener.open(
-    urllib.request.Request(base + "/scriptText", data=payload, headers=headers),
-    timeout=30,
-).read().decode("utf-8", "replace")
-marker = next(
-    (line for line in response.splitlines() if line.startswith("SHADOW001_SOURCE=")),
-    None,
-)
-if marker is None:
-    raise SystemExit("bounded Jenkins source marker is absent")
-print(marker)
-'"'"'' <"${repo_root}/migration/shadow-runtime-v1/source-probe.groovy" \
-  | sed -n 's/^SHADOW001_SOURCE=//p' >"${output_root}/source-probe.raw.json"
-chmod 0600 "${output_root}/source-probe.raw.json"
+tar -C "${repo_root}" -cf - \
+  migration/shadow-runtime-v1/source-effects.py \
+  migration/shadow-runtime-v1/source-probe.groovy \
+  | ssh -o BatchMode=yes srikanth@mario '
+      set -euo pipefail
+      stage="$(mktemp -d)"
+      trap '\''rm -rf -- "${stage}"'\'' EXIT
+      tar -xf - -C "${stage}"
+      python3 "${stage}/migration/shadow-runtime-v1/source-effects.py" \
+        "${stage}/migration/shadow-runtime-v1/source-probe.groovy"
+    ' >"${output_root}/source-capture.markers"
+chmod 0600 "${output_root}/source-capture.markers"
+source_marker_count="$(grep -c '^SHADOW001_SOURCE=' \
+  "${output_root}/source-capture.markers" || true)"
+effect_marker_count="$(grep -c '^SHADOW001_SOURCE_EFFECTS=' \
+  "${output_root}/source-capture.markers" || true)"
+if [[ "${source_marker_count}" -ne 1 || "${effect_marker_count}" -ne 1 ]]; then
+  echo "live source capture did not emit exactly one bounded marker per class" >&2
+  exit 1
+fi
+sed -n 's/^SHADOW001_SOURCE=//p' \
+  "${output_root}/source-capture.markers" \
+  >"${output_root}/source-probe.raw.json"
+sed -n 's/^SHADOW001_SOURCE_EFFECTS=//p' \
+  "${output_root}/source-capture.markers" \
+  >"${output_root}/source-effects.json"
+chmod 0600 "${output_root}/source-probe.raw.json" \
+  "${output_root}/source-effects.json"
 
 capture_source_boundary "${output_root}/source-boundary-after.json"
 if ! cmp -s -- "${output_root}/source-boundary-before.json" \
@@ -184,11 +175,21 @@ if ! cmp -s -- "${output_root}/source-boundary-before.json" \
   echo "live source containment changed during capture" >&2
   exit 1
 fi
-jq '
+jq --exit-status '
+  .schema == "mcloving.shadow001.source-effects/v1"
+  and .network_request_attempts == 0
+  and .unclassified_home_mutations == 0
+  and .probe_control_mutations > 0
+' "${output_root}/source-effects.json" >/dev/null
+source_connector_requests="$(jq '.network_request_attempts' \
+  "${output_root}/source-effects.json")"
+source_production_effects="$(jq '.unclassified_home_mutations' \
+  "${output_root}/source-effects.json")"
+jq --argjson connector_requests "${source_connector_requests}" \
+  --argjson production_effects "${source_production_effects}" '
   .observations |= map(. + {
-    credential_grants: 0,
-    connector_requests: 0,
-    production_effects: 0
+    connector_requests: $connector_requests,
+    production_effects: $production_effects
   })
 ' "${output_root}/source-probe.raw.json" >"${output_root}/source-probe.json"
 chmod 0600 "${output_root}/source-probe.json"
@@ -347,7 +348,8 @@ source_fixture_sha256="$({
     "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/container-inspect.json" \
     "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt" \
     "${output_root}/source-boundary-before.json" \
-    "${output_root}/source-boundary-after.json"
+    "${output_root}/source-boundary-after.json" \
+    "${output_root}/source-effects.json"
 } | sha256sum | cut -d ' ' -f 1)"
 target_fixture_sha256="$({
   sha256sum "${runtime_stage}/trigger_ingress" \
@@ -361,6 +363,7 @@ source_network_sha256="$(sha256sum \
   "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt" \
   "${output_root}/source-boundary-before.json" \
   "${output_root}/source-boundary-after.json" \
+  "${output_root}/source-effects.json" \
   | sha256sum | cut -d ' ' -f 1)"
 target_network_sha256="$(sha256sum \
   "${output_root}/target-network-inspect.json" | cut -d ' ' -f 1)"
@@ -414,6 +417,13 @@ if [[ -n "${seal_source_status}" || "${seal_source_commit}" != "${source_commit}
       "${seal_source_tree}" != "${source_tree}" ]]; then
   echo "SHADOW-001 source tree changed before template preparation" >&2
   exit 78
+fi
+terminal_authz_generation_pin="${output_root}/terminal-authz-generation.sha256"
+"${repo_root}/scripts/capture-shadow001-authz-pin.sh" \
+  "${terminal_authz_generation_pin}" >/dev/null
+if ! cmp -s -- "${authz_generation_pin}" "${terminal_authz_generation_pin}"; then
+  echo "live authorization generation changed before template preparation" >&2
+  exit 1
 fi
 "${output_root}/mcloving-shadow-qualification" prepare \
   "${output_root}/source-probe.json" \

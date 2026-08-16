@@ -205,6 +205,7 @@ struct SourceSessionBinding<'a> {
     captured_wall_clock_unix_ms: i64,
     freeze: Freeze,
     comparison_inputs: &'a ComparisonInputs,
+    events: Vec<PairedEvent>,
     trace: &'a TraceComparison,
     isolation: &'a Isolation,
     authority: &'a Authority,
@@ -295,6 +296,7 @@ struct ActivityObservation {
     builds: u64,
     queued: u64,
     next_build_number: u64,
+    credential_lookups: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -661,6 +663,7 @@ fn validate_runtime_observations(
         || source.original_activity.builds != 1
         || source.original_activity.queued != 0
         || source.original_activity.next_build_number != 2
+        || source.original_activity.credential_lookups != 0
         || source.observations.len() != order.len()
         || target.schema != TARGET_REPLAY_SCHEMA
         || target.job_id != JOB_ID
@@ -1179,6 +1182,14 @@ fn verify_denial_receipt(
 }
 
 fn source_session_binding_sha256(session: &Session) -> Result<String, QualificationError> {
+    let mut events = session.events.clone();
+    for event in &mut events {
+        for receipt in [&mut event.source, &mut event.shadow] {
+            receipt.session_binding_sha256.clear();
+            receipt.signing_public_key_sha256.clear();
+            receipt.signature_base64.clear();
+        }
+    }
     let binding = SourceSessionBinding {
         schema: SOURCE_SESSION_BINDING_SCHEMA,
         session_id: session.session_id,
@@ -1189,6 +1200,7 @@ fn source_session_binding_sha256(session: &Session) -> Result<String, Qualificat
         captured_wall_clock_unix_ms: session.comparison_inputs.captured_wall_clock_unix_ms,
         freeze: session.freeze.clone(),
         comparison_inputs: &session.comparison_inputs,
+        events,
         trace: &session.trace,
         isolation: &session.isolation,
         authority: &session.authority,
@@ -1433,11 +1445,13 @@ mod tests {
                 builds: 1,
                 queued: 0,
                 next_build_number: 2,
+                credential_lookups: 0,
             },
             terminal_activity: ActivityObservation {
                 builds: 1,
                 queued: 0,
                 next_build_number: 2,
+                credential_lookups: 0,
             },
             observations,
         }
@@ -1995,6 +2009,18 @@ mod tests {
             .expect_err("forged source receipt")
             .code,
             "E_SIGNATURE"
+        );
+        let mut substituted_shadow_audit = session.clone();
+        substituted_shadow_audit.events[0].shadow.audit_sha256 = sha256(b"substituted replay");
+        assert_eq!(
+            seal_private_session(
+                &canonical_bytes(&substituted_shadow_audit).expect("substituted replay audit"),
+                &source_pin,
+                shadow_pkcs8.as_ref(),
+            )
+            .expect_err("source binding must authenticate the replay audit")
+            .code,
+            "E_CAPTURE_BINDING"
         );
         let mut transplanted_session = session.clone();
         transplanted_session.session_id = Uuid::from_u128(100);
