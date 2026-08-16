@@ -1441,6 +1441,8 @@ fn read_regular_file(
     limit: usize,
     require_owner_only: bool,
 ) -> Result<Vec<u8>, PackageError> {
+    #[cfg(not(unix))]
+    let _ = require_owner_only;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

@@ -7,7 +7,9 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Read as _, Write as _};
-use std::path::{Component, Path};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::Path;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
