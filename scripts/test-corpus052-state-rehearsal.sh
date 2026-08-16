@@ -103,6 +103,7 @@ podman run --rm --network none \
   --cpus 2 --memory 4g --pids-limit 1024 \
   --env CARGO_HOME=/usr/local/cargo \
   --env CARGO_TARGET_DIR=/target \
+  --env RUSTUP_TOOLCHAIN=1.97.1-x86_64-unknown-linux-gnu \
   --workdir /workspace \
   "${client_build_mounts[@]}" \
   "${MCLOVING_RUST_IMAGE}" \
