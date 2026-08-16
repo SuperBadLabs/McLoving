@@ -1782,6 +1782,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-shadow-qualification"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "mcloving-migration-package",
+ "nix",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-source-acquirer"
 version = "0.0.0"
 dependencies = [
