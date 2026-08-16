@@ -7,6 +7,7 @@ use mcloving_jenkins_state_transfer::{
     admitted_forward_binding, admitted_reverse_binding, admitted_tree_digest,
     authenticate_forward_bundle, authenticate_reverse_bundle, load_admitted_history_owner_only,
     normalize_single_aborted_workflow, parse_retained_build_record,
+    verify_retained_job_configuration,
 };
 use mcloving_state_transfer::{BuildResult, Digest, StateBundle, canonical_bytes, transform};
 use serde::{Deserialize, Serialize};
@@ -817,13 +818,8 @@ fn verify_exact_state(
 
 fn validate_retained_job_configuration(archive: &EvidenceArchive) -> Result<(), PackageError> {
     let path = "evidence/jenkins-job-after/config.xml";
-    if archive_file(archive, path)? != ADMITTED_JENKINS_JOB_CONFIG {
-        return Err(PackageError::new(
-            "E_PRIVATE_JOB_CONFIG",
-            "retained Jenkins job configuration is divergent from the reviewed fixture",
-        ));
-    }
-    Ok(())
+    verify_retained_job_configuration(archive_file(archive, path)?, ADMITTED_JENKINS_JOB_CONFIG)
+        .map_err(|error| PackageError::new("E_PRIVATE_JOB_CONFIG", error.to_string()))
 }
 
 fn validate_build_one_logs(

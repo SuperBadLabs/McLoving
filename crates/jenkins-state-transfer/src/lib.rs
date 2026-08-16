@@ -16,7 +16,10 @@ use mcloving_state_transfer::{
     STATE_TRANSFER_SCHEMA_V1, StateBundle, SystemIdentity, TransferBinding, TransferDirection,
     canonical_bytes, record_provenance, sha256, transform,
 };
-use quick_xml::{Reader, events::Event};
+use quick_xml::{
+    Reader,
+    events::{BytesStart, Event},
+};
 use sha2::{Digest as _, Sha256};
 
 const MAX_XML_BYTES: usize = 4 * 1024 * 1024;
@@ -102,6 +105,13 @@ pub struct RetainedBuildRecord {
     pub duration_ms: i64,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum JobConfigToken {
+    Start(String, Vec<(String, String)>),
+    Text(String),
+    End(String),
+}
+
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum HistoryError {
     #[error("invalid sealed Jenkins history: {0}")]
@@ -158,6 +168,163 @@ pub fn parse_retained_build_record(bytes: &[u8]) -> Result<RetainedBuildRecord, 
         started_at_unix_ms,
         duration_ms,
     })
+}
+
+/// Compares a retained Jenkins job configuration with its reviewed fixture
+/// while ignoring only formatting and Jenkins-populated `plugin` version
+/// attributes. Element names, non-plugin attributes, values, pipeline script,
+/// trigger denominator, retention policy, sandbox, and disabled state remain
+/// exact and duplicate-safe.
+pub fn verify_retained_job_configuration(
+    bytes: &[u8],
+    reviewed: &[u8],
+) -> Result<(), HistoryError> {
+    let actual = canonical_job_configuration(bytes)?;
+    let expected = canonical_job_configuration(reviewed)?;
+    if actual != expected {
+        return Err(invalid(
+            "retained Jenkins job configuration is behaviorally divergent",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, HistoryError> {
+    if bytes.len() > MAX_XML_BYTES {
+        return Err(invalid(
+            "retained Jenkins job configuration exceeds its byte limit",
+        ));
+    }
+    let mut reader = Reader::from_reader(bytes);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<String>::new();
+    let mut tokens = Vec::<JobConfigToken>::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                let token = job_config_start_token(&reader, &start)?;
+                if stack.is_empty() && token.0 != "flow-definition" {
+                    return Err(invalid(
+                        "retained Jenkins job configuration root is divergent",
+                    ));
+                }
+                stack.push(token.0.clone());
+                tokens.push(JobConfigToken::Start(token.0, token.1));
+            }
+            Ok(Event::Empty(start)) => {
+                let token = job_config_start_token(&reader, &start)?;
+                if stack.is_empty() && token.0 != "flow-definition" {
+                    return Err(invalid(
+                        "retained Jenkins job configuration root is divergent",
+                    ));
+                }
+                tokens.push(JobConfigToken::Start(token.0.clone(), token.1));
+                tokens.push(JobConfigToken::End(token.0));
+            }
+            Ok(Event::Text(text)) => {
+                let decoded = text
+                    .decode()
+                    .map_err(|error| invalid(format!("invalid job configuration text: {error}")))?;
+                let value = quick_xml::escape::unescape(&decoded).map_err(|error| {
+                    invalid(format!("invalid job configuration escape: {error}"))
+                })?;
+                push_job_config_text(&mut tokens, value.trim());
+            }
+            Ok(Event::CData(text)) => {
+                let value = text.decode().map_err(|error| {
+                    invalid(format!("invalid job configuration CDATA: {error}"))
+                })?;
+                push_job_config_text(&mut tokens, value.trim());
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let decoded = reference.decode().map_err(|error| {
+                    invalid(format!("invalid job configuration reference: {error}"))
+                })?;
+                let value =
+                    quick_xml::escape::unescape(&format!("&{decoded};")).map_err(|error| {
+                        invalid(format!("invalid job configuration reference: {error}"))
+                    })?;
+                push_job_config_text(&mut tokens, value.trim());
+            }
+            Ok(Event::End(end)) => {
+                let name = std::str::from_utf8(end.name().as_ref())
+                    .map_err(|_| invalid("job configuration element name is not UTF-8"))?
+                    .to_owned();
+                if stack.pop().as_deref() != Some(name.as_str()) {
+                    return Err(invalid("job configuration element nesting is divergent"));
+                }
+                tokens.push(JobConfigToken::End(name));
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(invalid("XML document type declarations are denied"));
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(invalid(format!(
+                    "cannot parse retained Jenkins job configuration: {error}"
+                )));
+            }
+        }
+        if tokens.len() > 256 {
+            return Err(invalid(
+                "retained Jenkins job configuration token denominator is unbounded",
+            ));
+        }
+    }
+    if !stack.is_empty()
+        || !matches!(
+            tokens.first(),
+            Some(JobConfigToken::Start(name, _)) if name == "flow-definition"
+        )
+    {
+        return Err(invalid("retained Jenkins job configuration is incomplete"));
+    }
+    Ok(tokens)
+}
+
+fn job_config_start_token<R>(
+    reader: &Reader<R>,
+    start: &BytesStart<'_>,
+) -> Result<(String, Vec<(String, String)>), HistoryError> {
+    let name = std::str::from_utf8(start.name().as_ref())
+        .map_err(|_| invalid("job configuration element name is not UTF-8"))?
+        .to_owned();
+    let mut attributes = Vec::new();
+    for attribute in start.attributes().with_checks(true) {
+        let attribute = attribute
+            .map_err(|error| invalid(format!("invalid job configuration attribute: {error}")))?;
+        let key = std::str::from_utf8(attribute.key.as_ref())
+            .map_err(|_| invalid("job configuration attribute name is not UTF-8"))?
+            .to_owned();
+        if key == "plugin" {
+            continue;
+        }
+        let decoded = reader
+            .decoder()
+            .decode(attribute.value.as_ref())
+            .map_err(|error| invalid(format!("invalid job configuration attribute: {error}")))?;
+        let value = quick_xml::escape::unescape(&decoded)
+            .map_err(|error| invalid(format!("invalid job configuration attribute: {error}")))?
+            .into_owned();
+        attributes.push((key, value));
+    }
+    attributes.sort();
+    if attributes.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(invalid("job configuration attribute is duplicated"));
+    }
+    Ok((name, attributes))
+}
+
+fn push_job_config_text(tokens: &mut Vec<JobConfigToken>, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    if let Some(JobConfigToken::Text(existing)) = tokens.last_mut() {
+        existing.push_str(value);
+    } else {
+        tokens.push(JobConfigToken::Text(value.to_owned()));
+    }
 }
 
 pub fn admitted_destination_identity() -> SystemIdentity {
@@ -1547,5 +1714,43 @@ mod tests {
 
         let duplicated = br#"<flow-build><timestamp>2000</timestamp><timestamp>3000</timestamp><duration>20</duration><result>SUCCESS</result></flow-build>"#;
         assert!(parse_retained_build_record(duplicated).is_err());
+    }
+
+    #[test]
+    fn retained_job_configuration_allows_only_serialization_metadata_drift() {
+        let reviewed = include_bytes!(
+            "../../../migration/state-transfer-v1/fixtures/corpus052-job-config.xml"
+        );
+        verify_retained_job_configuration(reviewed, reviewed).unwrap();
+
+        let reviewed_text = std::str::from_utf8(reviewed).unwrap();
+        let rewritten_plugins = reviewed_text
+            .replace(
+                "plugin=\"workflow-job\"",
+                "plugin=\"workflow-job@1400.v7fd111b_ec82f\"",
+            )
+            .replace(
+                "plugin=\"workflow-cps\"",
+                "plugin=\"workflow-cps@4209.v83c4e257f1e9\"",
+            );
+        verify_retained_job_configuration(rewritten_plugins.as_bytes(), reviewed).unwrap();
+
+        for divergent in [
+            reviewed_text.replace("<disabled>false</disabled>", "<disabled>true</disabled>"),
+            reviewed_text.replace("Hello World", "Hello Divergent World"),
+            reviewed_text.replace(
+                "<triggers/>",
+                "<triggers><hudson.triggers.TimerTrigger/></triggers>",
+            ),
+        ] {
+            assert!(verify_retained_job_configuration(divergent.as_bytes(), reviewed).is_err());
+        }
+        assert!(
+            verify_retained_job_configuration(
+                b"<!DOCTYPE flow-definition><flow-definition/>",
+                reviewed,
+            )
+            .is_err()
+        );
     }
 }
