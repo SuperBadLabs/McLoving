@@ -7,11 +7,16 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Read as _, Write as _};
+#[cfg(unix)]
+use std::path::Component;
 use std::path::Path;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mcloving_migration_package::{MAX_PACKAGE_BYTES, generate, verify};
+use mcloving_migration_package::{
+    MAX_PACKAGE_BYTES, MAX_PRIVATE_PACKAGE_BYTES, PrivateGenerationInputs,
+    PrivateVerificationInputs, generate, generate_private, verify, verify_private,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -49,9 +54,81 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("package_complete={}", receipt.package_complete);
             println!("production_authority={}", receipt.production_authority);
         }
+        [
+            _,
+            command,
+            repository,
+            sealed_history,
+            forward_evidence,
+            forward_pin,
+            forward_implementation_pin,
+            reverse_evidence,
+            reverse_pin,
+            reverse_implementation_pin,
+            output,
+        ] if command == "generate-private" => {
+            let forward_pin = read_owner_pin(Path::new(forward_pin))?;
+            let reverse_pin = read_owner_pin(Path::new(reverse_pin))?;
+            let forward_implementation_pin = read_owner_pin(Path::new(forward_implementation_pin))?;
+            let reverse_implementation_pin = read_owner_pin(Path::new(reverse_implementation_pin))?;
+            let verification = PrivateVerificationInputs {
+                sealed_history_root: Path::new(sealed_history),
+                expected_forward_manifest_sha256: &forward_pin,
+                expected_reverse_manifest_sha256: &reverse_pin,
+                expected_forward_implementation_sha256: &forward_implementation_pin,
+                expected_reverse_implementation_sha256: &reverse_implementation_pin,
+                expected_package_sha256: None,
+            };
+            let inputs = PrivateGenerationInputs {
+                forward_evidence_root: Path::new(forward_evidence),
+                reverse_evidence_root: Path::new(reverse_evidence),
+                verification,
+            };
+            let bytes = generate_private(Path::new(repository), &inputs)?;
+            publish_new_private_file(Path::new(output), &bytes)?;
+        }
+        [
+            _,
+            command,
+            package,
+            package_pin,
+            repository,
+            sealed_history,
+            forward_pin,
+            forward_implementation_pin,
+            reverse_pin,
+            reverse_implementation_pin,
+        ] if command == "verify-private" => {
+            let bytes =
+                read_private_regular_bounded(Path::new(package), MAX_PRIVATE_PACKAGE_BYTES)?;
+            let package_pin = read_owner_pin(Path::new(package_pin))?;
+            let forward_pin = read_owner_pin(Path::new(forward_pin))?;
+            let reverse_pin = read_owner_pin(Path::new(reverse_pin))?;
+            let forward_implementation_pin = read_owner_pin(Path::new(forward_implementation_pin))?;
+            let reverse_implementation_pin = read_owner_pin(Path::new(reverse_implementation_pin))?;
+            let inputs = PrivateVerificationInputs {
+                sealed_history_root: Path::new(sealed_history),
+                expected_forward_manifest_sha256: &forward_pin,
+                expected_reverse_manifest_sha256: &reverse_pin,
+                expected_forward_implementation_sha256: &forward_implementation_pin,
+                expected_reverse_implementation_sha256: &reverse_implementation_pin,
+                expected_package_sha256: Some(&package_pin),
+            };
+            let receipt = verify_private(&bytes, Path::new(repository), &inputs)?;
+            println!("schema={}", receipt.schema);
+            println!("packaged_cases={}", receipt.packaged_cases);
+            println!("rejected_cases={}", receipt.rejected_cases);
+            println!(
+                "admitted_state_dependencies={}",
+                receipt.admitted_state_dependencies
+            );
+            println!("package_complete={}", receipt.package_complete);
+            println!("shadow_eligible={}", receipt.shadow_eligible);
+            println!("production_authority={}", receipt.production_authority);
+        }
         _ => {
             return Err(
-                "usage: mcloving-migration-package generate REPOSITORY_ROOT [OUTPUT]\n       mcloving-migration-package verify PACKAGE REPOSITORY_ROOT"
+                "usage: mcloving-migration-package generate REPOSITORY_ROOT [OUTPUT]\n       mcloving-migration-package verify PACKAGE REPOSITORY_ROOT\n       mcloving-migration-package generate-private REPOSITORY_ROOT SEALED_HISTORY FORWARD_EVIDENCE FORWARD_MANIFEST_PIN_FILE FORWARD_IMPLEMENTATION_PIN_FILE REVERSE_EVIDENCE REVERSE_MANIFEST_PIN_FILE REVERSE_IMPLEMENTATION_PIN_FILE OUTPUT\n       mcloving-migration-package verify-private PACKAGE PACKAGE_PIN_FILE REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN_FILE FORWARD_IMPLEMENTATION_PIN_FILE REVERSE_MANIFEST_PIN_FILE REVERSE_IMPLEMENTATION_PIN_FILE"
                     .into(),
             );
         }
@@ -64,7 +141,32 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
 fn publish_new_file(output: &Path, bytes: &[u8]) -> io::Result<()> {
-    publish_new_file_with(output, bytes, sync_open_directory, remove_relative_file)
+    publish_new_file_with_policy(
+        output,
+        bytes,
+        false,
+        sync_open_directory,
+        remove_relative_file,
+    )
+}
+
+#[cfg(unix)]
+fn publish_new_private_file(output: &Path, bytes: &[u8]) -> io::Result<()> {
+    publish_new_file_with_policy(
+        output,
+        bytes,
+        true,
+        sync_open_directory,
+        remove_relative_file,
+    )
+}
+
+#[cfg(not(unix))]
+fn publish_new_private_file(_output: &Path, _bytes: &[u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "owner-private package publication is unsupported on this platform",
+    ))
 }
 
 #[cfg(not(unix))]
@@ -75,10 +177,39 @@ fn publish_new_file(_output: &Path, _bytes: &[u8]) -> io::Result<()> {
     ))
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn publish_new_file_with<SyncDirectory, RemovePublished>(
     output: &Path,
     bytes: &[u8],
+    sync_directory: SyncDirectory,
+    remove_published: RemovePublished,
+) -> io::Result<()>
+where
+    SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
+    RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
+{
+    publish_new_file_with_policy(output, bytes, false, sync_directory, remove_published)
+}
+
+#[cfg(all(test, unix))]
+fn publish_new_private_file_with<SyncDirectory, RemovePublished>(
+    output: &Path,
+    bytes: &[u8],
+    sync_directory: SyncDirectory,
+    remove_published: RemovePublished,
+) -> io::Result<()>
+where
+    SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
+    RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
+{
+    publish_new_file_with_policy(output, bytes, true, sync_directory, remove_published)
+}
+
+#[cfg(unix)]
+fn publish_new_file_with_policy<SyncDirectory, RemovePublished>(
+    output: &Path,
+    bytes: &[u8],
+    require_owner_only_parent: bool,
     mut sync_directory: SyncDirectory,
     mut remove_published: RemovePublished,
 ) -> io::Result<()>
@@ -86,6 +217,9 @@ where
     SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
     RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
 {
+    if require_owner_only_parent {
+        require_private_parent_custody(output)?;
+    }
     let file_name = output.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -105,6 +239,15 @@ where
         rustix::fs::Mode::empty(),
     )
     .map_err(os_error)?;
+    if require_owner_only_parent {
+        let metadata = rustix::fs::fstat(&parent_directory).map_err(os_error)?;
+        if metadata.st_uid != nix::unistd::geteuid().as_raw() || metadata.st_mode & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private package parent must belong to the invoking owner and deny group/other access",
+            ));
+        }
+    }
     let (mut temporary, mut file) = create_temporary_sibling(&parent_directory, file_name)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -147,9 +290,24 @@ where
         }
     }
 
-    // Publication is complete and durable. A failed best-effort cleanup must
-    // not report generation as failed and make a retry collide with the
-    // already-published, complete destination.
+    if require_owner_only_parent {
+        remove_published(&parent_directory, temporary.name.as_os_str()).map_err(|error| {
+            io::Error::other(format!(
+                "E_PRIVATE_PUBLICATION_CLEANUP: staging-link removal failed after durable publication ({error}); destination requires explicit verification and reconciliation"
+            ))
+        })?;
+        temporary.active = false;
+        sync_directory(&parent_directory).map_err(|error| {
+            io::Error::other(format!(
+                "E_PRIVATE_PUBLICATION_CLEANUP: staging-link removal could not be made durable ({error}); destination requires explicit verification and reconciliation"
+            ))
+        })?;
+        return Ok(());
+    }
+
+    // Public package publication is complete and durable. Its staging-name
+    // cleanup remains best effort because an extra public link does not make
+    // the public verifier reject an otherwise complete destination.
     if temporary.remove().is_ok() {
         let _ = sync_directory(&parent_directory);
     }
@@ -248,6 +406,20 @@ impl Drop for TemporaryPath<'_> {
 }
 
 fn read_regular_bounded(path: &Path) -> io::Result<Vec<u8>> {
+    read_regular_bounded_with_limit(path, MAX_PACKAGE_BYTES)
+}
+
+fn read_regular_bounded_with_limit(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    read_regular_bounded_with_policy(path, limit, false)
+}
+
+fn read_regular_bounded_with_policy(
+    path: &Path,
+    limit: usize,
+    require_owner_only: bool,
+) -> io::Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    let _ = require_owner_only;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -261,25 +433,184 @@ fn read_regular_bounded(path: &Path) -> io::Result<Vec<u8>> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
+    #[cfg(unix)]
+    let mut file = if require_owner_only {
+        open_private_regular_descriptor(path)?
+    } else {
+        options.open(path)?
+    };
+    #[cfg(not(unix))]
     let mut file = options.open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_PACKAGE_BYTES as u64 {
+    if !metadata.file_type().is_file() || metadata.len() > limit as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "package must be a bounded regular file",
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if require_owner_only
+            && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o077 != 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-private input has the wrong owner, is linked, or grants group/other access",
+            ));
+        }
+    }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     std::io::Read::by_ref(&mut file)
-        .take(MAX_PACKAGE_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PACKAGE_BYTES {
+    if bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "package exceeds byte limit",
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_private_regular_descriptor(path: &Path) -> io::Result<File> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let components = absolute
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(Ok(name)),
+            Component::RootDir | Component::CurDir => None,
+            Component::ParentDir | Component::Prefix(_) => Some(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "owner-private path contains an unsafe component",
+            ))),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let (leaf, parents) = components.split_last().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "owner-private path has no file name",
+        )
+    })?;
+    let directory_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::CLOEXEC;
+    let mut directory =
+        rustix::fs::open(Path::new("/"), directory_flags, rustix::fs::Mode::empty())
+            .map_err(os_error)?;
+    let effective_uid = nix::unistd::geteuid().as_raw();
+    for component in parents {
+        directory = rustix::fs::openat(
+            &directory,
+            *component,
+            directory_flags,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(os_error)?;
+        let metadata = rustix::fs::fstat(&directory).map_err(os_error)?;
+        let trusted_sticky_root = metadata.st_uid == 0 && metadata.st_mode & 0o1000 != 0;
+        if metadata.st_mode & 0o022 != 0 && metadata.st_uid != effective_uid && !trusted_sticky_root
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-private path traverses a redirectable foreign directory",
+            ));
+        }
+    }
+    let parent_metadata = rustix::fs::fstat(&directory).map_err(os_error)?;
+    if parent_metadata.st_uid != effective_uid || parent_metadata.st_mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "owner-private input parent has the wrong owner or broad permissions",
+        ));
+    }
+    let file = rustix::fs::openat(
+        &directory,
+        *leaf,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(os_error)?;
+    Ok(File::from(file))
+}
+
+#[cfg(unix)]
+fn require_private_parent_custody(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let mut current = absolute.parent();
+    let mut immediate = true;
+    while let Some(directory) = current {
+        let metadata = std::fs::symlink_metadata(directory)?;
+        let trusted_sticky_root = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
+        if !metadata.file_type().is_dir()
+            || metadata.file_type().is_symlink()
+            || (metadata.mode() & 0o022 != 0
+                && metadata.uid() != nix::unistd::geteuid().as_raw()
+                && !trusted_sticky_root)
+            || (immediate
+                && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                    || metadata.mode() & 0o077 != 0))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-private input/output has a symlinked, writable, or non-owner parent",
+            ));
+        }
+        immediate = false;
+        current = directory.parent();
+    }
+    Ok(())
+}
+
+fn read_owner_pin(path: &Path) -> io::Result<String> {
+    let bytes = read_private_regular_bounded(path, 128)?;
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "owner pin is not UTF-8"))?;
+    let pin = value.strip_suffix('\n').unwrap_or(value);
+    if pin.len() != 64
+        || pin.contains('\n')
+        || !pin
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "owner pin is not canonical lowercase SHA-256",
+        ));
+    }
+    Ok(pin.to_owned())
+}
+
+fn read_private_regular_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, limit);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "owner-private package inputs require Unix mode and link validation",
+        ))
+    }
+    #[cfg(unix)]
+    {
+        read_regular_bounded_with_policy(path, limit, true)
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +712,96 @@ mod tests {
         );
         assert_eq!(fs::read_dir(&moved_parent).unwrap().count(), 1);
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_inputs_reject_broad_modes_and_multiple_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let input = directory.path().join("private-package.json");
+        fs::write(&input, b"private").unwrap();
+        fs::set_permissions(&input, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(read_private_regular_bounded(&input, 128).is_err());
+
+        fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+        let second_link = directory.path().join("second-link.json");
+        fs::hard_link(&input, second_link).unwrap();
+        assert!(read_private_regular_bounded(&input, 128).is_err());
+
+        let real_parent = directory.path().join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        fs::set_permissions(&real_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let real_input = real_parent.join("pin");
+        fs::write(&real_input, b"private").unwrap();
+        fs::set_permissions(&real_input, fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = directory.path().join("parent-alias");
+        std::os::unix::fs::symlink(&real_parent, &alias).unwrap();
+        assert!(read_private_regular_bounded(&alias.join("pin"), 128).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_publication_rejects_a_broad_parent_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        let output = directory.path().join("private-package.json");
+
+        assert!(publish_new_private_file(&output, b"private").is_err());
+        assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_publication_reports_staging_cleanup_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let output = directory.path().join("private-package.json");
+
+        let error =
+            publish_new_private_file_with(&output, b"private", sync_open_directory, |_, _| {
+                Err(io::Error::other("injected staging cleanup failure"))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("E_PRIVATE_PUBLICATION_CLEANUP"));
+        assert_eq!(fs::read(&output).unwrap(), b"private");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_publication_reports_nondurable_cleanup() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let output = directory.path().join("private-package.json");
+        let mut syncs = 0;
+
+        let error = publish_new_private_file_with(
+            &output,
+            b"private",
+            |_| {
+                syncs += 1;
+                if syncs == 1 {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("injected cleanup sync failure"))
+                }
+            },
+            remove_relative_file,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("E_PRIVATE_PUBLICATION_CLEANUP"));
+        assert_eq!(fs::read(&output).unwrap(), b"private");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[cfg(not(unix))]

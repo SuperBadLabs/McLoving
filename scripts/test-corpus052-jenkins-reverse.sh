@@ -4,8 +4,8 @@ umask 077
 failure_line=0
 trap 'failure_line=$LINENO' ERR
 
-if [[ $# -ne 7 ]]; then
-  echo "usage: $0 SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID TRANSFORM_ROOT OWNER_PINNED_REHEARSAL_MANIFEST_SHA256 JENKINS_PLUGIN_SOURCE OUTPUT_ROOT" >&2
+if [[ $# -ne 8 ]]; then
+  echo "usage: $0 SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID TRANSFORM_ROOT OWNER_PINNED_REHEARSAL_MANIFEST_SHA256 JENKINS_PLUGIN_SOURCE REVIEWED_NORMALIZER OUTPUT_ROOT" >&2
   exit 64
 fi
 
@@ -16,7 +16,8 @@ opaque_evidence_id=$3
 requested_transform_root=$4
 owner_pinned_rehearsal_manifest_sha256=$5
 plugin_source=$6
-requested_output=$7
+reviewed_normalizer=$7
+requested_output=$8
 fixture_root="${repo_root}/migration/state-transfer-v1/fixtures"
 source_plugin_manifest="${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/PLUGIN_SHA256SUMS"
 plugin_manifest_sha256='e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0'
@@ -71,6 +72,14 @@ for path in "${source_reverse_bundle}" "${source_rehearsal_summary}" \
     exit 66
   fi
 done
+if [[ ! -f "${reviewed_normalizer}" || -L "${reviewed_normalizer}" \
+  || ! -x "${reviewed_normalizer}" \
+  || $(stat -c '%h' "${reviewed_normalizer}") -ne 1 \
+  || $(stat -c '%u' "${reviewed_normalizer}") -ne "${EUID}" \
+  || $((8#$(stat -c '%a' "${reviewed_normalizer}") & 8#077)) -ne 0 ]]; then
+  echo "reviewed normalizer is missing, aliased, non-owner, or not owner-only" >&2
+  exit 66
+fi
 
 if [[ $(basename -- "${requested_transform_root}") != mcloving \
   || ! -f "${rehearsal_manifest}" || -L "${rehearsal_manifest}" \
@@ -206,6 +215,7 @@ test "$(sha256sum "${authenticated_rehearsal}/SHA256SUMS" | awk '{print $1}')" =
 rehearsal_root="${authenticated_rehearsal}"
 rehearsal_manifest="${rehearsal_root}/SHA256SUMS"
 transform_root="${rehearsal_root}/mcloving"
+forward_bundle="${transform_root}/forward-bundle.json"
 reverse_bundle="${transform_root}/reverse-bundle.json"
 rehearsal_summary="${transform_root}/rehearsal-summary.json"
 log_payload="${transform_root}/mcloving-build-2.log"
@@ -213,6 +223,11 @@ trace_payload="${transform_root}/mcloving-build-2-log-0.txt"
 stdout_payload="${transform_root}/mcloving-build-2-log-1.txt"
 
 reverse_digest=$(sha256sum "${reverse_bundle}" | awk '{print $1}')
+expected_normalizer_digest=$(jq -r \
+  '.binding.transform_implementation_digest[]' "${forward_bundle}" \
+  | awk '{printf "%02x", $1} END {print ""}')
+test "$(sha256sum "${reviewed_normalizer}" | awk '{print $1}')" = \
+  "${expected_normalizer_digest}"
 test "$(awk '$2 == "mcloving/reverse-bundle.json" { print $1 }' \
   "${rehearsal_manifest}")" = "${reverse_digest}"
 test "$(awk '$2 == "mcloving/reverse-bundle.json" { count += 1 } END { print count + 0 }' \
@@ -361,13 +376,9 @@ authenticate_history() {
   local source_root=$1
   local output_bundle=$2
   local output_receipt=$3
-  (
-    cd "${repo_root}"
-    cargo run --locked --quiet \
-      -p mcloving-jenkins-state-transfer --example normalize_history -- \
-      "${source_root}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
-      "${output_bundle}"
-  ) > "${output_receipt}"
+  "${reviewed_normalizer}" \
+    "${source_root}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
+    "${output_bundle}" > "${output_receipt}"
 }
 
 mkdir -p "${home}/init.groovy.d" "${home}/plugins" "${job_home}/builds" \
@@ -477,6 +488,8 @@ stop_controller() {
 capture_build() {
   local number=$1
   local prefix=$2
+  local retained_log=${3:-}
+  local expected_retained_log=${4:-}
   for _ in $(seq 1 240); do
     if podman exec "${container}" curl --fail --silent --show-error \
       "http://127.0.0.1:8080/job/${job}/${number}/api/json" \
@@ -485,6 +498,19 @@ capture_build() {
       podman exec "${container}" curl --fail --silent --show-error \
         "http://127.0.0.1:8080/job/${job}/${number}/consoleText" \
         > "${staging}/evidence/${prefix}-build-${number}.log"
+      if [[ -n "${retained_log}" ]]; then
+        podman unshare test -f "${retained_log}"
+        podman unshare test ! -L "${retained_log}"
+        if [[ -n "${expected_retained_log}" ]]; then
+          podman unshare cmp "${retained_log}" "${expected_retained_log}"
+        fi
+        podman unshare cmp "${retained_log}" \
+          "${staging}/evidence/${prefix}-build-${number}.log"
+        if [[ -n "${expected_retained_log}" ]]; then
+          cmp "${staging}/evidence/${prefix}-build-${number}.log" \
+            "${expected_retained_log}"
+        fi
+      fi
       return 0
     fi
     sleep 0.5
@@ -779,7 +805,7 @@ podman unshare cp "${staging}/permalinks" "${job_home}/builds/permalinks"
 podman unshare chown -R 1000:1000 "${job_home}"
 
 start_controller "${home}" "${home_plugins}"
-capture_build 1 imported
+capture_build 1 imported "${job_home}/builds/1/log" "${sealed_builds}/1/log"
 capture_build 2 imported
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
   "${staging}/evidence/imported-build-1.json" >/dev/null
@@ -803,7 +829,7 @@ test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 stop_controller
 
 start_controller "${home}" "${home_plugins}"
-capture_build 1 restarted
+capture_build 1 restarted "${job_home}/builds/1/log" "${sealed_builds}/1/log"
 capture_build 2 restarted
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
   "${staging}/evidence/restarted-build-1.json" >/dev/null
@@ -826,7 +852,7 @@ podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 podman exec "${container}" curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:8080/job/${job}/build" >/dev/null
-capture_build 3 continued
+capture_build 3 continued "${job_home}/builds/3/log"
 jq --exit-status '.number == 3 and .result == "SUCCESS"' \
   "${staging}/evidence/continued-build-3.json" >/dev/null
 rg --quiet 'Hello World' "${staging}/evidence/continued-build-3.log"
@@ -870,6 +896,15 @@ cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-state-transfer-rece
   "${staging}/mcloving-state-transfer-receipt.json"
 cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-state-transfer-build.json" \
   "${staging}/mcloving-state-transfer-build.json"
+cmp "${staging}/evidence/imported-build-1.log" "${sealed_builds}/1/log"
+cmp "${staging}/evidence/restarted-build-1.log" "${sealed_builds}/1/log"
+cmp "${staging}/evidence/jenkins-job-after/builds/1/log" "${sealed_builds}/1/log"
+cmp "${staging}/evidence/jenkins-job-after/builds/2/log" \
+  "${staging}/evidence/imported-build-2.log"
+cmp "${staging}/evidence/jenkins-job-after/builds/2/log" \
+  "${staging}/evidence/restarted-build-2.log"
+cmp "${staging}/evidence/jenkins-job-after/builds/3/log" \
+  "${staging}/evidence/continued-build-3.log"
 rm -f -- "${staging}/imported-build-2.log" \
   "${staging}/imported-build-2.log-index" \
   "${staging}/mcloving-state-transfer-build.json" \
