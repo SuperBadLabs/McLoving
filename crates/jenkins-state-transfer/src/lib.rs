@@ -1838,7 +1838,8 @@ mod tests {
                 "<artifactNumToKeep>-1</artifactNumToKeep><removeLastBuild>false</removeLastBuild>",
             );
         verify_retained_job_configuration(rewritten_plugins.as_bytes(), reviewed).unwrap();
-        verify_retained_job_configuration(reviewed_text.replace('\n', "\r\n").as_bytes(), reviewed)
+        let reviewed_lf = reviewed_text.replace("\r\n", "\n").replace('\r', "\n");
+        verify_retained_job_configuration(reviewed_lf.replace('\n', "\r\n").as_bytes(), reviewed)
             .unwrap();
         let escaped_script = reviewed_text
             .replace("<script><![CDATA[", "<script>")
