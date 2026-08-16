@@ -6,9 +6,9 @@ use std::path::{Component, Path};
 use mcloving_jenkins_state_transfer::{
     admitted_forward_binding, admitted_reverse_binding, admitted_tree_digest,
     authenticate_forward_bundle, authenticate_reverse_bundle, load_admitted_history_owner_only,
-    normalize_single_aborted_workflow,
+    normalize_single_aborted_workflow, parse_retained_build_record,
 };
-use mcloving_state_transfer::{Digest, StateBundle, canonical_bytes, transform};
+use mcloving_state_transfer::{BuildResult, Digest, StateBundle, canonical_bytes, transform};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -420,6 +420,7 @@ fn verify_exact_state(
         .ok_or_else(|| {
             PackageError::new("E_PRIVATE_FORWARD", "opaque evidence locator is divergent")
         })?;
+    require_private_parent_custody(inputs.sealed_history_root)?;
     let history =
         load_admitted_history_owner_only(inputs.sealed_history_root, opaque_evidence_id.to_owned())
             .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
@@ -703,6 +704,21 @@ fn verify_exact_state(
             ));
         }
     }
+    validate_retained_build_record(
+        &state.reverse_evidence,
+        "evidence/jenkins-job-after/builds/2/build.xml",
+        &[
+            "evidence/imported-build-2.json",
+            "evidence/restarted-build-2.json",
+        ],
+        2,
+    )?;
+    validate_retained_build_record(
+        &state.reverse_evidence,
+        "evidence/jenkins-job-after/builds/3/build.xml",
+        &["evidence/continued-build-3.json"],
+        3,
+    )?;
     let source_build_1_log = history.files.get("1/log").ok_or_else(|| {
         PackageError::new(
             "E_PRIVATE_CONTINUITY",
@@ -794,6 +810,37 @@ fn verify_exact_state(
             "evidence/jenkins-container-inspect.json",
         ],
     )?;
+    Ok(())
+}
+
+fn validate_retained_build_record(
+    archive: &EvidenceArchive,
+    retained_path: &str,
+    api_paths: &[&str],
+    expected_number: u64,
+) -> Result<(), PackageError> {
+    let retained = parse_retained_build_record(archive_file(archive, retained_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_RETAINED_BUILD", error.to_string()))?;
+    if retained.number != expected_number || retained.result != BuildResult::Succeeded {
+        return Err(PackageError::new(
+            "E_PRIVATE_RETAINED_BUILD",
+            format!("{retained_path} has divergent identity or result"),
+        ));
+    }
+    for path in api_paths {
+        let api: Value = serde_json::from_slice(archive_file(archive, path)?)
+            .map_err(|error| PackageError::new("E_PRIVATE_RETAINED_BUILD", error.to_string()))?;
+        if api.get("number") != Some(&Value::from(retained.number))
+            || api.get("result") != Some(&Value::from("SUCCESS"))
+            || api.get("timestamp") != Some(&Value::from(retained.started_at_unix_ms))
+            || api.get("duration") != Some(&Value::from(retained.duration_ms))
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_RETAINED_BUILD",
+                format!("{retained_path} is divergent from {path}"),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1130,6 +1177,7 @@ fn load_archive(
     expected_manifest_sha256: &str,
     required_paths: &[&str],
 ) -> Result<EvidenceArchive, PackageError> {
+    require_private_parent_custody(root)?;
     require_plain_directory(root)?;
     let manifest_bytes = read_plain_file(&root.join("SHA256SUMS"), MAX_EVIDENCE_FILE_BYTES)?;
     if sha256(&manifest_bytes) != expected_manifest_sha256 {
@@ -1337,6 +1385,48 @@ fn require_plain_directory(path: &Path) -> Result<(), PackageError> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn require_private_parent_custody(path: &Path) -> Result<(), PackageError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?
+            .join(path)
+    };
+    let mut current = absolute.parent();
+    let mut immediate = true;
+    while let Some(directory) = current {
+        let metadata = fs::symlink_metadata(directory)
+            .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+        if !metadata.file_type().is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.mode() & 0o022 != 0
+            || (immediate
+                && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                    || metadata.mode() & 0o077 != 0))
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_CUSTODY",
+                "private evidence has a symlinked, writable, or non-owner parent",
+            ));
+        }
+        immediate = false;
+        current = directory.parent();
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_private_parent_custody(_path: &Path) -> Result<(), PackageError> {
+    Err(PackageError::new(
+        "E_PRIVATE_CUSTODY",
+        "owner-private ancestor custody requires Unix",
+    ))
 }
 
 fn read_plain_file(path: &Path, limit: usize) -> Result<Vec<u8>, PackageError> {

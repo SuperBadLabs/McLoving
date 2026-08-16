@@ -138,8 +138,9 @@ retained owner package pin, both evidence-manifest pins, both transform-implemen
 pins, sealed source tree, exact
 reviewed repository heads, and complete verifier all agree. The CLI never
 prints its digest and publishes it as a new owner-only file with mode `0600`.
-Every owner-private input and parent must belong to the invoking effective user
-as well as deny group/other access. Private publication additionally requires confirmed staging-link removal and a
+Every owner-private input and immediate parent must belong to the invoking
+effective user and deny group/other access; every ancestor is a plain,
+non-symlink directory that denies group/other writes. Private publication additionally requires confirmed staging-link removal and a
 second held-parent directory sync; either cleanup failure is reported for
 explicit verification and reconciliation. The private verifier rejects
 group/other access on every traversed sealed-source directory and member, and
@@ -148,7 +149,8 @@ sidecars exactly to the authenticated reverse bundle and all-false authority
 ledger. The completed build's ordered normalized log entries are joined by
 digest, byte length, retrieval digest, and media type to both captured stream
 chunks and their exact aggregate. Restart continuity includes the original build-1 result and log, the
-retained build cursor and complete permalink set after continued build 3, and
+retained build-2/build-3 XML identities/results/timings joined to their API
+receipts, the retained build cursor and complete permalink set after continued build 3, and
 both ceremonies' exclusive container attachment to their captured internal
 Podman networks.
 The verified private package is 704,617 bytes and remains solely under

@@ -33,12 +33,14 @@ reverse archives. Its canonical verifier authenticates the sealed source,
 reconstructs both state transforms only when their exact implementation
 identities match separate owner-private pins, cross-checks their configuration
 and independent binding receipts, enforces effective-owner identity plus
-owner-only modes throughout the
+owner-only modes throughout the inputs and rejects writable or symlinked
+ancestors, and
 sealed source tree, and joins the retained Jenkins build/import/provenance
 sidecars to the authenticated reverse bundle. It proves the effect-free
 McLoving build and binds both ordered normalized log entries to their captured
 stream chunks, plus Jenkins restart, build-1 retention, next-build/permalink
-continuity, and exclusive attachment to the captured internal networks. Private
+continuity, retained build-2/build-3 XML-to-API identity/result/timing joins,
+and exclusive attachment to the captured internal networks. Private
 publication succeeds only after durable staging-link cleanup. It verifies one
 packaged case and 227 deterministic rejections,
 sets `package_complete=true` and `shadow_eligible=true`, and keeps every

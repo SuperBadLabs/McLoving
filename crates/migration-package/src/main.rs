@@ -215,6 +215,9 @@ where
     SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
     RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
 {
+    if require_owner_only_parent {
+        require_private_parent_custody(output)?;
+    }
     let file_name = output.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -415,6 +418,10 @@ fn read_regular_bounded_with_policy(
 ) -> io::Result<Vec<u8>> {
     #[cfg(not(unix))]
     let _ = require_owner_only;
+    #[cfg(unix)]
+    if require_owner_only {
+        require_private_parent_custody(path)?;
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -461,6 +468,37 @@ fn read_regular_bounded_with_policy(
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn require_private_parent_custody(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let mut current = absolute.parent();
+    let mut immediate = true;
+    while let Some(directory) = current {
+        let metadata = std::fs::symlink_metadata(directory)?;
+        if !metadata.file_type().is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.mode() & 0o022 != 0
+            || (immediate
+                && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                    || metadata.mode() & 0o077 != 0))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-private input/output has a symlinked, writable, or non-owner parent",
+            ));
+        }
+        immediate = false;
+        current = directory.parent();
+    }
+    Ok(())
 }
 
 fn read_owner_pin(path: &Path) -> io::Result<String> {
@@ -604,6 +642,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let input = directory.path().join("private-package.json");
         fs::write(&input, b"private").unwrap();
         fs::set_permissions(&input, fs::Permissions::from_mode(0o640)).unwrap();
@@ -613,6 +652,16 @@ mod tests {
         let second_link = directory.path().join("second-link.json");
         fs::hard_link(&input, second_link).unwrap();
         assert!(read_private_regular_bounded(&input, 128).is_err());
+
+        let real_parent = directory.path().join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        fs::set_permissions(&real_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let real_input = real_parent.join("pin");
+        fs::write(&real_input, b"private").unwrap();
+        fs::set_permissions(&real_input, fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = directory.path().join("parent-alias");
+        std::os::unix::fs::symlink(&real_parent, &alias).unwrap();
+        assert!(read_private_regular_bounded(&alias.join("pin"), 128).is_err());
     }
 
     #[cfg(unix)]
