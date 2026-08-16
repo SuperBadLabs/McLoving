@@ -12,7 +12,8 @@ use std::path::Path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use mcloving_migration_package::{MAX_PRIVATE_PACKAGE_BYTES, PrivateVerificationInputs};
 use mcloving_shadow_qualification::{
-    IndependentPins, VerificationReceipt, seal_private_session, verify_private_session,
+    IndependentPins, SourceTemplateInputs, VerificationReceipt,
+    prepare_source_authenticated_template, seal_private_session, verify_private_session,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
@@ -20,6 +21,7 @@ use sha2::{Digest as _, Sha256};
 
 const MAX_SESSION_BYTES: usize = 262_144;
 const MAX_PIN_BYTES: usize = 65;
+const MAX_RUNTIME_OBSERVATION_BYTES: usize = 65_536;
 
 fn main() {
     if let Err(error) = run() {
@@ -82,6 +84,70 @@ fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::
             println!("source_capture_key_pin_created=true");
             println!("shadow_replay_key_created=true");
             println!("shadow_replay_public_identity_created=true");
+        }
+        (
+            Some("prepare"),
+            [
+                _,
+                _,
+                source_probe,
+                target_replay,
+                trace_observation,
+                isolation_observation,
+                source_key,
+                source_key_pin,
+                shadow_public_identity,
+                package,
+                package_pin,
+                authz_generation_pin,
+                verifier_binary_pin,
+                expected_head,
+                template,
+            ],
+        ) => {
+            let expected_head = expected_head
+                .to_str()
+                .ok_or("expected implementation head is not UTF-8")?;
+            let source_probe =
+                read_owner_private(Path::new(source_probe), MAX_RUNTIME_OBSERVATION_BYTES)?;
+            let target_replay =
+                read_owner_private(Path::new(target_replay), MAX_RUNTIME_OBSERVATION_BYTES)?;
+            let trace_observation =
+                read_owner_private(Path::new(trace_observation), MAX_RUNTIME_OBSERVATION_BYTES)?;
+            let isolation_observation = read_owner_private(
+                Path::new(isolation_observation),
+                MAX_RUNTIME_OBSERVATION_BYTES,
+            )?;
+            let source_key = read_owner_private(Path::new(source_key), 1_024)?;
+            let source_key_pin = read_owner_pin(Path::new(source_key_pin))?;
+            let shadow_public_identity =
+                read_owner_private(Path::new(shadow_public_identity), 128)?;
+            let shadow_public_identity = std::str::from_utf8(&shadow_public_identity)
+                .map_err(|_| "shadow public identity is not UTF-8")?
+                .trim();
+            let package = read_owner_private(Path::new(package), MAX_PRIVATE_PACKAGE_BYTES)?;
+            let package_pin = read_owner_pin(Path::new(package_pin))?;
+            let authz_generation = read_owner_pin(Path::new(authz_generation_pin))?;
+            let verifier_binary = read_owner_pin(Path::new(verifier_binary_pin))?;
+            let bytes = prepare_source_authenticated_template(&SourceTemplateInputs {
+                source_probe_bytes: &source_probe,
+                target_replay_bytes: &target_replay,
+                trace_observation_bytes: &trace_observation,
+                isolation_observation_bytes: &isolation_observation,
+                private_package_bytes: &package,
+                expected_private_package_sha256: &package_pin,
+                source_capture_pkcs8: &source_key,
+                expected_source_capture_public_key_sha256: &source_key_pin,
+                shadow_replay_public_key_base64: shadow_public_identity,
+                authz_generation_sha256: &authz_generation,
+                verifier_binary_sha256: &verifier_binary,
+                shadow_implementation_head: expected_head,
+            })?;
+            publish_owner_private(Path::new(template), &bytes)?;
+            println!("source_capture_authenticated=true");
+            println!("target_replay_observed=true");
+            println!("shadow_replay_signed=false");
+            println!("production_authority=false");
         }
         (
             Some("seal"),
@@ -730,6 +796,208 @@ mod tests {
             fs::read(&shadow_public).expect("unchanged identity"),
             b"preexisting"
         );
+    }
+
+    #[test]
+    fn prepare_command_publishes_only_a_source_authenticated_template() {
+        let directory = private_directory();
+        let write_private = |name: &str, bytes: &[u8]| {
+            let path = directory.path().join(name);
+            fs::write(&path, bytes).expect("write private input");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("private input mode");
+            path
+        };
+        let random = SystemRandom::new();
+        let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
+        let source_pair = Ed25519KeyPair::from_pkcs8(source_pkcs8.as_ref()).expect("source pair");
+        let shadow_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("shadow key");
+        let shadow_pair = Ed25519KeyPair::from_pkcs8(shadow_pkcs8.as_ref()).expect("shadow pair");
+        let source_observations = [
+            (
+                "api",
+                "WorkflowJob.doBuild(StaplerRequest2,StaplerResponse2,TimeDuration)",
+                serde_json::json!({"rejection": "org.kohsuke.stapler.HttpResponses$3"}),
+            ),
+            (
+                "manual",
+                "WorkflowJob.scheduleBuild2(UserIdCause)",
+                serde_json::json!({"returned_future": false}),
+            ),
+            ("schedule", "TimerTrigger.run()", serde_json::json!({})),
+            (
+                "upstream",
+                "ReverseBuildTrigger.RunListenerImpl.onCompleted",
+                serde_json::json!({"upstream_result": "ABORTED"}),
+            ),
+            ("webhook", "SCMTrigger.run(Action[])", serde_json::json!({})),
+        ]
+        .iter()
+        .map(|(kind, path, detail)| {
+            serde_json::json!({
+                "kind": kind,
+                "path": path,
+                "outcome": "disabled_pre_queue",
+                "queued_builds": 0,
+                "scheduled_attempts": 0,
+                "credential_grants": 0,
+                "connector_requests": 0,
+                "production_effects": 0,
+                "detail": detail,
+            })
+        })
+        .collect::<Vec<_>>();
+        let target_observations = [
+            ("api", "Store.accept_trigger_delivery(remote_api)"),
+            ("manual", "Store.admit_dag"),
+            ("schedule", "Store.accept_trigger_delivery(schedule)"),
+            ("upstream", "Store.accept_trigger_delivery(upstream)"),
+            ("webhook", "Store.accept_trigger_delivery(scm_webhook)"),
+        ]
+        .iter()
+        .map(|(kind, path)| {
+            serde_json::json!({
+                "kind": kind,
+                "path": path,
+                "outcome": "disabled_pre_queue",
+                "queued_builds": 0,
+                "scheduled_attempts": 0,
+                "credential_grants": 0,
+                "connector_requests": 0,
+                "production_effects": 0,
+            })
+        })
+        .collect::<Vec<_>>();
+        let activity = serde_json::json!({
+            "builds": 1,
+            "queued": 0,
+            "next_build_number": 2,
+            "credential_lookups": 0,
+        });
+        let source = serde_json::to_vec(&serde_json::json!({
+            "schema": "mcloving.shadow001.jenkins-source-probe/v1",
+            "job_id": "corpus-052-cinqict_jenkinsdev",
+            "source_state": "disabled",
+            "definition_kind": "org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition",
+            "source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+            "source_config_sha256": "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97",
+            "captured_wall_clock_unix_ms": 1_786_904_213_797_i64,
+            "original_activity": activity,
+            "terminal_activity": activity,
+            "observations": source_observations,
+        }))
+        .expect("source observation");
+        let target = serde_json::to_vec(&serde_json::json!({
+            "schema": "mcloving.shadow001.target-replay/v1",
+            "job_id": "corpus-052-cinqict_jenkinsdev",
+            "target_state": "disabled",
+            "target_generation": "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97",
+            "observations": target_observations,
+            "terminal_queued_builds": 0,
+        }))
+        .expect("target observation");
+        let log = serde_json::json!([
+            {
+                "sequence": 1,
+                "stream": "stderr",
+                "content_sha256": "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
+                "bytes": 19,
+            },
+            {
+                "sequence": 2,
+                "stream": "stdout",
+                "content_sha256": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+                "bytes": 12,
+            },
+        ]);
+        let trace = serde_json::to_vec(&serde_json::json!({
+            "schema": "mcloving.shadow001.trace-observation/v1",
+            "certified_trace_sha256": "e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6",
+            "source_trace_sha256": "e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6",
+            "target_trace_sha256": "e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6",
+            "source_log": log,
+            "target_log": log,
+            "source_result": "SUCCESS",
+            "target_result": "SUCCESS",
+            "artifacts": 0,
+            "external_effect_intents": 0,
+            "isolated_replay_executed": true,
+            "compared_traces": 1,
+            "mismatches": 0,
+        }))
+        .expect("trace observation");
+        let isolation = serde_json::to_vec(&serde_json::json!({
+            "schema": "mcloving.shadow001.isolation-observation/v1",
+            "source_fixture_identity": "source-fixture",
+            "target_fixture_identity": "target-fixture",
+            "source_network_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_network_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "reachability_receipt_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "source_and_target_networks_disjoint": true,
+            "production_network_requests": 0,
+            "production_endpoint_mappings": 0,
+            "production_credentials": 0,
+            "host_mounts": 0,
+            "cross_fixture_mounts": 0,
+            "teardown_complete": true,
+        }))
+        .expect("isolation observation");
+        let package = b"private-package";
+        let source_path = write_private("source.json", &source);
+        let target_path = write_private("target.json", &target);
+        let trace_path = write_private("trace.json", &trace);
+        let isolation_path = write_private("isolation.json", &isolation);
+        let source_key_path = write_private("source.pkcs8", source_pkcs8.as_ref());
+        let source_pin_path = write_private(
+            "source.sha256",
+            format!("{}\n", digest_hex(source_pair.public_key().as_ref())).as_bytes(),
+        );
+        let shadow_public_path = write_private(
+            "shadow.base64",
+            format!("{}\n", BASE64.encode(shadow_pair.public_key().as_ref())).as_bytes(),
+        );
+        let package_path = write_private("package.json", package);
+        let package_pin_path = write_private(
+            "package.sha256",
+            format!("{}\n", digest_hex(package)).as_bytes(),
+        );
+        let authz_path = write_private("authz.sha256", format!("{}\n", "d".repeat(64)).as_bytes());
+        let verifier_path = write_private(
+            "verifier.sha256",
+            format!("{}\n", "e".repeat(64)).as_bytes(),
+        );
+        let template_path = directory.path().join("template.json");
+        let arguments = vec![
+            OsString::from("mcloving-shadow-qualification"),
+            OsString::from("prepare"),
+            source_path.into_os_string(),
+            target_path.into_os_string(),
+            trace_path.into_os_string(),
+            isolation_path.into_os_string(),
+            source_key_path.into_os_string(),
+            source_pin_path.into_os_string(),
+            shadow_public_path.into_os_string(),
+            package_path.into_os_string(),
+            package_pin_path.into_os_string(),
+            authz_path.into_os_string(),
+            verifier_path.into_os_string(),
+            OsString::from("f".repeat(40)),
+            template_path.as_os_str().to_owned(),
+        ];
+
+        run_with_arguments(&arguments).expect("prepare template");
+        let bytes = read_owner_private(&template_path, MAX_SESSION_BYTES).expect("template");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("template JSON");
+        let events = value["events"].as_array().expect("events");
+        assert_eq!(events.len(), 5);
+        assert!(events.iter().all(|event| {
+            !event["source"]["signature_base64"]
+                .as_str()
+                .expect("source signature")
+                .is_empty()
+                && event["shadow"]["signature_base64"] == ""
+                && event["shadow"]["signing_public_key_sha256"] == ""
+        }));
     }
 
     #[test]
