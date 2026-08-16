@@ -2179,7 +2179,7 @@ mod tests {
             verify_fixture(&reordered, &package)
                 .expect_err("reordered")
                 .code,
-            "E_CAPTURE_BINDING"
+            "E_EVENT_ORDER"
         );
 
         let mut substituted = session.clone();
