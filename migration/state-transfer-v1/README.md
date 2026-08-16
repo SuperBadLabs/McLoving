@@ -9,9 +9,11 @@ the forward and reverse rehearsal harnesses.
 - `fixtures/corpus052-job-config.xml` is the exact public pipeline definition
   used to reconcile the admitted job's one retained private build-history
   dependency.
-- `fixtures/corpus052-template-job-config.xml` is a non-authoritative,
-  built-in-echo-only serialization fixture. It never runs the admitted shell
-  workload and is destroyed before the destination continuity proof starts.
+- `fixtures/corpus052-template-job-config.xml` is a non-authoritative native
+  `ShellStep` serialization fixture. Its controller replaces the global shell
+  with a recorded non-executing stub, so the graph describes the admitted step
+  without running its script; the controller is destroyed before destination
+  continuity proof starts.
 - `fixtures/repo/` supplies the initial, two matching, and final nonmatching revisions.
 
 Run `scripts/test-state-transfer-rehearsal.sh` to create the two-build Jenkins
@@ -32,12 +34,16 @@ the independently pinned public tree digest, its opaque evidence identifier,
 that transform output, an owner-private independently retained digest of the
 enclosing rehearsal manifest, the pinned private plugin profile, and a new
 output directory. Before any controller starts, it authenticates and verifies
-the complete rehearsal manifest, reauthenticates the exact five-file
-tree, proves build 1 equals the reverse bundle, and copies exactly the committed
-90-plugin manifest denominator with digest verification before and after each
-copy. A separate non-authoritative template controller creates only native
-serialization structure with a built-in marker and is destroyed. The fresh
-destination controller then loads the reverse-imported history without
+the complete rehearsal manifest, copies every authenticated member into a
+private read-only snapshot and reauthenticates that snapshot, reauthenticates
+the exact five-file tree, proves build 1 equals the reverse bundle, and copies
+exactly the committed 90-plugin manifest denominator with digest verification
+before and after each copy. A separate non-authoritative template controller
+creates an exact native `ShellStep` graph through a non-executing shell stub.
+The harness replaces its log, remaps every native workflow timestamp into the
+canonical transferred interval, proves no template marker remains, and
+destroys the controller. The fresh destination controller then loads the
+reverse-imported history without
 executing build 2, verifies native workflow and log retrieval across restart,
 executes build 3 once, proves contiguous numbering, and denies public network
 egress. Both harnesses retain only owner-private evidence and grant no

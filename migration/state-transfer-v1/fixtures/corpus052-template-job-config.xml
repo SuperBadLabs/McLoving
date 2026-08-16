@@ -16,11 +16,11 @@
   <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
     <script><![CDATA[
 pipeline {
-    agent none
+    agent any
     stages {
         stage('Build') {
             steps {
-                echo 'MIG005A_SERIALIZATION_TEMPLATE_ONLY'
+                sh 'echo "Hello World"'
             }
         }
     }

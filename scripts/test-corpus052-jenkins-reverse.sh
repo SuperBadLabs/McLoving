@@ -11,20 +11,20 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sealed_builds=$1
 expected_tree_sha256=$2
 opaque_evidence_id=$3
-transform_root=$4
+requested_transform_root=$4
 owner_pinned_rehearsal_manifest_sha256=$5
 plugin_source=$6
 requested_output=$7
 fixture_root="${repo_root}/migration/state-transfer-v1/fixtures"
 plugin_manifest="${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/PLUGIN_SHA256SUMS"
 plugin_manifest_sha256='e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0'
-reverse_bundle="${transform_root}/reverse-bundle.json"
-rehearsal_summary="${transform_root}/rehearsal-summary.json"
-rehearsal_root=$(realpath -e "${transform_root}/..")
+source_reverse_bundle="${requested_transform_root}/reverse-bundle.json"
+source_rehearsal_summary="${requested_transform_root}/rehearsal-summary.json"
+source_log_payload="${requested_transform_root}/mcloving-build-2.log"
+source_stdout_payload="${requested_transform_root}/mcloving-build-2-log-0.txt"
+source_stderr_payload="${requested_transform_root}/mcloving-build-2-log-1.txt"
+rehearsal_root=$(realpath -e "${requested_transform_root}/..")
 rehearsal_manifest="${rehearsal_root}/SHA256SUMS"
-log_payload="${transform_root}/mcloving-build-2.log"
-stdout_payload="${transform_root}/mcloving-build-2-log-0.txt"
-stderr_payload="${transform_root}/mcloving-build-2-log-1.txt"
 image='docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02'
 job='corpus-052-cinqict_jenkinsdev'
 output_parent=$(realpath -e "$(dirname -- "${requested_output}")")
@@ -34,7 +34,7 @@ if [[ ! "${output_leaf}" =~ ^jenkins-reverse-v[0-9]+$ || -e "${requested_output}
   echo "output must be one new jenkins-reverse-vN directory" >&2
   exit 73
 fi
-for path in "${sealed_builds}" "${transform_root}" "${plugin_source}"; do
+for path in "${sealed_builds}" "${requested_transform_root}" "${plugin_source}"; do
   if [[ ! -d "${path}" || -L "${path}" ]]; then
     echo "input directory is missing or symbolic: ${path}" >&2
     exit 66
@@ -50,20 +50,50 @@ if [[ ! -f "${plugin_manifest}" || -L "${plugin_manifest}" ]] \
   echo "pinned Jenkins plugin manifest is missing or divergent" >&2
   exit 66
 fi
-for path in "${reverse_bundle}" "${rehearsal_summary}" "${log_payload}" \
-  "${stdout_payload}" "${stderr_payload}"; do
+for path in "${source_reverse_bundle}" "${source_rehearsal_summary}" \
+  "${source_log_payload}" "${source_stdout_payload}" "${source_stderr_payload}"; do
   if [[ ! -f "${path}" || -L "${path}" ]]; then
     echo "input file is missing or symbolic: ${path}" >&2
     exit 66
   fi
 done
 
-if [[ $(basename -- "${transform_root}") != mcloving \
+if [[ $(basename -- "${requested_transform_root}") != mcloving \
   || ! -f "${rehearsal_manifest}" || -L "${rehearsal_manifest}" \
   || $(stat -c '%h' "${rehearsal_manifest}") -ne 1 ]]; then
   echo "rehearsal manifest boundary is missing or nonregular" >&2
   exit 66
 fi
+
+staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
+runtime_root=$(mktemp -d /tmp/mcloving-mig005a-corpus052-jenkins.XXXXXX)
+home="${runtime_root}/destination-home"
+template_home="${runtime_root}/template-home"
+template="${runtime_root}/template-build-2"
+authenticated_rehearsal="${runtime_root}/authenticated-rehearsal"
+job_home="${home}/jobs/${job}"
+template_job_home="${template_home}/jobs/${job}"
+network="mcloving-mig005a-corpus052-reverse-$$"
+container="mcloving-mig005a-corpus052-reverse-$$"
+port=$((21000 + ($$ % 1000)))
+completed=0
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  set +e
+  podman rm --force "${container}" >/dev/null 2>&1 || true
+  podman network rm "${network}" >/dev/null 2>&1 || true
+  chmod -R u+rwX "${authenticated_rehearsal}" >/dev/null 2>&1 || true
+  rm -rf -- "${authenticated_rehearsal}"
+  if [[ "${completed}" != 1 ]]; then
+    rm -rf -- "${staging}"
+    echo "kept failed Jenkins runtime at ${runtime_root}" >&2
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
+
 test "$(sha256sum "${rehearsal_manifest}" | awk '{print $1}')" = \
   "${owner_pinned_rehearsal_manifest_sha256}"
 awk '
@@ -73,6 +103,48 @@ awk '
   cd "${rehearsal_root}"
   sha256sum --check --strict SHA256SUMS >/dev/null
 )
+
+# Reopen no authenticated input after this point. Copy every manifest member into
+# a private snapshot, reauthenticate that snapshot against the independently
+# retained owner pin, and remove owner write permission before consuming it.
+mkdir -p "${authenticated_rehearsal}"
+cp --no-dereference --reflink=never "${rehearsal_manifest}" \
+  "${authenticated_rehearsal}/SHA256SUMS"
+test "$(sha256sum "${authenticated_rehearsal}/SHA256SUMS" | awk '{print $1}')" = \
+  "${owner_pinned_rehearsal_manifest_sha256}"
+awk '
+  NF != 2 || $2 ~ /^\// || $2 ~ /(^|\/)\.\.(\/|$)/ || $2 ~ /\\/ { exit 1 }
+' "${authenticated_rehearsal}/SHA256SUMS"
+while read -r expected_digest relative extra; do
+  test -z "${extra:-}"
+  [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ ]]
+  source_file="${rehearsal_root}/${relative}"
+  destination_file="${authenticated_rehearsal}/${relative}"
+  test -f "${source_file}"
+  test ! -L "${source_file}"
+  test "$(stat -c '%h' "${source_file}")" -eq 1
+  test "$(realpath -e -- "${source_file}")" = "${source_file}"
+  mkdir -p "$(dirname -- "${destination_file}")"
+  cp --no-dereference --reflink=never "${source_file}" "${destination_file}"
+  test -f "${destination_file}"
+  test ! -L "${destination_file}"
+  test "$(stat -c '%h' "${destination_file}")" -eq 1
+done < "${authenticated_rehearsal}/SHA256SUMS"
+(
+  cd "${authenticated_rehearsal}"
+  sha256sum --check --strict SHA256SUMS >/dev/null
+)
+find "${authenticated_rehearsal}" -type f -exec chmod 400 {} +
+find "${authenticated_rehearsal}" -type d -exec chmod 500 {} +
+
+rehearsal_root="${authenticated_rehearsal}"
+rehearsal_manifest="${rehearsal_root}/SHA256SUMS"
+transform_root="${rehearsal_root}/mcloving"
+reverse_bundle="${transform_root}/reverse-bundle.json"
+rehearsal_summary="${transform_root}/rehearsal-summary.json"
+log_payload="${transform_root}/mcloving-build-2.log"
+stdout_payload="${transform_root}/mcloving-build-2-log-0.txt"
+stderr_payload="${transform_root}/mcloving-build-2-log-1.txt"
 
 reverse_digest=$(sha256sum "${reverse_bundle}" | awk '{print $1}')
 test "$(awk '$2 == "mcloving/reverse-bundle.json" { print $1 }' \
@@ -128,32 +200,6 @@ test "$(sha256sum "${stderr_payload}" | awk '{print $1}')" = "${expected_stderr_
 test "$(wc -c < "${stdout_payload}" | tr -d ' ')" = 12
 test "$(wc -c < "${stderr_payload}" | tr -d ' ')" = 19
 test "$(cat "${log_payload}")" = $'Hello World\n+ echo Hello World'
-
-staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
-runtime_root=$(mktemp -d /tmp/mcloving-mig005a-corpus052-jenkins.XXXXXX)
-home="${runtime_root}/destination-home"
-template_home="${runtime_root}/template-home"
-template="${runtime_root}/template-build-2"
-job_home="${home}/jobs/${job}"
-template_job_home="${template_home}/jobs/${job}"
-network="mcloving-mig005a-corpus052-reverse-$$"
-container="mcloving-mig005a-corpus052-reverse-$$"
-port=$((21000 + ($$ % 1000)))
-completed=0
-
-cleanup() {
-  local status=$?
-  trap - EXIT
-  set +e
-  podman rm --force "${container}" >/dev/null 2>&1 || true
-  podman network rm "${network}" >/dev/null 2>&1 || true
-  if [[ "${completed}" != 1 ]]; then
-    rm -rf -- "${staging}"
-    echo "kept failed Jenkins runtime at ${runtime_root}" >&2
-  fi
-  exit "${status}"
-}
-trap cleanup EXIT
 
 verify_and_copy_plugins() {
   local source_root=$1
@@ -240,6 +286,11 @@ cmp "${staging}/evidence/authenticated-transform-binding.json" \
 cp "${fixture_root}/init.groovy" "${home}/init.groovy.d/10-mig005a.groovy"
 cp "${fixture_root}/corpus052-job-config.xml" "${job_home}/config.xml"
 cp "${fixture_root}/init.groovy" "${template_home}/init.groovy.d/10-mig005a.groovy"
+cp "${fixture_root}/corpus052-template-shell.groovy" \
+  "${template_home}/init.groovy.d/20-mig005a-template-shell.groovy"
+cp "${fixture_root}/corpus052-template-noop-shell" \
+  "${template_home}/mig005a-nonexecuting-shell"
+chmod 700 "${template_home}/mig005a-nonexecuting-shell"
 cp "${fixture_root}/corpus052-template-job-config.xml" "${template_job_home}/config.xml"
 verify_and_copy_plugins "${plugin_source}" "${home}/plugins"
 verify_and_copy_plugins "${plugin_source}" "${template_home}/plugins"
@@ -305,6 +356,7 @@ capture_build() {
 capture_workflow() {
   local number=$1
   local prefix=$2
+  local stage_id
   curl --fail --silent --show-error \
     "http://127.0.0.1:${port}/job/${job}/${number}/wfapi/describe" \
     -o "${staging}/evidence/${prefix}-build-${number}-workflow.json"
@@ -313,6 +365,19 @@ capture_workflow() {
     and ([.stages[].name] == ["Build"])
     and ([.stages[].status] == ["SUCCESS"])
   ' "${staging}/evidence/${prefix}-build-${number}-workflow.json" >/dev/null
+  stage_id=$(jq -r '.stages[0].id' \
+    "${staging}/evidence/${prefix}-build-${number}-workflow.json")
+  [[ "${stage_id}" =~ ^[0-9]+$ ]]
+  curl --fail --silent --show-error \
+    "http://127.0.0.1:${port}/job/${job}/${number}/execution/node/${stage_id}/wfapi/describe" \
+    -o "${staging}/evidence/${prefix}-build-${number}-stage.json"
+  jq --exit-status '
+    .name == "Build"
+    and .status == "SUCCESS"
+    and ([.stageFlowNodes[]
+          | select(.name == "Shell Script" and .status == "SUCCESS")]
+         | length) == 1
+  ' "${staging}/evidence/${prefix}-build-${number}-stage.json" >/dev/null
 }
 
 start_controller "${template_home}"
@@ -327,6 +392,9 @@ if rg --quiet 'Hello World|\+ echo' "${staging}/evidence/template-build-2.log"; 
   echo "serialization template executed the admitted workload" >&2
   exit 1
 fi
+test "$(sed -n '1p' "${template_home}/mig005a-template-shell-invocation.txt")" = 2
+test "$(sed -n '2p' "${template_home}/mig005a-template-shell-invocation.txt")" = -xe
+rg --quiet '/script\.sh$' "${template_home}/mig005a-template-shell-invocation.txt"
 capture_workflow 2 template
 podman inspect "${container}" > "${staging}/evidence/template-container-inspect.json"
 stop_controller
@@ -370,6 +438,43 @@ podman unshare sed -E -i \
   -e "s#<duration>[0-9]+</duration>#<duration>${build_duration}</duration>#g" \
   -e 's#<result>[^<]+</result>#<result>SUCCESS</result>#g' \
   "${template}/build.xml"
+flow_store="${template}/workflow-completed/flowNodeStore.xml"
+podman unshare test -f "${flow_store}"
+podman unshare test ! -L "${flow_store}"
+podman unshare rg --quiet 'ShellStep' "${flow_store}"
+podman unshare rg --quiet 'Hello World' "${flow_store}"
+BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
+  podman unshare perl -0pi -e '
+    my @times = /<startTime>([0-9]+)<\/startTime>/g;
+    die "native workflow has no timestamps\n" unless @times;
+    my ($min, $max) = ($times[0], $times[0]);
+    for my $time (@times) {
+      $min = $time if $time < $min;
+      $max = $time if $time > $max;
+    }
+    my $started = $ENV{BUILD_STARTED};
+    my $ended = $ENV{BUILD_ENDED};
+    die "invalid canonical build interval\n" unless $started <= $ended;
+    s{<startTime>([0-9]+)</startTime>}{
+      my $mapped = $max == $min
+        ? $started
+        : $started + int((($1 - $min) * ($ended - $started)) / ($max - $min));
+      "<startTime>${mapped}</startTime>"
+    }ge;
+  ' "${flow_store}"
+BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
+  podman unshare perl -0ne '
+    my @times = /<startTime>([0-9]+)<\/startTime>/g;
+    die "native workflow has no timestamps\n" unless @times;
+    for my $time (@times) {
+      die "native workflow timestamp escapes canonical build interval\n"
+        if $time < $ENV{BUILD_STARTED} || $time > $ENV{BUILD_ENDED};
+    }
+  ' "${flow_store}"
+if podman unshare rg --quiet 'MIG005A_SERIALIZATION_TEMPLATE_ONLY' "${template}"; then
+  echo "serialization-template marker survived build-2 reconciliation" >&2
+  exit 1
+fi
 podman unshare cp -a "${template}" "${job_home}/builds/2"
 printf '%s\n' 3 > "${staging}/nextBuildNumber"
 printf '%s\n' \
