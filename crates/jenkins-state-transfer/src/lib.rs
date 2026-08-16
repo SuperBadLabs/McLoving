@@ -272,7 +272,7 @@ pub fn verify_retained_workflow_storage(
     }
     for (id, node) in &nodes {
         let numeric_id = validate_numeric_id(id, "retained workflow node ID")?;
-        for reference in &node.parent_ids {
+        for reference in node.parent_ids.iter().chain(node.start_id.iter()) {
             let numeric_reference =
                 validate_numeric_id(reference, "retained workflow node reference")?;
             if !nodes.contains_key(reference) || numeric_reference >= numeric_id {
@@ -305,7 +305,7 @@ fn retained_workflow_reaches_ancestor(
         let Some(node) = nodes.get(id) else {
             return false;
         };
-        for reference in node.parent_ids.iter().chain(node.start_id.iter()) {
+        for reference in &node.parent_ids {
             if reference == ancestor {
                 return true;
             }
