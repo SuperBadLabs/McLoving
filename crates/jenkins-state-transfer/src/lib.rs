@@ -346,7 +346,8 @@ fn parse_retained_workflow_nodes(
                     let decoded = reference
                         .decode()
                         .map_err(|error| invalid(format!("invalid workflow reference: {error}")))?;
-                    let value = quick_xml::escape::unescape(&format!("&{decoded};"))
+                    let encoded = format!("&{decoded};");
+                    let value = quick_xml::escape::unescape(&encoded)
                         .map_err(|error| invalid(format!("invalid workflow reference: {error}")))?;
                     let field = retained_workflow_field(&path)
                         .ok_or_else(|| invalid("workflow reference has no selected field"))?;
