@@ -401,9 +401,15 @@ test "$(podman unshare sed -n '1p' \
   "${template_home}/mig005a-template-shell-invocation.txt")" = 2
 test "$(podman unshare sed -n '2p' \
   "${template_home}/mig005a-template-shell-invocation.txt")" = -xe
-podman unshare rg --quiet \
-  '^/var/jenkins_home/workspace/corpus-052-cinqict_jenkinsdev@tmp/durable-[0-9a-f]+/script\.sh(\.copy)?$' \
-  "${template_home}/mig005a-template-shell-invocation.txt"
+test "$(podman unshare awk 'END { print NR }' \
+  "${template_home}/mig005a-template-shell-invocation.txt")" = 3
+invoked_script=$(podman unshare sed -n '3p' \
+  "${template_home}/mig005a-template-shell-invocation.txt")
+[[ "${invoked_script}" == /var/jenkins_home/workspace/*@tmp/durable-*/* ]]
+case "$(basename -- "${invoked_script}")" in
+  script.sh | script.sh.copy) ;;
+  *) exit 1 ;;
+esac
 capture_workflow 2 template
 podman inspect "${container}" > "${staging}/evidence/template-container-inspect.json"
 stop_controller
