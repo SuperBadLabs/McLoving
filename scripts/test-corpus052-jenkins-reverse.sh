@@ -577,26 +577,60 @@ BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
     }
     my $started = $ENV{BUILD_STARTED};
     my $ended = $ENV{BUILD_ENDED};
+    my $attempt_started = $ENV{ATTEMPT_STARTED};
+    my $attempt_ended = $ENV{ATTEMPT_ENDED};
+    my $template_shell_started = $ENV{TEMPLATE_SHELL_STARTED};
+    my $template_shell_ended = $ENV{TEMPLATE_SHELL_ENDED};
     my @shell_starts = grep { $times[$_] == $ENV{TEMPLATE_SHELL_STARTED} } 0 .. $#times;
     my @shell_ends = grep { $times[$_] == $ENV{TEMPLATE_SHELL_ENDED} } 0 .. $#times;
     die "native ShellStep timing denominator mismatch\n"
       unless @shell_starts == 1 && @shell_ends == 1
-        && $shell_starts[0] != $shell_ends[0];
-    die "invalid canonical build interval\n" unless $started <= $ended;
+        && $template_shell_started < $template_shell_ended;
+    die "invalid canonical build/attempt interval\n"
+      unless $started <= $attempt_started
+        && $attempt_started <= $attempt_ended
+        && $attempt_ended <= $ended;
+    my $scale = sub {
+      my ($value, $from_started, $from_ended, $to_started, $to_ended) = @_;
+      return $to_started if $from_started == $from_ended;
+      return $to_started
+        + int((($value - $from_started) * ($to_ended - $to_started))
+          / ($from_ended - $from_started));
+    };
+    my @mapped;
+    for my $time (@times) {
+      my $value;
+      if ($time < $template_shell_started) {
+        $value = $scale->($time, $min, $template_shell_started,
+          $started, $attempt_started);
+      } elsif ($time == $template_shell_started) {
+        $value = $attempt_started;
+      } elsif ($time < $template_shell_ended) {
+        $value = $scale->($time, $template_shell_started, $template_shell_ended,
+          $attempt_started, $attempt_ended);
+      } elsif ($time == $template_shell_ended) {
+        $value = $attempt_ended;
+      } else {
+        $value = $scale->($time, $template_shell_ended, $max,
+          $attempt_ended, $ended);
+      }
+      push @mapped, $value;
+    }
+    for my $left (0 .. $#times) {
+      for my $right (0 .. $#times) {
+        die "native workflow graph chronology is not monotonic\n"
+          if $times[$left] <= $times[$right]
+            && $mapped[$left] > $mapped[$right];
+      }
+    }
+    die "native ShellStep boundary mapping is divergent\n"
+      unless $mapped[$shell_starts[0]] == $attempt_started
+        && $mapped[$shell_ends[0]] == $attempt_ended;
     my $index = 0;
     s{<startTime>([0-9]+)</startTime>}{
-      my $mapped;
-      if ($index == $shell_starts[0]) {
-        $mapped = $ENV{ATTEMPT_STARTED};
-      } elsif ($index == $shell_ends[0]) {
-        $mapped = $ENV{ATTEMPT_ENDED};
-      } else {
-        $mapped = $max == $min
-          ? $started
-          : $started + int((($1 - $min) * ($ended - $started)) / ($max - $min));
-      }
+      my $mapped_time = $mapped[$index];
       $index++;
-      "<startTime>${mapped}</startTime>"
+      "<startTime>${mapped_time}</startTime>"
     }ge;
     die "native workflow timing rewrite count mismatch\n" unless $index == @times;
   ' "${flow_store}"

@@ -273,13 +273,14 @@ async fn main() -> Result<(), AnyError> {
         .build_logs(organization_id, project_id, admission.build_id)
         .await?;
     let completed = completed_build(&forward, &graph, &logs, continuation)?;
+    let reverse_executable = fs::read(env::current_exe()?)?;
     let reverse = prepare_reverse_history(
         &authenticated_forward,
         completed,
         &ReverseBinding {
             source: forward.binding.destination.clone(),
             destination: forward.binding.source.clone(),
-            transform_implementation_digest: forward.binding.transform_implementation_digest,
+            transform_implementation_digest: sha256(&reverse_executable),
             transform_configuration_digest: forward.binding.transform_configuration_digest,
             provenance: "MIG-005A contained corpus-052 reverse reconciliation".to_owned(),
         },

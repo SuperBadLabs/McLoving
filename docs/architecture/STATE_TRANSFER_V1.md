@@ -267,7 +267,9 @@ terminal attempt truth before reverse preparation. The build then executed the
 exact pinned `/bin/sh -xe` process, captured its stdout and stderr as two
 ordered durable log records, produced `Hello World`, preserved zero external
 effects, advanced history to build 2, and produced reverse
-`next_build_number=3`.
+`next_build_number=3`. Forward and reverse bindings hash the executable that
+actually performed each transform: `normalize_history` for forward and
+`rehearse_history` for reverse.
 The exact forward bundle, reverse bundle, and relocated evidence manifest all
 verify in the owner-only HeMan evidence package. Their private digests are not
 published to GitHub.
@@ -285,8 +287,9 @@ non-authoritative template controller created the exact Jenkins-native
 `ShellStep` structure using a recorded non-executing shell stub; it never ran
 the admitted script, its raw log and byte-offset index were rebuilt so the
 exact ShellStep owns both transferred process records, its ShellStep timing was
-reconciled to the exact durable attempt and all other graph timestamps bounded
-inside the canonical build interval, its unrepresentable native queue ID was
+reconciled to the exact durable attempt, and its wrapper-node timestamps were
+mapped separately into the pre-step and post-step regions with monotonic graph
+chronology asserted inside the canonical build interval. Its unrepresentable native queue ID was
 set to Jenkins sentinel `-1`, its template cause and queue-timing actions were
 removed in favor of an
 exact typed canonical-trigger sidecar that was byte-verified after install,
