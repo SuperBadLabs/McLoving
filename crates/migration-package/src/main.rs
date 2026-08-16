@@ -163,7 +163,7 @@ fn publish_new_file(_output: &Path, _bytes: &[u8]) -> io::Result<()> {
     ))
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn publish_new_file_with<SyncDirectory, RemovePublished>(
     output: &Path,
     bytes: &[u8],
