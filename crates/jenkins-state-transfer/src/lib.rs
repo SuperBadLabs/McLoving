@@ -131,10 +131,28 @@ pub fn load_admitted_history(
     root: &Path,
     opaque_evidence_id: String,
 ) -> Result<SealedHistory, HistoryError> {
-    require_plain_directory(root)?;
-    require_plain_directory(&root.join("1"))?;
-    require_plain_directory(&root.join("1/workflow-completed"))?;
-    let actual = regular_files(root)?;
+    load_admitted_history_with_policy(root, opaque_evidence_id, false)
+}
+
+/// Loads the admitted history while enforcing the owner-private boundary used
+/// by migration packaging. Every traversed directory and every admitted file
+/// must deny group/other access in addition to the ordinary type/link checks.
+pub fn load_admitted_history_owner_only(
+    root: &Path,
+    opaque_evidence_id: String,
+) -> Result<SealedHistory, HistoryError> {
+    load_admitted_history_with_policy(root, opaque_evidence_id, true)
+}
+
+fn load_admitted_history_with_policy(
+    root: &Path,
+    opaque_evidence_id: String,
+    require_owner_only: bool,
+) -> Result<SealedHistory, HistoryError> {
+    require_plain_directory(root, require_owner_only)?;
+    require_plain_directory(&root.join("1"), require_owner_only)?;
+    require_plain_directory(&root.join("1/workflow-completed"), require_owner_only)?;
+    let actual = regular_files(root, require_owner_only)?;
     let expected = EXPECTED_PATHS
         .into_iter()
         .map(str::to_owned)
@@ -168,9 +186,9 @@ pub fn load_admitted_history(
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            if metadata.nlink() != 1 {
+            if metadata.nlink() != 1 || (require_owner_only && metadata.mode() & 0o077 != 0) {
                 return Err(invalid(format!(
-                    "sealed source entry {relative} is hard-linked"
+                    "sealed source entry {relative} is hard-linked or grants group/other access"
                 )));
             }
         }
@@ -619,10 +637,11 @@ pub fn authenticate_reverse_bundle(
     Ok(reconstructed)
 }
 
-fn regular_files(root: &Path) -> Result<BTreeSet<String>, HistoryError> {
+fn regular_files(root: &Path, require_owner_only: bool) -> Result<BTreeSet<String>, HistoryError> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = BTreeSet::new();
     while let Some(directory) = pending.pop() {
+        require_plain_directory(&directory, require_owner_only)?;
         let entries = fs::read_dir(&directory)
             .map_err(|error| invalid(format!("cannot enumerate sealed source: {error}")))?;
         for entry in entries {
@@ -653,14 +672,24 @@ fn regular_files(root: &Path) -> Result<BTreeSet<String>, HistoryError> {
     Ok(files)
 }
 
-fn require_plain_directory(path: &Path) -> Result<(), HistoryError> {
+fn require_plain_directory(path: &Path, require_owner_only: bool) -> Result<(), HistoryError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| invalid(format!("cannot inspect sealed source directory: {error}")))?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        Ok(())
-    } else {
-        Err(invalid("sealed source parent is not a plain directory"))
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(invalid("sealed source parent is not a plain directory"));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if require_owner_only && metadata.mode() & 0o077 != 0 {
+            return Err(invalid(
+                "sealed source directory grants group or other access",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = require_owner_only;
+    Ok(())
 }
 
 fn validate_history_input(

@@ -5,7 +5,7 @@ use std::path::{Component, Path};
 
 use mcloving_jenkins_state_transfer::{
     admitted_forward_binding, admitted_reverse_binding, admitted_tree_digest,
-    authenticate_forward_bundle, authenticate_reverse_bundle, load_admitted_history,
+    authenticate_forward_bundle, authenticate_reverse_bundle, load_admitted_history_owner_only,
     normalize_single_aborted_workflow,
 };
 use mcloving_state_transfer::{Digest, StateBundle, canonical_bytes, transform};
@@ -420,8 +420,9 @@ fn verify_exact_state(
         .ok_or_else(|| {
             PackageError::new("E_PRIVATE_FORWARD", "opaque evidence locator is divergent")
         })?;
-    let history = load_admitted_history(inputs.sealed_history_root, opaque_evidence_id.to_owned())
-        .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
+    let history =
+        load_admitted_history_owner_only(inputs.sealed_history_root, opaque_evidence_id.to_owned())
+            .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
     let forward_implementation = parse_digest(inputs.expected_forward_implementation_sha256)?;
     if forward.binding.transform_implementation_digest != forward_implementation {
         return Err(PackageError::new(
@@ -630,6 +631,17 @@ fn verify_exact_state(
         )
     })?;
     let expected_log = b"+ echo Hello World\nHello World\n";
+    let imported_build = reverse
+        .jobs
+        .first()
+        .and_then(|job| job.builds.get(1))
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                "reverse bundle is missing the completed imported build",
+            )
+        })?;
+    validate_state_transfer_sidecars(&state.reverse_evidence, reverse_bytes, imported_build)?;
     validate_workflow_receipts(
         &state.reverse_evidence,
         "imported",
@@ -733,6 +745,69 @@ fn verify_exact_state(
         return Err(PackageError::new(
             "E_PRIVATE_CONTINUITY",
             "network-denial receipt is divergent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_state_transfer_sidecars(
+    archive: &EvidenceArchive,
+    reverse_bytes: &[u8],
+    imported_build: &mcloving_state_transfer::BuildState,
+) -> Result<(), PackageError> {
+    let expected_build = serde_json::to_value(imported_build)
+        .map_err(|error| PackageError::new("E_PRIVATE_SIDECAR", error.to_string()))?;
+    let expected_receipt = json!({
+        "schema": "mcloving.jenkins-reverse-import/v1",
+        "source_build": 2,
+        "destination_build": 2,
+        "next_build_number": 3,
+        "result": "SUCCESS",
+        "reverse_bundle_digest": sha256(reverse_bytes),
+        "external_effects": 0,
+        "production_authority": false,
+    });
+    let expected_provenance = json!({
+        "schema": "mcloving.jenkins-native-provenance/v1",
+        "native_queue_id": -1,
+        "native_cause_action": "removed-unrepresentable-contained-rehearsal",
+        "native_time_in_queue_action": "removed-unrepresentable-contained-rehearsal",
+        "source_queue_id": imported_build.source_queue_id,
+        "queued_at_unix_ms": imported_build.queued_at_unix_ms,
+        "trigger_kind": imported_build.trigger.trigger_kind,
+        "trigger_external_id": imported_build.trigger.external_id,
+        "trigger_actor_subject": imported_build.trigger.actor_subject,
+    });
+    for (path, expected) in [
+        (
+            "evidence/jenkins-job-after/builds/2/mcloving-state-transfer-build.json",
+            &expected_build,
+        ),
+        (
+            "evidence/jenkins-job-after/builds/2/mcloving-state-transfer-receipt.json",
+            &expected_receipt,
+        ),
+        (
+            "evidence/jenkins-job-after/builds/2/mcloving-native-provenance.json",
+            &expected_provenance,
+        ),
+    ] {
+        validate_exact_json_sidecar(archive, path, expected)?;
+    }
+    Ok(())
+}
+
+fn validate_exact_json_sidecar(
+    archive: &EvidenceArchive,
+    path: &str,
+    expected: &Value,
+) -> Result<(), PackageError> {
+    let actual: Value = serde_json::from_slice(archive_file(archive, path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_SIDECAR", error.to_string()))?;
+    if actual != *expected {
+        return Err(PackageError::new(
+            "E_PRIVATE_SIDECAR",
+            format!("{path} is divergent from authenticated reverse state"),
         ));
     }
     Ok(())
@@ -1367,5 +1442,72 @@ mod tests {
         assert_eq!(parse_digest(&"0".repeat(64)).unwrap(), [0; 32]);
         assert!(parse_digest(&"A".repeat(64)).is_err());
         assert!(parse_digest(&"0".repeat(63)).is_err());
+    }
+
+    #[test]
+    fn state_transfer_sidecar_rejects_authority_or_identity_drift() {
+        let path = "evidence/jenkins-job-after/builds/2/mcloving-state-transfer-receipt.json";
+        let expected = json!({
+            "schema": "mcloving.jenkins-reverse-import/v1",
+            "production_authority": false,
+            "reverse_bundle_digest": "0".repeat(64),
+        });
+        let contents = expected.to_string();
+        let archive = EvidenceArchive {
+            role: "test".into(),
+            manifest_sha256: "0".repeat(64),
+            manifest: String::new(),
+            files: vec![EvidenceFile {
+                path: path.into(),
+                sha256: sha256(contents.as_bytes()),
+                contents,
+            }],
+        };
+        validate_exact_json_sidecar(&archive, path, &expected).unwrap();
+
+        let mut divergent = expected;
+        divergent["production_authority"] = Value::Bool(true);
+        assert!(validate_exact_json_sidecar(&archive, path, &divergent).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_source_requires_owner_only_directories_and_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        let error =
+            load_admitted_history_owner_only(root.path(), "opaque-private-id".into()).unwrap_err();
+        assert!(error.to_string().contains("group or other access"));
+
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(root.path().join("1")).unwrap();
+        fs::create_dir(root.path().join("1/workflow-completed")).unwrap();
+        for directory in [
+            root.path().join("1"),
+            root.path().join("1/workflow-completed"),
+        ] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for relative in [
+            "1/build.xml",
+            "1/log",
+            "1/log-index",
+            "1/workflow-completed/flowNodeStore.xml",
+            "permalinks",
+        ] {
+            let path = root.path().join(relative);
+            fs::write(&path, b"private").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::set_permissions(
+            root.path().join("1/build.xml"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let error =
+            load_admitted_history_owner_only(root.path(), "opaque-private-id".into()).unwrap_err();
+        assert!(error.to_string().contains("group/other access"));
     }
 }

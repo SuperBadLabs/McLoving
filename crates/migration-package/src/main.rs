@@ -189,6 +189,20 @@ where
     publish_new_file_with_policy(output, bytes, false, sync_directory, remove_published)
 }
 
+#[cfg(all(test, unix))]
+fn publish_new_private_file_with<SyncDirectory, RemovePublished>(
+    output: &Path,
+    bytes: &[u8],
+    sync_directory: SyncDirectory,
+    remove_published: RemovePublished,
+) -> io::Result<()>
+where
+    SyncDirectory: FnMut(&rustix::fd::OwnedFd) -> io::Result<()>,
+    RemovePublished: FnMut(&rustix::fd::OwnedFd, &OsStr) -> io::Result<()>,
+{
+    publish_new_file_with_policy(output, bytes, true, sync_directory, remove_published)
+}
+
 #[cfg(unix)]
 fn publish_new_file_with_policy<SyncDirectory, RemovePublished>(
     output: &Path,
@@ -271,9 +285,24 @@ where
         }
     }
 
-    // Publication is complete and durable. A failed best-effort cleanup must
-    // not report generation as failed and make a retry collide with the
-    // already-published, complete destination.
+    if require_owner_only_parent {
+        remove_published(&parent_directory, temporary.name.as_os_str()).map_err(|error| {
+            io::Error::other(format!(
+                "E_PRIVATE_PUBLICATION_CLEANUP: staging-link removal failed after durable publication ({error}); destination requires explicit verification and reconciliation"
+            ))
+        })?;
+        temporary.active = false;
+        sync_directory(&parent_directory).map_err(|error| {
+            io::Error::other(format!(
+                "E_PRIVATE_PUBLICATION_CLEANUP: staging-link removal could not be made durable ({error}); destination requires explicit verification and reconciliation"
+            ))
+        })?;
+        return Ok(());
+    }
+
+    // Public package publication is complete and durable. Its staging-name
+    // cleanup remains best effort because an extra public link does not make
+    // the public verifier reject an otherwise complete destination.
     if temporary.remove().is_ok() {
         let _ = sync_directory(&parent_directory);
     }
@@ -593,6 +622,49 @@ mod tests {
 
         assert!(publish_new_private_file(&output, b"private").is_err());
         assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_publication_reports_staging_cleanup_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("private-package.json");
+
+        let error =
+            publish_new_private_file_with(&output, b"private", sync_open_directory, |_, _| {
+                Err(io::Error::other("injected staging cleanup failure"))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("E_PRIVATE_PUBLICATION_CLEANUP"));
+        assert_eq!(fs::read(&output).unwrap(), b"private");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_publication_reports_nondurable_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("private-package.json");
+        let mut syncs = 0;
+
+        let error = publish_new_private_file_with(
+            &output,
+            b"private",
+            |_| {
+                syncs += 1;
+                if syncs == 1 {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("injected cleanup sync failure"))
+                }
+            },
+            remove_relative_file,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("E_PRIVATE_PUBLICATION_CLEANUP"));
+        assert_eq!(fs::read(&output).unwrap(), b"private");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[cfg(not(unix))]

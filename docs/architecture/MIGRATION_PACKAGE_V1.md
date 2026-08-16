@@ -138,6 +138,13 @@ retained owner package pin, both evidence-manifest pins, both transform-implemen
 pins, sealed source tree, exact
 reviewed repository heads, and complete verifier all agree. The CLI never
 prints its digest and publishes it as a new owner-only file with mode `0600`.
+Private publication additionally requires confirmed staging-link removal and a
+second held-parent directory sync; either cleanup failure is reported for
+explicit verification and reconciliation. The private verifier rejects
+group/other access on every traversed sealed-source directory and member, and
+joins the retained Jenkins build, import receipt, and native-provenance
+sidecars exactly to the authenticated reverse bundle and all-false authority
+ledger.
 The verified private package is 704,617 bytes and remains solely under
 `/sn8100/runs/mcloving/mig005a-corpus052-corrective-20260816T034309Z/`.
 Neither package grants production, credential, trigger, scheduler, effect,

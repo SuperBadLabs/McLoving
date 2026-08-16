@@ -32,9 +32,12 @@ public baseline and the complete owner-manifest-pinned MIG-005A forward and
 reverse archives. Its canonical verifier authenticates the sealed source,
 reconstructs both state transforms only when their exact implementation
 identities match separate owner-private pins, cross-checks their configuration
-and independent binding receipts, and
-proves the effect-free McLoving build plus Jenkins restart and next-build
-continuity. It verifies one packaged case and 227 deterministic rejections,
+and independent binding receipts, enforces owner-only modes throughout the
+sealed source tree, and joins the retained Jenkins build/import/provenance
+sidecars to the authenticated reverse bundle. It proves the effect-free
+McLoving build plus Jenkins restart and next-build continuity. Private
+publication succeeds only after durable staging-link cleanup. It verifies one
+packaged case and 227 deterministic rejections,
 sets `package_complete=true` and `shadow_eligible=true`, and keeps every
 production, credential, trigger, scheduler, effect, canary, cutover, rollback,
 and decommission authority bit false. Private package bytes, evidence, and
