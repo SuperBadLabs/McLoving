@@ -234,7 +234,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                     invalid(format!("invalid job configuration escape: {error}"))
                 })?;
                 if !inside_job_action_payload(&stack) {
-                    push_job_config_text(&mut tokens, value.trim());
+                    push_job_config_text(&mut tokens, &value);
                 }
             }
             Ok(Event::CData(text)) => {
@@ -242,7 +242,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                     invalid(format!("invalid job configuration CDATA: {error}"))
                 })?;
                 if !inside_job_action_payload(&stack) {
-                    push_job_config_text(&mut tokens, value.trim());
+                    push_job_config_text(&mut tokens, &value);
                 }
             }
             Ok(Event::GeneralRef(reference)) => {
@@ -254,7 +254,7 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                     invalid(format!("invalid job configuration reference: {error}"))
                 })?;
                 if !inside_job_action_payload(&stack) {
-                    push_job_config_text(&mut tokens, value.trim());
+                    push_job_config_text(&mut tokens, &value);
                 }
             }
             Ok(Event::End(end)) => {
@@ -366,6 +366,8 @@ fn job_config_start_token<R>(
 }
 
 fn push_job_config_text(tokens: &mut Vec<JobConfigToken>, value: &str) {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    let value = normalized.trim();
     if value.is_empty() {
         return;
     }
@@ -1791,6 +1793,8 @@ mod tests {
                 "<artifactNumToKeep>-1</artifactNumToKeep><removeLastBuild>false</removeLastBuild>",
             );
         verify_retained_job_configuration(rewritten_plugins.as_bytes(), reviewed).unwrap();
+        verify_retained_job_configuration(reviewed_text.replace('\n', "\r\n").as_bytes(), reviewed)
+            .unwrap();
 
         for divergent in [
             reviewed_text.replace("<disabled>false</disabled>", "<disabled>true</disabled>"),
