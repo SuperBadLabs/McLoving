@@ -130,12 +130,14 @@ class WindowsAgentImpactTests(unittest.TestCase):
             Path("crates/domain"),
             Path("crates/jenkins-compiler-admission"),
             Path("crates/jenkins-mapping-catalog"),
+            Path("crates/jenkins-state-transfer"),
             Path("crates/migration-package"),
         }
         for path in (
             "crates/migration-package/src/lib.rs",
             "crates/jenkins-compiler-admission/src/lib.rs",
             "crates/jenkins-mapping-catalog/src/lib.rs",
+            "crates/jenkins-state-transfer/src/lib.rs",
         ):
             with self.subTest(path=path):
                 run_windows, reason = IMPACT.classify(

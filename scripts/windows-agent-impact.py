@@ -31,6 +31,7 @@ WINDOWS_VERIFIER_DIRECTORIES = {
     Path("crates/boundary-differential"),
     Path("crates/differential-aggregate"),
     Path("crates/jenkins-differential"),
+    Path("crates/jenkins-state-transfer"),
     Path("crates/migration-package"),
     Path("crates/state-policy-differential"),
 }

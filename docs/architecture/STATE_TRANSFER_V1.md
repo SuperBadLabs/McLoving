@@ -234,3 +234,107 @@ skipped, only `persistent.state` was archived, builds 1–4 were unique, and
 This is a case-specific pre-effect rehearsal, not general migration or
 production-effect authority. `DIFF-002`, `MIG-006`, packaging, canary, cutover,
 and rollback gates remain separate.
+
+## Exact admitted-case corrective closure
+
+The later inventory audit found one real retained dependency outside the
+synthetic rehearsal: `corpus-052-cinqict_jenkinsdev` has one aborted Jenkins
+build under `build-history`. Its private five-file source tree remains only on
+HeMan. The repository carries no source bytes or private source-seal metadata;
+the already-public exact tree digest is
+`b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
+
+`mcloving-jenkins-state-transfer` implements the narrow exact adapter. It
+requires the five-file denominator, denies links and special files, bounds
+total bytes, rejects XML DTD/entity input and unknown workflow nodes, verifies
+the tree digest before parsing, and emits the ordinary canonical
+`mcloving.state-transfer/v1` bundle. The forward bundle preserves build 1 as
+`aborted`, `next_build_number=2`, exact terminal timing, ordered empty
+`log-index`, the `Build` workflow node, permalinks, indefinite retention, and
+the `build-history` persistent dependency. Reverse preparation accepts only an
+exact inverse binding and one contiguous completed successor; build gaps,
+duplicate source identity, and noninverse source/destination identities fail
+closed.
+
+The exact retained run used the pinned PostgreSQL image above without a
+host-published database port; the pinned Rust rehearsal client ran beside it on
+the same private internal container network. The client executable was built
+offline inside that pinned Rust image from the locked source and read-only
+Cargo cache, so the retained executable digest binds the runtime-compatible
+binary rather than a host-ABI build. PostgreSQL, client, and internal-network
+inspect receipts retain the no-published-port topology. Forward import,
+exact replay, independent retrieval, one durable externally effect-free
+McLoving build, reverse import, and independent reverse retrieval all passed.
+The McLoving admission derived build 2 and its aborted build 1 predecessor from
+the canonical forward bundle retrieved from durable destination storage. It
+persisted that receipt/cursor/predecessor binding in the DAG contract, proved
+the exact contract by idempotent durable replay, and reverified the same link in
+terminal attempt truth before reverse preparation. The build then executed the
+exact pinned `/bin/sh -xe` process, captured its stdout and stderr as two
+durable records through one shared ordered file-description capture, preserved
+the observed xtrace-before-stdout chronology, produced `Hello World`, preserved zero external
+effects, advanced history to build 2, and produced reverse
+`next_build_number=3`. Forward and reverse bindings hash the executable that
+actually performed each transform: `normalize_history` for forward and
+`rehearse_history` for reverse. The orchestrator independently hashes the
+forward executable, verifies the generated bundle carries that value, and
+passes it as the expected authentication binding; exact configuration,
+provenance, source/destination, and job identities are pinned in the adapter
+rather than copied from the candidate. Both forward and reverse imports prove
+exact replay against the same immutable receipt before retrieval.
+The exact forward bundle, reverse bundle, and relocated evidence manifest all
+verify in the owner-only HeMan evidence package. Their private digests are not
+published to GitHub.
+
+The reverse-continuity harness then used pinned Jenkins image
+`docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`
+on an internal-only network without a host-published controller port. Every API
+request ran through the pinned image's own local `curl` client inside the
+active container; container and internal-network inspect receipts retain that
+topology. Before either controller started, the harness
+authenticated the complete rehearsal manifest against the independently held
+owner pin, copied every member into a private snapshot, transferred that
+snapshot to root ownership with read access only for the invoking account's
+dedicated group, while rejecting root invocation. It reverified the snapshot
+after lockdown and proved the invoking unprivileged UID
+could neither restore write access nor replace the snapshot path. It then
+recomputed the independently pinned five-file source-tree digest
+with no-follow reads, proved the authenticated build-1 record equals the
+reverse bundle, and copied exactly the committed 90-plugin manifest denominator while verifying
+every regular, singly linked plugin both before and after copy. The two plugin
+trees were then transferred to root-owned non-writable sticky-directory
+snapshots, reverified, proven immutable to the invoking UID, and mounted
+as 90 individual read-only `.jpi` files over distinct writable expansion
+directories in the template and destination controllers. A separate
+non-authoritative template controller created the exact Jenkins-native
+`ShellStep` structure using a recorded non-executing shell stub; it never ran
+the admitted script, its raw log and byte-offset index were rebuilt so the
+exact ShellStep owns both transferred process records, its ShellStep timing was
+reconciled to the exact durable attempt, and its wrapper-node timestamps were
+mapped separately into the pre-step and post-step regions with monotonic graph
+chronology asserted inside the canonical build interval. Its unrepresentable native queue ID was
+set to Jenkins sentinel `-1`, its template cause and queue-timing actions were
+removed in favor of an
+exact typed canonical-trigger sidecar that was byte-verified after install,
+restart, and archival. The installed reverse-import receipt was likewise
+byte-verified after initial load, restart, pre-archive, and in the archive; the
+canonical transferred-build sidecar was byte-verified at those same boundaries.
+The durable terminal record was also required to retain
+`production_authority=false` before the public summary could report it; the
+template was checked free of its
+marker and provenance before being destroyed ahead of
+the destination proof. A fresh destination controller
+then loaded private build 1 as `ABORTED`, loaded the reverse-imported build 2 as
+`SUCCESS` without executing it, returned the exact `Build` workflow stage and
+the two McLoving process-log records, restarted, and executed build 3 exactly
+once as `SUCCESS`. Numeric history was exactly `[1,2,3]`, `nextBuildNumber`
+became 4, public egress was denied, and the reverse-import receipt retained
+`external_effects=0` and `production_authority=false`. Its owner-only retained
+evidence manifest verifies on HeMan; its private digest and contents are not
+published to GitHub.
+
+These receipts close the exact recorded dependency in addition to the earlier
+synthetic denominator. They grant no production identity, reader, trigger,
+scheduler, credential, agent, connector, effect, shadow, canary, cutover,
+rollback, or decommission authority. `MIG-007` must still embed or immutably
+retrieve and verify these exact objects in its separately reviewed package.
