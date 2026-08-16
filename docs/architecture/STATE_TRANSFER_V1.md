@@ -265,7 +265,8 @@ persisted that receipt/cursor/predecessor binding in the DAG contract, proved
 the exact contract by idempotent durable replay, and reverified the same link in
 terminal attempt truth before reverse preparation. The build then executed the
 exact pinned `/bin/sh -xe` process, captured its stdout and stderr as two
-ordered durable log records, produced `Hello World`, preserved zero external
+durable records through one shared ordered file-description capture, preserved
+the observed xtrace-before-stdout chronology, produced `Hello World`, preserved zero external
 effects, advanced history to build 2, and produced reverse
 `next_build_number=3`. Forward and reverse bindings hash the executable that
 actually performed each transform: `normalize_history` for forward and

@@ -107,7 +107,7 @@ test "$(sha256sum "${repo_root}/target/debug/examples/rehearse_history" | awk '{
   "$(jq -r '.reverse_transform_implementation_sha256' \
     "${staging}/mcloving/rehearsal-summary.json")"
 test "$(cat "${staging}/mcloving/mcloving-build-2.log")" = \
-  $'Hello World\n+ echo Hello World'
+  $'+ echo Hello World\nHello World'
 
 (
   cd "${staging}"

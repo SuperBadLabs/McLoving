@@ -3,7 +3,7 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write as _};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use mcloving_controller_store::{
     ClaimRequest, DagNodeKind, NewDagBuild, NewDagNode, NewLogChunk, PipelinePutOutcome,
@@ -207,14 +207,30 @@ async fn main() -> Result<(), AnyError> {
     {
         return Err("effect-free McLoving build did not begin exactly once".into());
     }
+    let capture_path = output.join(".ordered-process-capture");
+    let mut capture_options = OpenOptions::new();
+    capture_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        capture_options.mode(0o600);
+    }
+    let capture = capture_options.open(&capture_path)?;
+    let capture_stdout = capture.try_clone()?;
+    let capture_stderr = capture.try_clone()?;
     let execution = Command::new("/bin/sh")
         .args(["-xe", "-c", "echo \"Hello World\""])
         .env_clear()
-        .output()?;
-    if !execution.status.success()
-        || execution.stdout != b"Hello World\n"
-        || execution.stderr != b"+ echo Hello World\n"
-    {
+        .stdout(Stdio::from(capture_stdout))
+        .stderr(Stdio::from(capture_stderr))
+        .status()?;
+    capture.sync_all()?;
+    drop(capture);
+    let combined_log = read_bounded(&capture_path)?;
+    fs::remove_file(&capture_path)?;
+    let trace_log = b"+ echo Hello World\n";
+    let stdout_log = b"Hello World\n";
+    if !execution.success() || combined_log != b"+ echo Hello World\nHello World\n" {
         return Err("exact contained process execution diverged".into());
     }
     if !store
@@ -225,8 +241,8 @@ async fn main() -> Result<(), AnyError> {
             restore_epoch: claim.restore_epoch,
             agent_id: AGENT_ID,
             sequence: 0,
-            stream: "stdout",
-            content: &execution.stdout,
+            stream: "stderr",
+            content: trace_log,
         })
         .await?
         || !store
@@ -237,8 +253,8 @@ async fn main() -> Result<(), AnyError> {
                 restore_epoch: claim.restore_epoch,
                 agent_id: AGENT_ID,
                 sequence: 1,
-                stream: "stderr",
-                content: &execution.stderr,
+                stream: "stdout",
+                content: stdout_log,
             })
             .await?
         || !store
@@ -305,17 +321,9 @@ async fn main() -> Result<(), AnyError> {
 
     write_new(&output.join("forward-bundle.json"), &stored_forward)?;
     write_new(&output.join("reverse-bundle.json"), &stored_reverse)?;
-    let mut combined_log = execution.stdout.clone();
-    combined_log.extend_from_slice(&execution.stderr);
     write_new(&output.join("mcloving-build-2.log"), &combined_log)?;
-    write_new(
-        &output.join("mcloving-build-2-log-0.txt"),
-        &execution.stdout,
-    )?;
-    write_new(
-        &output.join("mcloving-build-2-log-1.txt"),
-        &execution.stderr,
-    )?;
+    write_new(&output.join("mcloving-build-2-log-0.txt"), trace_log)?;
+    write_new(&output.join("mcloving-build-2-log-1.txt"), stdout_log)?;
     write_new(
         &output.join("rehearsal-summary.json"),
         &serde_json::to_vec_pretty(&json!({
@@ -376,11 +384,11 @@ fn completed_build(
             }))
         || logs.len() != 2
         || logs[0].sequence != 0
-        || logs[0].stream != "stdout"
-        || logs[0].content != b"Hello World\n"
+        || logs[0].stream != "stderr"
+        || logs[0].content != b"+ echo Hello World\n"
         || logs[1].sequence != 1
-        || logs[1].stream != "stderr"
-        || logs[1].content != b"+ echo Hello World\n"
+        || logs[1].stream != "stdout"
+        || logs[1].content != b"Hello World\n"
     {
         return Err("effect-free McLoving execution truth is divergent".into());
     }

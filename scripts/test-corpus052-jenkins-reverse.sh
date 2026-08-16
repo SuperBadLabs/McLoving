@@ -23,8 +23,8 @@ plugin_manifest_sha256='e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796
 source_reverse_bundle="${requested_transform_root}/reverse-bundle.json"
 source_rehearsal_summary="${requested_transform_root}/rehearsal-summary.json"
 source_log_payload="${requested_transform_root}/mcloving-build-2.log"
-source_stdout_payload="${requested_transform_root}/mcloving-build-2-log-0.txt"
-source_stderr_payload="${requested_transform_root}/mcloving-build-2-log-1.txt"
+source_trace_payload="${requested_transform_root}/mcloving-build-2-log-0.txt"
+source_stdout_payload="${requested_transform_root}/mcloving-build-2-log-1.txt"
 rehearsal_root=$(realpath -e "${requested_transform_root}/..")
 rehearsal_manifest="${rehearsal_root}/SHA256SUMS"
 image='docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02'
@@ -53,7 +53,7 @@ if [[ ! -f "${plugin_manifest}" || -L "${plugin_manifest}" ]] \
   exit 66
 fi
 for path in "${source_reverse_bundle}" "${source_rehearsal_summary}" \
-  "${source_log_payload}" "${source_stdout_payload}" "${source_stderr_payload}"; do
+  "${source_log_payload}" "${source_trace_payload}" "${source_stdout_payload}"; do
   if [[ ! -f "${path}" || -L "${path}" ]]; then
     echo "input file is missing or symbolic: ${path}" >&2
     exit 66
@@ -148,8 +148,8 @@ transform_root="${rehearsal_root}/mcloving"
 reverse_bundle="${transform_root}/reverse-bundle.json"
 rehearsal_summary="${transform_root}/rehearsal-summary.json"
 log_payload="${transform_root}/mcloving-build-2.log"
-stdout_payload="${transform_root}/mcloving-build-2-log-0.txt"
-stderr_payload="${transform_root}/mcloving-build-2-log-1.txt"
+trace_payload="${transform_root}/mcloving-build-2-log-0.txt"
+stdout_payload="${transform_root}/mcloving-build-2-log-1.txt"
 
 reverse_digest=$(sha256sum "${reverse_bundle}" | awk '{print $1}')
 test "$(awk '$2 == "mcloving/reverse-bundle.json" { print $1 }' \
@@ -174,8 +174,8 @@ jq --exit-status --arg job "${job}" '
   and ([.jobs[0].builds[1].graph_nodes[].stage_path] == ["Build"])
   and (.jobs[0].builds[1].logs | length) == 2
   and [.jobs[0].builds[1].logs[].sequence] == [0, 1]
-  and .jobs[0].builds[1].logs[0].bytes == 12
-  and .jobs[0].builds[1].logs[1].bytes == 19
+  and .jobs[0].builds[1].logs[0].bytes == 19
+  and .jobs[0].builds[1].logs[1].bytes == 12
 ' "${reverse_bundle}" >/dev/null
 test "$(jq -r '.binding.source.instance_id' "${reverse_bundle}")" = \
   'mcloving/disposable-postgres'
@@ -194,17 +194,17 @@ actual_destination_configuration=$(jq -r '.binding.destination.configuration_dig
   "${reverse_bundle}" | awk '{printf "%02x", $1} END {print ""}')
 test "${actual_source_configuration}" = "${expected_source_configuration}"
 test "${actual_destination_configuration}" = "${expected_destination_configuration}"
-expected_stdout_digest=$(jq -r '
+expected_trace_digest=$(jq -r '
   .jobs[0].builds[1].logs[0].content_digest[]
 ' "${reverse_bundle}" | awk '{printf "%02x", $1} END {print ""}')
-expected_stderr_digest=$(jq -r '
+expected_stdout_digest=$(jq -r '
   .jobs[0].builds[1].logs[1].content_digest[]
 ' "${reverse_bundle}" | awk '{printf "%02x", $1} END {print ""}')
+test "$(sha256sum "${trace_payload}" | awk '{print $1}')" = "${expected_trace_digest}"
 test "$(sha256sum "${stdout_payload}" | awk '{print $1}')" = "${expected_stdout_digest}"
-test "$(sha256sum "${stderr_payload}" | awk '{print $1}')" = "${expected_stderr_digest}"
+test "$(wc -c < "${trace_payload}" | tr -d ' ')" = 19
 test "$(wc -c < "${stdout_payload}" | tr -d ' ')" = 12
-test "$(wc -c < "${stderr_payload}" | tr -d ' ')" = 19
-test "$(cat "${log_payload}")" = $'Hello World\n+ echo Hello World'
+test "$(cat "${log_payload}")" = $'+ echo Hello World\nHello World'
 build_started=$(jq -r '.jobs[0].builds[1].started_at_unix_ms' "${reverse_bundle}")
 build_ended=$(jq -r '.jobs[0].builds[1].ended_at_unix_ms' "${reverse_bundle}")
 attempt_started=$(jq -r \
@@ -496,9 +496,9 @@ printf '%s\n' \
   'external_effects=0' \
   'production_authority=false' \
   > "${staging}/evidence/template-boundary.txt"
-cp "${stdout_payload}" "${staging}/imported-build-2.log"
+cp "${trace_payload}" "${staging}/imported-build-2.log"
 chmod 600 "${staging}/imported-build-2.log"
-cat "${stderr_payload}" >> "${staging}/imported-build-2.log"
+cat "${stdout_payload}" >> "${staging}/imported-build-2.log"
 cmp "${log_payload}" "${staging}/imported-build-2.log"
 podman unshare cp "${staging}/imported-build-2.log" "${template}/log"
 printf '0 %s\n' "${shell_node_id}" > "${staging}/imported-build-2.log-index"
@@ -679,7 +679,7 @@ jq --exit-status '
   and ([.actions[] | select(._class == "jenkins.metrics.impl.TimeInQueueAction")] | length) == 0
 ' "${staging}/evidence/imported-build-2.json" >/dev/null
 test "$(cat "${staging}/evidence/imported-build-2.log")" = \
-  $'Hello World\n+ echo Hello World'
+  $'+ echo Hello World\nHello World'
 capture_workflow 2 imported "${log_payload}" "${attempt_started}" "${attempt_ended}"
 podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
   "${staging}/mcloving-native-provenance.json"
@@ -699,7 +699,7 @@ jq --exit-status '
   and ([.actions[] | select(._class == "jenkins.metrics.impl.TimeInQueueAction")] | length) == 0
 ' "${staging}/evidence/restarted-build-2.json" >/dev/null
 test "$(cat "${staging}/evidence/restarted-build-2.log")" = \
-  $'Hello World\n+ echo Hello World'
+  $'+ echo Hello World\nHello World'
 capture_workflow 2 restarted "${log_payload}" "${attempt_started}" "${attempt_ended}"
 podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
   "${staging}/mcloving-native-provenance.json"
