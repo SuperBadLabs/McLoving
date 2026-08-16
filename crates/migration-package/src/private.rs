@@ -112,6 +112,8 @@ pub struct PrivateVerificationInputs<'a> {
     pub sealed_history_root: &'a Path,
     pub expected_forward_manifest_sha256: &'a str,
     pub expected_reverse_manifest_sha256: &'a str,
+    pub expected_forward_implementation_sha256: &'a str,
+    pub expected_reverse_implementation_sha256: &'a str,
     pub expected_package_sha256: Option<&'a str>,
 }
 
@@ -213,6 +215,14 @@ pub fn generate_private(
         inputs.verification.expected_reverse_manifest_sha256,
         "reverse owner pin",
     )?;
+    validate_digest(
+        inputs.verification.expected_forward_implementation_sha256,
+        "forward implementation owner pin",
+    )?;
+    validate_digest(
+        inputs.verification.expected_reverse_implementation_sha256,
+        "reverse implementation owner pin",
+    )?;
     if inputs.verification.expected_package_sha256.is_some() {
         return Err(PackageError::new(
             "E_PRIVATE_INPUT",
@@ -282,6 +292,14 @@ pub fn verify_private(
     }
     validate_digest(inputs.expected_forward_manifest_sha256, "forward owner pin")?;
     validate_digest(inputs.expected_reverse_manifest_sha256, "reverse owner pin")?;
+    validate_digest(
+        inputs.expected_forward_implementation_sha256,
+        "forward implementation owner pin",
+    )?;
+    validate_digest(
+        inputs.expected_reverse_implementation_sha256,
+        "reverse implementation owner pin",
+    )?;
     if let Some(expected) = inputs.expected_package_sha256 {
         validate_digest(expected, "private package owner pin")?;
         if sha256(bytes) != expected {
@@ -404,7 +422,13 @@ fn verify_exact_state(
         })?;
     let history = load_admitted_history(inputs.sealed_history_root, opaque_evidence_id.to_owned())
         .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
-    let forward_implementation = forward.binding.transform_implementation_digest;
+    let forward_implementation = parse_digest(inputs.expected_forward_implementation_sha256)?;
+    if forward.binding.transform_implementation_digest != forward_implementation {
+        return Err(PackageError::new(
+            "E_PRIVATE_FORWARD",
+            "forward transform does not match the independent owner pin",
+        ));
+    }
     let reconstructed = normalize_single_aborted_workflow(
         &history,
         &admitted_forward_binding(forward_implementation),
@@ -456,7 +480,13 @@ fn verify_exact_state(
     let authenticated_forward =
         authenticate_forward_bundle(&history, &forward, forward_implementation)
             .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
-    let reverse_implementation = reverse.binding.transform_implementation_digest;
+    let reverse_implementation = parse_digest(inputs.expected_reverse_implementation_sha256)?;
+    if reverse.binding.transform_implementation_digest != reverse_implementation {
+        return Err(PackageError::new(
+            "E_PRIVATE_REVERSE",
+            "reverse transform does not match the independent owner pin",
+        ));
+    }
     let expected_reverse_binding = admitted_reverse_binding(reverse_implementation);
     let mut reverse_binding_fields = Vec::new();
     if reverse.binding.source != expected_reverse_binding.source {
@@ -581,6 +611,47 @@ fn verify_exact_state(
             "forward or reverse transform identity receipt is divergent",
         ));
     }
+    let imported_attempt = reverse
+        .jobs
+        .first()
+        .and_then(|job| job.builds.get(1))
+        .and_then(|build| build.graph_nodes.first())
+        .and_then(|node| node.attempts.first())
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                "reverse bundle is missing the completed imported attempt",
+            )
+        })?;
+    let imported_started = imported_attempt.started_at_unix_ms.ok_or_else(|| {
+        PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "imported attempt is missing its start time",
+        )
+    })?;
+    let expected_log = b"+ echo Hello World\nHello World\n";
+    validate_workflow_receipts(
+        &state.reverse_evidence,
+        "imported",
+        2,
+        Some((imported_started, imported_attempt.ended_at_unix_ms)),
+        Some(expected_log),
+    )?;
+    validate_workflow_receipts(
+        &state.reverse_evidence,
+        "restarted",
+        2,
+        Some((imported_started, imported_attempt.ended_at_unix_ms)),
+        Some(expected_log),
+    )?;
+    validate_workflow_receipts(
+        &state.reverse_evidence,
+        "continued",
+        3,
+        None,
+        Some(expected_log),
+    )?;
+    validate_workflow_receipts(&state.reverse_evidence, "template", 2, None, None)?;
     for (path, number, result) in [
         ("evidence/imported-build-1.json", 1, "ABORTED"),
         ("evidence/imported-build-2.json", 2, "SUCCESS"),
@@ -597,14 +668,206 @@ fn verify_exact_state(
                 format!("{path} is divergent"),
             ));
         }
+        if number == 2
+            && (value.get("queueId") != Some(&Value::from(-1))
+                || value
+                    .get("actions")
+                    .and_then(Value::as_array)
+                    .is_none_or(|actions| {
+                        actions.iter().any(|action| {
+                            matches!(
+                                action.get("_class").and_then(Value::as_str),
+                                Some("hudson.model.CauseAction")
+                                    | Some("jenkins.metrics.impl.TimeInQueueAction")
+                            )
+                        })
+                    }))
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                format!("{path} has divergent imported execution provenance"),
+            ));
+        }
     }
-    if archive_file(&state.reverse_evidence, "evidence/network-negative.txt")?.is_empty() {
+    for path in [
+        "evidence/imported-build-2.log",
+        "evidence/restarted-build-2.log",
+        "evidence/imported-build-2-shell-log.txt",
+        "evidence/restarted-build-2-shell-log.txt",
+    ] {
+        if archive_file(&state.reverse_evidence, path)? != expected_log {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                format!("{path} has divergent process output"),
+            ));
+        }
+    }
+    let continued_log = archive_file(&state.reverse_evidence, "evidence/continued-build-3.log")?;
+    if !continued_log
+        .windows(b"Hello World".len())
+        .any(|window| window == b"Hello World")
+    {
         return Err(PackageError::new(
             "E_PRIVATE_CONTINUITY",
-            "network-denial receipt is empty",
+            "continued build log omits the admitted process output",
+        ));
+    }
+    let template_log = archive_file(&state.reverse_evidence, "evidence/template-build-2.log")?;
+    if !template_log
+        .windows(b"MIG005A_SERIALIZATION_TEMPLATE_ONLY".len())
+        .any(|window| window == b"MIG005A_SERIALIZATION_TEMPLATE_ONLY")
+        || template_log
+            .windows(b"Hello World".len())
+            .any(|window| window == b"Hello World")
+        || archive_file(&state.reverse_evidence, "evidence/template-boundary.txt")?
+            != b"schema=mcloving.jenkins-serialization-template/v1\ndestination_started=false\nadmitted_workload_process_executed=false\nexternal_effects=0\nproduction_authority=false\n"
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "serialization template execution boundary is divergent",
+        ));
+    }
+    if archive_file(&state.reverse_evidence, "evidence/network-negative.txt")?
+        != b"public-network-denied\n"
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "network-denial receipt is divergent",
         ));
     }
     Ok(())
+}
+
+fn validate_workflow_receipts(
+    archive: &EvidenceArchive,
+    prefix: &str,
+    number: u64,
+    expected_shell_times: Option<(i64, i64)>,
+    expected_shell_log: Option<&[u8]>,
+) -> Result<(), PackageError> {
+    let workflow_path = format!("evidence/{prefix}-build-{number}-workflow.json");
+    let stage_path = format!("evidence/{prefix}-build-{number}-stage.json");
+    let shell_path = format!("evidence/{prefix}-build-{number}-shell-log.json");
+    let workflow: Value = serde_json::from_slice(archive_file(archive, &workflow_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW", error.to_string()))?;
+    let stages = workflow
+        .get("stages")
+        .and_then(Value::as_array)
+        .filter(|stages| stages.len() == 1)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_WORKFLOW",
+                format!("{workflow_path} has a divergent stage denominator"),
+            )
+        })?;
+    let workflow_stage = &stages[0];
+    if workflow.get("status") != Some(&Value::from("SUCCESS"))
+        || workflow_stage.get("name") != Some(&Value::from("Build"))
+        || workflow_stage.get("status") != Some(&Value::from("SUCCESS"))
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_WORKFLOW",
+            format!("{workflow_path} has a divergent workflow result"),
+        ));
+    }
+    let stage_id = numeric_identifier(workflow_stage.get("id"), &workflow_path)?;
+
+    let stage: Value = serde_json::from_slice(archive_file(archive, &stage_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW", error.to_string()))?;
+    if stage.get("name") != Some(&Value::from("Build"))
+        || stage.get("status") != Some(&Value::from("SUCCESS"))
+        || stage
+            .get("id")
+            .map(|value| numeric_identifier(Some(value), &stage_path))
+            .transpose()?
+            .is_some_and(|value| value != stage_id)
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_WORKFLOW",
+            format!("{stage_path} has a divergent Build stage"),
+        ));
+    }
+    let shell_nodes = stage
+        .get("stageFlowNodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_WORKFLOW",
+                format!("{stage_path} omits stage flow nodes"),
+            )
+        })?
+        .iter()
+        .filter(|node| {
+            node.get("name") == Some(&Value::from("Shell Script"))
+                && node.get("status") == Some(&Value::from("SUCCESS"))
+        })
+        .collect::<Vec<_>>();
+    if shell_nodes.len() != 1 {
+        return Err(PackageError::new(
+            "E_PRIVATE_WORKFLOW",
+            format!("{stage_path} has a divergent successful Shell Script denominator"),
+        ));
+    }
+    let shell_node = shell_nodes[0];
+    let shell_id = numeric_identifier(shell_node.get("id"), &stage_path)?;
+    if let Some((started, ended)) = expected_shell_times {
+        let duration = ended.checked_sub(started).ok_or_else(|| {
+            PackageError::new("E_PRIVATE_WORKFLOW", "shell timing is not monotonic")
+        })?;
+        if shell_node.get("startTimeMillis") != Some(&Value::from(started))
+            || shell_node.get("durationMillis") != Some(&Value::from(duration))
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_WORKFLOW",
+                format!("{stage_path} has divergent imported Shell Script timing"),
+            ));
+        }
+    }
+
+    let shell: Value = serde_json::from_slice(archive_file(archive, &shell_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW", error.to_string()))?;
+    let text = shell
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_WORKFLOW",
+                format!("{shell_path} omits shell text"),
+            )
+        })?
+        .as_bytes();
+    if numeric_identifier(shell.get("nodeId"), &shell_path)? != shell_id
+        || shell.get("nodeStatus") != Some(&Value::from("SUCCESS"))
+        || shell.get("hasMore") != Some(&Value::Bool(false))
+        || shell.get("length") != Some(&Value::from(text.len()))
+        || expected_shell_log.is_some_and(|expected| text != expected)
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_WORKFLOW",
+            format!("{shell_path} has divergent shell execution truth"),
+        ));
+    }
+    Ok(())
+}
+
+fn numeric_identifier(value: Option<&Value>, role: &str) -> Result<String, PackageError> {
+    let identifier = match value {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Number(value)) if value.is_u64() => value.to_string(),
+        _ => {
+            return Err(PackageError::new(
+                "E_PRIVATE_WORKFLOW",
+                format!("{role} has a nonnumeric workflow identifier"),
+            ));
+        }
+    };
+    if identifier.is_empty() || !identifier.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PackageError::new(
+            "E_PRIVATE_WORKFLOW",
+            format!("{role} has a noncanonical workflow identifier"),
+        ));
+    }
+    Ok(identifier)
 }
 
 fn load_archive(
@@ -880,6 +1143,16 @@ fn read_regular_file(
     Ok(bytes)
 }
 
+fn parse_digest(value: &str) -> Result<Digest, PackageError> {
+    validate_digest(value, "SHA-256")?;
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|error| PackageError::new("E_PRIVATE_DIGEST", error.to_string()))?;
+    }
+    Ok(digest)
+}
+
 fn validate_digest(value: &str, role: &str) -> Result<(), PackageError> {
     if value.len() != 64
         || !value
@@ -981,6 +1254,60 @@ fn encode_digest(digest: Digest) -> String {
 mod tests {
     use super::*;
 
+    fn workflow_archive(shell_status: &str) -> EvidenceArchive {
+        let shell_text = "+ echo Hello World\nHello World\n";
+        let files = [
+            (
+                "evidence/imported-build-2-workflow.json",
+                serde_json::json!({
+                    "status": "SUCCESS",
+                    "stages": [{"id": "10", "name": "Build", "status": "SUCCESS"}]
+                })
+                .to_string(),
+            ),
+            (
+                "evidence/imported-build-2-stage.json",
+                serde_json::json!({
+                    "id": "10",
+                    "name": "Build",
+                    "status": "SUCCESS",
+                    "stageFlowNodes": [{
+                        "id": "11",
+                        "name": "Shell Script",
+                        "status": "SUCCESS",
+                        "startTimeMillis": 1000,
+                        "durationMillis": 250
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "evidence/imported-build-2-shell-log.json",
+                serde_json::json!({
+                    "nodeId": "11",
+                    "nodeStatus": shell_status,
+                    "hasMore": false,
+                    "length": shell_text.len(),
+                    "text": shell_text
+                })
+                .to_string(),
+            ),
+        ];
+        EvidenceArchive {
+            role: "test".into(),
+            manifest_sha256: "0".repeat(64),
+            manifest: String::new(),
+            files: files
+                .into_iter()
+                .map(|(path, contents)| EvidenceFile {
+                    path: path.into(),
+                    sha256: sha256(contents.as_bytes()),
+                    contents,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn manifest_parser_rejects_traversal_duplicates_and_bad_digests() {
         let digest = "0".repeat(64);
@@ -1008,5 +1335,37 @@ mod tests {
         verify_archive(&archive, "test", &manifest_digest, &["receipt.txt"]).unwrap();
         archive.files[0].contents.push_str("changed");
         assert!(verify_archive(&archive, "test", &manifest_digest, &["receipt.txt"]).is_err());
+    }
+
+    #[test]
+    fn workflow_receipts_require_semantic_joins_and_success() {
+        let archive = workflow_archive("SUCCESS");
+        validate_workflow_receipts(
+            &archive,
+            "imported",
+            2,
+            Some((1000, 1250)),
+            Some(b"+ echo Hello World\nHello World\n"),
+        )
+        .unwrap();
+
+        let divergent = workflow_archive("FAILED");
+        assert!(
+            validate_workflow_receipts(
+                &divergent,
+                "imported",
+                2,
+                Some((1000, 1250)),
+                Some(b"+ echo Hello World\nHello World\n"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn digest_parser_requires_canonical_lowercase_sha256() {
+        assert_eq!(parse_digest(&"0".repeat(64)).unwrap(), [0; 32]);
+        assert!(parse_digest(&"A".repeat(64)).is_err());
+        assert!(parse_digest(&"0".repeat(63)).is_err());
     }
 }

@@ -92,8 +92,8 @@ reverse-continuity evidence. Those private objects cannot enter GitHub. The
 `mcloving.jenkins.migration-package/private-v1` extension therefore embeds the
 canonical public baseline plus the complete owner-manifest-pinned forward and
 reverse archives in one owner-only canonical JSON envelope retained on HeMan.
-It reconstructs both transforms with the implementation identities carried by
-the exact bundles, cross-checks those identities and configuration against the
+It reconstructs both transforms only after their implementation identities
+match separately supplied owner-private pins, then cross-checks those identities and configuration against the
 independent rehearsal summary and Jenkins binding receipts, authenticates the
 sealed five-file source tree, and verifies ordered logs, results, restart, and
 next-build continuity. Its verified denominator is one packaged case and 227
@@ -134,7 +134,8 @@ atomic publisher. Verification remains supported on both platforms.
 
 The public baseline alone is not an admissible input to `SHADOW-001`. The
 owner-private extension is the admissible package only when its separately
-retained owner pin, both evidence-manifest pins, sealed source tree, exact
+retained owner package pin, both evidence-manifest pins, both transform-implementation
+pins, sealed source tree, exact
 reviewed repository heads, and complete verifier all agree. The CLI never
 prints its digest and publishes it as a new owner-only file with mode `0600`.
 The verified private package is 704,617 bytes and remains solely under

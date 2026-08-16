@@ -59,16 +59,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             sealed_history,
             forward_evidence,
             forward_pin,
+            forward_implementation_pin,
             reverse_evidence,
             reverse_pin,
+            reverse_implementation_pin,
             output,
         ] if command == "generate-private" => {
             let forward_pin = read_owner_pin(Path::new(forward_pin))?;
             let reverse_pin = read_owner_pin(Path::new(reverse_pin))?;
+            let forward_implementation_pin = read_owner_pin(Path::new(forward_implementation_pin))?;
+            let reverse_implementation_pin = read_owner_pin(Path::new(reverse_implementation_pin))?;
             let verification = PrivateVerificationInputs {
                 sealed_history_root: Path::new(sealed_history),
                 expected_forward_manifest_sha256: &forward_pin,
                 expected_reverse_manifest_sha256: &reverse_pin,
+                expected_forward_implementation_sha256: &forward_implementation_pin,
+                expected_reverse_implementation_sha256: &reverse_implementation_pin,
                 expected_package_sha256: None,
             };
             let inputs = PrivateGenerationInputs {
@@ -87,17 +93,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             repository,
             sealed_history,
             forward_pin,
+            forward_implementation_pin,
             reverse_pin,
+            reverse_implementation_pin,
         ] if command == "verify-private" => {
             let bytes =
                 read_private_regular_bounded(Path::new(package), MAX_PRIVATE_PACKAGE_BYTES)?;
             let package_pin = read_owner_pin(Path::new(package_pin))?;
             let forward_pin = read_owner_pin(Path::new(forward_pin))?;
             let reverse_pin = read_owner_pin(Path::new(reverse_pin))?;
+            let forward_implementation_pin = read_owner_pin(Path::new(forward_implementation_pin))?;
+            let reverse_implementation_pin = read_owner_pin(Path::new(reverse_implementation_pin))?;
             let inputs = PrivateVerificationInputs {
                 sealed_history_root: Path::new(sealed_history),
                 expected_forward_manifest_sha256: &forward_pin,
                 expected_reverse_manifest_sha256: &reverse_pin,
+                expected_forward_implementation_sha256: &forward_implementation_pin,
+                expected_reverse_implementation_sha256: &reverse_implementation_pin,
                 expected_package_sha256: Some(&package_pin),
             };
             let receipt = verify_private(&bytes, Path::new(repository), &inputs)?;
@@ -114,7 +126,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: mcloving-migration-package generate REPOSITORY_ROOT [OUTPUT]\n       mcloving-migration-package verify PACKAGE REPOSITORY_ROOT\n       mcloving-migration-package generate-private REPOSITORY_ROOT SEALED_HISTORY FORWARD_EVIDENCE FORWARD_PIN_FILE REVERSE_EVIDENCE REVERSE_PIN_FILE OUTPUT\n       mcloving-migration-package verify-private PACKAGE PACKAGE_PIN_FILE REPOSITORY_ROOT SEALED_HISTORY FORWARD_PIN_FILE REVERSE_PIN_FILE"
+                "usage: mcloving-migration-package generate REPOSITORY_ROOT [OUTPUT]\n       mcloving-migration-package verify PACKAGE REPOSITORY_ROOT\n       mcloving-migration-package generate-private REPOSITORY_ROOT SEALED_HISTORY FORWARD_EVIDENCE FORWARD_MANIFEST_PIN_FILE FORWARD_IMPLEMENTATION_PIN_FILE REVERSE_EVIDENCE REVERSE_MANIFEST_PIN_FILE REVERSE_IMPLEMENTATION_PIN_FILE OUTPUT\n       mcloving-migration-package verify-private PACKAGE PACKAGE_PIN_FILE REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN_FILE FORWARD_IMPLEMENTATION_PIN_FILE REVERSE_MANIFEST_PIN_FILE REVERSE_IMPLEMENTATION_PIN_FILE"
                     .into(),
             );
         }

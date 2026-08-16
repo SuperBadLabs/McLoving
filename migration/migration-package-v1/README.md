@@ -30,8 +30,9 @@ HeMan; no source bytes or private seal metadata enter the repository.
 The companion `private-v1` envelope, retained only on HeMan, embeds this exact
 public baseline and the complete owner-manifest-pinned MIG-005A forward and
 reverse archives. Its canonical verifier authenticates the sealed source,
-reconstructs both state transforms from their exact packaged implementation
-and configuration identities, cross-checks independent binding receipts, and
+reconstructs both state transforms only when their exact implementation
+identities match separate owner-private pins, cross-checks their configuration
+and independent binding receipts, and
 proves the effect-free McLoving build plus Jenkins restart and next-build
 continuity. It verifies one packaged case and 227 deterministic rejections,
 sets `package_complete=true` and `shadow_eligible=true`, and keeps every
