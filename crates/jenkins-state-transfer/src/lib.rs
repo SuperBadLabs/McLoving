@@ -105,7 +105,7 @@ pub struct RetainedBuildRecord {
     pub duration_ms: i64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum JobConfigToken {
     Start(String, Vec<(String, String)>),
     Text(String),
@@ -208,8 +208,11 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                         "retained Jenkins job configuration root is divergent",
                     ));
                 }
+                let ignore = inside_job_action_payload(&stack);
                 stack.push(token.0.clone());
-                tokens.push(JobConfigToken::Start(token.0, token.1));
+                if !ignore {
+                    tokens.push(JobConfigToken::Start(token.0, token.1));
+                }
             }
             Ok(Event::Empty(start)) => {
                 let token = job_config_start_token(&reader, &start)?;
@@ -218,8 +221,10 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                         "retained Jenkins job configuration root is divergent",
                     ));
                 }
-                tokens.push(JobConfigToken::Start(token.0.clone(), token.1));
-                tokens.push(JobConfigToken::End(token.0));
+                if !inside_job_action_payload(&stack) {
+                    tokens.push(JobConfigToken::Start(token.0.clone(), token.1));
+                    tokens.push(JobConfigToken::End(token.0));
+                }
             }
             Ok(Event::Text(text)) => {
                 let decoded = text
@@ -228,13 +233,17 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                 let value = quick_xml::escape::unescape(&decoded).map_err(|error| {
                     invalid(format!("invalid job configuration escape: {error}"))
                 })?;
-                push_job_config_text(&mut tokens, value.trim());
+                if !inside_job_action_payload(&stack) {
+                    push_job_config_text(&mut tokens, value.trim());
+                }
             }
             Ok(Event::CData(text)) => {
                 let value = text.decode().map_err(|error| {
                     invalid(format!("invalid job configuration CDATA: {error}"))
                 })?;
-                push_job_config_text(&mut tokens, value.trim());
+                if !inside_job_action_payload(&stack) {
+                    push_job_config_text(&mut tokens, value.trim());
+                }
             }
             Ok(Event::GeneralRef(reference)) => {
                 let decoded = reference.decode().map_err(|error| {
@@ -244,16 +253,21 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
                 let value = quick_xml::escape::unescape(&encoded).map_err(|error| {
                     invalid(format!("invalid job configuration reference: {error}"))
                 })?;
-                push_job_config_text(&mut tokens, value.trim());
+                if !inside_job_action_payload(&stack) {
+                    push_job_config_text(&mut tokens, value.trim());
+                }
             }
             Ok(Event::End(end)) => {
                 let name = std::str::from_utf8(end.name().as_ref())
                     .map_err(|_| invalid("job configuration element name is not UTF-8"))?
                     .to_owned();
+                let ignore = inside_job_action_child(&stack, &name);
                 if stack.pop().as_deref() != Some(name.as_str()) {
                     return Err(invalid("job configuration element nesting is divergent"));
                 }
-                tokens.push(JobConfigToken::End(name));
+                if !ignore {
+                    tokens.push(JobConfigToken::End(name));
+                }
             }
             Ok(Event::DocType(_)) => {
                 return Err(invalid("XML document type declarations are denied"));
@@ -280,7 +294,42 @@ fn canonical_job_configuration(bytes: &[u8]) -> Result<Vec<JobConfigToken>, Hist
     {
         return Err(invalid("retained Jenkins job configuration is incomplete"));
     }
-    Ok(tokens)
+    Ok(remove_false_remove_last_build_default(tokens))
+}
+
+fn inside_job_action_payload(stack: &[String]) -> bool {
+    stack.len() >= 2 && stack[0] == "flow-definition" && stack[1] == "actions"
+}
+
+fn inside_job_action_child(stack_before_pop: &[String], ended_name: &str) -> bool {
+    stack_before_pop.len() > 2
+        && inside_job_action_payload(stack_before_pop)
+        && ended_name != "actions"
+}
+
+fn remove_false_remove_last_build_default(tokens: Vec<JobConfigToken>) -> Vec<JobConfigToken> {
+    let mut normalized = Vec::with_capacity(tokens.len());
+    let mut index = 0;
+    while index < tokens.len() {
+        let is_false_default = matches!(
+            tokens.get(index..index + 3),
+            Some([
+                JobConfigToken::Start(name, attributes),
+                JobConfigToken::Text(value),
+                JobConfigToken::End(end),
+            ]) if name == "removeLastBuild"
+                && attributes.is_empty()
+                && value == "false"
+                && end == name
+        );
+        if is_false_default {
+            index += 3;
+        } else {
+            normalized.push(tokens[index].clone());
+            index += 1;
+        }
+    }
+    normalized
 }
 
 fn job_config_start_token<R>(
@@ -1732,6 +1781,14 @@ mod tests {
             .replace(
                 "plugin=\"workflow-cps\"",
                 "plugin=\"workflow-cps@4209.v83c4e257f1e9\"",
+            )
+            .replace(
+                "<actions/>",
+                "<actions><org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobAction><owner>derived-cache</owner></org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobAction></actions>",
+            )
+            .replace(
+                "<artifactNumToKeep>-1</artifactNumToKeep>",
+                "<artifactNumToKeep>-1</artifactNumToKeep><removeLastBuild>false</removeLastBuild>",
             );
         verify_retained_job_configuration(rewritten_plugins.as_bytes(), reviewed).unwrap();
 
@@ -1741,6 +1798,10 @@ mod tests {
             reviewed_text.replace(
                 "<triggers/>",
                 "<triggers><hudson.triggers.TimerTrigger/></triggers>",
+            ),
+            reviewed_text.replace(
+                "<artifactNumToKeep>-1</artifactNumToKeep>",
+                "<artifactNumToKeep>-1</artifactNumToKeep><removeLastBuild>true</removeLastBuild>",
             ),
         ] {
             assert!(verify_retained_job_configuration(divergent.as_bytes(), reviewed).is_err());
