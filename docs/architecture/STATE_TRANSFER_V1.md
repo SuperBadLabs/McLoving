@@ -269,14 +269,22 @@ published to GitHub.
 
 The reverse-continuity harness then used pinned Jenkins image
 `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`
-on an internal-only network. A fresh controller loaded private build 1 as
-`ABORTED`, loaded the reverse-imported build 2 as `SUCCESS` without executing
-it again, returned the exact `Build` workflow stage and `Hello World` log,
-restarted, and executed build 3 exactly once as `SUCCESS`. Numeric history was
-exactly `[1,2,3]`, `nextBuildNumber` became 4, public egress was denied, and
-the reverse-import receipt retained `external_effects=0` and
-`production_authority=false`. Its owner-only retained evidence manifest
-verifies on HeMan; its private digest and contents are not published to GitHub.
+on an internal-only network. Before either controller started, the harness
+recomputed the independently pinned five-file source-tree digest with no-follow
+reads, proved the authenticated build-1 record equals the reverse bundle, and
+copied exactly the committed 90-plugin manifest denominator while verifying
+every regular, singly linked plugin both before and after copy. A separate
+non-authoritative template controller created only Jenkins-native serialization
+structure using a built-in marker; it never ran the admitted shell process and
+was destroyed before the destination proof. A fresh destination controller
+then loaded private build 1 as `ABORTED`, loaded the reverse-imported build 2 as
+`SUCCESS` without executing it, returned the exact `Build` workflow stage and
+the two McLoving process-log records, restarted, and executed build 3 exactly
+once as `SUCCESS`. Numeric history was exactly `[1,2,3]`, `nextBuildNumber`
+became 4, public egress was denied, and the reverse-import receipt retained
+`external_effects=0` and `production_authority=false`. Its owner-only retained
+evidence manifest verifies on HeMan; its private digest and contents are not
+published to GitHub.
 
 These receipts close the exact recorded dependency in addition to the earlier
 synthetic denominator. They grant no production identity, reader, trigger,

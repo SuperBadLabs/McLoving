@@ -1,0 +1,33 @@
+<?xml version="1.1" encoding="UTF-8"?>
+<flow-definition plugin="workflow-job">
+  <actions/>
+  <description>MIG-005A non-authoritative serialization template only</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <jenkins.model.BuildDiscarderProperty>
+      <strategy class="hudson.tasks.LogRotator">
+        <daysToKeep>-1</daysToKeep>
+        <numToKeep>-1</numToKeep>
+        <artifactDaysToKeep>-1</artifactDaysToKeep>
+        <artifactNumToKeep>-1</artifactNumToKeep>
+      </strategy>
+    </jenkins.model.BuildDiscarderProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script><![CDATA[
+pipeline {
+    agent none
+    stages {
+        stage('Build') {
+            steps {
+                echo 'MIG005A_SERIALIZATION_TEMPLATE_ONLY'
+            }
+        }
+    }
+}
+    ]]></script>
+    <sandbox>false</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>

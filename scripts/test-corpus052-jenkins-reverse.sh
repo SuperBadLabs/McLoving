@@ -2,17 +2,21 @@
 set -euo pipefail
 umask 077
 
-if [[ $# -ne 4 ]]; then
-  echo "usage: $0 SEALED_BUILDS TRANSFORM_ROOT JENKINS_PLUGIN_SOURCE OUTPUT_ROOT" >&2
+if [[ $# -ne 6 ]]; then
+  echo "usage: $0 SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID TRANSFORM_ROOT JENKINS_PLUGIN_SOURCE OUTPUT_ROOT" >&2
   exit 64
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sealed_builds=$1
-transform_root=$2
-plugin_source=$3
-requested_output=$4
+expected_tree_sha256=$2
+opaque_evidence_id=$3
+transform_root=$4
+plugin_source=$5
+requested_output=$6
 fixture_root="${repo_root}/migration/state-transfer-v1/fixtures"
+plugin_manifest="${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/PLUGIN_SHA256SUMS"
+plugin_manifest_sha256='e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0'
 reverse_bundle="${transform_root}/reverse-bundle.json"
 rehearsal_summary="${transform_root}/rehearsal-summary.json"
 log_payload="${transform_root}/mcloving-build-2.log"
@@ -33,6 +37,15 @@ for path in "${sealed_builds}" "${transform_root}" "${plugin_source}"; do
     exit 66
   fi
 done
+if [[ ! "${expected_tree_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "expected tree digest must be lowercase SHA-256" >&2
+  exit 65
+fi
+if [[ ! -f "${plugin_manifest}" || -L "${plugin_manifest}" ]] \
+  || [[ $(sha256sum "${plugin_manifest}" | awk '{print $1}') != "${plugin_manifest_sha256}" ]]; then
+  echo "pinned Jenkins plugin manifest is missing or divergent" >&2
+  exit 66
+fi
 for path in "${reverse_bundle}" "${rehearsal_summary}" "${log_payload}" \
   "${stdout_payload}" "${stderr_payload}"; do
   if [[ ! -f "${path}" || -L "${path}" ]]; then
@@ -77,9 +90,11 @@ test "$(cat "${log_payload}")" = $'Hello World\n+ echo Hello World'
 
 staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
 runtime_root=$(mktemp -d /tmp/mcloving-mig005a-corpus052-jenkins.XXXXXX)
-home="${runtime_root}/jenkins-home"
+home="${runtime_root}/destination-home"
+template_home="${runtime_root}/template-home"
 template="${runtime_root}/template-build-2"
 job_home="${home}/jobs/${job}"
+template_job_home="${template_home}/jobs/${job}"
 network="mcloving-mig005a-corpus052-reverse-$$"
 container="mcloving-mig005a-corpus052-reverse-$$"
 port=$((21000 + ($$ % 1000)))
@@ -99,26 +114,104 @@ cleanup() {
 }
 trap cleanup EXIT
 
+verify_and_copy_plugins() {
+  local source_root=$1
+  local destination_root=$2
+  local expected_digest relative extra leaf source_file destination_file
+  local -a expected_plugins actual_plugins copied_plugins
+
+  mapfile -t expected_plugins < <(
+    awk '{sub(/^plugins\//, "", $2); print $2}' "${plugin_manifest}" | sort
+  )
+  mapfile -t actual_plugins < <(
+    find "${source_root}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
+  )
+  test "${#expected_plugins[@]}" -eq 90
+  test "$(printf '%s\n' "${expected_plugins[@]}" | sort -u | wc -l)" -eq 90
+  test "${expected_plugins[*]}" = "${actual_plugins[*]}"
+
+  mkdir -p "${destination_root}"
+  while read -r expected_digest relative extra; do
+    test -z "${extra:-}"
+    [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ ]]
+    [[ "${relative}" =~ ^plugins/[A-Za-z0-9._-]+\.jpi$ ]]
+    leaf=${relative#plugins/}
+    source_file="${source_root}/${leaf}"
+    destination_file="${destination_root}/${leaf}"
+    test -f "${source_file}"
+    test ! -L "${source_file}"
+    test "$(stat -c '%h' "${source_file}")" -eq 1
+    test "$(sha256sum "${source_file}" | awk '{print $1}')" = "${expected_digest}"
+    cp --no-dereference -- "${source_file}" "${destination_file}"
+    test -f "${destination_file}"
+    test ! -L "${destination_file}"
+    test "$(stat -c '%h' "${destination_file}")" -eq 1
+    test "$(sha256sum "${destination_file}" | awk '{print $1}')" = "${expected_digest}"
+  done < "${plugin_manifest}"
+  mapfile -t copied_plugins < <(
+    find "${destination_root}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
+  )
+  test "${expected_plugins[*]}" = "${copied_plugins[*]}"
+}
+
+authenticate_history() {
+  local source_root=$1
+  local output_bundle=$2
+  local output_receipt=$3
+  (
+    cd "${repo_root}"
+    cargo run --locked --quiet \
+      -p mcloving-jenkins-state-transfer --example normalize_history -- \
+      "${source_root}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
+      "${output_bundle}"
+  ) > "${output_receipt}"
+}
+
 mkdir -p "${home}/init.groovy.d" "${home}/plugins" "${job_home}/builds" \
-  "${staging}/evidence"
-chmod 700 "${runtime_root}" "${home}" "${staging}"
+  "${template_home}/init.groovy.d" "${template_home}/plugins" \
+  "${template_job_home}/builds" "${staging}/evidence"
+chmod 700 "${runtime_root}" "${home}" "${template_home}" "${staging}"
+
+authenticate_history "${sealed_builds}" \
+  "${staging}/evidence/authenticated-source-forward-bundle.json" \
+  "${staging}/evidence/authenticated-source.txt"
+jq --sort-keys '.jobs[0].builds[0]' \
+  "${staging}/evidence/authenticated-source-forward-bundle.json" \
+  > "${staging}/evidence/authenticated-source-build-1.json"
+jq --sort-keys '.jobs[0].builds[0]' "${reverse_bundle}" \
+  > "${staging}/evidence/reverse-source-build-1.json"
+cmp "${staging}/evidence/authenticated-source-build-1.json" \
+  "${staging}/evidence/reverse-source-build-1.json"
+
 cp "${fixture_root}/init.groovy" "${home}/init.groovy.d/10-mig005a.groovy"
 cp "${fixture_root}/corpus052-job-config.xml" "${job_home}/config.xml"
-cp -a "${plugin_source}/." "${home}/plugins/"
+cp "${fixture_root}/init.groovy" "${template_home}/init.groovy.d/10-mig005a.groovy"
+cp "${fixture_root}/corpus052-template-job-config.xml" "${template_job_home}/config.xml"
+verify_and_copy_plugins "${plugin_source}" "${home}/plugins"
+verify_and_copy_plugins "${plugin_source}" "${template_home}/plugins"
+cp "${plugin_manifest}" "${staging}/evidence/PLUGIN_SHA256SUMS"
 cp -a "${sealed_builds}/1" "${job_home}/builds/1"
 cp "${sealed_builds}/permalinks" "${job_home}/builds/permalinks"
 printf '%s\n' 2 > "${job_home}/nextBuildNumber"
-chmod -R u+rwX "${home}"
-podman unshare chown -R 1000:1000 "${home}"
+authenticate_history "${job_home}/builds" \
+  "${staging}/evidence/restored-source-forward-bundle.json" \
+  "${staging}/evidence/restored-source.txt"
+cmp "${staging}/evidence/authenticated-source-forward-bundle.json" \
+  "${staging}/evidence/restored-source-forward-bundle.json"
+
+printf '%s\n' 2 > "${template_job_home}/nextBuildNumber"
+chmod -R u+rwX "${home}" "${template_home}"
+podman unshare chown -R 1000:1000 "${home}" "${template_home}"
 podman network create --internal "${network}" >/dev/null
 
 start_controller() {
+  local controller_home=$1
   podman run --detach --name "${container}" \
     --network "${network}" \
     --publish "127.0.0.1:${port}:8080" \
     --cpus 4 --memory 4g --pids-limit 2048 \
     --env JAVA_OPTS='-Djenkins.install.runSetupWizard=false' \
-    --volume "${home}:/var/jenkins_home:Z" \
+    --volume "${controller_home}:/var/jenkins_home:Z" \
     "${image}" >/dev/null
   for _ in $(seq 1 240); do
     if curl --fail --silent --show-error \
@@ -168,21 +261,31 @@ capture_workflow() {
   ' "${staging}/evidence/${prefix}-build-${number}-workflow.json" >/dev/null
 }
 
-start_controller
-capture_build 1 template
-jq --exit-status '.number == 1 and .result == "ABORTED"' \
-  "${staging}/evidence/template-build-1.json" >/dev/null
+start_controller "${template_home}"
 curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:${port}/job/${job}/build" >/dev/null
 capture_build 2 template
 jq --exit-status '.number == 2 and .result == "SUCCESS"' \
   "${staging}/evidence/template-build-2.json" >/dev/null
-rg --quiet 'Hello World' "${staging}/evidence/template-build-2.log"
+rg --quiet '^MIG005A_SERIALIZATION_TEMPLATE_ONLY$' \
+  "${staging}/evidence/template-build-2.log"
+if rg --quiet 'Hello World|\+ echo' "${staging}/evidence/template-build-2.log"; then
+  echo "serialization template executed the admitted workload" >&2
+  exit 1
+fi
 capture_workflow 2 template
+podman inspect "${container}" > "${staging}/evidence/template-container-inspect.json"
 stop_controller
 
-podman unshare cp -a "${job_home}/builds/2" "${template}"
-podman unshare rm -rf -- "${job_home}/builds/2"
+podman unshare cp -a "${template_job_home}/builds/2" "${template}"
+podman unshare rm -rf -- "${template_home}"
+printf '%s\n' \
+  'schema=mcloving.jenkins-serialization-template/v1' \
+  'destination_started=false' \
+  'admitted_workload_process_executed=false' \
+  'external_effects=0' \
+  'production_authority=false' \
+  > "${staging}/evidence/template-boundary.txt"
 cp "${stdout_payload}" "${staging}/imported-build-2.log"
 cat "${stderr_payload}" >> "${staging}/imported-build-2.log"
 cmp "${log_payload}" "${staging}/imported-build-2.log"
@@ -223,7 +326,7 @@ podman unshare cp "${staging}/nextBuildNumber" "${job_home}/nextBuildNumber"
 podman unshare cp "${staging}/permalinks" "${job_home}/builds/permalinks"
 podman unshare chown -R 1000:1000 "${job_home}"
 
-start_controller
+start_controller "${home}"
 capture_build 1 imported
 capture_build 2 imported
 jq --exit-status '.number == 1 and .result == "ABORTED"' \
