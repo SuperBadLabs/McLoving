@@ -279,8 +279,11 @@ The reverse-continuity harness then used pinned Jenkins image
 `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`
 on an internal-only network. Before either controller started, the harness
 authenticated the complete rehearsal manifest against the independently held
-owner pin, copied every member into a private read-only snapshot, reverified
-that snapshot, recomputed the independently pinned five-file source-tree digest
+owner pin, copied every member into a private snapshot, transferred that
+snapshot to root ownership with read access only for the invoking account's
+dedicated group, reverified it after lockdown, and proved the invoking UID
+could neither restore write access nor replace the snapshot path. It then
+recomputed the independently pinned five-file source-tree digest
 with no-follow reads, proved the authenticated build-1 record equals the
 reverse bundle, and copied exactly the committed 90-plugin manifest denominator while verifying
 every regular, singly linked plugin both before and after copy. A separate

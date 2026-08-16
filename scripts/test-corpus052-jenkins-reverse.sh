@@ -31,6 +31,18 @@ image='docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de
 job='corpus-052-cinqict_jenkinsdev'
 output_parent=$(realpath -e "$(dirname -- "${requested_output}")")
 output_leaf=$(basename -- "${requested_output}")
+snapshot_group=$(id -g)
+if [[ "${EUID}" -eq 0 ]]; then
+  privileged=()
+else
+  command -v sudo >/dev/null
+  sudo -n true
+  privileged=(sudo -n)
+fi
+test "$(getent passwd | awk -F: -v gid="${snapshot_group}" \
+  '$4 == gid { count += 1 } END { print count + 0 }')" -eq 1
+group_members=$(getent group "${snapshot_group}" | cut -d: -f4)
+test -z "${group_members}" || test "${group_members}" = "$(id -un)"
 
 if [[ ! "${output_leaf}" =~ ^jenkins-reverse-v[0-9]+$ || -e "${requested_output}" ]]; then
   echo "output must be one new jenkins-reverse-vN directory" >&2
@@ -69,10 +81,10 @@ fi
 
 staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
 runtime_root=$(mktemp -d /tmp/mcloving-mig005a-corpus052-jenkins.XXXXXX)
+authenticated_rehearsal=$(mktemp -d /tmp/mcloving-mig005a-authenticated.XXXXXX)
 home="${runtime_root}/destination-home"
 template_home="${runtime_root}/template-home"
 template="${runtime_root}/template-build-2"
-authenticated_rehearsal="${runtime_root}/authenticated-rehearsal"
 job_home="${home}/jobs/${job}"
 template_job_home="${template_home}/jobs/${job}"
 network="mcloving-mig005a-corpus052-reverse-$$"
@@ -86,12 +98,11 @@ cleanup() {
   set +e
   podman rm --force "${container}" >/dev/null 2>&1 || true
   podman network rm "${network}" >/dev/null 2>&1 || true
-  chmod -R u+rwX "${authenticated_rehearsal}" >/dev/null 2>&1 || true
-  rm -rf -- "${authenticated_rehearsal}"
   if [[ "${completed}" != 1 ]]; then
     rm -rf -- "${staging}"
   fi
-  podman unshare rm -rf -- "${runtime_root}" >/dev/null 2>&1 || true
+  "${privileged[@]}" rm -rf -- "${authenticated_rehearsal}" >/dev/null 2>&1 || true
+  "${privileged[@]}" rm -rf -- "${runtime_root}" >/dev/null 2>&1 || true
   if [[ "${status}" != 0 ]]; then
     echo "rehearsal-failure-line=${failure_line}" >&2
   fi
@@ -109,10 +120,11 @@ awk '
   sha256sum --check --strict SHA256SUMS >/dev/null
 )
 
-# Reopen no authenticated input after this point. Copy every manifest member into
-# a private snapshot, reauthenticate that snapshot against the independently
-# retained owner pin, and remove owner write permission before consuming it.
-mkdir -p "${authenticated_rehearsal}"
+# Reopen no original authenticated input after this point. Copy every manifest
+# member into a private snapshot, reauthenticate it, then transfer the snapshot
+# to root ownership with read access only for this account's dedicated primary
+# group. A concurrent process under the invoking UID cannot chmod or replace an
+# authenticated inode before a later consumer reopens it.
 cp --no-dereference --reflink=never "${rehearsal_manifest}" \
   "${authenticated_rehearsal}/SHA256SUMS"
 test "$(sha256sum "${authenticated_rehearsal}/SHA256SUMS" | awk '{print $1}')" = \
@@ -139,8 +151,22 @@ done < "${authenticated_rehearsal}/SHA256SUMS"
   cd "${authenticated_rehearsal}"
   sha256sum --check --strict SHA256SUMS >/dev/null
 )
-find "${authenticated_rehearsal}" -type f -exec chmod 400 {} +
-find "${authenticated_rehearsal}" -type d -exec chmod 500 {} +
+"${privileged[@]}" chown -R "0:${snapshot_group}" "${authenticated_rehearsal}"
+"${privileged[@]}" find "${authenticated_rehearsal}" -type f -exec chmod 0440 {} +
+"${privileged[@]}" find "${authenticated_rehearsal}" -type d -exec chmod 0550 {} +
+test -z "$(find "${authenticated_rehearsal}" ! -user root -print -quit)"
+test -z "$(find "${authenticated_rehearsal}" ! -group "${snapshot_group}" -print -quit)"
+if chmod u+w "${authenticated_rehearsal}/SHA256SUMS" 2>/dev/null \
+  || mv "${authenticated_rehearsal}" "${authenticated_rehearsal}.replaced" 2>/dev/null; then
+  echo "authenticated snapshot remained mutable to the invoking UID" >&2
+  exit 1
+fi
+test "$(sha256sum "${authenticated_rehearsal}/SHA256SUMS" | awk '{print $1}')" = \
+  "${owner_pinned_rehearsal_manifest_sha256}"
+(
+  cd "${authenticated_rehearsal}"
+  sha256sum --check --strict SHA256SUMS >/dev/null
+)
 
 rehearsal_root="${authenticated_rehearsal}"
 rehearsal_manifest="${rehearsal_root}/SHA256SUMS"
@@ -762,7 +788,8 @@ find "${staging}" -type f -exec chmod 600 {} +
       done > SHA256SUMS
   sha256sum -c SHA256SUMS >/dev/null
 )
-podman unshare rm -rf -- "${runtime_root}"
+"${privileged[@]}" rm -rf -- "${authenticated_rehearsal}"
+"${privileged[@]}" rm -rf -- "${runtime_root}"
 mv -- "${staging}" "${output_parent}/${output_leaf}"
 completed=1
 (
