@@ -22,6 +22,21 @@ SPEC.loader.exec_module(IMPACT)
 
 
 class WindowsAgentImpactTests(unittest.TestCase):
+    def test_closure_includes_migration_verifier_dependencies(self) -> None:
+        directories, _digest = IMPACT.closure(IMPACT.cargo_metadata(Path.cwd()), Path.cwd())
+        self.assertTrue(
+            {
+                Path("bins/agent"),
+                Path("crates/differential-aggregate"),
+                Path("crates/jenkins-compiler-admission"),
+                Path("crates/jenkins-mapping-catalog"),
+                Path("crates/migration-package"),
+                Path("crates/pipeline-ir"),
+                Path("crates/state-policy-differential"),
+            }
+            <= directories
+        )
+
     def test_rename_preserves_source_and_destination_paths(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             repository = Path(root)
@@ -94,7 +109,7 @@ class WindowsAgentImpactTests(unittest.TestCase):
             "same-policy",
         )
         self.assertFalse(run_windows)
-        self.assertIn("no Windows agent", reason)
+        self.assertIn("no Windows production or verifier", reason)
 
     def test_local_dependency_source_triggers(self) -> None:
         run_windows, reason = IMPACT.classify(
@@ -107,20 +122,46 @@ class WindowsAgentImpactTests(unittest.TestCase):
             "same",
         )
         self.assertTrue(run_windows)
-        self.assertIn("dependency source", reason)
+        self.assertIn("Windows dependency source", reason)
 
     def test_windows_verifier_source_triggers(self) -> None:
+        directories = {
+            Path("bins/agent"),
+            Path("crates/domain"),
+            Path("crates/jenkins-compiler-admission"),
+            Path("crates/jenkins-mapping-catalog"),
+            Path("crates/migration-package"),
+        }
+        for path in (
+            "crates/migration-package/src/lib.rs",
+            "crates/jenkins-compiler-admission/src/lib.rs",
+            "crates/jenkins-mapping-catalog/src/lib.rs",
+        ):
+            with self.subTest(path=path):
+                run_windows, reason = IMPACT.classify(
+                    {path},
+                    directories,
+                    directories,
+                    "same",
+                    "same",
+                    "same",
+                    "same",
+                )
+                self.assertTrue(run_windows)
+                self.assertIn("Windows", reason)
+
+    def test_windows_verifier_evidence_triggers(self) -> None:
         run_windows, reason = IMPACT.classify(
-            {"crates/differential-aggregate/src/lib.rs"},
-            {Path("bins/agent"), Path("crates/domain")},
-            {Path("bins/agent"), Path("crates/domain")},
+            {"migration/migration-package-v1/migration-package.json"},
+            {Path("bins/agent")},
+            {Path("bins/agent")},
             "same",
             "same",
             "same",
             "same",
         )
         self.assertTrue(run_windows)
-        self.assertIn("Windows verifier source", reason)
+        self.assertIn("Windows verifier input", reason)
 
     def test_repository_cargo_configuration_triggers(self) -> None:
         for path in (".cargo/config", ".cargo/config.toml", ".gitattributes"):
@@ -157,7 +198,7 @@ class WindowsAgentImpactTests(unittest.TestCase):
             "same",
         )
         self.assertTrue(run_windows)
-        self.assertIn("resolved agent dependency", reason)
+        self.assertIn("resolved Windows dependency", reason)
 
     def test_workspace_policy_change_triggers(self) -> None:
         run_windows, reason = IMPACT.classify(

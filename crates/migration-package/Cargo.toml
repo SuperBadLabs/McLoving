@@ -1,0 +1,26 @@
+[package]
+name = "mcloving-migration-package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "=0.2.189"
+mcloving-differential-aggregate = { version = "0.0.0", path = "../differential-aggregate" }
+mcloving-jenkins-compiler-admission = { version = "0.0.0", path = "../jenkins-compiler-admission" }
+mcloving-jenkins-mapping-catalog = { version = "0.0.0", path = "../jenkins-mapping-catalog" }
+mcloving-state-policy-differential = { version = "0.0.0", path = "../state-policy-differential" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+serde-saphyr = "=1.0.0-rc.2"
+sha2 = "=0.10.9"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true
