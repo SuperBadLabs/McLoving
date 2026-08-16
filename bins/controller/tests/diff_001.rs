@@ -262,7 +262,7 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
             .expect("serialize SHADOW-001 trace observation");
         if path == "-" {
             println!(
-                "SHADOW001_TRACE={}",
+                "\nSHADOW001_TRACE={}",
                 String::from_utf8(bytes).expect("SHADOW-001 trace is UTF-8")
             );
         } else {

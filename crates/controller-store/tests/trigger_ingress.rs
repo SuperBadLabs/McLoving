@@ -2068,7 +2068,7 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
         .expect("serialize SHADOW-001 target replay observation");
         if path == "-" {
             println!(
-                "SHADOW001_TARGET={}",
+                "\nSHADOW001_TARGET={}",
                 String::from_utf8(bytes).expect("SHADOW-001 observation is UTF-8")
             );
         } else {

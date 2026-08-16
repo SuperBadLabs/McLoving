@@ -274,6 +274,14 @@ jq --exit-status '.[0].Internal == true' \
   "${output_root}/target-network-inspect.json" >/dev/null
 grep -Fxq 'SHADOW001_TARGET_NETWORK=public-network-denied' \
   "${output_root}/target-runtime.log"
+target_marker_count="$(grep -c '^SHADOW001_TARGET=' \
+  "${output_root}/target-runtime.log" || true)"
+trace_marker_count="$(grep -c '^SHADOW001_TRACE=' \
+  "${output_root}/target-runtime.log" || true)"
+if [[ "${target_marker_count}" -ne 1 || "${trace_marker_count}" -ne 1 ]]; then
+  echo "isolated target replay did not emit exactly one bounded receipt per class" >&2
+  exit 1
+fi
 sed -n 's/^SHADOW001_TARGET=//p' "${output_root}/target-runtime.log" \
   >"${output_root}/target-replay.json"
 sed -n 's/^SHADOW001_TRACE=//p' "${output_root}/target-runtime.log" \

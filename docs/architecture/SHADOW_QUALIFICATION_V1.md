@@ -206,7 +206,9 @@ runtime test emits the target receipt only after all five real target entry
 points return `PipelineDisabled` with zero build rows. The admitted-case test
 emits the trace receipt only after the exact process and normalized logs,
 terminal result, empty artifact/input/credential/effect surfaces, and empty
-user workspace are proven. A public-network negative must pass, the runtime
+user workspace are proven. Both emitters line-frame their bounded marker, and
+the sidecar requires exactly one marker of each class before parsing. A
+public-network negative must pass, the runtime
 mount sets, both PostgreSQL tmpfs mounts, and internal network are inspected, and both
 containers and their network are removed before the isolation observation can state teardown
 complete. The sidecar finally invokes `prepare` against the independently
