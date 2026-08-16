@@ -30,9 +30,7 @@ The envelope binds and embeds:
 - the canonical MIG-006 aggregate and DIFF-002 state-policy evidence;
 - the reviewed v0.1.0 release identity, envelope, evidence-manifest, and
   verification-receipt digests; and
-- the MIG-005A transform binary, source/evidence/reverse manifests, forward
-  and reverse bundles, and four accepted repair/import/protection/retry receipt
-  digests.
+- an exact state-transfer disposition for the stateless admitted source.
 
 Exactly one disposition is `packaged_disabled_certified`. The other 227 are
 `deterministically_rejected` with `E_SOURCE_NOT_ADMITTED`. The package does
@@ -48,7 +46,7 @@ produces byte-identical pretty JSON with one trailing newline. Verification
 first requires those exact canonical bytes and the compiled package SHA-256.
 It then:
 
-1. compares every identity, state-transfer binding, and all-false authority
+1. compares every identity, state-transfer disposition, and all-false authority
    field with its compiled reviewed value;
 2. hashes every embedded artifact;
 3. passes the embedded source and worker response to
@@ -70,9 +68,13 @@ The admitted source is a single literal shell step with no persistent
 cross-build state dependency. Therefore
 `admitted_state_dependencies=[]` and
 `case_specific_rehearsal_receipts=[]` are exact, non-vacuous denominator
-statements tied to that reviewed source. MIG-005A's synthetic seeded-history
-receipt proves transform capability but is not presented as a case-specific
-production rehearsal.
+statements tied to that reviewed source. The package additionally requires
+`status=not_applicable_stateless_source`, `packaged_artifacts=[]`,
+`cutover_eligible=false`, and `rollback_eligible=false`. It does not retain
+digest-only pointers to the synthetic MIG-005A rehearsal, because verification
+cannot authenticate an unavailable object. Any later stateful or
+authority-transfer package must embed the bounded certified objects or require
+an immutable content-addressed object source and verify the retrieved bytes.
 
 The envelope has no field capable of carrying credential material. Its
 free-form embedded artifacts are accepted only at their exact previously
@@ -82,7 +84,7 @@ bit is false and the source operational state is disabled.
 ## Seal and portability
 
 The canonical package SHA-256 is
-`9f68159216d385bf9b14deb3bb3957bdb7e79e1ed77ca374786da5676c07b13c`.
+`390f7ff92dcd8a493b9f926df6d881d12c2c4078776f592a351cf5d05b065ceb`.
 The package and seal are marked non-translatable in `.gitattributes`.
 Linux and hosted Windows compile, lint, and execute the verifier. The CLI opens
 the supplied package once with platform no-follow semantics, validates a

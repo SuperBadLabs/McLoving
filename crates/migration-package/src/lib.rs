@@ -21,7 +21,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.migration-package/v1";
 pub const PACKAGE_ID: &str = "mario-corpus-052-disabled-v1";
 pub const PACKAGE_FILE: &str = "migration-package.json";
 pub const MAX_PACKAGE_BYTES: usize = 1_048_576;
-pub const PACKAGE_SHA256: &str = "9f68159216d385bf9b14deb3bb3957bdb7e79e1ed77ca374786da5676c07b13c";
+pub const PACKAGE_SHA256: &str = "390f7ff92dcd8a493b9f926df6d881d12c2c4078776f592a351cf5d05b065ceb";
 
 const REQUEST_ID: &str = "mig003-golden";
 const SOURCE_FILE: &str =
@@ -66,27 +66,6 @@ const RELEASE_EVIDENCE_MANIFEST_SHA256: &str =
 const RELEASE_VERIFICATION_RECEIPT_SHA256: &str =
     "6c11cc651b1f4daab6647b43947a433ae565b1a11dfa09cf5cf48e9f789f139f";
 
-const TRANSFORM_BINARY_SHA256: &str =
-    "549ec832edb138cea2895cf02fc39a3e4ec244f8a0aec378473be8f952dfe4c9";
-const TRANSFORM_SOURCE_MANIFEST_SHA256: &str =
-    "0304557a39a7c2a58ff9e1f110bc1bd4ca3bb2df16b28d54cc3c94262b7f47c6";
-const TRANSFORM_EVIDENCE_MANIFEST_SHA256: &str =
-    "e28b47d2aa70ec2ad8cdaa2c48e1100c8862c9a47765d22a355c1660e96cafe7";
-const TRANSFORM_REVERSE_MANIFEST_SHA256: &str =
-    "2063b41b982f2821d494bfba96d43125382ea39fb12a601fbed3ce0fd8a77e05";
-const FORWARD_BUNDLE_SHA256: &str =
-    "af172be8893e282b72fc20b820382c8236e18c7b981bc3b4acbf57884ead55e4";
-const REVERSE_BUNDLE_SHA256: &str =
-    "1a66f2c6354011abd23f45671674291e0b22faeea1043791920fc5ee0123ef52";
-const REPAIR_VERIFICATION_RECEIPT_SHA256: &str =
-    "aaf5bad61ca1b14a7bf542a71fea76291ac868d175863b3f310fffbaedcf0d5a";
-const IMPORTED_BUILD_RECEIPT_SHA256: &str =
-    "0e85104bdf06d4b797c9d8221087b75b98767f90b3917cafe76dc660146d7f98";
-const PROTECTION_RECORD_SHA256: &str =
-    "ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e";
-const RETRY_HISTORY_RECEIPT_SHA256: &str =
-    "81b5fca8af93d25ce18d78474e26211b0f8568bcc1506eb401c52929a5c196cc";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationReceipt {
     pub schema: &'static str,
@@ -127,7 +106,7 @@ struct MigrationPackage {
     package_id: String,
     identities: Identities,
     artifacts: Artifacts,
-    state_transfer: StateTransferBindings,
+    state_transfer: StateTransferDisposition,
     dispositions: Vec<Disposition>,
     authority: Authority,
 }
@@ -181,19 +160,13 @@ struct Artifacts {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct StateTransferBindings {
-    transform_binary_sha256: String,
-    source_manifest_sha256: String,
-    evidence_manifest_sha256: String,
-    reverse_manifest_sha256: String,
-    forward_bundle_sha256: String,
-    reverse_bundle_sha256: String,
-    repair_verification_receipt_sha256: String,
-    imported_build_receipt_sha256: String,
-    protection_record_sha256: String,
-    retry_history_receipt_sha256: String,
+struct StateTransferDisposition {
+    status: String,
     admitted_state_dependencies: Vec<String>,
     case_specific_rehearsal_receipts: Vec<String>,
+    packaged_artifacts: Vec<String>,
+    cutover_eligible: bool,
+    rollback_eligible: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -289,7 +262,7 @@ pub fn verify(bytes: &[u8], repository_root: &Path) -> Result<VerificationReceip
     if package.state_transfer != expected_state_transfer() {
         return Err(PackageError::new(
             "E_STATE_TRANSFER",
-            "state-transfer binding or dependency denominator mismatch",
+            "state-transfer disposition or dependency denominator mismatch",
         ));
     }
     if package.authority != expected_authority() {
@@ -483,20 +456,14 @@ fn expected_identities() -> Identities {
     }
 }
 
-fn expected_state_transfer() -> StateTransferBindings {
-    StateTransferBindings {
-        transform_binary_sha256: TRANSFORM_BINARY_SHA256.into(),
-        source_manifest_sha256: TRANSFORM_SOURCE_MANIFEST_SHA256.into(),
-        evidence_manifest_sha256: TRANSFORM_EVIDENCE_MANIFEST_SHA256.into(),
-        reverse_manifest_sha256: TRANSFORM_REVERSE_MANIFEST_SHA256.into(),
-        forward_bundle_sha256: FORWARD_BUNDLE_SHA256.into(),
-        reverse_bundle_sha256: REVERSE_BUNDLE_SHA256.into(),
-        repair_verification_receipt_sha256: REPAIR_VERIFICATION_RECEIPT_SHA256.into(),
-        imported_build_receipt_sha256: IMPORTED_BUILD_RECEIPT_SHA256.into(),
-        protection_record_sha256: PROTECTION_RECORD_SHA256.into(),
-        retry_history_receipt_sha256: RETRY_HISTORY_RECEIPT_SHA256.into(),
+fn expected_state_transfer() -> StateTransferDisposition {
+    StateTransferDisposition {
+        status: "not_applicable_stateless_source".into(),
         admitted_state_dependencies: Vec::new(),
         case_specific_rehearsal_receipts: Vec::new(),
+        packaged_artifacts: Vec::new(),
+        cutover_eligible: false,
+        rollback_eligible: false,
     }
 }
 
@@ -690,6 +657,22 @@ mod tests {
                 .state_transfer
                 .admitted_state_dependencies
                 .push("invented".into());
+        });
+        assert_eq!(
+            verify(&bytes, &root()).unwrap_err().code,
+            "E_PACKAGE_DIGEST"
+        );
+    }
+
+    #[test]
+    fn invented_state_artifact_or_eligibility_fails_closed() {
+        let package: MigrationPackage = serde_json::from_slice(&generated()).unwrap();
+        let bytes = mutate(package, |value| {
+            value
+                .state_transfer
+                .packaged_artifacts
+                .push("digest-only-artifact".into());
+            value.state_transfer.cutover_eligible = true;
         });
         assert_eq!(
             verify(&bytes, &root()).unwrap_err().code,

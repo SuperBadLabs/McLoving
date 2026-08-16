@@ -10,11 +10,13 @@ The canonical JSON envelope embeds the exact source export, compiler response,
 strict pipeline YAML, `JOBSTATE-001` import YAML, compiler trace, mapping
 catalog and lock, full 228-case corpus disposition ledger, MIG-006 aggregate,
 and DIFF-002 state-policy receipt. It binds the reviewed v0.1.0 release
-envelope/evidence/verification digests and the exact MIG-005A
-transform/manifests/bundles plus its four accepted rehearsal receipt digests.
-The admitted job has zero persistent state dependencies, so the case-specific
-state-rehearsal set is explicitly empty rather than borrowing the synthetic
-MIG-005A fixture.
+envelope/evidence/verification digests. The admitted job has zero persistent
+state dependencies, so its state-transfer disposition is explicitly
+`not_applicable_stateless_source`: the package contains no digest-only
+MIG-005A artifact claim, no case-specific rehearsal receipt, and no cutover or
+rollback eligibility. A later package that needs state transfer must carry or
+immutably retrieve and verify every claimed transform, manifest, bundle, and
+receipt object.
 
 Reproduce and verify from the repository root:
 
