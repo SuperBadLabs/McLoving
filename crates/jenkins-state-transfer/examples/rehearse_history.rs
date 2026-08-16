@@ -30,6 +30,14 @@ const PIPELINE_SOURCE: &str = include_str!(
     "../../../migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/pipeline.yaml"
 );
 
+#[derive(Clone, Copy)]
+struct ImportedContinuation {
+    receipt_id: Uuid,
+    build_number: u64,
+    previous_build_number: u64,
+    previous_result: BuildResult,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     if !cfg!(unix) {
@@ -104,6 +112,7 @@ async fn main() -> Result<(), AnyError> {
     if stored_forward != forward_bytes {
         return Err("retrieved forward bundle differs from imported bytes".into());
     }
+    let continuation = imported_continuation(&stored_forward, forward_receipt.id)?;
 
     let source = PIPELINE_SOURCE.to_owned();
     let pipeline = match store
@@ -127,36 +136,44 @@ async fn main() -> Result<(), AnyError> {
         PipelinePutOutcome::Created(record) => record,
         other => return Err(format!("unexpected pipeline write outcome: {other:?}").into()),
     };
-    let admission = store
-        .admit_dag(&NewDagBuild {
-            organization_id,
-            project_id,
-            pipeline_id,
-            pipeline_revision: pipeline.revision,
-            pipeline_operational_generation: pipeline.operational_generation,
-            idempotency_key: "mig005a-corpus052-build-2".to_owned(),
-            pipeline_digest: forward_receipt.bundle_digest,
+    let dag = NewDagBuild {
+        organization_id,
+        project_id,
+        pipeline_id,
+        pipeline_revision: pipeline.revision,
+        pipeline_operational_generation: pipeline.operational_generation,
+        idempotency_key: format!("mig005a-corpus052-build-{}", continuation.build_number),
+        pipeline_digest: forward_receipt.bundle_digest,
+        priority: 0,
+        nodes: vec![NewDagNode {
+            node_key: "build".to_owned(),
+            kind: DagNodeKind::Work,
+            dependencies: Vec::new(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_platform: "linux".to_owned(),
+            required_trust_pool: "isolated-rehearsal".to_owned(),
             priority: 0,
-            nodes: vec![NewDagNode {
-                node_key: "build".to_owned(),
-                kind: DagNodeKind::Work,
-                dependencies: Vec::new(),
-                required_capabilities: vec!["linux".to_owned()],
-                required_platform: "linux".to_owned(),
-                required_trust_pool: "isolated-rehearsal".to_owned(),
-                priority: 0,
-                execution_spec: json!({
-                    "program": "/bin/sh",
-                    "args": ["-xe", "-c", "echo \"Hello World\""],
-                    "external_effect_authority": false,
-                    "production_authority": false,
-                    "state_transfer_receipt_id": forward_receipt.id,
-                }),
-                fail_fast: true,
-                max_attempts: 1,
-            }],
-        })
-        .await?;
+            execution_spec: json!({
+                "program": "/bin/sh",
+                "args": ["-xe", "-c", "echo \"Hello World\""],
+                "external_effect_authority": false,
+                "production_authority": false,
+                "state_transfer_continuation": {
+                    "receipt_id": continuation.receipt_id,
+                    "build_number": continuation.build_number,
+                    "previous_build_number": continuation.previous_build_number,
+                    "previous_result": continuation.previous_result,
+                },
+            }),
+            fail_fast: true,
+            max_attempts: 1,
+        }],
+    };
+    let admission = store.admit_dag(&dag).await?;
+    let durable_admission = store.admit_dag(&dag).await?;
+    if durable_admission.created || durable_admission.build_id != admission.build_id {
+        return Err("imported continuation did not survive durable DAG replay".into());
+    }
     let claim = store
         .claim_next(&ClaimRequest {
             organization_id,
@@ -232,7 +249,16 @@ async fn main() -> Result<(), AnyError> {
                 claim.restore_epoch,
                 AGENT_ID,
                 TerminalOutcome::Succeeded,
-                json!({"external_effects": 0, "production_authority": false}),
+                json!({
+                    "external_effects": 0,
+                    "production_authority": false,
+                    "state_transfer_continuation": {
+                        "receipt_id": continuation.receipt_id,
+                        "build_number": continuation.build_number,
+                        "previous_build_number": continuation.previous_build_number,
+                        "previous_result": continuation.previous_result,
+                    },
+                }),
             )
             .await?
     {
@@ -246,7 +272,7 @@ async fn main() -> Result<(), AnyError> {
     let logs = store
         .build_logs(organization_id, project_id, admission.build_id)
         .await?;
-    let completed = completed_build(&forward, &graph, &logs)?;
+    let completed = completed_build(&forward, &graph, &logs, continuation)?;
     let reverse = prepare_reverse_history(
         &authenticated_forward,
         completed,
@@ -300,9 +326,11 @@ async fn main() -> Result<(), AnyError> {
             "forward_bundle_digest": encode(forward_receipt.bundle_digest),
             "reverse_receipt_id": reverse_receipt.id,
             "reverse_bundle_digest": encode(reverse_receipt.bundle_digest),
-            "build_count": 2,
-            "next_build_number": 3,
+            "build_count": continuation.build_number,
+            "next_build_number": continuation.build_number + 1,
             "previous_result": "succeeded",
+            "imported_previous_build_number": continuation.previous_build_number,
+            "imported_previous_result": continuation.previous_result,
             "log_count": 2,
             "actual_process_execution": true,
             "external_effects": 0,
@@ -318,6 +346,7 @@ fn completed_build(
     forward: &StateBundle,
     graph: &mcloving_controller_store::BuildGraph,
     logs: &[mcloving_controller_store::CommittedLog],
+    continuation: ImportedContinuation,
 ) -> Result<BuildState, AnyError> {
     if graph.build.status != "succeeded" || graph.nodes.len() != 1 || graph.attempts.len() != 1 {
         return Err("durable McLoving graph denominator is divergent".into());
@@ -333,6 +362,16 @@ fn completed_build(
             .and_then(|summary| summary.get("external_effects"))
             .and_then(serde_json::Value::as_u64)
             != Some(0)
+        || attempt
+            .terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.get("state_transfer_continuation"))
+            != Some(&json!({
+                "receipt_id": continuation.receipt_id,
+                "build_number": continuation.build_number,
+                "previous_build_number": continuation.previous_build_number,
+                "previous_result": continuation.previous_result,
+            }))
         || logs.len() != 2
         || logs[0].sequence != 0
         || logs[0].stream != "stdout"
@@ -351,24 +390,30 @@ fn completed_build(
     let protection = forward.jobs[0].builds[0].protection.clone();
     Ok(BuildState {
         record: record(
-            "build:corpus-052-cinqict_jenkinsdev:2",
+            &format!(
+                "build:corpus-052-cinqict_jenkinsdev:{}",
+                continuation.build_number
+            ),
             graph_digest,
             "durable McLoving effect-free build",
         ),
-        source_queue_id: "mig005a-corpus052-build-2".to_owned(),
+        source_queue_id: format!("mig005a-corpus052-build-{}", continuation.build_number),
         source_build_id: graph.build.build_id.to_string(),
         trigger: mcloving_state_transfer::TriggerCause {
             record: record(
-                "trigger:corpus-052-cinqict_jenkinsdev:2",
-                sha256(b"mig005a-corpus052-build-2"),
+                &format!(
+                    "trigger:corpus-052-cinqict_jenkinsdev:{}",
+                    continuation.build_number
+                ),
+                sha256(format!("mig005a-corpus052-build-{}", continuation.build_number).as_bytes()),
                 "contained rehearsal trigger",
             ),
             trigger_kind: "contained-rehearsal".to_owned(),
-            external_id: "mig005a-corpus052-build-2".to_owned(),
+            external_id: format!("mig005a-corpus052-build-{}", continuation.build_number),
             actor_subject: "migration:corpus052".to_owned(),
         },
         invocation_parameters: Vec::new(),
-        number: 2,
+        number: continuation.build_number,
         result: BuildResult::Succeeded,
         queued_at_unix_ms: graph.build.created_at_unix_ms,
         started_at_unix_ms: started_at,
@@ -376,7 +421,10 @@ fn completed_build(
         checkouts: Vec::new(),
         graph_nodes: vec![GraphNodeState {
             record: record(
-                "node:corpus-052-cinqict_jenkinsdev:2:build",
+                &format!(
+                    "node:corpus-052-cinqict_jenkinsdev:{}:build",
+                    continuation.build_number
+                ),
                 graph_digest,
                 "durable McLoving Build node",
             ),
@@ -387,7 +435,10 @@ fn completed_build(
             result: BuildResult::Succeeded,
             attempts: vec![AttemptState {
                 record: record(
-                    "attempt:corpus-052-cinqict_jenkinsdev:2:build:1",
+                    &format!(
+                        "attempt:corpus-052-cinqict_jenkinsdev:{}:build:1",
+                        continuation.build_number
+                    ),
                     sha256(&serde_json::to_vec(attempt)?),
                     "durable McLoving effect-free attempt",
                 ),
@@ -410,7 +461,10 @@ fn completed_build(
                 let log_digest = sha256(&log.content);
                 LogState {
                     record: record(
-                        &format!("log:corpus-052-cinqict_jenkinsdev:2:{}", log.sequence),
+                        &format!(
+                            "log:corpus-052-cinqict_jenkinsdev:{}:{}",
+                            continuation.build_number, log.sequence
+                        ),
                         log_digest,
                         "durable McLoving effect-free process log",
                     ),
@@ -424,8 +478,8 @@ fn completed_build(
                     retrieval: RetrievalMetadata {
                         media_type: "text/plain".to_owned(),
                         logical_locator: format!(
-                            "held-evidence:corpus052-rehearsal/builds/2/log/{}",
-                            log.sequence
+                            "held-evidence:corpus052-rehearsal/builds/{}/log/{}",
+                            continuation.build_number, log.sequence
                         ),
                         content_digest: log_digest,
                     },
@@ -435,6 +489,42 @@ fn completed_build(
         artifacts: Vec::new(),
         protection,
         audit_digest: graph_digest,
+    })
+}
+
+fn imported_continuation(
+    stored_forward: &[u8],
+    receipt_id: Uuid,
+) -> Result<ImportedContinuation, AnyError> {
+    let durable: StateBundle = serde_json::from_slice(stored_forward)?;
+    if canonical_bytes(&durable)? != stored_forward {
+        return Err("durable imported state is not canonical".into());
+    }
+    let [job] = durable.jobs.as_slice() else {
+        return Err("durable imported state does not contain the exact job".into());
+    };
+    if job.source_job_id != JOB_ID || job.target_pipeline_id != JOB_ID {
+        return Err("durable imported job identity is divergent".into());
+    }
+    let previous = job
+        .builds
+        .last()
+        .ok_or("durable imported history has no predecessor")?;
+    let build_number = previous
+        .number
+        .checked_add(1)
+        .ok_or("durable imported build number overflows")?;
+    if job.next_build_number != build_number || job.previous_result != Some(previous.result) {
+        return Err("durable imported cursor and predecessor are divergent".into());
+    }
+    if build_number != 2 || previous.number != 1 || previous.result != BuildResult::Aborted {
+        return Err("durable imported corpus-052 history denominator is divergent".into());
+    }
+    Ok(ImportedContinuation {
+        receipt_id,
+        build_number,
+        previous_build_number: previous.number,
+        previous_result: previous.result,
     })
 }
 
