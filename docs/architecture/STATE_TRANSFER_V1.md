@@ -286,7 +286,8 @@ on an internal-only network. Before either controller started, the harness
 authenticated the complete rehearsal manifest against the independently held
 owner pin, copied every member into a private snapshot, transferred that
 snapshot to root ownership with read access only for the invoking account's
-dedicated group, reverified it after lockdown, and proved the invoking UID
+dedicated group, while rejecting root invocation. It reverified the snapshot
+after lockdown and proved the invoking unprivileged UID
 could neither restore write access nor replace the snapshot path. It then
 recomputed the independently pinned five-file source-tree digest
 with no-follow reads, proved the authenticated build-1 record equals the

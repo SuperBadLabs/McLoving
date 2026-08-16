@@ -33,12 +33,12 @@ output_parent=$(realpath -e "$(dirname -- "${requested_output}")")
 output_leaf=$(basename -- "${requested_output}")
 snapshot_group=$(id -g)
 if [[ "${EUID}" -eq 0 ]]; then
-  privileged=()
-else
-  command -v sudo >/dev/null
-  sudo -n true
-  privileged=(sudo -n)
+  echo "rehearsal must run as the unprivileged evidence owner" >&2
+  exit 77
 fi
+command -v sudo >/dev/null
+sudo -n true
+privileged=(sudo -n)
 test "$(getent passwd | awk -F: -v gid="${snapshot_group}" \
   '$4 == gid { count += 1 } END { print count + 0 }')" -eq 1
 group_members=$(getent group "${snapshot_group}" | cut -d: -f4)
