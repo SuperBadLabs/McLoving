@@ -29,20 +29,22 @@ cutover, rollback, or decommission authority.
 The caller supplies:
 
 - canonical private session bytes;
-- the independently owner-held session pin;
+- independently owner-held session, live authorization-generation, and exact
+  verifier-binary pins;
 - the exact owner-private MIG-007 package bytes;
 - the existing owner-held package, forward-manifest, reverse-manifest, and
   transform-implementation pins;
 - the sealed source-history root;
 - the exact reviewed SHADOW-001 implementation head.
 
-The verifier authenticates the session against its owner pin. The package
-verifier then authenticates the package, source, state-transfer evidence, and
-owner pins before the session is considered. The session binds the package
-digest internally. Operational output must never print either private digest
-or any package, evidence-manifest, or owner-pin digest. Session bytes, private
-package bytes, pins, and signing seeds remain owner-only on HeMan and never
-enter GitHub.
+The verifier authenticates the session against its owner pin and compares the
+session's variable authorization and verifier identities with their two
+independent owner pins. The package verifier then authenticates the package,
+source, state-transfer evidence, and owner pins before the session is
+considered. The session binds the package digest internally. Operational
+output must never print either private digest or any package,
+evidence-manifest, or owner-pin digest. Session bytes, private package bytes,
+pins, and signing seeds remain owner-only on HeMan and never enter GitHub.
 
 The Linux CLI opens every private file by walking from `/` with retained
 directory descriptors, `NOFOLLOW`, and nonblocking leaf reads. It rejects
@@ -61,10 +63,11 @@ The session freezes the exact:
 - Mario controller, accepted inventory epoch and fingerprint;
 - job, source, compiled pipeline, disabled source and target state, and matching
   operational generation;
-- authorization generation and the empty admitted agent-input set;
+- independently pinned authorization generation and the empty admitted
+  agent-input set;
 - v0.1.0 private Linux release identity and envelope;
 - Jenkins image and plugin set, McLoving runtime image, PostgreSQL image, and
-  shadow-verifier binary;
+  independently pinned shadow-verifier binary;
 - distinct authoritative-capture and shadow-replay Ed25519 public keys.
 
 Runtime or state drift rejects the complete session. A later source or runtime
@@ -90,9 +93,11 @@ signature mutation fails closed.
 `seal` accepts only a canonical template whose public-key identities and every
 signature field are empty, derives those identities from the two private keys,
 signs each role's five receipts, runs the complete MIG-007 and SHADOW-001
-verification stack in memory, and only then publishes the session and its
-independent owner pin. A caller cannot inject a preexisting signature or reuse
-one key for both roles through the sealing interface.
+verification stack in memory—including the separately supplied authorization
+and verifier-binary pins—and only then publishes the session and its independent
+owner pin. A caller cannot inject a preexisting signature, self-endorse either
+variable freeze value, or reuse one key for both roles through the sealing
+interface.
 
 The admitted case has no live external input, secret outcome, connector
 outcome, administrative operation, semantic time, or semantic entropy

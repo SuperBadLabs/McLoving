@@ -12,7 +12,7 @@ use std::path::Path;
 
 use mcloving_migration_package::{MAX_PRIVATE_PACKAGE_BYTES, PrivateVerificationInputs};
 use mcloving_shadow_qualification::{
-    VerificationReceipt, seal_private_session, verify_private_session,
+    IndependentPins, VerificationReceipt, seal_private_session, verify_private_session,
 };
 use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
@@ -65,6 +65,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             forward_implementation_pin,
             reverse_manifest_pin,
             reverse_implementation_pin,
+            authz_generation_pin,
+            verifier_binary_pin,
             expected_head,
         ] if command == "seal" => {
             let template_bytes = read_owner_private(Path::new(template), MAX_SESSION_BYTES)?;
@@ -72,22 +74,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let shadow_key = read_owner_private(Path::new(shadow_key), 1_024)?;
             let session_bytes = seal_private_session(&template_bytes, &source_key, &shadow_key)?;
             let computed_session_pin = digest_hex(&session_bytes);
-            let (package_bytes, pins) = read_package_inputs(
+            let paths = PackageInputPaths {
                 package,
                 package_pin,
                 forward_manifest_pin,
                 forward_implementation_pin,
                 reverse_manifest_pin,
                 reverse_implementation_pin,
-            )?;
+                authz_generation_pin,
+                verifier_binary_pin,
+            };
+            let (package_bytes, pins) = read_package_inputs(&paths)?;
             let package_inputs = private_inputs(sealed_history, &pins);
+            let independent_pins = IndependentPins {
+                session_sha256: &computed_session_pin,
+                authz_generation_sha256: &pins.authz_generation,
+                verifier_binary_sha256: &pins.verifier_binary,
+                shadow_implementation_head: expected_head,
+            };
             let receipt = verify_private_session(
                 &session_bytes,
-                &computed_session_pin,
+                &independent_pins,
                 &package_bytes,
                 Path::new(repository),
                 &package_inputs,
-                expected_head,
             )?;
             publish_owner_private(Path::new(session), &session_bytes)?;
             let pin_bytes = format!("{computed_session_pin}\n");
@@ -114,30 +124,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             forward_implementation_pin,
             reverse_manifest_pin,
             reverse_implementation_pin,
+            authz_generation_pin,
+            verifier_binary_pin,
             expected_head,
         ] if command == "verify" => {
             let session_bytes = read_owner_private(Path::new(session), MAX_SESSION_BYTES)?;
             let session_pin = read_owner_pin(Path::new(session_pin))?;
-            let (package_bytes, pins) = read_package_inputs(
+            let paths = PackageInputPaths {
                 package,
                 package_pin,
                 forward_manifest_pin,
                 forward_implementation_pin,
                 reverse_manifest_pin,
                 reverse_implementation_pin,
-            )?;
+                authz_generation_pin,
+                verifier_binary_pin,
+            };
+            let (package_bytes, pins) = read_package_inputs(&paths)?;
             let package_inputs = private_inputs(sealed_history, &pins);
+            let independent_pins = IndependentPins {
+                session_sha256: &session_pin,
+                authz_generation_sha256: &pins.authz_generation,
+                verifier_binary_sha256: &pins.verifier_binary,
+                shadow_implementation_head: expected_head,
+            };
             let receipt = verify_private_session(
                 &session_bytes,
-                &session_pin,
+                &independent_pins,
                 &package_bytes,
                 Path::new(repository),
                 &package_inputs,
-                expected_head,
             )?;
             print_receipt(&receipt);
         }
-        _ => return Err("usage:\n  mcloving-shadow-qualification generate-keys SOURCE_CAPTURE_KEY SHADOW_REPLAY_KEY\n  mcloving-shadow-qualification seal TEMPLATE SOURCE_CAPTURE_KEY SHADOW_REPLAY_KEY SESSION SESSION_PIN PACKAGE PACKAGE_PIN REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN FORWARD_IMPLEMENTATION_PIN REVERSE_MANIFEST_PIN REVERSE_IMPLEMENTATION_PIN EXPECTED_IMPLEMENTATION_HEAD\n  mcloving-shadow-qualification verify SESSION SESSION_PIN PACKAGE PACKAGE_PIN REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN FORWARD_IMPLEMENTATION_PIN REVERSE_MANIFEST_PIN REVERSE_IMPLEMENTATION_PIN EXPECTED_IMPLEMENTATION_HEAD".into()),
+        _ => return Err("usage:\n  mcloving-shadow-qualification generate-keys SOURCE_CAPTURE_KEY SHADOW_REPLAY_KEY\n  mcloving-shadow-qualification seal TEMPLATE SOURCE_CAPTURE_KEY SHADOW_REPLAY_KEY SESSION SESSION_PIN PACKAGE PACKAGE_PIN REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN FORWARD_IMPLEMENTATION_PIN REVERSE_MANIFEST_PIN REVERSE_IMPLEMENTATION_PIN AUTHZ_GENERATION_PIN VERIFIER_BINARY_PIN EXPECTED_IMPLEMENTATION_HEAD\n  mcloving-shadow-qualification verify SESSION SESSION_PIN PACKAGE PACKAGE_PIN REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN FORWARD_IMPLEMENTATION_PIN REVERSE_MANIFEST_PIN REVERSE_IMPLEMENTATION_PIN AUTHZ_GENERATION_PIN VERIFIER_BINARY_PIN EXPECTED_IMPLEMENTATION_HEAD".into()),
     }
     Ok(())
 }
@@ -148,24 +168,32 @@ struct OwnerPins {
     forward_implementation: String,
     reverse_manifest: String,
     reverse_implementation: String,
+    authz_generation: String,
+    verifier_binary: String,
 }
 
-fn read_package_inputs(
-    package: &str,
-    package_pin: &str,
-    forward_manifest_pin: &str,
-    forward_implementation_pin: &str,
-    reverse_manifest_pin: &str,
-    reverse_implementation_pin: &str,
-) -> io::Result<(Vec<u8>, OwnerPins)> {
+struct PackageInputPaths<'a> {
+    package: &'a str,
+    package_pin: &'a str,
+    forward_manifest_pin: &'a str,
+    forward_implementation_pin: &'a str,
+    reverse_manifest_pin: &'a str,
+    reverse_implementation_pin: &'a str,
+    authz_generation_pin: &'a str,
+    verifier_binary_pin: &'a str,
+}
+
+fn read_package_inputs(paths: &PackageInputPaths<'_>) -> io::Result<(Vec<u8>, OwnerPins)> {
     Ok((
-        read_owner_private(Path::new(package), MAX_PRIVATE_PACKAGE_BYTES)?,
+        read_owner_private(Path::new(paths.package), MAX_PRIVATE_PACKAGE_BYTES)?,
         OwnerPins {
-            package: read_owner_pin(Path::new(package_pin))?,
-            forward_manifest: read_owner_pin(Path::new(forward_manifest_pin))?,
-            forward_implementation: read_owner_pin(Path::new(forward_implementation_pin))?,
-            reverse_manifest: read_owner_pin(Path::new(reverse_manifest_pin))?,
-            reverse_implementation: read_owner_pin(Path::new(reverse_implementation_pin))?,
+            package: read_owner_pin(Path::new(paths.package_pin))?,
+            forward_manifest: read_owner_pin(Path::new(paths.forward_manifest_pin))?,
+            forward_implementation: read_owner_pin(Path::new(paths.forward_implementation_pin))?,
+            reverse_manifest: read_owner_pin(Path::new(paths.reverse_manifest_pin))?,
+            reverse_implementation: read_owner_pin(Path::new(paths.reverse_implementation_pin))?,
+            authz_generation: read_owner_pin(Path::new(paths.authz_generation_pin))?,
+            verifier_binary: read_owner_pin(Path::new(paths.verifier_binary_pin))?,
         },
     ))
 }

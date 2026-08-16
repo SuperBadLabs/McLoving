@@ -62,6 +62,13 @@ pub struct VerificationReceipt {
     pub production_authority: bool,
 }
 
+pub struct IndependentPins<'a> {
+    pub session_sha256: &'a str,
+    pub authz_generation_sha256: &'a str,
+    pub verifier_binary_sha256: &'a str,
+    pub shadow_implementation_head: &'a str,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QualificationError {
     pub code: &'static str,
@@ -244,13 +251,12 @@ struct VerifiedPackage {
 
 pub fn verify_private_session(
     session_bytes: &[u8],
-    expected_session_sha256: &str,
+    independent_pins: &IndependentPins<'_>,
     private_package_bytes: &[u8],
     repository_root: &Path,
     package_inputs: &PrivateVerificationInputs<'_>,
-    expected_shadow_implementation_head: &str,
 ) -> Result<VerificationReceipt, QualificationError> {
-    verify_session_pin(session_bytes, expected_session_sha256)?;
+    verify_session_pin(session_bytes, independent_pins.session_sha256)?;
     let package = verify_private(private_package_bytes, repository_root, package_inputs)
         .map_err(|error| QualificationError::new("E_PACKAGE", error.to_string()))?;
     if package.packaged_cases != 1
@@ -267,7 +273,9 @@ pub fn verify_private_session(
     }
     verify_session(
         session_bytes,
-        expected_shadow_implementation_head,
+        independent_pins.shadow_implementation_head,
+        independent_pins.authz_generation_sha256,
+        independent_pins.verifier_binary_sha256,
         &VerifiedPackage {
             sha256: sha256(private_package_bytes),
             packaged_cases: package.packaged_cases,
@@ -337,6 +345,8 @@ pub fn seal_private_session(
     verify_session(
         &bytes,
         &session.shadow_implementation_head,
+        &session.freeze.authz_generation_sha256,
+        &session.freeze.verifier_binary_sha256,
         &VerifiedPackage {
             sha256: session.migration_package_sha256.clone(),
             packaged_cases: 1,
@@ -372,6 +382,8 @@ fn verify_session_pin(
 fn verify_session(
     bytes: &[u8],
     expected_shadow_implementation_head: &str,
+    expected_authz_generation_sha256: &str,
+    expected_verifier_binary_sha256: &str,
     package: &VerifiedPackage,
 ) -> Result<VerificationReceipt, QualificationError> {
     if bytes.is_empty() || bytes.len() > MAX_SESSION_BYTES {
@@ -407,7 +419,11 @@ fn verify_session(
             "shadow session identity or package binding mismatch",
         ));
     }
-    verify_freeze(&session.freeze)?;
+    verify_freeze(
+        &session.freeze,
+        expected_authz_generation_sha256,
+        expected_verifier_binary_sha256,
+    )?;
     verify_comparison_inputs(&session.comparison_inputs)?;
     verify_events(&session.events, &session.freeze)?;
     verify_trace(&session.trace)?;
@@ -432,7 +448,11 @@ fn verify_session(
     })
 }
 
-fn verify_freeze(freeze: &Freeze) -> Result<(), QualificationError> {
+fn verify_freeze(
+    freeze: &Freeze,
+    expected_authz_generation_sha256: &str,
+    expected_verifier_binary_sha256: &str,
+) -> Result<(), QualificationError> {
     let source_key = decode_public_key(&freeze.source_capture_public_key_base64)?;
     let shadow_key = decode_public_key(&freeze.shadow_replay_public_key_base64)?;
     if source_key == shadow_key
@@ -446,7 +466,8 @@ fn verify_freeze(freeze: &Freeze) -> Result<(), QualificationError> {
         || freeze.source_generation != OPERATIONAL_GENERATION
         || freeze.target_state != "disabled"
         || freeze.target_generation != OPERATIONAL_GENERATION
-        || !is_sha256(&freeze.authz_generation_sha256)
+        || !is_sha256(expected_authz_generation_sha256)
+        || freeze.authz_generation_sha256 != expected_authz_generation_sha256
         || freeze.agent_inputs_sha256 != EMPTY_SHA256
         || freeze.release_id != RELEASE_ID
         || freeze.release_version != RELEASE_VERSION
@@ -456,7 +477,8 @@ fn verify_freeze(freeze: &Freeze) -> Result<(), QualificationError> {
         || freeze.jenkins_plugins_sha256 != JENKINS_PLUGINS_SHA256
         || freeze.rust_image_sha256 != RUST_IMAGE_SHA256
         || freeze.postgres_image_sha256 != POSTGRES_IMAGE_SHA256
-        || !is_sha256(&freeze.verifier_binary_sha256)
+        || !is_sha256(expected_verifier_binary_sha256)
+        || freeze.verifier_binary_sha256 != expected_verifier_binary_sha256
     {
         return Err(QualificationError::new(
             "E_FREEZE",
@@ -722,6 +744,10 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_AUTHZ_SHA256: &str =
+        "11d3b170d09e175e366abe551cf0db9b6444b077155081c3a515a1015f003540";
+    const TEST_VERIFIER_SHA256: &str =
+        "151a2ee8646801158552126fb666ea0d7055c8ea2f7a728ddcb51e373c78a272";
 
     fn pair(seed_byte: u8) -> Ed25519KeyPair {
         Ed25519KeyPair::from_seed_unchecked(&[seed_byte; 32]).expect("test key")
@@ -806,7 +832,7 @@ mod tests {
                     source_generation: OPERATIONAL_GENERATION.to_owned(),
                     target_state: "disabled".to_owned(),
                     target_generation: OPERATIONAL_GENERATION.to_owned(),
-                    authz_generation_sha256: sha256(b"authz-generation"),
+                    authz_generation_sha256: TEST_AUTHZ_SHA256.to_owned(),
                     agent_inputs_sha256: EMPTY_SHA256.to_owned(),
                     release_id: RELEASE_ID.to_owned(),
                     release_version: RELEASE_VERSION.to_owned(),
@@ -816,7 +842,7 @@ mod tests {
                     jenkins_plugins_sha256: JENKINS_PLUGINS_SHA256.to_owned(),
                     rust_image_sha256: RUST_IMAGE_SHA256.to_owned(),
                     postgres_image_sha256: POSTGRES_IMAGE_SHA256.to_owned(),
-                    verifier_binary_sha256: sha256(b"shadow-verifier"),
+                    verifier_binary_sha256: TEST_VERIFIER_SHA256.to_owned(),
                     source_capture_public_key_base64: BASE64
                         .encode(source_key.public_key().as_ref()),
                     shadow_replay_public_key_base64: BASE64
@@ -904,6 +930,8 @@ mod tests {
         verify_session(
             &canonical_bytes(session).expect("fixture bytes"),
             HEAD,
+            TEST_AUTHZ_SHA256,
+            TEST_VERIFIER_SHA256,
             package,
         )
     }
@@ -957,7 +985,14 @@ mod tests {
             shadow_pkcs8.as_ref(),
         )
         .expect("sealed");
-        let receipt = verify_session(&sealed, HEAD, &package).expect("verified");
+        let receipt = verify_session(
+            &sealed,
+            HEAD,
+            TEST_AUTHZ_SHA256,
+            TEST_VERIFIER_SHA256,
+            &package,
+        )
+        .expect("verified");
         assert_eq!(receipt.captured_events, 5);
         assert!(!receipt.production_authority);
 
@@ -1098,11 +1133,55 @@ mod tests {
         );
 
         let (_, package) = fixture();
+        let session_bytes = canonical_bytes(&session).expect("session bytes");
+        assert_eq!(
+            verify_session(
+                &session_bytes,
+                HEAD,
+                &sha256(b"wrong-independent-authz-pin"),
+                TEST_VERIFIER_SHA256,
+                &package,
+            )
+            .expect_err("independent authorization pin")
+            .code,
+            "E_FREEZE"
+        );
+        assert_eq!(
+            verify_session(
+                &session_bytes,
+                HEAD,
+                TEST_AUTHZ_SHA256,
+                &sha256(b"wrong-independent-verifier-pin"),
+                &package,
+            )
+            .expect_err("independent verifier pin")
+            .code,
+            "E_FREEZE"
+        );
+
         let mut runtime = session.clone();
         runtime.freeze.rust_image_sha256 = sha256(b"other-runtime");
         assert_eq!(
             verify_fixture(&runtime, &package)
                 .expect_err("runtime drift")
+                .code,
+            "E_FREEZE"
+        );
+
+        let mut authz = session.clone();
+        authz.freeze.authz_generation_sha256 = sha256(b"other-authz-generation");
+        assert_eq!(
+            verify_fixture(&authz, &package)
+                .expect_err("authorization pin drift")
+                .code,
+            "E_FREEZE"
+        );
+
+        let mut verifier = session.clone();
+        verifier.freeze.verifier_binary_sha256 = sha256(b"other-verifier");
+        assert_eq!(
+            verify_fixture(&verifier, &package)
+                .expect_err("verifier pin drift")
                 .code,
             "E_FREEZE"
         );
@@ -1164,9 +1243,15 @@ mod tests {
         let (session, package) = fixture();
         let compact = serde_json::to_vec(&session).expect("compact");
         assert_eq!(
-            verify_session(&compact, HEAD, &package)
-                .expect_err("noncanonical")
-                .code,
+            verify_session(
+                &compact,
+                HEAD,
+                TEST_AUTHZ_SHA256,
+                TEST_VERIFIER_SHA256,
+                &package,
+            )
+            .expect_err("noncanonical")
+            .code,
             "E_CANONICAL"
         );
 
@@ -1177,16 +1262,28 @@ mod tests {
             .insert("unknown".to_owned(), serde_json::Value::Bool(true));
         let bytes = serde_json::to_vec_pretty(&value).expect("unknown");
         assert_eq!(
-            verify_session(&bytes, HEAD, &package)
-                .expect_err("unknown")
-                .code,
+            verify_session(
+                &bytes,
+                HEAD,
+                TEST_AUTHZ_SHA256,
+                TEST_VERIFIER_SHA256,
+                &package,
+            )
+            .expect_err("unknown")
+            .code,
             "E_SCHEMA"
         );
 
         assert_eq!(
-            verify_session(&vec![b' '; MAX_SESSION_BYTES + 1], HEAD, &package)
-                .expect_err("oversized")
-                .code,
+            verify_session(
+                &vec![b' '; MAX_SESSION_BYTES + 1],
+                HEAD,
+                TEST_AUTHZ_SHA256,
+                TEST_VERIFIER_SHA256,
+                &package,
+            )
+            .expect_err("oversized")
+            .code,
             "E_SIZE"
         );
     }
