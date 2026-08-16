@@ -1,6 +1,6 @@
 # Migration package v1
 
-Status: `MIG-007` incomplete implementation; `MIG-005A` corrective work required
+Status: `MIG-007` incomplete implementation; `MIG-005A` corrective closure available
 
 ## Purpose and boundary
 
@@ -85,11 +85,15 @@ reproduces the inventory value
 `b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
 The private tree passed the pinned networkless Gitleaks scan with zero findings
 and is retained owner-read-only under an internal source-seal receipt kept only
-on HeMan; no source bytes or private seal metadata enter the repository. It is
-not yet transformed, rehearsed, or admitted as a complete package input.
-Completion requires bounded certified forward and reverse objects, destination
-state, and a case-specific rehearsal whose bytes are embedded or immutably
-retrieved and verified.
+on HeMan; no source bytes or private seal metadata enter the repository.
+MIG-005A now supplies bounded forward and reverse objects, independently
+retrieved PostgreSQL destination truth, and pinned case-specific Jenkins
+reverse-continuity evidence. The currently merged package predates those
+objects, still contains empty packaged-artifact and case-specific-receipt sets,
+and must remain incomplete. MIG-007 completion requires regenerating it so the
+new bounded bytes are embedded or immutably retrieved and hashed, then passing
+the complete verifier and review gates without changing the all-false authority
+state prematurely.
 
 The envelope has no field capable of carrying credential material. Its
 free-form embedded artifacts are accepted only at their exact previously

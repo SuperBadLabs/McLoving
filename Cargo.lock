@@ -1671,6 +1671,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-jenkins-state-transfer"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-controller-store",
+ "mcloving-state-transfer",
+ "quick-xml",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-migration-package"
 version = "0.0.0"
 dependencies = [

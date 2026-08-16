@@ -234,3 +234,52 @@ skipped, only `persistent.state` was archived, builds 1–4 were unique, and
 This is a case-specific pre-effect rehearsal, not general migration or
 production-effect authority. `DIFF-002`, `MIG-006`, packaging, canary, cutover,
 and rollback gates remain separate.
+
+## Exact admitted-case corrective closure
+
+The later inventory audit found one real retained dependency outside the
+synthetic rehearsal: `corpus-052-cinqict_jenkinsdev` has one aborted Jenkins
+build under `build-history`. Its private five-file source tree remains only on
+HeMan. The repository carries no source bytes or private source-seal metadata;
+the already-public exact tree digest is
+`b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
+
+`mcloving-jenkins-state-transfer` implements the narrow exact adapter. It
+requires the five-file denominator, denies links and special files, bounds
+total bytes, rejects XML DTD/entity input and unknown workflow nodes, verifies
+the tree digest before parsing, and emits the ordinary canonical
+`mcloving.state-transfer/v1` bundle. The forward bundle preserves build 1 as
+`aborted`, `next_build_number=2`, exact terminal timing, ordered empty
+`log-index`, the `Build` workflow node, permalinks, indefinite retention, and
+the `build-history` persistent dependency. Reverse preparation accepts only an
+exact inverse binding and one contiguous completed successor; build gaps,
+duplicate source identity, and noninverse source/destination identities fail
+closed.
+
+The exact retained run used the pinned PostgreSQL image above. Forward import,
+exact replay, independent retrieval, one durable externally effect-free
+McLoving build, reverse import, and independent reverse retrieval all passed.
+The McLoving build actually executed the exact pinned `/bin/sh -xe` process,
+captured its stdout and stderr as two ordered durable log records, produced
+`Hello World`, preserved zero external effects, advanced history to build 2,
+and produced reverse `next_build_number=3`.
+The exact forward bundle, reverse bundle, and relocated evidence manifest all
+verify in the owner-only HeMan evidence package. Their private digests are not
+published to GitHub.
+
+The reverse-continuity harness then used pinned Jenkins image
+`docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`
+on an internal-only network. A fresh controller loaded private build 1 as
+`ABORTED`, loaded the reverse-imported build 2 as `SUCCESS` without executing
+it again, returned the exact `Build` workflow stage and `Hello World` log,
+restarted, and executed build 3 exactly once as `SUCCESS`. Numeric history was
+exactly `[1,2,3]`, `nextBuildNumber` became 4, public egress was denied, and
+the reverse-import receipt retained `external_effects=0` and
+`production_authority=false`. Its owner-only retained evidence manifest
+verifies on HeMan; its private digest and contents are not published to GitHub.
+
+These receipts close the exact recorded dependency in addition to the earlier
+synthetic denominator. They grant no production identity, reader, trigger,
+scheduler, credential, agent, connector, effect, shadow, canary, cutover,
+rollback, or decommission authority. `MIG-007` must still embed or immutably
+retrieve and verify these exact objects in its separately reviewed package.
