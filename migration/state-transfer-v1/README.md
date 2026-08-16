@@ -41,7 +41,10 @@ exactly the committed 90-plugin manifest denominator with digest verification
 before and after each copy. A separate non-authoritative template controller
 creates an exact native `ShellStep` graph through a non-executing shell stub.
 The harness replaces its log, remaps every native workflow timestamp into the
-canonical transferred interval, proves no template marker remains, and
+canonical transferred interval, replaces the nonrepresentable template queue
+ID with Jenkins unknown sentinel `-1`, removes template cause/queue-timing
+actions, retains the exact canonical trigger in a typed sidecar, proves no
+template marker or provenance remains, and
 destroys the controller. The fresh destination controller then loads the
 reverse-imported history without
 executing build 2, verifies native workflow and log retrieval across restart,

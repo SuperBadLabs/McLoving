@@ -429,6 +429,30 @@ cmp "${log_payload}" "${staging}/imported-build-2.log"
 podman unshare cp "${staging}/imported-build-2.log" "${template}/log"
 jq --sort-keys '.jobs[0].builds[1]' "${reverse_bundle}" \
   > "${staging}/mcloving-state-transfer-build.json"
+jq --sort-keys '
+  .jobs[0].builds[1] as $build
+  | {
+      schema: "mcloving.jenkins-native-provenance/v1",
+      native_queue_id: -1,
+      native_cause_action: "removed-unrepresentable-contained-rehearsal",
+      native_time_in_queue_action: "removed-unrepresentable-contained-rehearsal",
+      source_queue_id: $build.source_queue_id,
+      queued_at_unix_ms: $build.queued_at_unix_ms,
+      trigger_kind: $build.trigger.trigger_kind,
+      trigger_external_id: $build.trigger.external_id,
+      trigger_actor_subject: $build.trigger.actor_subject
+    }
+' "${reverse_bundle}" > "${staging}/mcloving-native-provenance.json"
+jq --exit-status '
+  .schema == "mcloving.jenkins-native-provenance/v1"
+  and .native_queue_id == -1
+  and .native_cause_action == "removed-unrepresentable-contained-rehearsal"
+  and .native_time_in_queue_action == "removed-unrepresentable-contained-rehearsal"
+  and .source_queue_id == "mig005a-corpus052-build-2"
+  and .trigger_kind == "contained-rehearsal"
+  and .trigger_external_id == "mig005a-corpus052-build-2"
+  and .trigger_actor_subject == "migration:corpus052"
+' "${staging}/mcloving-native-provenance.json" >/dev/null
 jq -n --arg reverse_bundle_digest "${reverse_digest}" '
   {
     schema: "mcloving.jenkins-reverse-import/v1",
@@ -443,6 +467,8 @@ jq -n --arg reverse_bundle_digest "${reverse_digest}" '
 ' > "${staging}/mcloving-state-transfer-receipt.json"
 podman unshare cp "${staging}/mcloving-state-transfer-build.json" \
   "${template}/mcloving-state-transfer-build.json"
+podman unshare cp "${staging}/mcloving-native-provenance.json" \
+  "${template}/mcloving-native-provenance.json"
 podman unshare cp "${staging}/mcloving-state-transfer-receipt.json" \
   "${template}/mcloving-state-transfer-receipt.json"
 build_started=$(jq -r '.jobs[0].builds[1].started_at_unix_ms' "${reverse_bundle}")
@@ -453,6 +479,20 @@ podman unshare sed -E -i \
   -e "s#<duration>[0-9]+</duration>#<duration>${build_duration}</duration>#g" \
   -e 's#<result>[^<]+</result>#<result>SUCCESS</result>#g' \
   "${template}/build.xml"
+podman unshare perl -0pi -e '
+  my $queue = s{<queueId>-?[0-9]+</queueId>}{<queueId>-1</queueId>}g;
+  my $causes = s{\s*<hudson\.model\.CauseAction>.*?</hudson\.model\.CauseAction>}{}sg;
+  my $queue_timing = s{\s*<jenkins\.metrics\.impl\.TimeInQueueAction>.*?</jenkins\.metrics\.impl\.TimeInQueueAction>}{}sg;
+  die "native template provenance denominator mismatch\n"
+    unless $queue == 1 && $causes == 1 && $queue_timing == 1;
+' "${template}/build.xml"
+podman unshare rg --quiet '<queueId>-1</queueId>' "${template}/build.xml"
+if podman unshare rg --quiet \
+  'hudson\.model\.CauseAction|jenkins\.metrics\.impl\.TimeInQueueAction' \
+  "${template}/build.xml"; then
+  echo "template queue or cause provenance survived reconciliation" >&2
+  exit 1
+fi
 flow_store="${template}/workflow-completed/flowNodeStore.xml"
 podman unshare test -f "${flow_store}"
 podman unshare test ! -L "${flow_store}"
@@ -507,6 +547,11 @@ jq --exit-status '.number == 1 and .result == "ABORTED"' \
   "${staging}/evidence/imported-build-1.json" >/dev/null
 jq --exit-status '.number == 2 and .result == "SUCCESS"' \
   "${staging}/evidence/imported-build-2.json" >/dev/null
+jq --exit-status '
+  .queueId == -1
+  and ([.actions[] | select(._class == "hudson.model.CauseAction")] | length) == 0
+  and ([.actions[] | select(._class == "jenkins.metrics.impl.TimeInQueueAction")] | length) == 0
+' "${staging}/evidence/imported-build-2.json" >/dev/null
 test "$(cat "${staging}/evidence/imported-build-2.log")" = \
   $'Hello World\n+ echo Hello World'
 capture_workflow 2 imported
@@ -520,6 +565,11 @@ jq --exit-status '.number == 1 and .result == "ABORTED"' \
   "${staging}/evidence/restarted-build-1.json" >/dev/null
 jq --exit-status '.number == 2 and .result == "SUCCESS"' \
   "${staging}/evidence/restarted-build-2.json" >/dev/null
+jq --exit-status '
+  .queueId == -1
+  and ([.actions[] | select(._class == "hudson.model.CauseAction")] | length) == 0
+  and ([.actions[] | select(._class == "jenkins.metrics.impl.TimeInQueueAction")] | length) == 0
+' "${staging}/evidence/restarted-build-2.json" >/dev/null
 test "$(cat "${staging}/evidence/restarted-build-2.log")" = \
   $'Hello World\n+ echo Hello World'
 capture_workflow 2 restarted
@@ -559,6 +609,7 @@ podman unshare cp -a "${job_home}" "${staging}/evidence/jenkins-job-after"
 podman unshare chown -R 0:0 "${staging}/evidence/jenkins-job-after"
 rm -f -- "${staging}/imported-build-2.log" \
   "${staging}/mcloving-state-transfer-build.json" \
+  "${staging}/mcloving-native-provenance.json" \
   "${staging}/mcloving-state-transfer-receipt.json" \
   "${staging}/nextBuildNumber" "${staging}/permalinks"
 printf '%s\n' "${reverse_digest}" > "${staging}/evidence/reverse-bundle.sha256"
