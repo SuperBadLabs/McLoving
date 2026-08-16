@@ -466,6 +466,15 @@ shell_node_id=$(jq -r \
   '.stageFlowNodes[] | select(.name == "Shell Script") | .id' \
   "${staging}/evidence/template-build-2-stage.json")
 [[ "${shell_node_id}" =~ ^[0-9]+$ ]]
+template_shell_started=$(jq -r \
+  '.stageFlowNodes[] | select(.name == "Shell Script") | .startTimeMillis' \
+  "${staging}/evidence/template-build-2-stage.json")
+template_shell_duration=$(jq -r \
+  '.stageFlowNodes[] | select(.name == "Shell Script") | .durationMillis' \
+  "${staging}/evidence/template-build-2-stage.json")
+[[ "${template_shell_started}" =~ ^[0-9]+$ ]]
+[[ "${template_shell_duration}" =~ ^[0-9]+$ ]]
+template_shell_ended=$((template_shell_started + template_shell_duration))
 podman inspect "${container}" > "${staging}/evidence/template-container-inspect.json"
 stop_controller
 
@@ -555,6 +564,9 @@ podman unshare test ! -L "${flow_store}"
 podman unshare rg --quiet 'ShellStep' "${flow_store}"
 podman unshare rg --quiet 'Hello World' "${flow_store}"
 BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
+  TEMPLATE_SHELL_STARTED="${template_shell_started}" \
+  TEMPLATE_SHELL_ENDED="${template_shell_ended}" \
+  ATTEMPT_STARTED="${attempt_started}" ATTEMPT_ENDED="${attempt_ended}" \
   podman unshare perl -0pi -e '
     my @times = /<startTime>([0-9]+)<\/startTime>/g;
     die "native workflow has no timestamps\n" unless @times;
@@ -565,31 +577,28 @@ BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
     }
     my $started = $ENV{BUILD_STARTED};
     my $ended = $ENV{BUILD_ENDED};
+    my @shell_starts = grep { $times[$_] == $ENV{TEMPLATE_SHELL_STARTED} } 0 .. $#times;
+    my @shell_ends = grep { $times[$_] == $ENV{TEMPLATE_SHELL_ENDED} } 0 .. $#times;
+    die "native ShellStep timing denominator mismatch\n"
+      unless @shell_starts == 1 && @shell_ends == 1
+        && $shell_starts[0] != $shell_ends[0];
     die "invalid canonical build interval\n" unless $started <= $ended;
+    my $index = 0;
     s{<startTime>([0-9]+)</startTime>}{
-      my $mapped = $max == $min
-        ? $started
-        : $started + int((($1 - $min) * ($ended - $started)) / ($max - $min));
+      my $mapped;
+      if ($index == $shell_starts[0]) {
+        $mapped = $ENV{ATTEMPT_STARTED};
+      } elsif ($index == $shell_ends[0]) {
+        $mapped = $ENV{ATTEMPT_ENDED};
+      } else {
+        $mapped = $max == $min
+          ? $started
+          : $started + int((($1 - $min) * ($ended - $started)) / ($max - $min));
+      }
+      $index++;
       "<startTime>${mapped}</startTime>"
     }ge;
-  ' "${flow_store}"
-SHELL_NODE_ID="${shell_node_id}" ATTEMPT_STARTED="${attempt_started}" \
-  ATTEMPT_ENDED="${attempt_ended}" podman unshare perl -0pi -e '
-    my $shell_id = $ENV{SHELL_NODE_ID};
-    my $shell_end_id = $shell_id + 1;
-    my $started = $ENV{ATTEMPT_STARTED};
-    my $ended = $ENV{ATTEMPT_ENDED};
-    my $starts = s{
-      (<entry>(?:(?!</entry>).)*?<id>\Q$shell_id\E</id>
-       (?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>
-       (?:(?!</entry>).)*?</entry>)
-    }{$1$started$2}gsx;
-    my $ends = s{
-      (<entry>(?:(?!</entry>).)*?<id>\Q$shell_end_id\E</id>
-       (?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>
-       (?:(?!</entry>).)*?</entry>)
-    }{$1$ended$2}gsx;
-    die "ShellStep timing target mismatch\n" unless $starts == 1 && $ends == 1;
+    die "native workflow timing rewrite count mismatch\n" unless $index == @times;
   ' "${flow_store}"
 BUILD_STARTED="${build_started}" BUILD_ENDED="${build_ended}" \
   podman unshare perl -0ne '
