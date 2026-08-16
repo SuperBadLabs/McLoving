@@ -397,6 +397,12 @@ fn completed_build(
         || attempt
             .terminal_summary
             .as_ref()
+            .and_then(|summary| summary.get("production_authority"))
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || attempt
+            .terminal_summary
+            .as_ref()
             .and_then(|summary| summary.get("state_transfer_continuation"))
             != Some(&json!({
                 "receipt_id": continuation.receipt_id,

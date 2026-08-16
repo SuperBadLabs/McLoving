@@ -711,6 +711,8 @@ podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
   "${staging}/mcloving-native-provenance.json"
 podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-receipt.json" \
   "${staging}/mcloving-state-transfer-receipt.json"
+podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
+  "${staging}/mcloving-state-transfer-build.json"
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 stop_controller
 
@@ -733,6 +735,8 @@ podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
   "${staging}/mcloving-native-provenance.json"
 podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-receipt.json" \
   "${staging}/mcloving-state-transfer-receipt.json"
+podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
+  "${staging}/mcloving-state-transfer-build.json"
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
 curl --fail --silent --show-error -X POST \
   "http://127.0.0.1:${port}/job/${job}/build" >/dev/null
@@ -766,6 +770,8 @@ podman unshare cmp "${job_home}/builds/2/mcloving-native-provenance.json" \
   "${staging}/mcloving-native-provenance.json"
 podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-receipt.json" \
   "${staging}/mcloving-state-transfer-receipt.json"
+podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
+  "${staging}/mcloving-state-transfer-build.json"
 test "$(jq -r '.reverse_bundle_digest' \
   "${staging}/mcloving-state-transfer-receipt.json")" = "${reverse_digest}"
 test "$(jq -r '.production_authority' \
@@ -776,6 +782,8 @@ cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-native-provenance.j
   "${staging}/mcloving-native-provenance.json"
 cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-state-transfer-receipt.json" \
   "${staging}/mcloving-state-transfer-receipt.json"
+cmp "${staging}/evidence/jenkins-job-after/builds/2/mcloving-state-transfer-build.json" \
+  "${staging}/mcloving-state-transfer-build.json"
 rm -f -- "${staging}/imported-build-2.log" \
   "${staging}/imported-build-2.log-index" \
   "${staging}/mcloving-state-transfer-build.json" \

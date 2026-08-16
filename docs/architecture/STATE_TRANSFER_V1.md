@@ -305,6 +305,9 @@ removed in favor of an
 exact typed canonical-trigger sidecar that was byte-verified after install,
 restart, and archival. The installed reverse-import receipt was likewise
 byte-verified after initial load, restart, pre-archive, and in the archive; the
+canonical transferred-build sidecar was byte-verified at those same boundaries.
+The durable terminal record was also required to retain
+`production_authority=false` before the public summary could report it; the
 template was checked free of its
 marker and provenance before being destroyed ahead of
 the destination proof. A fresh destination controller
