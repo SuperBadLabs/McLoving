@@ -693,6 +693,7 @@ fn verify_exact_state(
         Some(expected_log),
     )?;
     validate_workflow_receipts(&state.reverse_evidence, "template", 2, None, None)?;
+    validate_template_shell_receipt(&state.reverse_evidence)?;
     validate_retained_workflow_storage(&state.reverse_evidence, "imported", 2)?;
     validate_retained_workflow_storage(&state.reverse_evidence, "restarted", 2)?;
     validate_retained_workflow_storage(&state.reverse_evidence, "continued", 3)?;
@@ -995,6 +996,43 @@ fn validate_retained_workflow_storage(
     .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW_STORE", error.to_string()))
 }
 
+fn validate_template_shell_receipt(archive: &EvidenceArchive) -> Result<(), PackageError> {
+    let shell_path = "evidence/template-build-2-shell-log.json";
+    let console_path = "evidence/template-build-2.log";
+    let shell: Value = serde_json::from_slice(archive_file(archive, shell_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_TEMPLATE", error.to_string()))?;
+    let text = shell
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_TEMPLATE",
+                "template ShellStep receipt omits its output",
+            )
+        })?
+        .as_bytes();
+    let console = archive_file(archive, console_path)?;
+    if text.is_empty()
+        || !text
+            .windows(b"MIG005A_SERIALIZATION_TEMPLATE_ONLY".len())
+            .any(|window| window == b"MIG005A_SERIALIZATION_TEMPLATE_ONLY")
+        || text
+            .windows(b"Hello World".len())
+            .any(|window| window == b"Hello World")
+        || console
+            .windows(text.len())
+            .filter(|window| *window == text)
+            .count()
+            != 1
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_TEMPLATE",
+            "template ShellStep receipt diverges from its verified console output",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_build_one_logs(
     archive: &EvidenceArchive,
     authenticated_source_log: &[u8],
@@ -1157,6 +1195,18 @@ fn validate_private_network_topology(
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
         .ok_or_else(|| PackageError::new("E_PRIVATE_NETWORK", "private network has no identity"))?;
+    let id = network
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| {
+            id.len() == 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            PackageError::new("E_PRIVATE_NETWORK", "private network ID is noncanonical")
+        })?;
     if network.get("internal") != Some(&Value::Bool(true)) {
         return Err(PackageError::new(
             "E_PRIVATE_NETWORK",
@@ -1181,9 +1231,21 @@ fn validate_private_network_topology(
             .and_then(Value::as_str);
         let attached = container
             .pointer("/NetworkSettings/Networks")
-            .and_then(Value::as_object);
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                PackageError::new(
+                    "E_PRIVATE_NETWORK",
+                    format!("{path} omits its network attachments"),
+                )
+            })?;
+        let attachment_id = attached
+            .get(name)
+            .and_then(Value::as_object)
+            .and_then(|attachment| attachment.get("NetworkID"))
+            .and_then(Value::as_str);
         if network_mode != Some("bridge")
-            || attached.is_none_or(|attached| attached.len() != 1 || !attached.contains_key(name))
+            || attached.len() != 1
+            || !matches!(attachment_id, Some(value) if value == id || value == name)
         {
             return Err(PackageError::new(
                 "E_PRIVATE_NETWORK",
@@ -1961,6 +2023,74 @@ mod tests {
                 2,
                 Some((1000, 1250)),
                 Some(b"+ echo Hello World\nHello World\n"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn template_shell_receipt_is_bound_to_its_console_capture() {
+        let shell_path = "evidence/template-build-2-shell-log.json";
+        let console_path = "evidence/template-build-2.log";
+        let shell = serde_json::json!({
+            "text": "MIG005A_SERIALIZATION_TEMPLATE_ONLY\n"
+        })
+        .to_string();
+        let console = "controller prefix\nMIG005A_SERIALIZATION_TEMPLATE_ONLY\ncontroller suffix\n";
+        validate_template_shell_receipt(&test_archive(&[
+            (shell_path, &shell),
+            (console_path, console),
+        ]))
+        .unwrap();
+
+        let detached = serde_json::json!({"text": "different template output\n"}).to_string();
+        assert!(
+            validate_template_shell_receipt(&test_archive(&[
+                (shell_path, &detached),
+                (console_path, console),
+            ]))
+            .is_err()
+        );
+        let admitted_output = serde_json::json!({"text": "Hello World\n"}).to_string();
+        assert!(
+            validate_template_shell_receipt(&test_archive(&[
+                (shell_path, &admitted_output),
+                (console_path, "Hello World\n"),
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn container_attachment_is_bound_to_inspected_internal_network_identity() {
+        let network_path = "evidence/private-network-inspect.json";
+        let container_path = "evidence/container-inspect.json";
+        let network = serde_json::json!([{
+            "name": "contained-network",
+            "id": "0".repeat(64),
+            "internal": true
+        }])
+        .to_string();
+        let container = serde_json::json!([{
+            "HostConfig": {"NetworkMode": "bridge"},
+            "NetworkSettings": {"Networks": {
+                "contained-network": {"NetworkID": "contained-network"}
+            }}
+        }])
+        .to_string();
+        validate_private_network_topology(
+            &test_archive(&[(network_path, &network), (container_path, &container)]),
+            network_path,
+            &[container_path],
+        )
+        .unwrap();
+
+        let divergent = container.replace("contained-network\"}", "different-network\"}");
+        assert!(
+            validate_private_network_topology(
+                &test_archive(&[(network_path, &network), (container_path, &divergent)]),
+                network_path,
+                &[container_path],
             )
             .is_err()
         );

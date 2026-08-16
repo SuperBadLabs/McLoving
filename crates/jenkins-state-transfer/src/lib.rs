@@ -265,6 +265,11 @@ pub fn verify_retained_workflow_storage(
             "retained workflow identities or terminal result are divergent",
         ));
     }
+    if !retained_workflow_reaches_ancestor(&nodes, expected_shell_id, expected_stage_id) {
+        return Err(invalid(
+            "retained ShellStep is not a descendant of the verified Build stage",
+        ));
+    }
     for (id, node) in &nodes {
         let numeric_id = validate_numeric_id(id, "retained workflow node ID")?;
         for reference in node.parent_ids.iter().chain(node.start_id.iter()) {
@@ -284,6 +289,30 @@ pub fn verify_retained_workflow_storage(
         expected_shell_id,
         expected_shell_log,
     )
+}
+
+fn retained_workflow_reaches_ancestor(
+    nodes: &BTreeMap<String, RetainedWorkflowNode>,
+    descendant: &str,
+    ancestor: &str,
+) -> bool {
+    let mut pending = vec![descendant];
+    let mut visited = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(node) = nodes.get(id) else {
+            return false;
+        };
+        for reference in node.parent_ids.iter().chain(node.start_id.iter()) {
+            if reference == ancestor {
+                return true;
+            }
+            pending.push(reference);
+        }
+    }
+    false
 }
 
 fn parse_retained_workflow_nodes(
@@ -2303,6 +2332,21 @@ mod tests {
         assert!(
             verify_retained_workflow_storage(
                 corrupted_graph.as_bytes(),
+                index.as_bytes(),
+                &console,
+                "3",
+                "4",
+                shell,
+            )
+            .is_err()
+        );
+        let detached_shell = String::from_utf8(flow.to_vec()).unwrap().replace(
+            "<parentIds><string>3</string></parentIds><id>4</id>",
+            "<parentIds><string>2</string></parentIds><id>4</id>",
+        );
+        assert!(
+            verify_retained_workflow_storage(
+                detached_shell.as_bytes(),
                 index.as_bytes(),
                 &console,
                 "3",
