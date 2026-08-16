@@ -481,8 +481,8 @@ podman unshare sed -E -i \
   "${template}/build.xml"
 podman unshare perl -0pi -e '
   my $queue = s{<queueId>-?[0-9]+</queueId>}{<queueId>-1</queueId>}g;
-  my $causes = s{\s*<hudson\.model\.CauseAction>.*?</hudson\.model\.CauseAction>}{}sg;
-  my $queue_timing = s{\s*<jenkins\.metrics\.impl\.TimeInQueueAction>.*?</jenkins\.metrics\.impl\.TimeInQueueAction>}{}sg;
+  my $causes = s{\s*<hudson\.model\.CauseAction(?:\s[^>]*)?>.*?</hudson\.model\.CauseAction>}{}sg;
+  my $queue_timing = s{\s*<jenkins\.metrics\.impl\.TimeInQueueAction(?:\s[^>]*)?>.*?</jenkins\.metrics\.impl\.TimeInQueueAction>}{}sg;
   die "native template provenance denominator mismatch\n"
     unless $queue == 1 && $causes == 1 && $queue_timing == 1;
 ' "${template}/build.xml"
