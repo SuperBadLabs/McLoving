@@ -140,7 +140,8 @@ reviewed repository heads, and complete verifier all agree. The CLI never
 prints its digest and publishes it as a new owner-only file with mode `0600`.
 Every owner-private input and immediate parent must belong to the invoking
 effective user and deny group/other access; every ancestor is a plain,
-non-symlink directory that denies group/other writes. Private publication additionally requires confirmed staging-link removal and a
+non-symlink directory that either denies group/other writes or is the standard
+root-owned sticky temporary boundary. Private publication additionally requires confirmed staging-link removal and a
 second held-parent directory sync; either cleanup failure is reported for
 explicit verification and reconciliation. The private verifier rejects
 group/other access on every traversed sealed-source directory and member, and
