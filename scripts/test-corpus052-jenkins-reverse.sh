@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 umask 077
+failure_line=0
+trap 'failure_line=$LINENO' ERR
 
 if [[ $# -ne 7 ]]; then
   echo "usage: $0 SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID TRANSFORM_ROOT OWNER_PINNED_REHEARSAL_MANIFEST_SHA256 JENKINS_PLUGIN_SOURCE OUTPUT_ROOT" >&2
@@ -90,6 +92,9 @@ cleanup() {
     rm -rf -- "${staging}"
   fi
   podman unshare rm -rf -- "${runtime_root}" >/dev/null 2>&1 || true
+  if [[ "${status}" != 0 ]]; then
+    echo "rehearsal-failure-line=${failure_line}" >&2
+  fi
   exit "${status}"
 }
 trap cleanup EXIT
