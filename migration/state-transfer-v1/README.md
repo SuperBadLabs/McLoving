@@ -29,6 +29,8 @@ directory, expected public tree digest, opaque evidence identifier, and a new
 private output directory. It verifies and normalizes the exact five-file
 denominator, proves idempotent forward/reverse persistence against a fresh
 PostgreSQL instance, and executes one externally effect-free McLoving build.
+PostgreSQL has no host-published port: the pinned Rust rehearsal client runs
+beside it on the same private internal container network.
 Then run `scripts/test-corpus052-jenkins-reverse.sh` with the sealed directory,
 the independently pinned public tree digest, its opaque evidence identifier,
 that transform output, an owner-private independently retained digest of the
@@ -59,7 +61,9 @@ archival, and destroys the controller. The fresh destination controller then
 loads the reverse-imported history without
 executing build 2, verifies native workflow and log retrieval across restart,
 executes build 3 once, proves contiguous numbering, and denies public network
-egress. Both harnesses retain only owner-private evidence and grant no
+egress. Jenkins likewise has no host-published port; every API request executes
+through the pinned controller image's local client inside the active container.
+Both harnesses retain only owner-private evidence and grant no
 production authority.
 
 The complete contract, accepted hashes, security boundary, and limitations are

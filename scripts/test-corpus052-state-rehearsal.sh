@@ -28,14 +28,15 @@ fi
 
 staging=$(mktemp -d "${output_parent}/.${output_leaf}.staging.XXXXXX")
 container="mcloving-mig005a-corpus052-postgres-$$"
+client="mcloving-mig005a-corpus052-client-$$"
 network="mcloving-mig005a-corpus052-$$"
-port=$((20000 + ($$ % 1000)))
 completed=0
 
 cleanup() {
   local status=$?
   trap - EXIT
   set +e
+  podman rm --force "${client}" >/dev/null 2>&1 || true
   podman rm --force "${container}" >/dev/null 2>&1 || true
   podman network rm "${network}" >/dev/null 2>&1 || true
   if [[ "${completed}" != 1 ]]; then
@@ -50,7 +51,6 @@ podman network create --internal "${network}" >/dev/null
 podman run --detach \
   --name "${container}" \
   --network "${network}" \
-  --publish "127.0.0.1:${port}:5432" \
   --cpus 2 --memory 2g --pids-limit 1024 \
   --env POSTGRES_USER=mcloving \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
@@ -83,14 +83,22 @@ forward_bundle_transform_sha256=$(jq -r \
   '.binding.transform_implementation_digest[]' "${staging}/forward-bundle.json" \
   | awk '{printf "%02x", $1} END {print ""}')
 test "${forward_transform_sha256}" = "${forward_bundle_transform_sha256}"
-
-MCLOVING_TEST_DATABASE_URL="postgres://mcloving@127.0.0.1:${port}/mcloving" \
-  cargo run --locked --quiet \
+cargo build --locked --quiet \
   --manifest-path "${repo_root}/Cargo.toml" \
-  -p mcloving-jenkins-state-transfer --example rehearse_history -- \
-  "${sealed_builds}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
-  "${staging}/forward-bundle.json" "${forward_transform_sha256}" \
-  "${staging}/mcloving"
+  -p mcloving-jenkins-state-transfer --example rehearse_history
+
+podman run --rm --name "${client}" \
+  --network "${network}" \
+  --cpus 2 --memory 2g --pids-limit 1024 \
+  --env MCLOVING_TEST_DATABASE_URL="postgres://mcloving@${container}:5432/mcloving" \
+  --volume "${repo_root}/target/debug/examples/rehearse_history:/usr/local/bin/rehearse_history:ro" \
+  --volume "${sealed_builds}:/sealed-builds:ro" \
+  --volume "${staging}:/rehearsal-output:Z" \
+  "${MCLOVING_RUST_IMAGE}" \
+  /usr/local/bin/rehearse_history \
+  /sealed-builds "${expected_tree_sha256}" "${opaque_evidence_id}" \
+  /rehearsal-output/forward-bundle.json "${forward_transform_sha256}" \
+  /rehearsal-output/mcloving
 
 podman inspect "${container}" > "${staging}/evidence/postgres-container-inspect.json"
 podman image inspect "${MCLOVING_POSTGRES_IMAGE}" \

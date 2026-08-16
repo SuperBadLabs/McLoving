@@ -256,7 +256,9 @@ exact inverse binding and one contiguous completed successor; build gaps,
 duplicate source identity, and noninverse source/destination identities fail
 closed.
 
-The exact retained run used the pinned PostgreSQL image above. Forward import,
+The exact retained run used the pinned PostgreSQL image above without a
+host-published database port; the pinned Rust rehearsal client ran beside it on
+the same private internal container network. Forward import,
 exact replay, independent retrieval, one durable externally effect-free
 McLoving build, reverse import, and independent reverse retrieval all passed.
 The McLoving admission derived build 2 and its aborted build 1 predecessor from
@@ -282,7 +284,9 @@ published to GitHub.
 
 The reverse-continuity harness then used pinned Jenkins image
 `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`
-on an internal-only network. Before either controller started, the harness
+on an internal-only network without a host-published controller port. Every API
+request ran through the pinned image's own local `curl` client inside the
+active container. Before either controller started, the harness
 authenticated the complete rehearsal manifest against the independently held
 owner pin, copied every member into a private snapshot, transferred that
 snapshot to root ownership with read access only for the invoking account's

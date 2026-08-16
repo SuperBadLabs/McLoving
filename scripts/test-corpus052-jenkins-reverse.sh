@@ -91,7 +91,6 @@ job_home="${home}/jobs/${job}"
 template_job_home="${template_home}/jobs/${job}"
 network="mcloving-mig005a-corpus052-reverse-$$"
 container="mcloving-mig005a-corpus052-reverse-$$"
-port=$((21000 + ($$ % 1000)))
 completed=0
 
 cleanup() {
@@ -421,15 +420,14 @@ start_controller() {
   test "${#plugin_mounts[@]}" -eq 180
   podman run --detach --name "${container}" \
     --network "${network}" \
-    --publish "127.0.0.1:${port}:8080" \
     --cpus 4 --memory 4g --pids-limit 2048 \
     --env JAVA_OPTS='-Djenkins.install.runSetupWizard=false' \
     --volume "${controller_home}:/var/jenkins_home:Z" \
     "${plugin_mounts[@]}" \
     "${image}" >/dev/null
   for _ in $(seq 1 240); do
-    if curl --fail --silent --show-error \
-      "http://127.0.0.1:${port}/api/json" >/dev/null 2>&1; then
+    if podman exec "${container}" curl --fail --silent --show-error \
+      "http://127.0.0.1:8080/api/json" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -447,13 +445,13 @@ capture_build() {
   local number=$1
   local prefix=$2
   for _ in $(seq 1 240); do
-    if curl --fail --silent --show-error \
-      "http://127.0.0.1:${port}/job/${job}/${number}/api/json" \
-      -o "${staging}/evidence/${prefix}-build-${number}.json" 2>/dev/null \
+    if podman exec "${container}" curl --fail --silent --show-error \
+      "http://127.0.0.1:8080/job/${job}/${number}/api/json" \
+      > "${staging}/evidence/${prefix}-build-${number}.json" 2>/dev/null \
       && [[ $(jq -r '.building' "${staging}/evidence/${prefix}-build-${number}.json") == false ]]; then
-      curl --fail --silent --show-error \
-        "http://127.0.0.1:${port}/job/${job}/${number}/consoleText" \
-        -o "${staging}/evidence/${prefix}-build-${number}.log"
+      podman exec "${container}" curl --fail --silent --show-error \
+        "http://127.0.0.1:8080/job/${job}/${number}/consoleText" \
+        > "${staging}/evidence/${prefix}-build-${number}.log"
       return 0
     fi
     sleep 0.5
@@ -469,9 +467,9 @@ capture_workflow() {
   local expected_shell_started=${4:-}
   local expected_shell_ended=${5:-}
   local stage_id shell_id extracted_shell_log
-  curl --fail --silent --show-error \
-    "http://127.0.0.1:${port}/job/${job}/${number}/wfapi/describe" \
-    -o "${staging}/evidence/${prefix}-build-${number}-workflow.json"
+  podman exec "${container}" curl --fail --silent --show-error \
+    "http://127.0.0.1:8080/job/${job}/${number}/wfapi/describe" \
+    > "${staging}/evidence/${prefix}-build-${number}-workflow.json"
   jq --exit-status '
     .status == "SUCCESS"
     and ([.stages[].name] == ["Build"])
@@ -480,9 +478,9 @@ capture_workflow() {
   stage_id=$(jq -r '.stages[0].id' \
     "${staging}/evidence/${prefix}-build-${number}-workflow.json")
   [[ "${stage_id}" =~ ^[0-9]+$ ]]
-  curl --fail --silent --show-error \
-    "http://127.0.0.1:${port}/job/${job}/${number}/execution/node/${stage_id}/wfapi/describe" \
-    -o "${staging}/evidence/${prefix}-build-${number}-stage.json"
+  podman exec "${container}" curl --fail --silent --show-error \
+    "http://127.0.0.1:8080/job/${job}/${number}/execution/node/${stage_id}/wfapi/describe" \
+    > "${staging}/evidence/${prefix}-build-${number}-stage.json"
   jq --exit-status '
     .name == "Build"
     and .status == "SUCCESS"
@@ -494,9 +492,9 @@ capture_workflow() {
     '.stageFlowNodes[] | select(.name == "Shell Script") | .id' \
     "${staging}/evidence/${prefix}-build-${number}-stage.json")
   [[ "${shell_id}" =~ ^[0-9]+$ ]]
-  curl --fail --silent --show-error \
-    "http://127.0.0.1:${port}/job/${job}/${number}/execution/node/${shell_id}/wfapi/log" \
-    -o "${staging}/evidence/${prefix}-build-${number}-shell-log.json"
+  podman exec "${container}" curl --fail --silent --show-error \
+    "http://127.0.0.1:8080/job/${job}/${number}/execution/node/${shell_id}/wfapi/log" \
+    > "${staging}/evidence/${prefix}-build-${number}-shell-log.json"
   jq --exit-status --arg shell_id "${shell_id}" '
     .nodeId == $shell_id
     and .nodeStatus == "SUCCESS"
@@ -528,8 +526,8 @@ capture_workflow() {
 }
 
 start_controller "${template_home}" "${template_plugins}"
-curl --fail --silent --show-error -X POST \
-  "http://127.0.0.1:${port}/job/${job}/build" >/dev/null
+podman exec "${container}" curl --fail --silent --show-error -X POST \
+  "http://127.0.0.1:8080/job/${job}/build" >/dev/null
 capture_build 2 template
 jq --exit-status '.number == 2 and .result == "SUCCESS"' \
   "${staging}/evidence/template-build-2.json" >/dev/null
@@ -793,8 +791,8 @@ podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-receipt.json" \
 podman unshare cmp "${job_home}/builds/2/mcloving-state-transfer-build.json" \
   "${staging}/mcloving-state-transfer-build.json"
 test "$(podman unshare cat "${job_home}/nextBuildNumber")" = 3
-curl --fail --silent --show-error -X POST \
-  "http://127.0.0.1:${port}/job/${job}/build" >/dev/null
+podman exec "${container}" curl --fail --silent --show-error -X POST \
+  "http://127.0.0.1:8080/job/${job}/build" >/dev/null
 capture_build 3 continued
 jq --exit-status '.number == 3 and .result == "SUCCESS"' \
   "${staging}/evidence/continued-build-3.json" >/dev/null
