@@ -163,6 +163,10 @@ network identities must be distinct.
 `scripts/capture-shadow001-runtime.sh` is the reviewed runtime sidecar. From a
 clean exact head on HeMan it first builds and pins the exact verifier and
 atomically creates the distinct source and precommitted shadow key identities.
+Before that ceremony, `scripts/capture-shadow001-authz-pin.sh` independently
+captures the live Mario realm, authorization-strategy, stable user-seed, and
+job ACL decision generation into one create-new owner-private digest pin. It
+publishes no realm, seed, decision, or digest value to operational output.
 It then submits the fixed Groovy probe to Mario through an authenticated
 crumb-bearing session; the Mario credential is read and used only on Mario,
 and only the bounded `SHADOW001_SOURCE` marker returns. Neither signing private
