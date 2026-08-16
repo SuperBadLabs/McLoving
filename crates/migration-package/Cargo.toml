@@ -19,6 +19,7 @@ serde-saphyr = "=1.0.0-rc.2"
 sha2 = "=0.10.9"
 
 [target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", features = ["user"] }
 rustix = { version = "=1.1.4", features = ["fs"] }
 
 [dev-dependencies]

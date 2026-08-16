@@ -138,7 +138,8 @@ retained owner package pin, both evidence-manifest pins, both transform-implemen
 pins, sealed source tree, exact
 reviewed repository heads, and complete verifier all agree. The CLI never
 prints its digest and publishes it as a new owner-only file with mode `0600`.
-Private publication additionally requires confirmed staging-link removal and a
+Every owner-private input and parent must belong to the invoking effective user
+as well as deny group/other access. Private publication additionally requires confirmed staging-link removal and a
 second held-parent directory sync; either cleanup failure is reported for
 explicit verification and reconciliation. The private verifier rejects
 group/other access on every traversed sealed-source directory and member, and

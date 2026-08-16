@@ -849,13 +849,10 @@ fn validate_workflow_receipts(
 
     let stage: Value = serde_json::from_slice(archive_file(archive, &stage_path)?)
         .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW", error.to_string()))?;
+    let receipt_stage_id = numeric_identifier(stage.get("id"), &stage_path)?;
     if stage.get("name") != Some(&Value::from("Build"))
         || stage.get("status") != Some(&Value::from("SUCCESS"))
-        || stage
-            .get("id")
-            .map(|value| numeric_identifier(Some(value), &stage_path))
-            .transpose()?
-            .is_some_and(|value| value != stage_id)
+        || receipt_stage_id != stage_id
     {
         return Err(PackageError::new(
             "E_PRIVATE_WORKFLOW",
@@ -1150,10 +1147,10 @@ fn require_plain_directory(path: &Path) -> Result<(), PackageError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if metadata.mode() & 0o077 != 0 {
+        if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
             return Err(PackageError::new(
                 "E_PRIVATE_MODE",
-                "private evidence directory grants group or other access",
+                "private evidence directory has the wrong owner or grants group/other access",
             ));
         }
     }
@@ -1197,10 +1194,14 @@ fn read_regular_file(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if metadata.nlink() != 1 || (require_owner_only && metadata.mode() & 0o077 != 0) {
+        if metadata.nlink() != 1
+            || (require_owner_only
+                && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                    || metadata.mode() & 0o077 != 0))
+        {
             return Err(PackageError::new(
                 "E_PRIVATE_MODE",
-                "private input is linked or grants group or other access",
+                "private input has the wrong owner, is linked, or grants group/other access",
             ));
         }
     }
@@ -1428,6 +1429,26 @@ mod tests {
         assert!(
             validate_workflow_receipts(
                 &divergent,
+                "imported",
+                2,
+                Some((1000, 1250)),
+                Some(b"+ echo Hello World\nHello World\n"),
+            )
+            .is_err()
+        );
+
+        let mut missing_stage_id = workflow_archive("SUCCESS");
+        let stage = missing_stage_id
+            .files
+            .iter_mut()
+            .find(|file| file.path.ends_with("-stage.json"))
+            .unwrap();
+        let mut value: Value = serde_json::from_str(&stage.contents).unwrap();
+        value.as_object_mut().unwrap().remove("id");
+        stage.contents = value.to_string();
+        assert!(
+            validate_workflow_receipts(
+                &missing_stage_id,
                 "imported",
                 2,
                 Some((1000, 1250)),

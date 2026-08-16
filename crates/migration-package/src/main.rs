@@ -236,10 +236,10 @@ where
     .map_err(os_error)?;
     if require_owner_only_parent {
         let metadata = rustix::fs::fstat(&parent_directory).map_err(os_error)?;
-        if metadata.st_mode & 0o077 != 0 {
+        if metadata.st_uid != nix::unistd::geteuid().as_raw() || metadata.st_mode & 0o077 != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "private package parent must be an owner-only plain directory",
+                "private package parent must belong to the invoking owner and deny group/other access",
             ));
         }
     }
@@ -439,10 +439,14 @@ fn read_regular_bounded_with_policy(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if require_owner_only && (metadata.nlink() != 1 || metadata.mode() & 0o077 != 0) {
+        if require_owner_only
+            && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o077 != 0)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "owner-private input is linked or grants group or other access",
+                "owner-private input has the wrong owner, is linked, or grants group/other access",
             ));
         }
     }

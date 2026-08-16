@@ -186,9 +186,13 @@ fn load_admitted_history_with_policy(
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            if metadata.nlink() != 1 || (require_owner_only && metadata.mode() & 0o077 != 0) {
+            if metadata.nlink() != 1
+                || (require_owner_only
+                    && (metadata.uid() != nix::unistd::geteuid().as_raw()
+                        || metadata.mode() & 0o077 != 0))
+            {
                 return Err(invalid(format!(
-                    "sealed source entry {relative} is hard-linked or grants group/other access"
+                    "sealed source entry {relative} is hard-linked, has the wrong owner, or grants group/other access"
                 )));
             }
         }
@@ -681,9 +685,11 @@ fn require_plain_directory(path: &Path, require_owner_only: bool) -> Result<(), 
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if require_owner_only && metadata.mode() & 0o077 != 0 {
+        if require_owner_only
+            && (metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0)
+        {
             return Err(invalid(
-                "sealed source directory grants group or other access",
+                "sealed source directory has the wrong owner or grants group/other access",
             ));
         }
     }
