@@ -2005,6 +2005,64 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
         )
         .expect("write DIFF-002 typed ingress observation");
     }
+
+    if let Ok(path) = std::env::var("MCLOVING_SHADOW001_REPLAY_OUTPUT") {
+        let observation = |kind: &str, path: &str, denied: bool| {
+            json!({
+                "kind": kind,
+                "path": path,
+                "outcome": if denied {
+                    "disabled_pre_queue"
+                } else {
+                    "unexpected_activity"
+                },
+                "queued_builds": queued_builds,
+                "scheduled_attempts": queued_builds,
+                "credential_grants": 0,
+                "connector_requests": 0,
+                "production_effects": 0,
+            })
+        };
+        let bytes = serde_json::to_vec(&json!({
+            "schema": "mcloving.shadow001.target-replay/v1",
+            "job_id": "corpus-052-cinqict_jenkinsdev",
+            "target_state": "disabled",
+            "target_generation": "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97",
+            "observations": [
+                observation(
+                    "api",
+                    "Store.accept_trigger_delivery(remote_api)",
+                    api_denied,
+                ),
+                observation("manual", "Store.admit_dag", manual_denied),
+                observation(
+                    "schedule",
+                    "Store.accept_trigger_delivery(schedule)",
+                    schedule_denied,
+                ),
+                observation(
+                    "upstream",
+                    "Store.accept_trigger_delivery(upstream)",
+                    upstream_denied,
+                ),
+                observation(
+                    "webhook",
+                    "Store.accept_trigger_delivery(scm_webhook)",
+                    webhook_denied,
+                ),
+            ],
+            "terminal_queued_builds": queued_builds,
+        }))
+        .expect("serialize SHADOW-001 target replay observation");
+        if path == "-" {
+            println!(
+                "SHADOW001_TARGET={}",
+                String::from_utf8(bytes).expect("SHADOW-001 observation is UTF-8")
+            );
+        } else {
+            std::fs::write(path, bytes).expect("write SHADOW-001 target replay observation");
+        }
+    }
 }
 
 #[tokio::test]

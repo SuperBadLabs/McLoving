@@ -10,7 +10,9 @@ use std::fmt;
 use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use mcloving_migration_package::{PrivateVerificationInputs, verify_private};
+use mcloving_migration_package::{
+    MAX_PRIVATE_PACKAGE_BYTES, PrivateVerificationInputs, verify_private,
+};
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair as _, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -48,6 +50,11 @@ const STDOUT_LOG_SHA256: &str = "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SIGNATURE_DOMAIN: &[u8] = b"mcloving-shadow-denial-receipt-v1\0";
 const SOURCE_SESSION_BINDING_SCHEMA: &str = "mcloving.jenkins.shadow-source-session-binding/v1";
+const SOURCE_PROBE_SCHEMA: &str = "mcloving.shadow001.jenkins-source-probe/v1";
+const TARGET_REPLAY_SCHEMA: &str = "mcloving.shadow001.target-replay/v1";
+const TRACE_OBSERVATION_SCHEMA: &str = "mcloving.shadow001.trace-observation/v1";
+const ISOLATION_OBSERVATION_SCHEMA: &str = "mcloving.shadow001.isolation-observation/v1";
+const CAPTURE_BINDING_SCHEMA: &str = "mcloving.shadow001.capture-binding/v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationReceipt {
@@ -258,10 +265,492 @@ struct Authority {
     decommission: bool,
 }
 
+/// Exact inputs accepted from the independently reviewed SHADOW-001 runtime
+/// sidecar when it prepares the source-authenticated, shadow-unsigned session
+/// template. Durable publication and complete MIG-007 verification remain the
+/// responsibility of the `seal` operation.
+pub struct SourceTemplateInputs<'a> {
+    pub source_probe_bytes: &'a [u8],
+    pub target_replay_bytes: &'a [u8],
+    pub trace_observation_bytes: &'a [u8],
+    pub isolation_observation_bytes: &'a [u8],
+    pub private_package_bytes: &'a [u8],
+    pub expected_private_package_sha256: &'a str,
+    pub source_capture_pkcs8: &'a [u8],
+    pub expected_source_capture_public_key_sha256: &'a str,
+    pub shadow_replay_public_key_base64: &'a str,
+    pub authz_generation_sha256: &'a str,
+    pub verifier_binary_sha256: &'a str,
+    pub shadow_implementation_head: &'a str,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityObservation {
+    builds: u64,
+    queued: u64,
+    next_build_number: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SourceIngressObservation {
+    kind: String,
+    path: String,
+    outcome: String,
+    queued_builds: u64,
+    scheduled_attempts: u64,
+    credential_grants: u64,
+    connector_requests: u64,
+    production_effects: u64,
+    detail: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SourceProbe {
+    schema: String,
+    job_id: String,
+    source_state: String,
+    captured_wall_clock_unix_ms: i64,
+    original_activity: ActivityObservation,
+    terminal_activity: ActivityObservation,
+    observations: Vec<SourceIngressObservation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TargetIngressObservation {
+    kind: String,
+    path: String,
+    outcome: String,
+    queued_builds: u64,
+    scheduled_attempts: u64,
+    credential_grants: u64,
+    connector_requests: u64,
+    production_effects: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TargetReplay {
+    schema: String,
+    job_id: String,
+    target_state: String,
+    target_generation: String,
+    observations: Vec<TargetIngressObservation>,
+    terminal_queued_builds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IsolationObservation {
+    schema: String,
+    source_fixture_identity: String,
+    target_fixture_identity: String,
+    source_network_sha256: String,
+    target_network_sha256: String,
+    reachability_receipt_sha256: String,
+    source_and_target_networks_disjoint: bool,
+    production_network_requests: u64,
+    production_endpoint_mappings: u64,
+    production_credentials: u64,
+    host_mounts: u64,
+    cross_fixture_mounts: u64,
+    teardown_complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TraceObservation {
+    schema: String,
+    certified_trace_sha256: String,
+    source_trace_sha256: String,
+    target_trace_sha256: String,
+    source_log: Vec<NormalizedLogEntry>,
+    target_log: Vec<NormalizedLogEntry>,
+    source_result: String,
+    target_result: String,
+    artifacts: u64,
+    external_effect_intents: u64,
+    isolated_replay_executed: bool,
+    compared_traces: usize,
+    mismatches: usize,
+}
+
+#[derive(Serialize)]
+struct CaptureBinding<'a> {
+    schema: &'static str,
+    event_kind: &'a str,
+    source_path: &'a str,
+    source: &'a SourceIngressObservation,
+}
+
 struct VerifiedPackage {
     sha256: String,
     packaged_cases: usize,
     rejected_cases: usize,
+}
+
+/// Builds one canonical owner-private session template from the live Jenkins
+/// observation, the isolated McLoving replay, and the post-teardown isolation
+/// observation. Only the five source receipts are signed. The shadow half is
+/// deliberately left unsigned for [`seal_private_session`].
+pub fn prepare_source_authenticated_template(
+    inputs: &SourceTemplateInputs<'_>,
+) -> Result<Vec<u8>, QualificationError> {
+    if inputs.source_probe_bytes.is_empty()
+        || inputs.source_probe_bytes.len() > MAX_SESSION_BYTES
+        || inputs.target_replay_bytes.is_empty()
+        || inputs.target_replay_bytes.len() > MAX_SESSION_BYTES
+        || inputs.trace_observation_bytes.is_empty()
+        || inputs.trace_observation_bytes.len() > MAX_SESSION_BYTES
+        || inputs.isolation_observation_bytes.is_empty()
+        || inputs.isolation_observation_bytes.len() > MAX_SESSION_BYTES
+        || inputs.private_package_bytes.is_empty()
+        || inputs.private_package_bytes.len() > MAX_PRIVATE_PACKAGE_BYTES
+    {
+        return Err(QualificationError::new(
+            "E_SIZE",
+            "one or more shadow runtime inputs are empty or oversized",
+        ));
+    }
+    let source: SourceProbe = serde_json::from_slice(inputs.source_probe_bytes)
+        .map_err(|error| QualificationError::new("E_SOURCE_PROBE", error.to_string()))?;
+    let target: TargetReplay = serde_json::from_slice(inputs.target_replay_bytes)
+        .map_err(|error| QualificationError::new("E_TARGET_REPLAY", error.to_string()))?;
+    let trace_observation: TraceObservation =
+        serde_json::from_slice(inputs.trace_observation_bytes)
+            .map_err(|error| QualificationError::new("E_TRACE", error.to_string()))?;
+    let isolation_observation: IsolationObservation =
+        serde_json::from_slice(inputs.isolation_observation_bytes)
+            .map_err(|error| QualificationError::new("E_ISOLATION", error.to_string()))?;
+    validate_runtime_observations(&source, &target, &trace_observation, &isolation_observation)?;
+
+    let package_sha256 = sha256(inputs.private_package_bytes);
+    if !is_sha256(inputs.expected_private_package_sha256)
+        || package_sha256 != inputs.expected_private_package_sha256
+    {
+        return Err(QualificationError::new(
+            "E_PACKAGE_PIN",
+            "private migration package does not match its independent owner pin",
+        ));
+    }
+    if !is_git_sha1(inputs.shadow_implementation_head)
+        || !is_sha256(inputs.authz_generation_sha256)
+        || !is_sha256(inputs.verifier_binary_sha256)
+    {
+        return Err(QualificationError::new(
+            "E_FREEZE",
+            "reviewed head, authorization generation, or verifier identity is invalid",
+        ));
+    }
+    let source_key = Ed25519KeyPair::from_pkcs8(inputs.source_capture_pkcs8)
+        .map_err(|_| QualificationError::new("E_KEY", "invalid source-capture Ed25519 key"))?;
+    if !is_sha256(inputs.expected_source_capture_public_key_sha256)
+        || sha256(source_key.public_key().as_ref())
+            != inputs.expected_source_capture_public_key_sha256
+    {
+        return Err(QualificationError::new(
+            "E_SOURCE_CAPTURE_KEY",
+            "source-capture key does not match its independent owner pin",
+        ));
+    }
+    let shadow_public_key = decode_public_key(inputs.shadow_replay_public_key_base64)?;
+    if source_key.public_key().as_ref() == shadow_public_key {
+        return Err(QualificationError::new(
+            "E_KEY",
+            "source-capture and shadow-replay keys must be distinct",
+        ));
+    }
+
+    let mut events = Vec::with_capacity(source.observations.len());
+    for (source_observation, target_observation) in
+        source.observations.iter().zip(&target.observations)
+    {
+        let capture_sha256 = sha256(&canonical_bytes(&CaptureBinding {
+            schema: CAPTURE_BINDING_SCHEMA,
+            event_kind: &source_observation.kind,
+            source_path: &source_observation.path,
+            source: source_observation,
+        })?);
+        let event_id = Uuid::new_v4();
+        let source_receipt = SignedDenialReceipt {
+            schema: DENIAL_RECEIPT_SCHEMA.to_owned(),
+            event_id,
+            event_kind: source_observation.kind.clone(),
+            capture_sha256: capture_sha256.clone(),
+            runner_identity: "jenkins-source".to_owned(),
+            state: "disabled".to_owned(),
+            generation: OPERATIONAL_GENERATION.to_owned(),
+            outcome: "disabled_pre_queue".to_owned(),
+            replayed: false,
+            queued_builds: source_observation.queued_builds,
+            scheduled_attempts: source_observation.scheduled_attempts,
+            credential_grants: source_observation.credential_grants,
+            connector_requests: source_observation.connector_requests,
+            production_effects: source_observation.production_effects,
+            audit_sha256: sha256(&canonical_bytes(source_observation)?),
+            session_binding_sha256: String::new(),
+            signing_public_key_sha256: sha256(source_key.public_key().as_ref()),
+            signature_base64: String::new(),
+        };
+        let shadow_receipt = SignedDenialReceipt {
+            schema: DENIAL_RECEIPT_SCHEMA.to_owned(),
+            event_id,
+            event_kind: target_observation.kind.clone(),
+            capture_sha256,
+            runner_identity: "mcloving-shadow".to_owned(),
+            state: "disabled".to_owned(),
+            generation: OPERATIONAL_GENERATION.to_owned(),
+            outcome: "disabled_pre_queue".to_owned(),
+            replayed: true,
+            queued_builds: target_observation.queued_builds,
+            scheduled_attempts: target_observation.scheduled_attempts,
+            credential_grants: target_observation.credential_grants,
+            connector_requests: target_observation.connector_requests,
+            production_effects: target_observation.production_effects,
+            audit_sha256: sha256(&canonical_bytes(target_observation)?),
+            session_binding_sha256: String::new(),
+            signing_public_key_sha256: String::new(),
+            signature_base64: String::new(),
+        };
+        events.push(PairedEvent {
+            source: source_receipt,
+            shadow: shadow_receipt,
+        });
+    }
+
+    let mut session = Session {
+        schema: SCHEMA.to_owned(),
+        session_id: Uuid::new_v4(),
+        ticket: "SHADOW-001".to_owned(),
+        shadow_implementation_head: inputs.shadow_implementation_head.to_owned(),
+        mig007_protected_main: MIG007_PROTECTED_MAIN.to_owned(),
+        migration_package_sha256: package_sha256,
+        freeze: Freeze {
+            source_controller: SOURCE_CONTROLLER.to_owned(),
+            inventory_epoch: INVENTORY_EPOCH.to_owned(),
+            inventory_sha256: INVENTORY_SHA256.to_owned(),
+            job_id: JOB_ID.to_owned(),
+            source_sha256: SOURCE_SHA256.to_owned(),
+            pipeline_sha256: PIPELINE_SHA256.to_owned(),
+            source_state: "disabled".to_owned(),
+            source_generation: OPERATIONAL_GENERATION.to_owned(),
+            target_state: "disabled".to_owned(),
+            target_generation: OPERATIONAL_GENERATION.to_owned(),
+            authz_generation_sha256: inputs.authz_generation_sha256.to_owned(),
+            agent_inputs_sha256: EMPTY_SHA256.to_owned(),
+            release_id: RELEASE_ID.to_owned(),
+            release_version: RELEASE_VERSION.to_owned(),
+            release_profile: RELEASE_PROFILE.to_owned(),
+            release_envelope_sha256: RELEASE_ENVELOPE_SHA256.to_owned(),
+            jenkins_image_sha256: JENKINS_IMAGE_SHA256.to_owned(),
+            jenkins_plugins_sha256: JENKINS_PLUGINS_SHA256.to_owned(),
+            rust_image_sha256: RUST_IMAGE_SHA256.to_owned(),
+            postgres_image_sha256: POSTGRES_IMAGE_SHA256.to_owned(),
+            verifier_binary_sha256: inputs.verifier_binary_sha256.to_owned(),
+            source_capture_public_key_base64: BASE64.encode(source_key.public_key().as_ref()),
+            shadow_replay_public_key_base64: inputs.shadow_replay_public_key_base64.to_owned(),
+        },
+        comparison_inputs: ComparisonInputs {
+            captured_wall_clock_unix_ms: source.captured_wall_clock_unix_ms,
+            wall_clock_stream_sha256: EMPTY_SHA256.to_owned(),
+            wall_clock_consumption_events: 0,
+            semantic_time_dependencies: false,
+            entropy_stream_sha256: EMPTY_SHA256.to_owned(),
+            entropy_consumption_events: 0,
+            semantic_entropy_dependencies: false,
+            security_entropy_influences_semantics: false,
+            external_input_receipts: 0,
+            secret_outcome_receipts: 0,
+            connector_outcome_receipts: 0,
+            administrative_operation_receipts: 0,
+        },
+        events,
+        trace: TraceComparison {
+            certified_trace_sha256: trace_observation.certified_trace_sha256,
+            source_trace_sha256: trace_observation.source_trace_sha256,
+            target_trace_sha256: trace_observation.target_trace_sha256,
+            source_log: trace_observation.source_log,
+            target_log: trace_observation.target_log,
+            source_result: trace_observation.source_result,
+            target_result: trace_observation.target_result,
+            artifacts: trace_observation.artifacts,
+            external_effect_intents: trace_observation.external_effect_intents,
+            isolated_replay_executed: trace_observation.isolated_replay_executed,
+            compared_traces: trace_observation.compared_traces,
+            mismatches: trace_observation.mismatches,
+        },
+        isolation: Isolation {
+            source_fixture_identity: isolation_observation.source_fixture_identity,
+            target_fixture_identity: isolation_observation.target_fixture_identity,
+            source_network_sha256: isolation_observation.source_network_sha256,
+            target_network_sha256: isolation_observation.target_network_sha256,
+            reachability_receipt_sha256: isolation_observation.reachability_receipt_sha256,
+            source_and_target_networks_disjoint: isolation_observation
+                .source_and_target_networks_disjoint,
+            production_network_requests: isolation_observation.production_network_requests,
+            production_endpoint_mappings: isolation_observation.production_endpoint_mappings,
+            production_credentials: isolation_observation.production_credentials,
+            host_mounts: isolation_observation.host_mounts,
+            cross_fixture_mounts: isolation_observation.cross_fixture_mounts,
+            teardown_complete: isolation_observation.teardown_complete,
+        },
+        authority: denied_authority(),
+    };
+    let binding = source_session_binding_sha256(&session)?;
+    for event in &mut session.events {
+        event.source.session_binding_sha256 = binding.clone();
+        sign_receipt(&mut event.source, &source_key)?;
+    }
+    let bytes = canonical_bytes(&session)?;
+    if bytes.len() > MAX_SESSION_BYTES {
+        return Err(QualificationError::new(
+            "E_SIZE",
+            "prepared shadow session template exceeds its byte ceiling",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_runtime_observations(
+    source: &SourceProbe,
+    target: &TargetReplay,
+    trace: &TraceObservation,
+    isolation: &IsolationObservation,
+) -> Result<(), QualificationError> {
+    let order = ["api", "manual", "schedule", "upstream", "webhook"];
+    let source_paths = [
+        "WorkflowJob.doBuild(StaplerRequest2,StaplerResponse2,TimeDuration)",
+        "WorkflowJob.scheduleBuild2(UserIdCause)",
+        "TimerTrigger.run()",
+        "ReverseBuildTrigger.RunListenerImpl.onCompleted",
+        "SCMTrigger.run(Action[])",
+    ];
+    let target_paths = [
+        "Store.accept_trigger_delivery(remote_api)",
+        "Store.admit_dag",
+        "Store.accept_trigger_delivery(schedule)",
+        "Store.accept_trigger_delivery(upstream)",
+        "Store.accept_trigger_delivery(scm_webhook)",
+    ];
+    let source_details = [
+        serde_json::json!({"rejection": "org.kohsuke.stapler.HttpResponses$3"}),
+        serde_json::json!({"returned_future": false}),
+        serde_json::json!({}),
+        serde_json::json!({"upstream_result": "ABORTED"}),
+        serde_json::json!({}),
+    ];
+    if source.schema != SOURCE_PROBE_SCHEMA
+        || source.job_id != JOB_ID
+        || source.source_state != "disabled"
+        || source.captured_wall_clock_unix_ms <= 0
+        || source.original_activity != source.terminal_activity
+        || source.original_activity.builds != 1
+        || source.original_activity.queued != 0
+        || source.original_activity.next_build_number != 2
+        || source.observations.len() != order.len()
+        || target.schema != TARGET_REPLAY_SCHEMA
+        || target.job_id != JOB_ID
+        || target.target_state != "disabled"
+        || target.target_generation != OPERATIONAL_GENERATION
+        || target.terminal_queued_builds != 0
+        || target.observations.len() != order.len()
+    {
+        return Err(QualificationError::new(
+            "E_RUNTIME_OBSERVATION",
+            "source or target runtime denominator, state, or activity mismatch",
+        ));
+    }
+    for (index, kind) in order.iter().enumerate() {
+        let source_observation = &source.observations[index];
+        let target_observation = &target.observations[index];
+        if source_observation.kind != *kind
+            || target_observation.kind != *kind
+            || source_observation.path != source_paths[index]
+            || target_observation.path != target_paths[index]
+            || source_observation.detail != source_details[index]
+            || source_observation.path == target_observation.path
+            || !is_zero_denial(
+                &source_observation.outcome,
+                source_observation.queued_builds,
+                source_observation.scheduled_attempts,
+                source_observation.credential_grants,
+                source_observation.connector_requests,
+                source_observation.production_effects,
+            )
+            || !is_zero_denial(
+                &target_observation.outcome,
+                target_observation.queued_builds,
+                target_observation.scheduled_attempts,
+                target_observation.credential_grants,
+                target_observation.connector_requests,
+                target_observation.production_effects,
+            )
+        {
+            return Err(QualificationError::new(
+                "E_RUNTIME_OBSERVATION",
+                "source and target ingress observations are not exact paired denials",
+            ));
+        }
+    }
+    if isolation.schema != ISOLATION_OBSERVATION_SCHEMA {
+        return Err(QualificationError::new(
+            "E_ISOLATION",
+            "isolation observation schema mismatch",
+        ));
+    }
+    if trace.schema != TRACE_OBSERVATION_SCHEMA {
+        return Err(QualificationError::new(
+            "E_TRACE",
+            "trace observation schema mismatch",
+        ));
+    }
+    verify_trace(&TraceComparison {
+        certified_trace_sha256: trace.certified_trace_sha256.clone(),
+        source_trace_sha256: trace.source_trace_sha256.clone(),
+        target_trace_sha256: trace.target_trace_sha256.clone(),
+        source_log: trace.source_log.clone(),
+        target_log: trace.target_log.clone(),
+        source_result: trace.source_result.clone(),
+        target_result: trace.target_result.clone(),
+        artifacts: trace.artifacts,
+        external_effect_intents: trace.external_effect_intents,
+        isolated_replay_executed: trace.isolated_replay_executed,
+        compared_traces: trace.compared_traces,
+        mismatches: trace.mismatches,
+    })?;
+    verify_isolation(&Isolation {
+        source_fixture_identity: isolation.source_fixture_identity.clone(),
+        target_fixture_identity: isolation.target_fixture_identity.clone(),
+        source_network_sha256: isolation.source_network_sha256.clone(),
+        target_network_sha256: isolation.target_network_sha256.clone(),
+        reachability_receipt_sha256: isolation.reachability_receipt_sha256.clone(),
+        source_and_target_networks_disjoint: isolation.source_and_target_networks_disjoint,
+        production_network_requests: isolation.production_network_requests,
+        production_endpoint_mappings: isolation.production_endpoint_mappings,
+        production_credentials: isolation.production_credentials,
+        host_mounts: isolation.host_mounts,
+        cross_fixture_mounts: isolation.cross_fixture_mounts,
+        teardown_complete: isolation.teardown_complete,
+    })
+}
+
+fn is_zero_denial(
+    outcome: &str,
+    queued_builds: u64,
+    scheduled_attempts: u64,
+    credential_grants: u64,
+    connector_requests: u64,
+    production_effects: u64,
+) -> bool {
+    outcome == "disabled_pre_queue"
+        && queued_builds == 0
+        && scheduled_attempts == 0
+        && credential_grants == 0
+        && connector_requests == 0
+        && production_effects == 0
 }
 
 pub fn verify_private_session(
@@ -884,6 +1373,137 @@ mod tests {
         }
     }
 
+    fn source_probe() -> SourceProbe {
+        let observations = [
+            (
+                "api",
+                "WorkflowJob.doBuild(StaplerRequest2,StaplerResponse2,TimeDuration)",
+                serde_json::json!({"rejection": "org.kohsuke.stapler.HttpResponses$3"}),
+            ),
+            (
+                "manual",
+                "WorkflowJob.scheduleBuild2(UserIdCause)",
+                serde_json::json!({"returned_future": false}),
+            ),
+            ("schedule", "TimerTrigger.run()", serde_json::json!({})),
+            (
+                "upstream",
+                "ReverseBuildTrigger.RunListenerImpl.onCompleted",
+                serde_json::json!({"upstream_result": "ABORTED"}),
+            ),
+            ("webhook", "SCMTrigger.run(Action[])", serde_json::json!({})),
+        ]
+        .into_iter()
+        .map(|(kind, path, detail)| SourceIngressObservation {
+            kind: kind.to_owned(),
+            path: path.to_owned(),
+            outcome: "disabled_pre_queue".to_owned(),
+            queued_builds: 0,
+            scheduled_attempts: 0,
+            credential_grants: 0,
+            connector_requests: 0,
+            production_effects: 0,
+            detail,
+        })
+        .collect();
+        SourceProbe {
+            schema: SOURCE_PROBE_SCHEMA.to_owned(),
+            job_id: JOB_ID.to_owned(),
+            source_state: "disabled".to_owned(),
+            captured_wall_clock_unix_ms: 1_786_904_213_797,
+            original_activity: ActivityObservation {
+                builds: 1,
+                queued: 0,
+                next_build_number: 2,
+            },
+            terminal_activity: ActivityObservation {
+                builds: 1,
+                queued: 0,
+                next_build_number: 2,
+            },
+            observations,
+        }
+    }
+
+    fn target_replay() -> TargetReplay {
+        TargetReplay {
+            schema: TARGET_REPLAY_SCHEMA.to_owned(),
+            job_id: JOB_ID.to_owned(),
+            target_state: "disabled".to_owned(),
+            target_generation: OPERATIONAL_GENERATION.to_owned(),
+            observations: [
+                ("api", "Store.accept_trigger_delivery(remote_api)"),
+                ("manual", "Store.admit_dag"),
+                ("schedule", "Store.accept_trigger_delivery(schedule)"),
+                ("upstream", "Store.accept_trigger_delivery(upstream)"),
+                ("webhook", "Store.accept_trigger_delivery(scm_webhook)"),
+            ]
+            .into_iter()
+            .map(|(kind, path)| TargetIngressObservation {
+                kind: kind.to_owned(),
+                path: path.to_owned(),
+                outcome: "disabled_pre_queue".to_owned(),
+                queued_builds: 0,
+                scheduled_attempts: 0,
+                credential_grants: 0,
+                connector_requests: 0,
+                production_effects: 0,
+            })
+            .collect(),
+            terminal_queued_builds: 0,
+        }
+    }
+
+    fn isolation_observation() -> IsolationObservation {
+        IsolationObservation {
+            schema: ISOLATION_OBSERVATION_SCHEMA.to_owned(),
+            source_fixture_identity: "source-fixture".to_owned(),
+            target_fixture_identity: "target-fixture".to_owned(),
+            source_network_sha256: sha256(b"source-network"),
+            target_network_sha256: sha256(b"target-network"),
+            reachability_receipt_sha256: sha256(b"reachability"),
+            source_and_target_networks_disjoint: true,
+            production_network_requests: 0,
+            production_endpoint_mappings: 0,
+            production_credentials: 0,
+            host_mounts: 0,
+            cross_fixture_mounts: 0,
+            teardown_complete: true,
+        }
+    }
+
+    fn trace_observation() -> TraceObservation {
+        let log = vec![
+            NormalizedLogEntry {
+                sequence: 1,
+                stream: "stderr".to_owned(),
+                content_sha256: STDERR_LOG_SHA256.to_owned(),
+                bytes: 19,
+            },
+            NormalizedLogEntry {
+                sequence: 2,
+                stream: "stdout".to_owned(),
+                content_sha256: STDOUT_LOG_SHA256.to_owned(),
+                bytes: 12,
+            },
+        ];
+        TraceObservation {
+            schema: TRACE_OBSERVATION_SCHEMA.to_owned(),
+            certified_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
+            source_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
+            target_trace_sha256: DIFF001_TRACE_SHA256.to_owned(),
+            source_log: log.clone(),
+            target_log: log,
+            source_result: "SUCCESS".to_owned(),
+            target_result: "SUCCESS".to_owned(),
+            artifacts: 0,
+            external_effect_intents: 0,
+            isolated_replay_executed: true,
+            compared_traces: 1,
+            mismatches: 0,
+        }
+    }
+
     fn fixture() -> (Session, VerifiedPackage) {
         let source_key = pair(7);
         let shadow_key = pair(9);
@@ -1044,6 +1664,180 @@ mod tests {
         assert_eq!(receipt.compared_traces, 1);
         assert!(receipt.shadow_qualified);
         assert!(!receipt.production_authority);
+    }
+
+    #[test]
+    fn live_observations_prepare_only_authenticated_source_receipts() {
+        let random = SystemRandom::new();
+        let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
+        let source_pair = Ed25519KeyPair::from_pkcs8(source_pkcs8.as_ref()).expect("source pair");
+        let shadow_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("shadow key");
+        let shadow_pair = Ed25519KeyPair::from_pkcs8(shadow_pkcs8.as_ref()).expect("shadow pair");
+        let source_bytes = serde_json::to_vec(&source_probe()).expect("source observation");
+        let target_bytes = serde_json::to_vec(&target_replay()).expect("target observation");
+        let trace_bytes = serde_json::to_vec(&trace_observation()).expect("trace observation");
+        let isolation_bytes =
+            serde_json::to_vec(&isolation_observation()).expect("isolation observation");
+        let package = b"private-package";
+        let package_sha256 = sha256(package);
+        let source_pin = sha256(source_pair.public_key().as_ref());
+        let shadow_public = BASE64.encode(shadow_pair.public_key().as_ref());
+        let template = prepare_source_authenticated_template(&SourceTemplateInputs {
+            source_probe_bytes: &source_bytes,
+            target_replay_bytes: &target_bytes,
+            trace_observation_bytes: &trace_bytes,
+            isolation_observation_bytes: &isolation_bytes,
+            private_package_bytes: package,
+            expected_private_package_sha256: &package_sha256,
+            source_capture_pkcs8: source_pkcs8.as_ref(),
+            expected_source_capture_public_key_sha256: &source_pin,
+            shadow_replay_public_key_base64: &shadow_public,
+            authz_generation_sha256: TEST_AUTHZ_SHA256,
+            verifier_binary_sha256: TEST_VERIFIER_SHA256,
+            shadow_implementation_head: HEAD,
+        })
+        .expect("prepare source-authenticated template");
+        let prepared: Session = serde_json::from_slice(&template).expect("prepared session");
+        assert_eq!(prepared.events.len(), 5);
+        assert!(prepared.events.iter().all(|event| {
+            !event.source.signature_base64.is_empty()
+                && !event.source.session_binding_sha256.is_empty()
+                && event.shadow.signature_base64.is_empty()
+                && event.shadow.signing_public_key_sha256.is_empty()
+                && event.shadow.session_binding_sha256.is_empty()
+        }));
+        assert_eq!(
+            prepared
+                .events
+                .iter()
+                .map(|event| &event.source.capture_sha256)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            5
+        );
+
+        let sealed = seal_private_session(&template, &source_pin, shadow_pkcs8.as_ref())
+            .expect("seal shadow receipts");
+        let receipt = verify_session(
+            &sealed,
+            HEAD,
+            &source_pin,
+            TEST_AUTHZ_SHA256,
+            TEST_VERIFIER_SHA256,
+            &VerifiedPackage {
+                sha256: package_sha256,
+                packaged_cases: 1,
+                rejected_cases: 227,
+            },
+        )
+        .expect("verify prepared and sealed session");
+        assert!(receipt.shadow_qualified);
+        assert!(!receipt.production_authority);
+    }
+
+    #[test]
+    fn prepared_template_rejects_runtime_pin_key_and_isolation_drift() {
+        let random = SystemRandom::new();
+        let source_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("source key");
+        let source_pair = Ed25519KeyPair::from_pkcs8(source_pkcs8.as_ref()).expect("source pair");
+        let shadow_pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).expect("shadow key");
+        let shadow_pair = Ed25519KeyPair::from_pkcs8(shadow_pkcs8.as_ref()).expect("shadow pair");
+        let package = b"private-package";
+        let package_sha256 = sha256(package);
+        let source_pin = sha256(source_pair.public_key().as_ref());
+        let shadow_public = BASE64.encode(shadow_pair.public_key().as_ref());
+        let target_bytes = serde_json::to_vec(&target_replay()).expect("target");
+        let trace_bytes = serde_json::to_vec(&trace_observation()).expect("trace");
+        let valid_isolation = isolation_observation();
+        let isolation_bytes = serde_json::to_vec(&valid_isolation).expect("isolation");
+
+        let mut changed_source = source_probe();
+        changed_source.terminal_activity.next_build_number += 1;
+        let changed_source_bytes = serde_json::to_vec(&changed_source).expect("changed source");
+        macro_rules! inputs {
+            ($source:expr, $isolation:expr, $package_pin:expr, $source_pin:expr, $shadow:expr $(,)?) => {
+                SourceTemplateInputs {
+                    source_probe_bytes: $source,
+                    target_replay_bytes: &target_bytes,
+                    trace_observation_bytes: &trace_bytes,
+                    isolation_observation_bytes: $isolation,
+                    private_package_bytes: package,
+                    expected_private_package_sha256: $package_pin,
+                    source_capture_pkcs8: source_pkcs8.as_ref(),
+                    expected_source_capture_public_key_sha256: $source_pin,
+                    shadow_replay_public_key_base64: $shadow,
+                    authz_generation_sha256: TEST_AUTHZ_SHA256,
+                    verifier_binary_sha256: TEST_VERIFIER_SHA256,
+                    shadow_implementation_head: HEAD,
+                }
+            };
+        }
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &changed_source_bytes,
+                &isolation_bytes,
+                &package_sha256,
+                &source_pin,
+                &shadow_public,
+            ))
+            .expect_err("activity drift")
+            .code,
+            "E_RUNTIME_OBSERVATION"
+        );
+        let valid_source_bytes = serde_json::to_vec(&source_probe()).expect("source");
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &valid_source_bytes,
+                &isolation_bytes,
+                EMPTY_SHA256,
+                &source_pin,
+                &shadow_public,
+            ))
+            .expect_err("package substitution")
+            .code,
+            "E_PACKAGE_PIN"
+        );
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &valid_source_bytes,
+                &isolation_bytes,
+                &package_sha256,
+                EMPTY_SHA256,
+                &shadow_public,
+            ))
+            .expect_err("source-key substitution")
+            .code,
+            "E_SOURCE_CAPTURE_KEY"
+        );
+        let mut incomplete_isolation = valid_isolation;
+        incomplete_isolation.teardown_complete = false;
+        let incomplete_isolation_bytes =
+            serde_json::to_vec(&incomplete_isolation).expect("incomplete isolation");
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &valid_source_bytes,
+                &incomplete_isolation_bytes,
+                &package_sha256,
+                &source_pin,
+                &shadow_public,
+            ))
+            .expect_err("incomplete teardown")
+            .code,
+            "E_ISOLATION"
+        );
+        let shared_public = BASE64.encode(source_pair.public_key().as_ref());
+        assert_eq!(
+            prepare_source_authenticated_template(&inputs!(
+                &valid_source_bytes,
+                &isolation_bytes,
+                &package_sha256,
+                &source_pin,
+                &shared_public,
+            ))
+            .expect_err("shared signing identity")
+            .code,
+            "E_KEY"
+        );
     }
 
     #[test]

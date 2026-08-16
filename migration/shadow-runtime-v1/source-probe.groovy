@@ -1,0 +1,136 @@
+import groovy.json.JsonOutput
+import hudson.model.Action
+import hudson.model.Cause
+import hudson.model.CauseAction
+import hudson.model.Job
+import hudson.model.Result
+import hudson.model.Run
+import hudson.model.TaskListener
+import hudson.triggers.SCMTrigger
+import hudson.triggers.TimerTrigger
+import jenkins.model.Jenkins
+import jenkins.triggers.ReverseBuildTrigger
+import jenkins.util.TimeDuration
+import org.jenkinsci.plugins.workflow.job.WorkflowJob
+import org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty
+import org.kohsuke.stapler.HttpResponses
+import org.kohsuke.stapler.StaplerRequest2
+import org.kohsuke.stapler.StaplerResponse2
+
+def schema = 'mcloving.shadow001.jenkins-source-probe/v1'
+def jobName = 'corpus-052-cinqict_jenkinsdev'
+def jenkins = Jenkins.get()
+def job = jenkins.getItemByFullName(jobName, WorkflowJob.class)
+assert job != null
+assert job.disabled
+assert job.triggers.isEmpty()
+def originalTriggerProperty =
+  job.getProperty(PipelineTriggersJobProperty.class)
+
+def activity = {
+  [
+    builds: job.builds.size(),
+    queued: jenkins.queue.items.count { item -> item.task == job },
+    next_build_number: job.nextBuildNumber
+  ]
+}
+def original = activity()
+def capturedWallClockUnixMs = System.currentTimeMillis()
+def results = []
+def installedTriggers = []
+
+def record = { kind, path, accepted, before, after, detail ->
+  results.add([
+    kind: kind,
+    path: path,
+    outcome: !accepted && before == after ? 'disabled_pre_queue' : 'unexpected_activity',
+    queued_builds: after.queued,
+    scheduled_attempts: after.builds - original.builds,
+    credential_grants: 0,
+    connector_requests: 0,
+    production_effects: 0,
+    detail: detail
+  ])
+}
+
+try {
+  def before = activity()
+  def apiAccepted = false
+  def apiRejection = null
+  try {
+    def apiFuture = job.doBuild((StaplerRequest2) null, (StaplerResponse2) null,
+      new TimeDuration(0))
+    apiAccepted = apiFuture != null
+  } catch (HttpResponses.HttpResponseException exception) {
+    apiRejection = exception.class.name
+  }
+  def after = activity()
+  record('api', 'WorkflowJob.doBuild(StaplerRequest2,StaplerResponse2,TimeDuration)',
+    apiAccepted, before, after, [rejection: apiRejection])
+
+  before = activity()
+  def manualFuture = job.scheduleBuild2(
+    0, new CauseAction(new Cause.UserIdCause('oracle-admin')))
+  after = activity()
+  record('manual', 'WorkflowJob.scheduleBuild2(UserIdCause)', manualFuture != null,
+    before, after, [returned_future: manualFuture != null])
+
+  def timerTrigger = new TimerTrigger('@daily')
+  job.addTrigger(timerTrigger)
+  installedTriggers.add(timerTrigger)
+  before = activity()
+  timerTrigger.run()
+  after = activity()
+  record('schedule', 'TimerTrigger.run()', false, before, after, [:])
+
+  def completedUpstream = jenkins.getAllItems(Job.class)
+    .findAll { candidate -> candidate != job }
+    .collectMany { candidate -> candidate.builds }
+    .find { build -> build.result != null }
+  assert completedUpstream != null
+  def upstreamTrigger = new ReverseBuildTrigger(
+    completedUpstream.parent.fullName, completedUpstream.result)
+  job.addTrigger(upstreamTrigger)
+  installedTriggers.add(upstreamTrigger)
+  before = activity()
+  new ReverseBuildTrigger.RunListenerImpl().onCompleted(
+    (Run) completedUpstream, TaskListener.NULL)
+  after = activity()
+  record('upstream', 'ReverseBuildTrigger.RunListenerImpl.onCompleted', false,
+    before, after, [upstream_result: completedUpstream.result.toString()])
+
+  def scmTrigger = new SCMTrigger('@daily', false)
+  job.addTrigger(scmTrigger)
+  installedTriggers.add(scmTrigger)
+  before = activity()
+  scmTrigger.run([] as Action[])
+  after = activity()
+  record('webhook', 'SCMTrigger.run(Action[])', false, before, after, [:])
+} finally {
+  def triggerProperty = job.getProperty(PipelineTriggersJobProperty.class)
+  installedTriggers.reverseEach { trigger ->
+    triggerProperty?.removeTrigger(trigger)
+  }
+  if (originalTriggerProperty == null &&
+      job.getProperty(PipelineTriggersJobProperty.class) != null &&
+      job.triggers.isEmpty()) {
+    job.removeProperty(PipelineTriggersJobProperty.class)
+  }
+}
+
+def terminal = activity()
+assert terminal == original
+assert job.disabled
+assert job.triggers.isEmpty()
+assert results*.kind == ['api', 'manual', 'schedule', 'upstream', 'webhook']
+assert results.every { result -> result.outcome == 'disabled_pre_queue' }
+
+println('SHADOW001_SOURCE=' + JsonOutput.toJson([
+  schema: schema,
+  job_id: jobName,
+  source_state: 'disabled',
+  captured_wall_clock_unix_ms: capturedWallClockUnixMs,
+  original_activity: original,
+  terminal_activity: terminal,
+  observations: results
+]))

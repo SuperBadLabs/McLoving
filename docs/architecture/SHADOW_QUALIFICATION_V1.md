@@ -121,6 +121,20 @@ cannot manufacture or replace authoritative observations, self-endorse a
 variable freeze value, inject a shadow signature, or reuse one key for both
 roles through the sealing interface.
 
+`prepare` is the only interface that converts live runtime observations into
+that template. It reads the bounded Jenkins source observation, isolated
+McLoving ingress replay, executable trace observation, post-teardown isolation
+observation, exact private package and independent pin, source-capture private
+key and public-key pin, precommitted shadow public identity, live authorization
+pin, verifier-binary pin, and reviewed implementation head. It validates the
+canonical five-class order and distinct source/target paths, unchanged Jenkins
+activity, exact zero-count denials, the certified trace, complete teardown,
+distinct fixtures and networks, and zero production reachability or authority.
+It derives each unique capture digest only from the authoritative source
+observation, signs only the source receipt, leaves every shadow signature field
+empty, and publishes one create-new owner-private template. The source private
+key never enters `seal`.
+
 The admitted case has no live external input, secret outcome, connector
 outcome, administrative operation, semantic time, or semantic entropy
 dependency. Its session therefore binds one wall-clock instant plus empty
@@ -146,6 +160,35 @@ zero production endpoint mapping, network request, credential, host mount,
 cross-fixture mount, or effect, plus completed teardown. The two fixture and
 network identities must be distinct.
 
+`scripts/capture-shadow001-runtime.sh` is the reviewed runtime sidecar. From a
+clean exact head on HeMan it first builds and pins the exact verifier and
+atomically creates the distinct source and precommitted shadow key identities.
+It then submits the fixed Groovy probe to Mario through an authenticated
+crumb-bearing session; the Mario credential is read and used only on Mario,
+and only the bounded `SHADOW001_SOURCE` marker returns. Neither signing private
+key leaves the owner-private HeMan output directory. The probe exercises the
+real disabled `WorkflowJob` through five distinct Jenkins entry points in
+canonical API/manual/schedule/upstream/webhook order, asserts unchanged build,
+queue, next-build, trigger, and disabled state, and restores the exact
+preexisting trigger-property shape in `finally`.
+
+The target phase builds the exact controller-store ingress test, admitted-case
+controller test, and controller executable offline. It copies only those exact
+executables into a stopped container, then runs them with a read-only root,
+empty host-mount set, dropped capabilities, no-new-privileges, bounded
+resources, and a fresh PostgreSQL peer on a new internal-only network. The
+runtime test emits the target receipt only after all five real target entry
+points return `PipelineDisabled` with zero build rows. The admitted-case test
+emits the trace receipt only after the exact process and normalized logs,
+terminal result, empty artifact/input/credential/effect surfaces, and empty
+user workspace are proven. A public-network negative must pass, the runtime
+mount set and internal network are inspected, and both containers and their
+network are removed before the isolation observation can state teardown
+complete. The sidecar finally invokes `prepare` against the independently
+supplied private package, package pin, and authorization-generation pin and
+publishes the source-authenticated, shadow-unsigned template. Runtime
+observations and topology details remain owner-private.
+
 ## Verification surface
 
 The library returns only:
@@ -165,7 +208,8 @@ rollback-, or production-authority eligible.
 
 ## Current implementation evidence
 
-crates/shadow-qualification provides canonical parsing, MIG-007 private
+crates/shadow-qualification provides canonical parsing, live-observation
+template preparation, MIG-007 private
 verification composition, exact identity joins, Ed25519 receipt verification,
 denominator checks, exact log-sequence validation, trace/isolation checks, the
 all-false authority ledger, distinct-key generation, template sealing, safe
@@ -179,6 +223,9 @@ cross-session, cross-capture-time, and cross-freeze receipt transplantation;
 shadow-key replacement and cross-shadow-identity capture transplantation;
 shared signing keys; owner modes, hard links, aliases, create-new publication;
 non-UTF-8 paths; redacted failure output; and size bounds.
+
+The reviewed sidecar source now exists, but its exact head has not yet been
+merged and no owner-private ceremony over that head has been accepted.
 
 SHADOW-001 remains ACTIVE until an independently reviewed exact-head
 capture/replay sidecar and owner-private HeMan ceremony produce and verify the

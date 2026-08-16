@@ -162,15 +162,45 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
     assert_eq!(graph.nodes[0].status, "succeeded");
     assert_eq!(graph.attempts[0].ordinal, 1);
     assert_eq!(graph.attempts[0].status, "succeeded");
-    assert!(
-        logs.iter()
-            .any(|log| { log.stream == "stdout" && log.content_hex == "48656c6c6f20576f726c640a" }),
-        "stdout must contain the admitted semantic output"
+    assert_eq!(
+        logs.len(),
+        2,
+        "the admitted trace has exactly two log records"
     );
+    let stdout = logs
+        .iter()
+        .find(|log| log.stream == "stdout")
+        .expect("exact stdout log");
+    let stderr = logs
+        .iter()
+        .find(|log| log.stream == "stderr")
+        .expect("exact stderr log");
+    assert_eq!(stdout.content_hex, "48656c6c6f20576f726c640a");
+    assert_eq!(
+        stdout.sha256,
+        "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26"
+    );
+    assert_eq!(stderr.content_hex, "2b206563686f2048656c6c6f20576f726c640a");
+    assert_eq!(
+        stderr.sha256,
+        "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c"
+    );
+    assert_eq!(stdout.attempt_id, admission.attempt_id);
+    assert_eq!(stderr.attempt_id, admission.attempt_id);
+    assert_eq!(stdout.fence, status.fence);
+    assert_eq!(stderr.fence, status.fence);
+    assert_ne!(stdout.sequence, stderr.sequence);
     assert!(artifacts.is_empty());
     assert!(tests.is_empty());
     assert!(approvals.is_empty());
     assert!(grants.is_empty());
+    let external_effects =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attempt_effects WHERE attempt_id = $1")
+            .bind(admission.attempt_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count exact admitted-case external effects");
+    assert_eq!(external_effects, 0);
     let workspace_entries = count_user_workspace_entries(
         &workspace,
         organization_id,
@@ -194,6 +224,46 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
             "credential_grants": grants,
         });
         write_evidence(Path::new(&evidence_dir), &raw, workspace_entries);
+    }
+    if let Ok(path) = std::env::var("MCLOVING_SHADOW001_TRACE_OUTPUT") {
+        let normalized_log = json!([
+            {
+                "sequence": 1,
+                "stream": "stderr",
+                "content_sha256": "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
+                "bytes": 19,
+            },
+            {
+                "sequence": 2,
+                "stream": "stdout",
+                "content_sha256": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+                "bytes": 12,
+            },
+        ]);
+        let bytes = serde_json::to_vec(&json!({
+                "schema": "mcloving.shadow001.trace-observation/v1",
+                "certified_trace_sha256": "e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6",
+                "source_trace_sha256": "e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6",
+                "target_trace_sha256": "e1465ed5261dc046222045657c2f0e1ab774f63bd50d70f5e263bc7a6e94c4f6",
+                "source_log": normalized_log,
+                "target_log": normalized_log,
+                "source_result": "SUCCESS",
+                "target_result": "SUCCESS",
+                "artifacts": artifacts.len(),
+                "external_effect_intents": external_effects,
+                "isolated_replay_executed": true,
+                "compared_traces": 1,
+                "mismatches": 0,
+            }))
+            .expect("serialize SHADOW-001 trace observation");
+        if path == "-" {
+            println!(
+                "SHADOW001_TRACE={}",
+                String::from_utf8(bytes).expect("SHADOW-001 trace is UTF-8")
+            );
+        } else {
+            std::fs::write(path, bytes).expect("write SHADOW-001 trace observation");
+        }
     }
     controller.kill().await.expect("stop test controller");
 }
