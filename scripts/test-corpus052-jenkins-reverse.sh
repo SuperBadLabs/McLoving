@@ -403,6 +403,7 @@ podman unshare chown -R 1000:1000 "${home}" "${template_home}"
 lock_and_verify_plugins "${home_plugins}"
 lock_and_verify_plugins "${template_plugins}"
 podman network create --internal "${network}" >/dev/null
+podman network inspect "${network}" > "${staging}/evidence/private-network-inspect.json"
 
 start_controller() {
   local controller_home=$1

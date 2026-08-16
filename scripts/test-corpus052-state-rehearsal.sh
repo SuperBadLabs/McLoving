@@ -112,7 +112,7 @@ podman run --rm --network none \
 client_executable="${client_build_root}/debug/examples/rehearse_history"
 test -x "${client_executable}"
 
-podman run --rm --name "${client}" \
+podman run --name "${client}" \
   --network "${network}" \
   --cpus 2 --memory 2g --pids-limit 1024 \
   --env MCLOVING_TEST_DATABASE_URL="postgres://mcloving@${container}:5432/mcloving" \
@@ -126,8 +126,11 @@ podman run --rm --name "${client}" \
   /rehearsal-output/mcloving
 
 podman inspect "${container}" > "${staging}/evidence/postgres-container-inspect.json"
+podman inspect "${client}" > "${staging}/evidence/rust-client-container-inspect.json"
+podman network inspect "${network}" > "${staging}/evidence/private-network-inspect.json"
 podman image inspect "${MCLOVING_POSTGRES_IMAGE}" \
   > "${staging}/evidence/postgres-image-inspect.json"
+podman rm "${client}" >/dev/null
 
 jq --exit-status '
   .schema == "mcloving.corpus052-state-rehearsal/v1"
