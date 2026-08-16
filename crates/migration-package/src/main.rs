@@ -602,10 +602,10 @@ fn read_private_regular_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>
     #[cfg(not(unix))]
     {
         let _ = (path, limit);
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "owner-private package inputs require Unix mode and link validation",
-        ));
+        ))
     }
     #[cfg(unix)]
     {
