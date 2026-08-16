@@ -1,6 +1,5 @@
 use std::env;
-#[cfg(unix)]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::fs::File;
 use std::io;
@@ -39,9 +38,14 @@ fn public_error_code(_error: &(dyn std::error::Error + 'static)) -> &'static str
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let arguments = env::args().collect::<Vec<_>>();
-    match arguments.as_slice() {
-        [_, command, source_key, shadow_key] if command == "generate-keys" => {
+    let arguments = env::args_os().collect::<Vec<_>>();
+    run_with_arguments(&arguments)
+}
+
+fn run_with_arguments(arguments: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
+    let command = arguments.get(1).and_then(|value| value.to_str());
+    match (command, arguments) {
+        (Some("generate-keys"), [_, _, source_key, shadow_key]) => {
             let random = SystemRandom::new();
             let source = Ed25519KeyPair::generate_pkcs8(&random)
                 .map_err(|_| "could not generate source-capture Ed25519 key")?;
@@ -59,26 +63,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("source_capture_key_created=true");
             println!("shadow_replay_key_created=true");
         }
-        [
-            _,
-            command,
-            template,
-            source_key,
-            shadow_key,
-            session,
-            session_pin,
-            package,
-            package_pin,
-            repository,
-            sealed_history,
-            forward_manifest_pin,
-            forward_implementation_pin,
-            reverse_manifest_pin,
-            reverse_implementation_pin,
-            authz_generation_pin,
-            verifier_binary_pin,
-            expected_head,
-        ] if command == "seal" => {
+        (
+            Some("seal"),
+            [
+                _,
+                _,
+                template,
+                source_key,
+                shadow_key,
+                session,
+                session_pin,
+                package,
+                package_pin,
+                repository,
+                sealed_history,
+                forward_manifest_pin,
+                forward_implementation_pin,
+                reverse_manifest_pin,
+                reverse_implementation_pin,
+                authz_generation_pin,
+                verifier_binary_pin,
+                expected_head,
+            ],
+        ) => {
+            let expected_head = expected_head
+                .to_str()
+                .ok_or("expected implementation head is not UTF-8")?;
             let template_bytes = read_owner_private(Path::new(template), MAX_SESSION_BYTES)?;
             let source_key = read_owner_private(Path::new(source_key), 1_024)?;
             let shadow_key = read_owner_private(Path::new(shadow_key), 1_024)?;
@@ -111,7 +121,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             publish_owner_private(Path::new(session), &session_bytes)?;
             let pin_bytes = format!("{computed_session_pin}\n");
-            if let Err(error) = publish_owner_private(Path::new(session_pin), pin_bytes.as_bytes()) {
+            if let Err(error) = publish_owner_private(Path::new(session_pin), pin_bytes.as_bytes())
+            {
                 rollback_new_private(Path::new(session)).map_err(|rollback| {
                     io::Error::other(format!(
                         "session-pin publication failed ({error}); session rollback failed ({rollback}); reconcile both paths"
@@ -121,23 +132,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             print_receipt(&receipt);
         }
-        [
-            _,
-            command,
-            session,
-            session_pin,
-            package,
-            package_pin,
-            repository,
-            sealed_history,
-            forward_manifest_pin,
-            forward_implementation_pin,
-            reverse_manifest_pin,
-            reverse_implementation_pin,
-            authz_generation_pin,
-            verifier_binary_pin,
-            expected_head,
-        ] if command == "verify" => {
+        (
+            Some("verify"),
+            [
+                _,
+                _,
+                session,
+                session_pin,
+                package,
+                package_pin,
+                repository,
+                sealed_history,
+                forward_manifest_pin,
+                forward_implementation_pin,
+                reverse_manifest_pin,
+                reverse_implementation_pin,
+                authz_generation_pin,
+                verifier_binary_pin,
+                expected_head,
+            ],
+        ) => {
+            let expected_head = expected_head
+                .to_str()
+                .ok_or("expected implementation head is not UTF-8")?;
             let session_bytes = read_owner_private(Path::new(session), MAX_SESSION_BYTES)?;
             let session_pin = read_owner_pin(Path::new(session_pin))?;
             let paths = PackageInputPaths {
@@ -167,7 +184,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             print_receipt(&receipt);
         }
-        _ => return Err("usage:\n  mcloving-shadow-qualification generate-keys SOURCE_CAPTURE_KEY SHADOW_REPLAY_KEY\n  mcloving-shadow-qualification seal TEMPLATE SOURCE_CAPTURE_KEY SHADOW_REPLAY_KEY SESSION SESSION_PIN PACKAGE PACKAGE_PIN REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN FORWARD_IMPLEMENTATION_PIN REVERSE_MANIFEST_PIN REVERSE_IMPLEMENTATION_PIN AUTHZ_GENERATION_PIN VERIFIER_BINARY_PIN EXPECTED_IMPLEMENTATION_HEAD\n  mcloving-shadow-qualification verify SESSION SESSION_PIN PACKAGE PACKAGE_PIN REPOSITORY_ROOT SEALED_HISTORY FORWARD_MANIFEST_PIN FORWARD_IMPLEMENTATION_PIN REVERSE_MANIFEST_PIN REVERSE_IMPLEMENTATION_PIN AUTHZ_GENERATION_PIN VERIFIER_BINARY_PIN EXPECTED_IMPLEMENTATION_HEAD".into()),
+        _ => return Err("usage error".into()),
     }
     Ok(())
 }
@@ -183,14 +200,14 @@ struct OwnerPins {
 }
 
 struct PackageInputPaths<'a> {
-    package: &'a str,
-    package_pin: &'a str,
-    forward_manifest_pin: &'a str,
-    forward_implementation_pin: &'a str,
-    reverse_manifest_pin: &'a str,
-    reverse_implementation_pin: &'a str,
-    authz_generation_pin: &'a str,
-    verifier_binary_pin: &'a str,
+    package: &'a OsStr,
+    package_pin: &'a OsStr,
+    forward_manifest_pin: &'a OsStr,
+    forward_implementation_pin: &'a OsStr,
+    reverse_manifest_pin: &'a OsStr,
+    reverse_implementation_pin: &'a OsStr,
+    authz_generation_pin: &'a OsStr,
+    verifier_binary_pin: &'a OsStr,
 }
 
 fn read_package_inputs(paths: &PackageInputPaths<'_>) -> io::Result<(Vec<u8>, OwnerPins)> {
@@ -209,7 +226,7 @@ fn read_package_inputs(paths: &PackageInputPaths<'_>) -> io::Result<(Vec<u8>, Ow
 }
 
 fn private_inputs<'a>(
-    sealed_history: &'a str,
+    sealed_history: &'a OsStr,
     pins: &'a OwnerPins,
 ) -> PrivateVerificationInputs<'a> {
     PrivateVerificationInputs {
@@ -496,6 +513,7 @@ fn open_owner_parent(path: &Path) -> io::Result<(rustix::fd::OwnedFd, OsString)>
 #[cfg(all(test, unix))]
 mod tests {
     use std::fs;
+    use std::os::unix::ffi::OsStringExt as _;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     use super::*;
@@ -588,5 +606,22 @@ mod tests {
             "shadow qualification failed: SHADOW_QUALIFICATION_FAILED"
         );
         assert!(!output.contains(sentinel));
+    }
+
+    #[test]
+    fn non_utf8_private_path_reaches_the_redacted_error_boundary_without_panicking() {
+        let mut arguments = vec![
+            OsString::from("mcloving-shadow-qualification"),
+            OsString::from("verify"),
+        ];
+        arguments.extend((0..13).map(|index| OsString::from(format!("argument-{index}"))));
+        arguments[2] = OsString::from_vec(b"/tmp/private-\xff-path".to_vec());
+        arguments[14] = OsString::from("a".repeat(40));
+
+        let result = std::panic::catch_unwind(|| run_with_arguments(&arguments));
+        let error = result
+            .expect("non-UTF-8 path must not panic")
+            .expect_err("missing private input must fail");
+        assert_eq!(public_error_code(&*error), "SHADOW_QUALIFICATION_FAILED");
     }
 }
