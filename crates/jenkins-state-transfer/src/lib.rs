@@ -29,6 +29,9 @@ const ADMITTED_TREE_DIGEST: Digest = [
 ];
 const ADMITTED_RETENTION_POLICY_ID: &str = "jenkins-indefinite-oracle-retention";
 const ADMITTED_RETENTION_POLICY_VERSION: &str = "v1";
+const ADMITTED_TRANSFORM_CONFIGURATION: &[u8] = b"corpus052-single-aborted-workflow-v1";
+const ADMITTED_FORWARD_PROVENANCE: &str = "MIG-005A owner-held exact admitted-case source";
+const ADMITTED_REVERSE_PROVENANCE: &str = "MIG-005A contained corpus-052 reverse reconciliation";
 const ADMITTED_RETENTION_POLICY_DIGEST: Digest = [
     0xc2, 0xb7, 0x8e, 0x73, 0x52, 0x03, 0xec, 0x18, 0x77, 0xcc, 0xe3, 0xec, 0xb3, 0xc2, 0x97, 0x8b,
     0xcf, 0xb6, 0x1c, 0x81, 0x59, 0x80, 0x35, 0x12, 0x54, 0xf2, 0xb0, 0x1d, 0xda, 0x11, 0xd3, 0x2a,
@@ -235,10 +238,20 @@ pub fn admitted_forward_binding(transform_implementation_digest: Digest) -> Impo
         source: admitted_source_identity(),
         destination: admitted_destination_identity(),
         transform_implementation_digest,
-        transform_configuration_digest: sha256(b"corpus052-single-aborted-workflow-v1"),
-        provenance: "MIG-005A owner-held exact admitted-case source".to_owned(),
+        transform_configuration_digest: sha256(ADMITTED_TRANSFORM_CONFIGURATION),
+        provenance: ADMITTED_FORWARD_PROVENANCE.to_owned(),
         source_job_id: ADMITTED_JOB_ID.to_owned(),
         target_pipeline_id: ADMITTED_JOB_ID.to_owned(),
+    }
+}
+
+pub fn admitted_reverse_binding(transform_implementation_digest: Digest) -> ReverseBinding {
+    ReverseBinding {
+        source: admitted_destination_identity(),
+        destination: admitted_source_identity(),
+        transform_implementation_digest,
+        transform_configuration_digest: sha256(ADMITTED_TRANSFORM_CONFIGURATION),
+        provenance: ADMITTED_REVERSE_PROVENANCE.to_owned(),
     }
 }
 
@@ -575,6 +588,35 @@ pub fn prepare_reverse_history(
     transform(&bundle, &expected, &BTreeMap::new())
         .map_err(|error| invalid(format!("reverse bundle validation failed: {error}")))?;
     Ok(ParsedHistory { bundle, expected })
+}
+
+/// Reconstructs the exact admitted reverse bundle from an authenticated
+/// forward token and an independently pinned reverse implementation digest.
+/// The candidate supplies only the completed build observation; every binding
+/// and provenance field is rebuilt from the admitted contract before the full
+/// canonical bundle is compared.
+pub fn authenticate_reverse_bundle(
+    authenticated_forward: &AuthenticatedForwardHistory,
+    candidate: &StateBundle,
+    expected_transform_implementation_digest: Digest,
+) -> Result<ParsedHistory, HistoryError> {
+    let completed_build = candidate
+        .jobs
+        .first()
+        .and_then(|job| job.builds.get(1))
+        .cloned()
+        .ok_or_else(|| invalid("reverse candidate is missing the exact completed build"))?;
+    let reconstructed = prepare_reverse_history(
+        authenticated_forward,
+        completed_build,
+        &admitted_reverse_binding(expected_transform_implementation_digest),
+    )?;
+    if reconstructed.bundle != *candidate {
+        return Err(invalid(
+            "reverse candidate differs from exact admitted reconstruction",
+        ));
+    }
+    Ok(reconstructed)
 }
 
 fn regular_files(root: &Path) -> Result<BTreeSet<String>, HistoryError> {
@@ -1052,6 +1094,25 @@ mod tests {
             sha256(&source_export_bytes)
         );
         transform(&reverse.bundle, &reverse.expected, &BTreeMap::new()).unwrap();
+        let authenticated_reverse = authenticate_reverse_bundle(
+            &authenticated,
+            &reverse.bundle,
+            sha256(b"jenkins-state-transfer-test"),
+        )
+        .unwrap();
+        assert_eq!(authenticated_reverse, reverse);
+
+        let mut substituted = reverse.bundle.clone();
+        substituted.binding.provenance = "substituted reverse provenance".to_owned();
+        assert!(matches!(
+            authenticate_reverse_bundle(
+                &authenticated,
+                &substituted,
+                sha256(b"jenkins-state-transfer-test")
+            ),
+            Err(HistoryError::Invalid(message))
+                if message.contains("exact admitted reconstruction")
+        ));
     }
 
     #[test]
@@ -1336,14 +1397,8 @@ mod tests {
         }
     }
 
-    fn reverse_binding(bundle: &StateBundle) -> ReverseBinding {
-        ReverseBinding {
-            source: bundle.binding.destination.clone(),
-            destination: bundle.binding.source.clone(),
-            transform_implementation_digest: sha256(b"jenkins-state-transfer-test"),
-            transform_configuration_digest: sha256(b"corpus052-transform-configuration"),
-            provenance: "MIG-005A exact admitted-case reverse test".to_owned(),
-        }
+    fn reverse_binding(_bundle: &StateBundle) -> ReverseBinding {
+        admitted_reverse_binding(sha256(b"jenkins-state-transfer-test"))
     }
 
     fn completed_build(source: &BuildState) -> BuildState {

@@ -17,6 +17,13 @@ use mcloving_jenkins_compiler_admission::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod private;
+
+pub use private::{
+    MAX_PRIVATE_PACKAGE_BYTES, PrivateGenerationInputs, PrivateVerificationInputs,
+    PrivateVerificationReceipt, generate_private, verify_private,
+};
+
 pub const SCHEMA: &str = "mcloving.jenkins.migration-package/v1";
 pub const PACKAGE_ID: &str = "mario-corpus-052-disabled-v1";
 pub const PACKAGE_FILE: &str = "migration-package.json";

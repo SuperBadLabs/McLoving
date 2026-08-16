@@ -11,7 +11,10 @@ use std::path::Path;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mcloving_migration_package::{MAX_PACKAGE_BYTES, generate, verify};
+use mcloving_migration_package::{
+    MAX_PACKAGE_BYTES, MAX_PRIVATE_PACKAGE_BYTES, PrivateGenerationInputs,
+    PrivateVerificationInputs, generate, generate_private, verify, verify_private,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -49,9 +52,69 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("package_complete={}", receipt.package_complete);
             println!("production_authority={}", receipt.production_authority);
         }
+        [
+            _,
+            command,
+            repository,
+            sealed_history,
+            forward_evidence,
+            forward_pin,
+            reverse_evidence,
+            reverse_pin,
+            output,
+        ] if command == "generate-private" => {
+            let forward_pin = read_owner_pin(Path::new(forward_pin))?;
+            let reverse_pin = read_owner_pin(Path::new(reverse_pin))?;
+            let verification = PrivateVerificationInputs {
+                sealed_history_root: Path::new(sealed_history),
+                expected_forward_manifest_sha256: &forward_pin,
+                expected_reverse_manifest_sha256: &reverse_pin,
+                expected_package_sha256: None,
+            };
+            let inputs = PrivateGenerationInputs {
+                forward_evidence_root: Path::new(forward_evidence),
+                reverse_evidence_root: Path::new(reverse_evidence),
+                verification,
+            };
+            let bytes = generate_private(Path::new(repository), &inputs)?;
+            publish_new_file(Path::new(output), &bytes)?;
+        }
+        [
+            _,
+            command,
+            package,
+            package_pin,
+            repository,
+            sealed_history,
+            forward_pin,
+            reverse_pin,
+        ] if command == "verify-private" => {
+            let bytes =
+                read_private_regular_bounded(Path::new(package), MAX_PRIVATE_PACKAGE_BYTES)?;
+            let package_pin = read_owner_pin(Path::new(package_pin))?;
+            let forward_pin = read_owner_pin(Path::new(forward_pin))?;
+            let reverse_pin = read_owner_pin(Path::new(reverse_pin))?;
+            let inputs = PrivateVerificationInputs {
+                sealed_history_root: Path::new(sealed_history),
+                expected_forward_manifest_sha256: &forward_pin,
+                expected_reverse_manifest_sha256: &reverse_pin,
+                expected_package_sha256: Some(&package_pin),
+            };
+            let receipt = verify_private(&bytes, Path::new(repository), &inputs)?;
+            println!("schema={}", receipt.schema);
+            println!("packaged_cases={}", receipt.packaged_cases);
+            println!("rejected_cases={}", receipt.rejected_cases);
+            println!(
+                "admitted_state_dependencies={}",
+                receipt.admitted_state_dependencies
+            );
+            println!("package_complete={}", receipt.package_complete);
+            println!("shadow_eligible={}", receipt.shadow_eligible);
+            println!("production_authority={}", receipt.production_authority);
+        }
         _ => {
             return Err(
-                "usage: mcloving-migration-package generate REPOSITORY_ROOT [OUTPUT]\n       mcloving-migration-package verify PACKAGE REPOSITORY_ROOT"
+                "usage: mcloving-migration-package generate REPOSITORY_ROOT [OUTPUT]\n       mcloving-migration-package verify PACKAGE REPOSITORY_ROOT\n       mcloving-migration-package generate-private REPOSITORY_ROOT SEALED_HISTORY FORWARD_EVIDENCE FORWARD_PIN_FILE REVERSE_EVIDENCE REVERSE_PIN_FILE OUTPUT\n       mcloving-migration-package verify-private PACKAGE PACKAGE_PIN_FILE REPOSITORY_ROOT SEALED_HISTORY FORWARD_PIN_FILE REVERSE_PIN_FILE"
                     .into(),
             );
         }
@@ -248,6 +311,20 @@ impl Drop for TemporaryPath<'_> {
 }
 
 fn read_regular_bounded(path: &Path) -> io::Result<Vec<u8>> {
+    read_regular_bounded_with_limit(path, MAX_PACKAGE_BYTES)
+}
+
+fn read_regular_bounded_with_limit(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    read_regular_bounded_with_policy(path, limit, false)
+}
+
+fn read_regular_bounded_with_policy(
+    path: &Path,
+    limit: usize,
+    require_owner_only: bool,
+) -> io::Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    let _ = require_owner_only;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -263,23 +340,67 @@ fn read_regular_bounded(path: &Path) -> io::Result<Vec<u8>> {
     }
     let mut file = options.open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_PACKAGE_BYTES as u64 {
+    if !metadata.file_type().is_file() || metadata.len() > limit as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "package must be a bounded regular file",
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if require_owner_only && (metadata.nlink() != 1 || metadata.mode() & 0o077 != 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner-private input is linked or grants group or other access",
+            ));
+        }
+    }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     std::io::Read::by_ref(&mut file)
-        .take(MAX_PACKAGE_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PACKAGE_BYTES {
+    if bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "package exceeds byte limit",
         ));
     }
     Ok(bytes)
+}
+
+fn read_owner_pin(path: &Path) -> io::Result<String> {
+    let bytes = read_private_regular_bounded(path, 128)?;
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "owner pin is not UTF-8"))?;
+    let pin = value.strip_suffix('\n').unwrap_or(value);
+    if pin.len() != 64
+        || pin.contains('\n')
+        || !pin
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "owner pin is not canonical lowercase SHA-256",
+        ));
+    }
+    Ok(pin.to_owned())
+}
+
+fn read_private_regular_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, limit);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "owner-private package inputs require Unix mode and link validation",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        read_regular_bounded_with_policy(path, limit, true)
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +502,23 @@ mod tests {
         );
         assert_eq!(fs::read_dir(&moved_parent).unwrap().count(), 1);
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_inputs_reject_broad_modes_and_multiple_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("private-package.json");
+        fs::write(&input, b"private").unwrap();
+        fs::set_permissions(&input, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(read_private_regular_bounded(&input, 128).is_err());
+
+        fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+        let second_link = directory.path().join("second-link.json");
+        fs::hard_link(&input, second_link).unwrap();
+        assert!(read_private_regular_bounded(&input, 128).is_err());
     }
 
     #[cfg(not(unix))]

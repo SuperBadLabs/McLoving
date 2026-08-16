@@ -19,16 +19,25 @@ as unsupported. The envelope authenticates and normalizes that dependency,
 sets `status=incomplete_state_transfer_unsupported`, and rejects the candidate
 with `E_STATE_TRANSFER_EVIDENCE_UNAVAILABLE`. There are zero packaged cases and
 228 deterministic rejections. No case-specific rehearsal, state artifact,
-cutover eligibility, or rollback eligibility is claimed. MIG-007 therefore
-remains incomplete. The exact retained source tree is still private on HeMan;
+cutover eligibility, or rollback eligibility is claimed by this public
+baseline. The exact retained source tree is still private on HeMan;
 its exporter-compatible digest has been reproduced as
 `b47cc3e1c19e1d486a2df2fc76343e3031ee370a79564fe88a471adbf6e53107`.
 It passed the pinned networkless Gitleaks scan with zero findings and is
 retained owner-read-only under an internal source-seal receipt kept only on
-HeMan; no source bytes or private seal metadata enter the repository. It has
-not been converted by certified bidirectional transforms. Completion still
-requires those transforms, destination state, and case-specific rehearsal
-receipts to be packaged and verifiable.
+HeMan; no source bytes or private seal metadata enter the repository.
+
+The companion `private-v1` envelope, retained only on HeMan, embeds this exact
+public baseline and the complete owner-manifest-pinned MIG-005A forward and
+reverse archives. Its canonical verifier authenticates the sealed source,
+reconstructs both state transforms from their exact packaged implementation
+and configuration identities, cross-checks independent binding receipts, and
+proves the effect-free McLoving build plus Jenkins restart and next-build
+continuity. It verifies one packaged case and 227 deterministic rejections,
+sets `package_complete=true` and `shadow_eligible=true`, and keeps every
+production, credential, trigger, scheduler, effect, canary, cutover, rollback,
+and decommission authority bit false. Private package bytes, evidence, and
+owner pins never enter GitHub.
 
 Reproduce and verify from the repository root:
 

@@ -1,0 +1,1012 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Read as _;
+use std::path::{Component, Path};
+
+use mcloving_jenkins_state_transfer::{
+    admitted_forward_binding, admitted_reverse_binding, admitted_tree_digest,
+    authenticate_forward_bundle, authenticate_reverse_bundle, load_admitted_history,
+    normalize_single_aborted_workflow,
+};
+use mcloving_state_transfer::{Digest, StateBundle, canonical_bytes, transform};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::{PACKAGE_ID, PackageError, generate, sha256, verify};
+
+const PRIVATE_SCHEMA: &str = "mcloving.jenkins.migration-package/private-v1";
+const MIG005A_REVIEWED_HEAD: &str = "4d4e0027f8b103a39e1ed40d95c1a63385afa3e7";
+const MIG005A_PROTECTED_MAIN: &str = "9932cf42d3337f7cfa092c094daf3498e26eface";
+const MIG006_PROTECTED_MAIN: &str = "2a8f983838b4bd063bd029b3e164f7ac36c20439";
+const MAX_EVIDENCE_FILES: usize = 96;
+const MAX_EVIDENCE_FILE_BYTES: usize = 512 * 1024;
+
+pub const MAX_PRIVATE_PACKAGE_BYTES: usize = 2 * 1024 * 1024;
+
+const FORWARD_PATHS: &[&str] = &[
+    "evidence/forward-normalization.txt",
+    "evidence/postgres-container-inspect.json",
+    "evidence/postgres-image-inspect.json",
+    "evidence/private-network-inspect.json",
+    "evidence/rust-client-container-inspect.json",
+    "forward-bundle.json",
+    "mcloving/forward-bundle.json",
+    "mcloving/mcloving-build-2-log-0.txt",
+    "mcloving/mcloving-build-2-log-1.txt",
+    "mcloving/mcloving-build-2.log",
+    "mcloving/rehearsal-summary.json",
+    "mcloving/reverse-bundle.json",
+];
+
+const REVERSE_PATHS: &[&str] = &[
+    "evidence/PLUGIN_SHA256SUMS",
+    "evidence/authenticated-source-build-1.json",
+    "evidence/authenticated-source-forward-bundle.json",
+    "evidence/authenticated-source.txt",
+    "evidence/authenticated-transform-binding.json",
+    "evidence/continued-build-3-shell-log.json",
+    "evidence/continued-build-3-stage.json",
+    "evidence/continued-build-3-workflow.json",
+    "evidence/continued-build-3.json",
+    "evidence/continued-build-3.log",
+    "evidence/imported-build-1.json",
+    "evidence/imported-build-1.log",
+    "evidence/imported-build-2-shell-log.json",
+    "evidence/imported-build-2-shell-log.txt",
+    "evidence/imported-build-2-stage.json",
+    "evidence/imported-build-2-workflow.json",
+    "evidence/imported-build-2.json",
+    "evidence/imported-build-2.log",
+    "evidence/jenkins-container-inspect.json",
+    "evidence/jenkins-image-inspect.json",
+    "evidence/jenkins-job-after/builds/1/build.xml",
+    "evidence/jenkins-job-after/builds/1/log",
+    "evidence/jenkins-job-after/builds/1/log-index",
+    "evidence/jenkins-job-after/builds/1/workflow-completed/flowNodeStore.xml",
+    "evidence/jenkins-job-after/builds/2/build.xml",
+    "evidence/jenkins-job-after/builds/2/log",
+    "evidence/jenkins-job-after/builds/2/log-index",
+    "evidence/jenkins-job-after/builds/2/mcloving-native-provenance.json",
+    "evidence/jenkins-job-after/builds/2/mcloving-state-transfer-build.json",
+    "evidence/jenkins-job-after/builds/2/mcloving-state-transfer-receipt.json",
+    "evidence/jenkins-job-after/builds/2/workflow-completed/flowNodeStore.xml",
+    "evidence/jenkins-job-after/builds/3/build.xml",
+    "evidence/jenkins-job-after/builds/3/log",
+    "evidence/jenkins-job-after/builds/3/log-index",
+    "evidence/jenkins-job-after/builds/3/workflow-completed/flowNodeStore.xml",
+    "evidence/jenkins-job-after/builds/permalinks",
+    "evidence/jenkins-job-after/config.xml",
+    "evidence/jenkins-job-after/nextBuildNumber",
+    "evidence/network-negative.txt",
+    "evidence/private-network-inspect.json",
+    "evidence/restarted-build-1.json",
+    "evidence/restarted-build-1.log",
+    "evidence/restarted-build-2-shell-log.json",
+    "evidence/restarted-build-2-shell-log.txt",
+    "evidence/restarted-build-2-stage.json",
+    "evidence/restarted-build-2-workflow.json",
+    "evidence/restarted-build-2.json",
+    "evidence/restarted-build-2.log",
+    "evidence/restored-source-forward-bundle.json",
+    "evidence/restored-source.txt",
+    "evidence/reverse-bundle.sha256",
+    "evidence/reverse-source-build-1.json",
+    "evidence/reverse-transform-binding.json",
+    "evidence/template-boundary.txt",
+    "evidence/template-build-2-shell-log.json",
+    "evidence/template-build-2-stage.json",
+    "evidence/template-build-2-workflow.json",
+    "evidence/template-build-2.json",
+    "evidence/template-build-2.log",
+    "evidence/template-container-inspect.json",
+    "evidence/verified-next-build-number.txt",
+];
+
+pub struct PrivateGenerationInputs<'a> {
+    pub forward_evidence_root: &'a Path,
+    pub reverse_evidence_root: &'a Path,
+    pub verification: PrivateVerificationInputs<'a>,
+}
+
+pub struct PrivateVerificationInputs<'a> {
+    pub sealed_history_root: &'a Path,
+    pub expected_forward_manifest_sha256: &'a str,
+    pub expected_reverse_manifest_sha256: &'a str,
+    pub expected_package_sha256: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateVerificationReceipt {
+    pub schema: &'static str,
+    pub packaged_cases: usize,
+    pub rejected_cases: usize,
+    pub admitted_state_dependencies: usize,
+    pub package_complete: bool,
+    pub shadow_eligible: bool,
+    pub production_authority: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateMigrationPackage {
+    schema: String,
+    package_id: String,
+    reviewed_heads: ReviewedHeads,
+    public_baseline_json: String,
+    state_transfer: PrivateStateTransfer,
+    authority: PrivateAuthority,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewedHeads {
+    mig005a_reviewed_head: String,
+    mig005a_protected_main: String,
+    mig006_protected_main: String,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateStateTransfer {
+    status: String,
+    source_tree_sha256: String,
+    forward_evidence: EvidenceArchive,
+    reverse_evidence: EvidenceArchive,
+    packaged_case: String,
+    case_specific_receipts: Vec<String>,
+    admitted_state_dependencies: Vec<String>,
+    package_complete: bool,
+    shadow_eligible: bool,
+    canary_eligible: bool,
+    cutover_eligible: bool,
+    rollback_eligible: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceArchive {
+    role: String,
+    manifest_sha256: String,
+    manifest: String,
+    files: Vec<EvidenceFile>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceFile {
+    path: String,
+    sha256: String,
+    contents: String,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateAuthority {
+    source_state: String,
+    production_authority: bool,
+    production_credentials: bool,
+    production_effects: bool,
+    scheduler_authority: bool,
+    trigger_authority: bool,
+    canary_authority: bool,
+    cutover_authority: bool,
+    rollback_authority: bool,
+    decommission_authority: bool,
+    credential_material_present: bool,
+}
+
+pub fn generate_private(
+    repository_root: &Path,
+    inputs: &PrivateGenerationInputs<'_>,
+) -> Result<Vec<u8>, PackageError> {
+    if !cfg!(unix) {
+        return Err(PackageError::new(
+            "E_PRIVATE_PLATFORM",
+            "private package generation requires Unix no-follow input handling",
+        ));
+    }
+    validate_digest(
+        inputs.verification.expected_forward_manifest_sha256,
+        "forward owner pin",
+    )?;
+    validate_digest(
+        inputs.verification.expected_reverse_manifest_sha256,
+        "reverse owner pin",
+    )?;
+    if inputs.verification.expected_package_sha256.is_some() {
+        return Err(PackageError::new(
+            "E_PRIVATE_INPUT",
+            "generation must not accept a preselected private package digest",
+        ));
+    }
+    let public_baseline = generate(repository_root)?;
+    verify(&public_baseline, repository_root)?;
+    let package = PrivateMigrationPackage {
+        schema: PRIVATE_SCHEMA.into(),
+        package_id: format!("{PACKAGE_ID}-private-state-v1"),
+        reviewed_heads: expected_reviewed_heads(),
+        public_baseline_json: String::from_utf8(public_baseline)
+            .map_err(|error| PackageError::new("E_PRIVATE_BASELINE", error.to_string()))?,
+        state_transfer: PrivateStateTransfer {
+            status: "complete_private_state_transfer_verified".into(),
+            source_tree_sha256: encode_digest(admitted_tree_digest()),
+            forward_evidence: load_archive(
+                "mig005a-forward",
+                inputs.forward_evidence_root,
+                inputs.verification.expected_forward_manifest_sha256,
+                FORWARD_PATHS,
+            )?,
+            reverse_evidence: load_archive(
+                "mig005a-jenkins-reverse",
+                inputs.reverse_evidence_root,
+                inputs.verification.expected_reverse_manifest_sha256,
+                REVERSE_PATHS,
+            )?,
+            packaged_case: "corpus-052-cinqict_jenkinsdev".into(),
+            case_specific_receipts: vec![
+                "forward:mcloving/rehearsal-summary.json".into(),
+                "reverse:evidence/imported-build-2-workflow.json".into(),
+                "reverse:evidence/restarted-build-2-workflow.json".into(),
+                "reverse:evidence/continued-build-3-workflow.json".into(),
+            ],
+            admitted_state_dependencies: vec!["build-history".into()],
+            package_complete: true,
+            shadow_eligible: true,
+            canary_eligible: false,
+            cutover_eligible: false,
+            rollback_eligible: false,
+        },
+        authority: expected_private_authority(),
+    };
+    let bytes = render_private(&package)?;
+    verify_private(&bytes, repository_root, &inputs.verification)?;
+    Ok(bytes)
+}
+
+pub fn verify_private(
+    bytes: &[u8],
+    repository_root: &Path,
+    inputs: &PrivateVerificationInputs<'_>,
+) -> Result<PrivateVerificationReceipt, PackageError> {
+    if !cfg!(unix) {
+        return Err(PackageError::new(
+            "E_PRIVATE_PLATFORM",
+            "private package verification requires Unix no-follow input handling",
+        ));
+    }
+    if bytes.len() > MAX_PRIVATE_PACKAGE_BYTES {
+        return Err(PackageError::new(
+            "E_PRIVATE_SIZE",
+            "private package exceeds the two MiB byte limit",
+        ));
+    }
+    validate_digest(inputs.expected_forward_manifest_sha256, "forward owner pin")?;
+    validate_digest(inputs.expected_reverse_manifest_sha256, "reverse owner pin")?;
+    if let Some(expected) = inputs.expected_package_sha256 {
+        validate_digest(expected, "private package owner pin")?;
+        if sha256(bytes) != expected {
+            return Err(PackageError::new(
+                "E_PRIVATE_PACKAGE_DIGEST",
+                "private package digest mismatch",
+            ));
+        }
+    }
+    let package: PrivateMigrationPackage = serde_json::from_slice(bytes)
+        .map_err(|error| PackageError::new("E_PRIVATE_SCHEMA", error.to_string()))?;
+    if render_private(&package)? != bytes {
+        return Err(PackageError::new(
+            "E_PRIVATE_CANONICAL",
+            "private package bytes are not canonical pretty JSON",
+        ));
+    }
+    if package.schema != PRIVATE_SCHEMA
+        || package.package_id != format!("{PACKAGE_ID}-private-state-v1")
+        || package.reviewed_heads != expected_reviewed_heads()
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_IDENTITY",
+            "private package identity mismatch",
+        ));
+    }
+    verify(package.public_baseline_json.as_bytes(), repository_root)?;
+    if package.state_transfer.status != "complete_private_state_transfer_verified"
+        || package.state_transfer.source_tree_sha256 != encode_digest(admitted_tree_digest())
+        || package.state_transfer.packaged_case != "corpus-052-cinqict_jenkinsdev"
+        || package.state_transfer.admitted_state_dependencies != ["build-history"]
+        || package.state_transfer.case_specific_receipts
+            != [
+                "forward:mcloving/rehearsal-summary.json",
+                "reverse:evidence/imported-build-2-workflow.json",
+                "reverse:evidence/restarted-build-2-workflow.json",
+                "reverse:evidence/continued-build-3-workflow.json",
+            ]
+        || !package.state_transfer.package_complete
+        || !package.state_transfer.shadow_eligible
+        || package.state_transfer.canary_eligible
+        || package.state_transfer.cutover_eligible
+        || package.state_transfer.rollback_eligible
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_STATE_TRANSFER",
+            "private state-transfer eligibility mismatch",
+        ));
+    }
+    verify_archive(
+        &package.state_transfer.forward_evidence,
+        "mig005a-forward",
+        inputs.expected_forward_manifest_sha256,
+        FORWARD_PATHS,
+    )?;
+    verify_archive(
+        &package.state_transfer.reverse_evidence,
+        "mig005a-jenkins-reverse",
+        inputs.expected_reverse_manifest_sha256,
+        REVERSE_PATHS,
+    )?;
+    if package.authority != expected_private_authority() {
+        return Err(PackageError::new(
+            "E_PRIVATE_AUTHORITY",
+            "private package authority ledger mismatch",
+        ));
+    }
+    verify_exact_state(&package.state_transfer, inputs)?;
+    Ok(PrivateVerificationReceipt {
+        schema: PRIVATE_SCHEMA,
+        packaged_cases: 1,
+        rejected_cases: 227,
+        admitted_state_dependencies: 1,
+        package_complete: true,
+        shadow_eligible: true,
+        production_authority: false,
+    })
+}
+
+fn verify_exact_state(
+    state: &PrivateStateTransfer,
+    inputs: &PrivateVerificationInputs<'_>,
+) -> Result<(), PackageError> {
+    let forward_bytes = archive_file(&state.forward_evidence, "mcloving/forward-bundle.json")?;
+    let reverse_bytes = archive_file(&state.forward_evidence, "mcloving/reverse-bundle.json")?;
+    if archive_file(&state.forward_evidence, "forward-bundle.json")? != forward_bytes {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "forward bundle copies are divergent",
+        ));
+    }
+    let reverse_digest_receipt = std::str::from_utf8(archive_file(
+        &state.reverse_evidence,
+        "evidence/reverse-bundle.sha256",
+    )?)
+    .map_err(|error| PackageError::new("E_PRIVATE_CONTINUITY", error.to_string()))?;
+    if reverse_digest_receipt.strip_suffix('\n') != Some(sha256(reverse_bytes).as_str()) {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "reverse bundle digest receipt is divergent",
+        ));
+    }
+    let forward: StateBundle = serde_json::from_slice(forward_bytes)
+        .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
+    let reverse: StateBundle = serde_json::from_slice(reverse_bytes)
+        .map_err(|error| PackageError::new("E_PRIVATE_REVERSE", error.to_string()))?;
+    require_canonical_bundle(&forward, forward_bytes, "forward")?;
+    require_canonical_bundle(&reverse, reverse_bytes, "reverse")?;
+    let opaque_evidence_id = forward
+        .jobs
+        .first()
+        .and_then(|job| job.builds.first())
+        .and_then(|build| build.logs.first())
+        .map(|log| log.retrieval.logical_locator.as_str())
+        .and_then(|locator| locator.strip_prefix("held-evidence:"))
+        .and_then(|locator| locator.strip_suffix("/builds/1/log"))
+        .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+        .ok_or_else(|| {
+            PackageError::new("E_PRIVATE_FORWARD", "opaque evidence locator is divergent")
+        })?;
+    let history = load_admitted_history(inputs.sealed_history_root, opaque_evidence_id.to_owned())
+        .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
+    let forward_implementation = forward.binding.transform_implementation_digest;
+    let reconstructed = normalize_single_aborted_workflow(
+        &history,
+        &admitted_forward_binding(forward_implementation),
+    )
+    .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
+    if reconstructed.bundle() != &forward {
+        let boundary = if reconstructed.bundle().binding != forward.binding {
+            let expected = &reconstructed.bundle().binding;
+            let actual = &forward.binding;
+            let mut fields = Vec::new();
+            if expected.source != actual.source {
+                fields.push("source");
+            }
+            if expected.destination != actual.destination {
+                fields.push("destination");
+            }
+            if expected.source_export_digest != actual.source_export_digest {
+                fields.push("source-export");
+            }
+            if expected.transform_implementation_digest != actual.transform_implementation_digest {
+                fields.push("transform-implementation");
+            }
+            if expected.transform_configuration_digest != actual.transform_configuration_digest {
+                fields.push("transform-configuration");
+            }
+            if expected.conflict_policy != actual.conflict_policy {
+                fields.push("conflict-policy");
+            }
+            if expected.provenance != actual.provenance {
+                fields.push("provenance");
+            }
+            return Err(PackageError::new(
+                "E_PRIVATE_FORWARD",
+                format!(
+                    "forward candidate differs at binding fields: {}",
+                    fields.join(",")
+                ),
+            ));
+        } else if reconstructed.bundle().jobs != forward.jobs {
+            "jobs"
+        } else {
+            "expected-record denominator"
+        };
+        return Err(PackageError::new(
+            "E_PRIVATE_FORWARD",
+            format!("forward candidate differs at the {boundary} boundary"),
+        ));
+    }
+    let authenticated_forward =
+        authenticate_forward_bundle(&history, &forward, forward_implementation)
+            .map_err(|error| PackageError::new("E_PRIVATE_FORWARD", error.to_string()))?;
+    let reverse_implementation = reverse.binding.transform_implementation_digest;
+    let expected_reverse_binding = admitted_reverse_binding(reverse_implementation);
+    let mut reverse_binding_fields = Vec::new();
+    if reverse.binding.source != expected_reverse_binding.source {
+        reverse_binding_fields.push("source");
+    }
+    if reverse.binding.destination != expected_reverse_binding.destination {
+        reverse_binding_fields.push("destination");
+    }
+    if reverse.binding.transform_implementation_digest
+        != expected_reverse_binding.transform_implementation_digest
+    {
+        reverse_binding_fields.push("transform-implementation");
+    }
+    if reverse.binding.transform_configuration_digest
+        != expected_reverse_binding.transform_configuration_digest
+    {
+        reverse_binding_fields.push("transform-configuration");
+    }
+    if reverse.binding.provenance != expected_reverse_binding.provenance {
+        reverse_binding_fields.push("provenance");
+    }
+    if !reverse_binding_fields.is_empty() {
+        return Err(PackageError::new(
+            "E_PRIVATE_REVERSE",
+            format!(
+                "reverse candidate differs at binding fields: {}",
+                reverse_binding_fields.join(",")
+            ),
+        ));
+    }
+    let authenticated_reverse =
+        authenticate_reverse_bundle(&authenticated_forward, &reverse, reverse_implementation)
+            .map_err(|error| PackageError::new("E_PRIVATE_REVERSE", error.to_string()))?;
+    transform(
+        authenticated_reverse.bundle(),
+        authenticated_reverse.expected(),
+        &BTreeMap::new(),
+    )
+    .map_err(|error| PackageError::new("E_PRIVATE_REVERSE", error.to_string()))?;
+
+    for path in [
+        "evidence/authenticated-source-forward-bundle.json",
+        "evidence/restored-source-forward-bundle.json",
+    ] {
+        if archive_file(&state.reverse_evidence, path)? != forward_bytes {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                format!("{path} differs from the authenticated forward bundle"),
+            ));
+        }
+    }
+    if archive_file(&state.forward_evidence, "mcloving/mcloving-build-2.log")?
+        != b"+ echo Hello World\nHello World\n"
+        || archive_file(
+            &state.reverse_evidence,
+            "evidence/imported-build-2-shell-log.txt",
+        )? != b"+ echo Hello World\nHello World\n"
+        || archive_file(
+            &state.reverse_evidence,
+            "evidence/verified-next-build-number.txt",
+        )? != b"4\n"
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "ordered logs or next-build continuation are divergent",
+        ));
+    }
+    let summary: Value = serde_json::from_slice(archive_file(
+        &state.forward_evidence,
+        "mcloving/rehearsal-summary.json",
+    )?)
+    .map_err(|error| PackageError::new("E_PRIVATE_CONTINUITY", error.to_string()))?;
+    if summary.get("production_authority") != Some(&Value::Bool(false))
+        || summary.get("external_effects") != Some(&Value::from(0))
+        || summary.get("actual_process_execution") != Some(&Value::Bool(true))
+        || summary.get("forward_retrieval_verified") != Some(&Value::Bool(true))
+        || summary.get("reverse_retrieval_verified") != Some(&Value::Bool(true))
+        || summary.get("reverse_replay_verified") != Some(&Value::Bool(true))
+        || summary.get("forward_bundle_digest") != Some(&Value::String(sha256(forward_bytes)))
+        || summary.get("reverse_bundle_digest") != Some(&Value::String(sha256(reverse_bytes)))
+        || summary.get("reverse_transform_implementation_sha256")
+            != Some(&Value::String(encode_digest(reverse_implementation)))
+        || summary.get("build_count") != Some(&Value::from(2))
+        || summary.get("next_build_number") != Some(&Value::from(3))
+        || summary.get("previous_result") != Some(&Value::from("succeeded"))
+        || summary.get("imported_previous_build_number") != Some(&Value::from(1))
+        || summary.get("imported_previous_result") != Some(&Value::from("aborted"))
+        || summary.get("log_count") != Some(&Value::from(2))
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "durable rehearsal summary is divergent",
+        ));
+    }
+    let authenticated_binding: Value = serde_json::from_slice(archive_file(
+        &state.reverse_evidence,
+        "evidence/authenticated-transform-binding.json",
+    )?)
+    .map_err(|error| PackageError::new("E_PRIVATE_CONTINUITY", error.to_string()))?;
+    let reverse_binding: Value = serde_json::from_slice(archive_file(
+        &state.reverse_evidence,
+        "evidence/reverse-transform-binding.json",
+    )?)
+    .map_err(|error| PackageError::new("E_PRIVATE_CONTINUITY", error.to_string()))?;
+    let expected_authenticated_binding = json!({
+        "transform_implementation_digest": forward.binding.transform_implementation_digest,
+        "transform_configuration_digest": forward.binding.transform_configuration_digest,
+        "conflict_policy": forward.binding.conflict_policy,
+    });
+    let expected_reverse_binding = json!({
+        "transform_implementation_digest": reverse.binding.transform_implementation_digest,
+        "transform_configuration_digest": reverse.binding.transform_configuration_digest,
+        "conflict_policy": reverse.binding.conflict_policy,
+    });
+    if authenticated_binding != expected_authenticated_binding
+        || reverse_binding != expected_reverse_binding
+        || forward.binding.transform_implementation_digest
+            == reverse.binding.transform_implementation_digest
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "forward or reverse transform identity receipt is divergent",
+        ));
+    }
+    for (path, number, result) in [
+        ("evidence/imported-build-1.json", 1, "ABORTED"),
+        ("evidence/imported-build-2.json", 2, "SUCCESS"),
+        ("evidence/restarted-build-2.json", 2, "SUCCESS"),
+        ("evidence/continued-build-3.json", 3, "SUCCESS"),
+    ] {
+        let value: Value = serde_json::from_slice(archive_file(&state.reverse_evidence, path)?)
+            .map_err(|error| PackageError::new("E_PRIVATE_CONTINUITY", error.to_string()))?;
+        if value.get("number") != Some(&Value::from(number))
+            || value.get("result") != Some(&Value::from(result))
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                format!("{path} is divergent"),
+            ));
+        }
+    }
+    if archive_file(&state.reverse_evidence, "evidence/network-negative.txt")?.is_empty() {
+        return Err(PackageError::new(
+            "E_PRIVATE_CONTINUITY",
+            "network-denial receipt is empty",
+        ));
+    }
+    Ok(())
+}
+
+fn load_archive(
+    role: &str,
+    root: &Path,
+    expected_manifest_sha256: &str,
+    required_paths: &[&str],
+) -> Result<EvidenceArchive, PackageError> {
+    require_plain_directory(root)?;
+    let manifest_bytes = read_plain_file(&root.join("SHA256SUMS"), MAX_EVIDENCE_FILE_BYTES)?;
+    if sha256(&manifest_bytes) != expected_manifest_sha256 {
+        return Err(PackageError::new(
+            "E_PRIVATE_MANIFEST",
+            format!("{role} manifest owner pin mismatch"),
+        ));
+    }
+    let manifest = String::from_utf8(manifest_bytes)
+        .map_err(|error| PackageError::new("E_PRIVATE_MANIFEST", error.to_string()))?;
+    let entries = parse_manifest(&manifest)?;
+    let expected = required_paths
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>();
+    if entries.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(PackageError::new(
+            "E_PRIVATE_DENOMINATOR",
+            format!("{role} evidence denominator mismatch"),
+        ));
+    }
+    let mut actual = BTreeSet::new();
+    collect_regular_files(root, root, &mut actual)?;
+    let mut expected_actual = expected;
+    expected_actual.insert("SHA256SUMS".to_owned());
+    if actual != expected_actual {
+        return Err(PackageError::new(
+            "E_PRIVATE_DENOMINATOR",
+            format!("{role} filesystem denominator mismatch"),
+        ));
+    }
+    let mut total = manifest.len();
+    let mut files = Vec::with_capacity(entries.len());
+    for (path, expected_digest) in entries {
+        let contents = read_plain_file(&root.join(&path), MAX_EVIDENCE_FILE_BYTES)?;
+        total = total
+            .checked_add(contents.len())
+            .ok_or_else(|| PackageError::new("E_PRIVATE_SIZE", "evidence byte count overflow"))?;
+        if total > MAX_PRIVATE_PACKAGE_BYTES || sha256(&contents) != expected_digest {
+            return Err(PackageError::new(
+                "E_PRIVATE_MANIFEST",
+                format!("{role} evidence member mismatch"),
+            ));
+        }
+        files.push(EvidenceFile {
+            path,
+            sha256: expected_digest,
+            contents: String::from_utf8(contents)
+                .map_err(|error| PackageError::new("E_PRIVATE_UTF8", error.to_string()))?,
+        });
+    }
+    Ok(EvidenceArchive {
+        role: role.into(),
+        manifest_sha256: expected_manifest_sha256.into(),
+        manifest,
+        files,
+    })
+}
+
+fn verify_archive(
+    archive: &EvidenceArchive,
+    expected_role: &str,
+    expected_manifest_sha256: &str,
+    required_paths: &[&str],
+) -> Result<(), PackageError> {
+    if archive.role != expected_role
+        || archive.files.len() > MAX_EVIDENCE_FILES
+        || archive.manifest_sha256 != expected_manifest_sha256
+        || sha256(archive.manifest.as_bytes()) != expected_manifest_sha256
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_MANIFEST",
+            "embedded evidence manifest mismatch",
+        ));
+    }
+    let entries = parse_manifest(&archive.manifest)?;
+    let expected = required_paths
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>();
+    if entries.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(PackageError::new(
+            "E_PRIVATE_DENOMINATOR",
+            "embedded evidence denominator mismatch",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for file in &archive.files {
+        if !seen.insert(file.path.clone())
+            || entries.get(&file.path) != Some(&file.sha256)
+            || sha256(file.contents.as_bytes()) != file.sha256
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_MANIFEST",
+                "embedded evidence member mismatch",
+            ));
+        }
+    }
+    if seen != expected {
+        return Err(PackageError::new(
+            "E_PRIVATE_DENOMINATOR",
+            "embedded evidence member set mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_manifest(manifest: &str) -> Result<BTreeMap<String, String>, PackageError> {
+    if manifest.len() > MAX_EVIDENCE_FILE_BYTES || !manifest.ends_with('\n') {
+        return Err(PackageError::new(
+            "E_PRIVATE_MANIFEST",
+            "evidence manifest is unbounded or not newline terminated",
+        ));
+    }
+    let mut entries = BTreeMap::new();
+    let mut previous: Option<&str> = None;
+    for line in manifest.lines() {
+        let (digest, path) = line.split_once("  ").ok_or_else(|| {
+            PackageError::new("E_PRIVATE_MANIFEST", "malformed evidence manifest row")
+        })?;
+        validate_digest(digest, "evidence member")?;
+        validate_relative_path(path)?;
+        if previous.is_some_and(|value| value >= path)
+            || entries.insert(path.to_owned(), digest.to_owned()).is_some()
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_MANIFEST",
+                "evidence manifest paths are not unique and sorted",
+            ));
+        }
+        previous = Some(path);
+    }
+    if entries.is_empty() || entries.len() > MAX_EVIDENCE_FILES {
+        return Err(PackageError::new(
+            "E_PRIVATE_MANIFEST",
+            "evidence manifest denominator is invalid",
+        ));
+    }
+    Ok(entries)
+}
+
+fn collect_regular_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut BTreeSet<String>,
+) -> Result<(), PackageError> {
+    require_plain_directory(directory)?;
+    for entry in fs::read_dir(directory)
+        .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?
+    {
+        let entry = entry.map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+        let path = entry.path();
+        if file_type.is_symlink() {
+            return Err(PackageError::new(
+                "E_PRIVATE_FILE_TYPE",
+                "private evidence contains a symbolic link",
+            ));
+        }
+        if file_type.is_dir() {
+            collect_regular_files(root, &path, files)?;
+        } else if file_type.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| PackageError::new("E_PRIVATE_PATH", error.to_string()))?;
+            let relative = relative
+                .to_str()
+                .ok_or_else(|| PackageError::new("E_PRIVATE_PATH", "evidence path is not UTF-8"))?;
+            validate_relative_path(relative)?;
+            if !files.insert(relative.to_owned()) || files.len() > MAX_EVIDENCE_FILES + 1 {
+                return Err(PackageError::new(
+                    "E_PRIVATE_DENOMINATOR",
+                    "private evidence file denominator is invalid",
+                ));
+            }
+        } else {
+            return Err(PackageError::new(
+                "E_PRIVATE_FILE_TYPE",
+                "private evidence contains a non-regular entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_plain_directory(path: &Path) -> Result<(), PackageError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+    if !metadata.file_type().is_dir() {
+        return Err(PackageError::new(
+            "E_PRIVATE_FILE_TYPE",
+            "private evidence root is not a plain directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o077 != 0 {
+            return Err(PackageError::new(
+                "E_PRIVATE_MODE",
+                "private evidence directory grants group or other access",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_plain_file(path: &Path, limit: usize) -> Result<Vec<u8>, PackageError> {
+    read_regular_file(path, limit, true)
+}
+
+fn read_regular_file(
+    path: &Path,
+    limit: usize,
+    require_owner_only: bool,
+) -> Result<Vec<u8>, PackageError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+    if !metadata.file_type().is_file() || metadata.len() > limit as u64 {
+        return Err(PackageError::new(
+            "E_PRIVATE_FILE_TYPE",
+            "private input is not a bounded regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 || (require_owner_only && metadata.mode() & 0o077 != 0) {
+            return Err(PackageError::new(
+                "E_PRIVATE_MODE",
+                "private input is linked or grants group or other access",
+            ));
+        }
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| PackageError::new("E_PRIVATE_IO", error.to_string()))?;
+    if bytes.len() > limit {
+        return Err(PackageError::new(
+            "E_PRIVATE_SIZE",
+            "private input exceeds its byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_digest(value: &str, role: &str) -> Result<(), PackageError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_DIGEST",
+            format!("{role} digest is not canonical lowercase SHA-256"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_relative_path(path: &str) -> Result<(), PackageError> {
+    let value = Path::new(path);
+    if path.is_empty()
+        || path.contains('\\')
+        || value.is_absolute()
+        || value
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_PATH",
+            "evidence path is not a canonical relative path",
+        ));
+    }
+    Ok(())
+}
+
+fn archive_file<'a>(archive: &'a EvidenceArchive, path: &str) -> Result<&'a [u8], PackageError> {
+    archive
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .map(|file| file.contents.as_bytes())
+        .ok_or_else(|| PackageError::new("E_PRIVATE_DENOMINATOR", "required evidence is absent"))
+}
+
+fn require_canonical_bundle(
+    bundle: &StateBundle,
+    bytes: &[u8],
+    role: &str,
+) -> Result<(), PackageError> {
+    let canonical = canonical_bytes(bundle)
+        .map_err(|error| PackageError::new("E_PRIVATE_STATE", error.to_string()))?;
+    if canonical != bytes {
+        return Err(PackageError::new(
+            "E_PRIVATE_STATE",
+            format!("{role} state bundle is not canonical"),
+        ));
+    }
+    Ok(())
+}
+
+fn expected_reviewed_heads() -> ReviewedHeads {
+    ReviewedHeads {
+        mig005a_reviewed_head: MIG005A_REVIEWED_HEAD.into(),
+        mig005a_protected_main: MIG005A_PROTECTED_MAIN.into(),
+        mig006_protected_main: MIG006_PROTECTED_MAIN.into(),
+    }
+}
+
+fn expected_private_authority() -> PrivateAuthority {
+    PrivateAuthority {
+        source_state: "disabled_held_evidence".into(),
+        production_authority: false,
+        production_credentials: false,
+        production_effects: false,
+        scheduler_authority: false,
+        trigger_authority: false,
+        canary_authority: false,
+        cutover_authority: false,
+        rollback_authority: false,
+        decommission_authority: false,
+        credential_material_present: false,
+    }
+}
+
+fn render_private(package: &PrivateMigrationPackage) -> Result<Vec<u8>, PackageError> {
+    let mut bytes = serde_json::to_vec_pretty(package)
+        .map_err(|error| PackageError::new("E_PRIVATE_SCHEMA", error.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_PRIVATE_PACKAGE_BYTES {
+        return Err(PackageError::new(
+            "E_PRIVATE_SIZE",
+            "private package exceeds the two MiB byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn encode_digest(digest: Digest) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parser_rejects_traversal_duplicates_and_bad_digests() {
+        let digest = "0".repeat(64);
+        assert!(parse_manifest(&format!("{digest}  ../escape\n")).is_err());
+        assert!(parse_manifest(&format!("{digest}  a\n{digest}  a\n")).is_err());
+        assert!(parse_manifest("not-a-digest  a\n").is_err());
+    }
+
+    #[test]
+    fn archive_verifier_rejects_content_substitution() {
+        let contents = "receipt\n";
+        let digest = sha256(contents.as_bytes());
+        let manifest = format!("{digest}  receipt.txt\n");
+        let manifest_digest = sha256(manifest.as_bytes());
+        let mut archive = EvidenceArchive {
+            role: "test".into(),
+            manifest_sha256: manifest_digest.clone(),
+            manifest,
+            files: vec![EvidenceFile {
+                path: "receipt.txt".into(),
+                sha256: digest,
+                contents: contents.into(),
+            }],
+        };
+        verify_archive(&archive, "test", &manifest_digest, &["receipt.txt"]).unwrap();
+        archive.files[0].contents.push_str("changed");
+        assert!(verify_archive(&archive, "test", &manifest_digest, &["receipt.txt"]).is_err());
+    }
+}

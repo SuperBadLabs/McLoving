@@ -10,8 +10,8 @@ use mcloving_controller_store::{
     PipelineWrite, Store, TerminalOutcome,
 };
 use mcloving_jenkins_state_transfer::{
-    ReverseBinding, admitted_tree_digest, authenticate_forward_bundle, load_admitted_history,
-    prepare_reverse_history,
+    admitted_reverse_binding, admitted_tree_digest, authenticate_forward_bundle,
+    load_admitted_history, prepare_reverse_history,
 };
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, DataBinding, DataClassification, ExpectedBinding,
@@ -295,13 +295,7 @@ async fn main() -> Result<(), AnyError> {
     let reverse = prepare_reverse_history(
         &authenticated_forward,
         completed,
-        &ReverseBinding {
-            source: forward.binding.destination.clone(),
-            destination: forward.binding.source.clone(),
-            transform_implementation_digest: sha256(&reverse_executable),
-            transform_configuration_digest: forward.binding.transform_configuration_digest,
-            provenance: "MIG-005A contained corpus-052 reverse reconciliation".to_owned(),
-        },
+        &admitted_reverse_binding(sha256(&reverse_executable)),
     )?;
     let reverse_plan = transform(reverse.bundle(), reverse.expected(), &BTreeMap::new())?;
     let reverse_receipt = store
