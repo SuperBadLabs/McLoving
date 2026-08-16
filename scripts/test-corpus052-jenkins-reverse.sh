@@ -504,8 +504,8 @@ capture_build() {
         if [[ -n "${expected_retained_log}" ]]; then
           podman unshare cmp "${retained_log}" "${expected_retained_log}"
         fi
-        podman unshare cat "${retained_log}" \
-          > "${staging}/evidence/${prefix}-build-${number}.log"
+        podman unshare cmp "${retained_log}" \
+          "${staging}/evidence/${prefix}-build-${number}.log"
         if [[ -n "${expected_retained_log}" ]]; then
           cmp "${staging}/evidence/${prefix}-build-${number}.log" \
             "${expected_retained_log}"

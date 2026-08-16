@@ -106,6 +106,16 @@ pub struct RetainedBuildRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedSourceBuildRecord {
+    pub queue_id: String,
+    pub result: BuildResult,
+    pub queued_at_unix_ms: i64,
+    pub started_at_unix_ms: i64,
+    pub ended_at_unix_ms: i64,
+    pub actor_subject: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum JobConfigToken {
     Start(String, Vec<(String, String)>),
     Text(String, String),
@@ -168,6 +178,403 @@ pub fn parse_retained_build_record(bytes: &[u8]) -> Result<RetainedBuildRecord, 
         started_at_unix_ms,
         duration_ms,
     })
+}
+
+/// Parses the authenticated source-build projection after Jenkins has loaded
+/// and retained it. This reuses the exact admitted source parser so queue,
+/// trigger actor, result, and all timing boundaries remain duplicate-safe.
+pub fn parse_retained_source_build_record(
+    bytes: &[u8],
+) -> Result<RetainedSourceBuildRecord, HistoryError> {
+    let parsed = parse_build(bytes)?;
+    Ok(RetainedSourceBuildRecord {
+        queue_id: parsed.queue_id,
+        result: parsed.result,
+        queued_at_unix_ms: parsed.queued_at,
+        started_at_unix_ms: parsed.started_at,
+        ended_at_unix_ms: parsed.ended_at,
+        actor_subject: parsed.actor_subject,
+    })
+}
+
+#[derive(Default)]
+struct RetainedWorkflowEntry {
+    map_keys: Vec<String>,
+    node_ids: Vec<String>,
+    parent_ids: Vec<String>,
+    descriptor_ids: Vec<String>,
+    labels: Vec<String>,
+    start_ids: Vec<String>,
+    results: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RetainedWorkflowNode {
+    parent_ids: Vec<String>,
+    descriptor_id: Option<String>,
+    label: Option<String>,
+    start_id: Option<String>,
+    result: Option<String>,
+}
+
+/// Verifies the Jenkins workflow graph and annotated-log storage that will be
+/// loaded after another restart. The stage and ShellStep identities must join
+/// the independently captured workflow receipts, every graph reference must
+/// resolve, and the bytes attributed to the ShellStep must exactly reconstruct
+/// its independently captured log.
+pub fn verify_retained_workflow_storage(
+    flow_store: &[u8],
+    log_index: &[u8],
+    console_log: &[u8],
+    expected_stage_id: &str,
+    expected_shell_id: &str,
+    expected_shell_log: &[u8],
+) -> Result<(), HistoryError> {
+    validate_numeric_id(expected_stage_id, "expected stage ID")?;
+    validate_numeric_id(expected_shell_id, "expected shell ID")?;
+    let nodes = parse_retained_workflow_nodes(flow_store)?;
+    if !(8..=64).contains(&nodes.len()) {
+        return Err(invalid("retained workflow node denominator is divergent"));
+    }
+
+    let stage_ids = nodes
+        .iter()
+        .filter_map(|(id, node)| (node.label.as_deref() == Some("Build")).then_some(id.as_str()))
+        .collect::<Vec<_>>();
+    let shell_ids = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            (node.descriptor_id.as_deref()
+                == Some("org.jenkinsci.plugins.workflow.steps.durable_task.ShellStep"))
+            .then_some(id.as_str())
+        })
+        .collect::<Vec<_>>();
+    let results = nodes
+        .values()
+        .filter_map(|node| node.result.as_deref())
+        .collect::<Vec<_>>();
+    if stage_ids != [expected_stage_id]
+        || shell_ids != [expected_shell_id]
+        || results != ["SUCCESS"]
+    {
+        return Err(invalid(
+            "retained workflow identities or terminal result are divergent",
+        ));
+    }
+    for (id, node) in &nodes {
+        let numeric_id = validate_numeric_id(id, "retained workflow node ID")?;
+        for reference in node.parent_ids.iter().chain(node.start_id.iter()) {
+            let numeric_reference =
+                validate_numeric_id(reference, "retained workflow node reference")?;
+            if !nodes.contains_key(reference) || numeric_reference >= numeric_id {
+                return Err(invalid(
+                    "retained workflow graph contains a missing or cyclic reference",
+                ));
+            }
+        }
+    }
+    verify_retained_log_index(
+        log_index,
+        console_log,
+        &nodes,
+        expected_shell_id,
+        expected_shell_log,
+    )
+}
+
+fn parse_retained_workflow_nodes(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, RetainedWorkflowNode>, HistoryError> {
+    if bytes.is_empty() || bytes.len() > MAX_XML_BYTES {
+        return Err(invalid(
+            "retained workflow XML has an invalid byte denominator",
+        ));
+    }
+    let mut reader = Reader::from_reader(bytes);
+    reader.config_mut().trim_text(true);
+    let mut path = Vec::<String>::new();
+    let mut current = None::<RetainedWorkflowEntry>;
+    let mut nodes = BTreeMap::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                path.push(String::from_utf8_lossy(start.name().as_ref()).into_owned());
+                if path.len() == 1 && path[0] != "linked-hash-map" {
+                    return Err(invalid("retained workflow XML root is divergent"));
+                }
+                if path.len() == 2 && path[1] == "entry" {
+                    if current.replace(RetainedWorkflowEntry::default()).is_some() {
+                        return Err(invalid("retained workflow entries overlap"));
+                    }
+                }
+                if let (Some(entry), Some(field)) =
+                    (current.as_mut(), retained_workflow_field(&path))
+                {
+                    retained_workflow_values(entry, field).push(String::new());
+                }
+            }
+            Ok(Event::Text(text)) => {
+                if let (Some(entry), Some(field)) =
+                    (current.as_mut(), retained_workflow_field(&path))
+                {
+                    let decoded = text
+                        .decode()
+                        .map_err(|error| invalid(format!("invalid workflow text: {error}")))?;
+                    let value = quick_xml::escape::unescape(&decoded)
+                        .map_err(|error| invalid(format!("invalid workflow escape: {error}")))?;
+                    retained_workflow_values(entry, field)
+                        .last_mut()
+                        .ok_or_else(|| invalid("workflow text has no selected field"))?
+                        .push_str(&value);
+                }
+            }
+            Ok(Event::CData(text)) => {
+                if let (Some(entry), Some(field)) =
+                    (current.as_mut(), retained_workflow_field(&path))
+                {
+                    let value = text
+                        .decode()
+                        .map_err(|error| invalid(format!("invalid workflow CDATA: {error}")))?;
+                    retained_workflow_values(entry, field)
+                        .last_mut()
+                        .ok_or_else(|| invalid("workflow CDATA has no selected field"))?
+                        .push_str(&value);
+                }
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                if retained_workflow_field(&path).is_some() {
+                    let decoded = reference
+                        .decode()
+                        .map_err(|error| invalid(format!("invalid workflow reference: {error}")))?;
+                    let value = quick_xml::escape::unescape(&format!("&{decoded};"))
+                        .map_err(|error| invalid(format!("invalid workflow reference: {error}")))?;
+                    let field = retained_workflow_field(&path)
+                        .ok_or_else(|| invalid("workflow reference has no selected field"))?;
+                    retained_workflow_values(
+                        current
+                            .as_mut()
+                            .ok_or_else(|| invalid("workflow reference escapes an entry"))?,
+                        field,
+                    )
+                    .last_mut()
+                    .ok_or_else(|| invalid("workflow reference has no selected field"))?
+                    .push_str(&value);
+                }
+            }
+            Ok(Event::End(end)) => {
+                let name = String::from_utf8_lossy(end.name().as_ref()).into_owned();
+                if path.last() != Some(&name) {
+                    return Err(invalid("retained workflow element nesting is divergent"));
+                }
+                if path.len() == 2 && path[1] == "entry" {
+                    let entry = current
+                        .take()
+                        .ok_or_else(|| invalid("retained workflow entry is missing"))?;
+                    insert_retained_workflow_node(&mut nodes, entry)?;
+                }
+                path.pop();
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(invalid("XML document type declarations are denied"));
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(invalid(format!(
+                    "cannot parse retained Jenkins workflow XML: {error}"
+                )));
+            }
+        }
+        if nodes.len() > 64 || path.len() > 16 {
+            return Err(invalid("retained workflow XML is unbounded"));
+        }
+    }
+    if !path.is_empty() || current.is_some() || nodes.is_empty() {
+        return Err(invalid("retained workflow XML is incomplete"));
+    }
+    Ok(nodes)
+}
+
+fn retained_workflow_field(path: &[String]) -> Option<&'static str> {
+    if path.len() == 3 && path[0] == "linked-hash-map" && path[1] == "entry" {
+        return (path[2] == "string").then_some("map-key");
+    }
+    if path.len() >= 5
+        && path[0] == "linked-hash-map"
+        && path[1] == "entry"
+        && path[2] == "Tag"
+        && path[3] == "node"
+    {
+        return match path[4..]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["id"] => Some("node-id"),
+            ["parentIds", "string"] => Some("parent-id"),
+            ["descriptorId"] => Some("descriptor-id"),
+            ["startId"] => Some("start-id"),
+            ["result", "name"] => Some("result"),
+            _ => None,
+        };
+    }
+    if path.len() == 6
+        && path[0] == "linked-hash-map"
+        && path[1] == "entry"
+        && path[2] == "Tag"
+        && path[3] == "actions"
+        && path[4] == "wf.a.LabelAction"
+        && path[5] == "displayName"
+    {
+        return Some("label");
+    }
+    None
+}
+
+fn retained_workflow_values<'a>(
+    entry: &'a mut RetainedWorkflowEntry,
+    field: &str,
+) -> &'a mut Vec<String> {
+    match field {
+        "map-key" => &mut entry.map_keys,
+        "node-id" => &mut entry.node_ids,
+        "parent-id" => &mut entry.parent_ids,
+        "descriptor-id" => &mut entry.descriptor_ids,
+        "label" => &mut entry.labels,
+        "start-id" => &mut entry.start_ids,
+        "result" => &mut entry.results,
+        _ => unreachable!("retained workflow field is internal"),
+    }
+}
+
+fn insert_retained_workflow_node(
+    nodes: &mut BTreeMap<String, RetainedWorkflowNode>,
+    entry: RetainedWorkflowEntry,
+) -> Result<(), HistoryError> {
+    let map_key = retained_workflow_single(entry.map_keys, "map key")?
+        .ok_or_else(|| invalid("retained workflow entry has no map key"))?;
+    let node_id = retained_workflow_single(entry.node_ids, "node ID")?
+        .ok_or_else(|| invalid("retained workflow entry has no node ID"))?;
+    validate_numeric_id(&map_key, "retained workflow map key")?;
+    validate_numeric_id(&node_id, "retained workflow node ID")?;
+    if map_key != node_id
+        || nodes
+            .insert(
+                node_id,
+                RetainedWorkflowNode {
+                    parent_ids: entry.parent_ids,
+                    descriptor_id: retained_workflow_single(entry.descriptor_ids, "descriptor ID")?,
+                    label: retained_workflow_single(entry.labels, "label")?,
+                    start_id: retained_workflow_single(entry.start_ids, "start ID")?,
+                    result: retained_workflow_single(entry.results, "result")?,
+                },
+            )
+            .is_some()
+    {
+        return Err(invalid(
+            "retained workflow node identity is duplicated or divergent",
+        ));
+    }
+    Ok(())
+}
+
+fn retained_workflow_single(
+    values: Vec<String>,
+    role: &str,
+) -> Result<Option<String>, HistoryError> {
+    if values.len() > 1 {
+        return Err(invalid(format!("retained workflow {role} is ambiguous")));
+    }
+    values
+        .into_iter()
+        .next()
+        .map(|value| {
+            let value = value.trim().to_owned();
+            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+                Err(invalid(format!("retained workflow {role} is invalid")))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
+}
+
+fn validate_numeric_id(value: &str, role: &str) -> Result<u64, HistoryError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| invalid(format!("{role} is nonnumeric")))?;
+    if parsed.to_string() != value {
+        return Err(invalid(format!("{role} is noncanonical")));
+    }
+    Ok(parsed)
+}
+
+fn verify_retained_log_index(
+    bytes: &[u8],
+    console_log: &[u8],
+    nodes: &BTreeMap<String, RetainedWorkflowNode>,
+    expected_shell_id: &str,
+    expected_shell_log: &[u8],
+) -> Result<(), HistoryError> {
+    if bytes.is_empty() || bytes.len() > MAX_XML_BYTES || !bytes.ends_with(b"\n") {
+        return Err(invalid(
+            "retained log index has an invalid byte denominator",
+        ));
+    }
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| invalid("retained log index is not UTF-8"))?;
+    let mut previous_offset = 0_u64;
+    let mut active = None::<(&str, usize)>;
+    let mut shell_chunks = Vec::<&[u8]>::new();
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() || lines.len() > nodes.len() * 2 {
+        return Err(invalid("retained log index denominator is divergent"));
+    }
+    for line in lines {
+        let fields = line.split(' ').collect::<Vec<_>>();
+        if !(1..=2).contains(&fields.len()) || fields.iter().any(|field| field.is_empty()) {
+            return Err(invalid("retained log index row is malformed"));
+        }
+        let offset = validate_numeric_id(fields[0], "retained log offset")?;
+        if offset < previous_offset || offset > console_log.len() as u64 {
+            return Err(invalid("retained log offsets are divergent"));
+        }
+        if let Some((active_id, start)) = active {
+            if active_id == expected_shell_id {
+                shell_chunks.push(&console_log[start..offset as usize]);
+            }
+        }
+        active = if fields.len() == 2 {
+            if active.is_some() {
+                return Err(invalid("retained log annotations overlap"));
+            }
+            validate_numeric_id(fields[1], "retained log node ID")?;
+            if !nodes.contains_key(fields[1]) {
+                return Err(invalid(
+                    "retained log index references a missing workflow node",
+                ));
+            }
+            Some((fields[1], offset as usize))
+        } else {
+            if active.is_none() {
+                return Err(invalid("retained log annotation closes no workflow node"));
+            }
+            None
+        };
+        previous_offset = offset;
+    }
+    if let Some((active_id, start)) = active
+        && active_id == expected_shell_id
+    {
+        shell_chunks.push(&console_log[start..]);
+    }
+    if shell_chunks.len() != 1 || shell_chunks[0] != expected_shell_log {
+        return Err(invalid(
+            "retained log index does not reconstruct the verified ShellStep output",
+        ));
+    }
+    Ok(())
 }
 
 /// Compares a retained Jenkins job configuration with its reviewed fixture
@@ -1810,6 +2217,103 @@ mod tests {
 
         let duplicated = br#"<flow-build><timestamp>2000</timestamp><timestamp>3000</timestamp><duration>20</duration><result>SUCCESS</result></flow-build>"#;
         assert!(parse_retained_build_record(duplicated).is_err());
+    }
+
+    #[test]
+    fn retained_source_build_projection_preserves_authenticated_metadata() {
+        let record = parse_retained_source_build_record(BUILD_XML).unwrap();
+        assert_eq!(record.queue_id, "92");
+        assert_eq!(record.result, BuildResult::Aborted);
+        assert_eq!(record.queued_at_unix_ms, 1_232);
+        assert_eq!(record.started_at_unix_ms, 1_233);
+        assert_eq!(record.ended_at_unix_ms, 1_609);
+        assert_eq!(record.actor_subject, "oracle-admin");
+
+        let divergent = String::from_utf8(BUILD_XML.to_vec())
+            .unwrap()
+            .replace("<queueId>92</queueId>", "<queueId>93</queueId>");
+        assert_ne!(
+            parse_retained_source_build_record(divergent.as_bytes()).unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn retained_workflow_storage_joins_graph_index_and_shell_bytes() {
+        let flow = br#"<linked-hash-map>
+  <entry><string>1</string><Tag><node><id>1</id></node><actions/></Tag></entry>
+  <entry><string>2</string><Tag><node><parentIds><string>1</string></parentIds><id>2</id><descriptorId>executor</descriptorId></node><actions/></Tag></entry>
+  <entry><string>3</string><Tag><node><parentIds><string>2</string></parentIds><id>3</id><descriptorId>stage</descriptorId></node><actions><wf.a.LabelAction><displayName>Build</displayName></wf.a.LabelAction></actions></Tag></entry>
+  <entry><string>4</string><Tag><node><parentIds><string>3</string></parentIds><id>4</id><descriptorId>org.jenkinsci.plugins.workflow.steps.durable_task.ShellStep</descriptorId></node><actions/></Tag></entry>
+  <entry><string>5</string><Tag><node><parentIds><string>4</string></parentIds><id>5</id><startId>4</startId></node><actions/></Tag></entry>
+  <entry><string>6</string><Tag><node><parentIds><string>5</string></parentIds><id>6</id><startId>3</startId></node><actions/></Tag></entry>
+  <entry><string>7</string><Tag><node><parentIds><string>6</string></parentIds><id>7</id><startId>2</startId></node><actions/></Tag></entry>
+  <entry><string>8</string><Tag><node><parentIds><string>7</string></parentIds><id>8</id><result><name>SUCCESS</name></result></node><actions/></Tag></entry>
+</linked-hash-map>"#;
+        let shell = b"+ echo Hello World\nHello World\n";
+        let mut console = b"controller prefix\n".to_vec();
+        let start = console.len();
+        console.extend_from_slice(shell);
+        let end = console.len();
+        console.extend_from_slice(b"controller suffix\n");
+        let index = format!("{start} 4\n{end}\n");
+        verify_retained_workflow_storage(flow, index.as_bytes(), &console, "3", "4", shell)
+            .unwrap();
+
+        let detached_node = index.replace(" 4\n", " 99\n");
+        assert!(
+            verify_retained_workflow_storage(
+                flow,
+                detached_node.as_bytes(),
+                &console,
+                "3",
+                "4",
+                shell,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_retained_workflow_storage(
+                flow,
+                index.as_bytes(),
+                &console,
+                "3",
+                "4",
+                b"different\n",
+            )
+            .is_err()
+        );
+        let corrupted_graph = String::from_utf8(flow.to_vec()).unwrap().replacen(
+            "<string>4</string>",
+            "<string>40</string>",
+            1,
+        );
+        assert!(
+            verify_retained_workflow_storage(
+                corrupted_graph.as_bytes(),
+                index.as_bytes(),
+                &console,
+                "3",
+                "4",
+                shell,
+            )
+            .is_err()
+        );
+        let doctype = format!(
+            "<!DOCTYPE linked-hash-map>{}",
+            String::from_utf8_lossy(flow)
+        );
+        assert!(
+            verify_retained_workflow_storage(
+                doctype.as_bytes(),
+                index.as_bytes(),
+                &console,
+                "3",
+                "4",
+                shell,
+            )
+            .is_err()
+        );
     }
 
     #[test]

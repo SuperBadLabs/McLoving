@@ -7,9 +7,12 @@ use mcloving_jenkins_state_transfer::{
     admitted_forward_binding, admitted_reverse_binding, admitted_tree_digest,
     authenticate_forward_bundle, authenticate_reverse_bundle, load_admitted_history_owner_only,
     normalize_single_aborted_workflow, parse_retained_build_record,
-    verify_retained_job_configuration,
+    parse_retained_source_build_record, verify_retained_job_configuration,
+    verify_retained_workflow_storage as verify_jenkins_workflow_storage,
 };
-use mcloving_state_transfer::{BuildResult, Digest, StateBundle, canonical_bytes, transform};
+use mcloving_state_transfer::{
+    BuildResult, BuildState, Digest, StateBundle, canonical_bytes, transform,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -635,6 +638,17 @@ fn verify_exact_state(
         )
     })?;
     let expected_log = b"+ echo Hello World\nHello World\n";
+    let source_build = forward
+        .jobs
+        .first()
+        .and_then(|job| job.builds.first())
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_CONTINUITY",
+                "authenticated forward bundle is missing source build 1",
+            )
+        })?;
+    validate_build_one_state(&state.reverse_evidence, source_build)?;
     let imported_build = reverse
         .jobs
         .first()
@@ -669,6 +683,9 @@ fn verify_exact_state(
         Some(expected_log),
     )?;
     validate_workflow_receipts(&state.reverse_evidence, "template", 2, None, None)?;
+    validate_retained_workflow_storage(&state.reverse_evidence, "imported", 2)?;
+    validate_retained_workflow_storage(&state.reverse_evidence, "restarted", 2)?;
+    validate_retained_workflow_storage(&state.reverse_evidence, "continued", 3)?;
     for (path, number, result) in [
         ("evidence/imported-build-1.json", 1, "ABORTED"),
         ("evidence/restarted-build-1.json", 1, "ABORTED"),
@@ -820,6 +837,157 @@ fn validate_retained_job_configuration(archive: &EvidenceArchive) -> Result<(), 
     let path = "evidence/jenkins-job-after/config.xml";
     verify_retained_job_configuration(archive_file(archive, path)?, ADMITTED_JENKINS_JOB_CONFIG)
         .map_err(|error| PackageError::new("E_PRIVATE_JOB_CONFIG", error.to_string()))
+}
+
+fn validate_build_one_state(
+    archive: &EvidenceArchive,
+    source: &BuildState,
+) -> Result<(), PackageError> {
+    let expected_source = serde_json::to_value(source)
+        .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
+    for path in [
+        "evidence/authenticated-source-build-1.json",
+        "evidence/reverse-source-build-1.json",
+    ] {
+        let actual: Value = serde_json::from_slice(archive_file(archive, path)?)
+            .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
+        if actual != expected_source {
+            return Err(PackageError::new(
+                "E_PRIVATE_SOURCE_BUILD",
+                format!("{path} is divergent from authenticated source build 1"),
+            ));
+        }
+    }
+
+    let retained_path = "evidence/jenkins-job-after/builds/1/build.xml";
+    let retained = parse_retained_source_build_record(archive_file(archive, retained_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
+    if retained.queue_id != source.source_queue_id
+        || retained.result != source.result
+        || retained.queued_at_unix_ms != source.queued_at_unix_ms
+        || retained.started_at_unix_ms != source.started_at_unix_ms
+        || retained.ended_at_unix_ms != source.ended_at_unix_ms
+        || retained.actor_subject != source.trigger.actor_subject
+    {
+        return Err(PackageError::new(
+            "E_PRIVATE_SOURCE_BUILD",
+            "retained source build metadata diverges from authenticated source build 1",
+        ));
+    }
+
+    let queue_id = source.source_queue_id.parse::<i64>().map_err(|_| {
+        PackageError::new(
+            "E_PRIVATE_SOURCE_BUILD",
+            "authenticated source queue identity is nonnumeric",
+        )
+    })?;
+    let duration = source
+        .ended_at_unix_ms
+        .checked_sub(source.started_at_unix_ms)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_SOURCE_BUILD",
+                "authenticated source build timing is not monotonic",
+            )
+        })?;
+    for path in [
+        "evidence/imported-build-1.json",
+        "evidence/restarted-build-1.json",
+    ] {
+        let api: Value = serde_json::from_slice(archive_file(archive, path)?)
+            .map_err(|error| PackageError::new("E_PRIVATE_SOURCE_BUILD", error.to_string()))?;
+        let actions = api
+            .get("actions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                PackageError::new(
+                    "E_PRIVATE_SOURCE_BUILD",
+                    format!("{path} omits its source action provenance"),
+                )
+            })?;
+        let causes = actions
+            .iter()
+            .filter(|action| action.get("_class") == Some(&Value::from("hudson.model.CauseAction")))
+            .collect::<Vec<_>>();
+        let actors = causes
+            .first()
+            .and_then(|action| action.get("causes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|cause| cause.get("userId").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if api.get("number") != Some(&Value::from(source.number))
+            || api.get("result") != Some(&Value::from("ABORTED"))
+            || api.get("queueId") != Some(&Value::from(queue_id))
+            || api.get("timestamp") != Some(&Value::from(source.started_at_unix_ms))
+            || api.get("duration") != Some(&Value::from(duration))
+            || causes.len() != 1
+            || actors != [source.trigger.actor_subject.as_str()]
+        {
+            return Err(PackageError::new(
+                "E_PRIVATE_SOURCE_BUILD",
+                format!("{path} is divergent from authenticated source build 1"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_retained_workflow_storage(
+    archive: &EvidenceArchive,
+    prefix: &str,
+    number: u64,
+) -> Result<(), PackageError> {
+    let stage_path = format!("evidence/{prefix}-build-{number}-stage.json");
+    let shell_path = format!("evidence/{prefix}-build-{number}-shell-log.json");
+    let stage: Value = serde_json::from_slice(archive_file(archive, &stage_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW_STORE", error.to_string()))?;
+    let stage_id = numeric_identifier(stage.get("id"), &stage_path)?;
+    let shell_nodes = stage
+        .get("stageFlowNodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_WORKFLOW_STORE",
+                format!("{stage_path} omits workflow nodes"),
+            )
+        })?
+        .iter()
+        .filter(|node| node.get("name") == Some(&Value::from("Shell Script")))
+        .collect::<Vec<_>>();
+    if shell_nodes.len() != 1 {
+        return Err(PackageError::new(
+            "E_PRIVATE_WORKFLOW_STORE",
+            format!("{stage_path} has a divergent ShellStep denominator"),
+        ));
+    }
+    let shell_id = numeric_identifier(shell_nodes[0].get("id"), &stage_path)?;
+    let shell: Value = serde_json::from_slice(archive_file(archive, &shell_path)?)
+        .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW_STORE", error.to_string()))?;
+    let shell_log = shell
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            PackageError::new(
+                "E_PRIVATE_WORKFLOW_STORE",
+                format!("{shell_path} omits ShellStep output"),
+            )
+        })?
+        .as_bytes();
+    let retained_root = format!("evidence/jenkins-job-after/builds/{number}");
+    verify_jenkins_workflow_storage(
+        archive_file(
+            archive,
+            &format!("{retained_root}/workflow-completed/flowNodeStore.xml"),
+        )?,
+        archive_file(archive, &format!("{retained_root}/log-index"))?,
+        archive_file(archive, &format!("{retained_root}/log"))?,
+        &stage_id,
+        &shell_id,
+        shell_log,
+    )
+    .map_err(|error| PackageError::new("E_PRIVATE_WORKFLOW_STORE", error.to_string()))
 }
 
 fn validate_build_one_logs(
