@@ -187,30 +187,25 @@ pub fn load_admitted_history(
 pub fn authenticate_forward_bundle(
     history: &SealedHistory,
     candidate: &StateBundle,
+    expected_transform_implementation_digest: Digest,
 ) -> Result<ParsedHistory, HistoryError> {
-    authenticate_forward_bundle_inner(history, candidate, true)
+    authenticate_forward_bundle_inner(
+        history,
+        candidate,
+        expected_transform_implementation_digest,
+        true,
+    )
 }
 
 fn authenticate_forward_bundle_inner(
     history: &SealedHistory,
     candidate: &StateBundle,
+    expected_transform_implementation_digest: Digest,
     require_admitted_tree: bool,
 ) -> Result<ParsedHistory, HistoryError> {
-    let job = candidate
-        .jobs
-        .first()
-        .ok_or_else(|| invalid("forward candidate has no admitted job"))?;
     let normalized = normalize_single_aborted_workflow_inner(
         history,
-        &ImportBinding {
-            source: candidate.binding.source.clone(),
-            destination: candidate.binding.destination.clone(),
-            transform_implementation_digest: candidate.binding.transform_implementation_digest,
-            transform_configuration_digest: candidate.binding.transform_configuration_digest,
-            provenance: candidate.binding.provenance.clone(),
-            source_job_id: job.source_job_id.clone(),
-            target_pipeline_id: job.target_pipeline_id.clone(),
-        },
+        &admitted_forward_binding(expected_transform_implementation_digest),
         require_admitted_tree,
     )?;
     if normalized.bundle != *candidate {
@@ -219,6 +214,18 @@ fn authenticate_forward_bundle_inner(
         ));
     }
     Ok(normalized)
+}
+
+pub fn admitted_forward_binding(transform_implementation_digest: Digest) -> ImportBinding {
+    ImportBinding {
+        source: admitted_source_identity(),
+        destination: admitted_destination_identity(),
+        transform_implementation_digest,
+        transform_configuration_digest: sha256(b"corpus052-single-aborted-workflow-v1"),
+        provenance: "MIG-005A owner-held exact admitted-case source".to_owned(),
+        source_job_id: ADMITTED_JOB_ID.to_owned(),
+        target_pipeline_id: ADMITTED_JOB_ID.to_owned(),
+    }
 }
 
 pub fn normalize_single_aborted_workflow(
@@ -1019,18 +1026,67 @@ mod tests {
     #[test]
     fn reverse_requires_an_exact_freshly_normalized_forward_bundle() {
         let history = history();
-        let parsed = normalize_test_workflow(&history, &binding()).unwrap();
-        let authenticated =
-            authenticate_forward_bundle_inner(&history, &parsed.bundle, false).unwrap();
+        let expected_implementation = sha256(b"independently-pinned-forward-transform");
+        let parsed =
+            normalize_test_workflow(&history, &admitted_forward_binding(expected_implementation))
+                .unwrap();
+        let authenticated = authenticate_forward_bundle_inner(
+            &history,
+            &parsed.bundle,
+            expected_implementation,
+            false,
+        )
+        .unwrap();
         assert_eq!(authenticated, parsed);
 
         let mut substituted = parsed.bundle.clone();
         substituted.jobs[0].builds[0].result = BuildResult::Succeeded;
         assert!(matches!(
-            authenticate_forward_bundle_inner(&history, &substituted, false),
+            authenticate_forward_bundle_inner(
+                &history,
+                &substituted,
+                expected_implementation,
+                false
+            ),
             Err(HistoryError::Invalid(message))
                 if message.contains("exact admitted normalization")
         ));
+
+        let mut implementation = parsed.bundle.clone();
+        implementation.binding.transform_implementation_digest = sha256(b"substituted");
+        assert!(
+            authenticate_forward_bundle_inner(
+                &history,
+                &implementation,
+                expected_implementation,
+                false,
+            )
+            .is_err()
+        );
+
+        let mut configuration = parsed.bundle.clone();
+        configuration.binding.transform_configuration_digest = sha256(b"substituted");
+        assert!(
+            authenticate_forward_bundle_inner(
+                &history,
+                &configuration,
+                expected_implementation,
+                false,
+            )
+            .is_err()
+        );
+
+        let mut provenance = parsed.bundle.clone();
+        provenance.binding.provenance = "substituted provenance".to_owned();
+        assert!(
+            authenticate_forward_bundle_inner(
+                &history,
+                &provenance,
+                expected_implementation,
+                false,
+            )
+            .is_err()
+        );
     }
 
     #[test]

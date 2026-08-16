@@ -77,13 +77,20 @@ podman exec "${container}" pg_isready \
     "${sealed_builds}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
     "${staging}/forward-bundle.json"
 ) > "${staging}/evidence/forward-normalization.txt"
+forward_transform_executable="${repo_root}/target/debug/examples/normalize_history"
+forward_transform_sha256=$(sha256sum "${forward_transform_executable}" | awk '{print $1}')
+forward_bundle_transform_sha256=$(jq -r \
+  '.binding.transform_implementation_digest[]' "${staging}/forward-bundle.json" \
+  | awk '{printf "%02x", $1} END {print ""}')
+test "${forward_transform_sha256}" = "${forward_bundle_transform_sha256}"
 
 MCLOVING_TEST_DATABASE_URL="postgres://mcloving@127.0.0.1:${port}/mcloving" \
   cargo run --locked --quiet \
   --manifest-path "${repo_root}/Cargo.toml" \
   -p mcloving-jenkins-state-transfer --example rehearse_history -- \
   "${sealed_builds}" "${expected_tree_sha256}" "${opaque_evidence_id}" \
-  "${staging}/forward-bundle.json" "${staging}/mcloving"
+  "${staging}/forward-bundle.json" "${forward_transform_sha256}" \
+  "${staging}/mcloving"
 
 podman inspect "${container}" > "${staging}/evidence/postgres-container-inspect.json"
 podman image inspect "${MCLOVING_POSTGRES_IMAGE}" \
@@ -102,6 +109,7 @@ jq --exit-status '
   and .production_authority == false
   and .forward_retrieval_verified == true
   and .reverse_retrieval_verified == true
+  and .reverse_replay_verified == true
 ' "${staging}/mcloving/rehearsal-summary.json" >/dev/null
 test "$(sha256sum "${repo_root}/target/debug/examples/rehearse_history" | awk '{print $1}')" = \
   "$(jq -r '.reverse_transform_implementation_sha256' \

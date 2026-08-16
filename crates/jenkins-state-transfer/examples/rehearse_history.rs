@@ -44,8 +44,8 @@ async fn main() -> Result<(), AnyError> {
         return Err("exact state-transfer rehearsal requires Unix no-follow file access".into());
     }
     let arguments = env::args().collect::<Vec<_>>();
-    if arguments.len() != 6 {
-        return Err("usage: rehearse_history SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID FORWARD_BUNDLE NEW_OUTPUT_DIRECTORY".into());
+    if arguments.len() != 7 {
+        return Err("usage: rehearse_history SEALED_BUILDS EXPECTED_TREE_SHA256 OPAQUE_EVIDENCE_ID FORWARD_BUNDLE EXPECTED_FORWARD_TRANSFORM_SHA256 NEW_OUTPUT_DIRECTORY".into());
     }
     if parse_digest(&arguments[2])? != admitted_tree_digest() {
         return Err("expected tree digest is not the exact admitted digest".into());
@@ -58,9 +58,11 @@ async fn main() -> Result<(), AnyError> {
     }
     let forward_expected = expected(&forward)?;
     transform(&forward, &forward_expected, &BTreeMap::new())?;
-    let authenticated_forward = authenticate_forward_bundle(&history, &forward)?;
+    let expected_forward_transform = parse_digest(&arguments[5])?;
+    let authenticated_forward =
+        authenticate_forward_bundle(&history, &forward, expected_forward_transform)?;
 
-    let output = Path::new(&arguments[5]);
+    let output = Path::new(&arguments[6]);
     fs::create_dir(output)?;
     let database_url = env::var("MCLOVING_TEST_DATABASE_URL")?;
     let pool = PgPoolOptions::new()
@@ -311,6 +313,25 @@ async fn main() -> Result<(), AnyError> {
             "migration:corpus052-reverse",
         )
         .await?;
+    let reverse_replay = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            reverse.bundle(),
+            reverse.expected(),
+            "migration:corpus052-reverse",
+        )
+        .await?;
+    if reverse_replay.created
+        || reverse_replay.id != reverse_receipt.id
+        || reverse_replay.direction != reverse_receipt.direction
+        || reverse_replay.binding_digest != reverse_receipt.binding_digest
+        || reverse_replay.bundle_digest != reverse_receipt.bundle_digest
+        || reverse_replay.record_count != reverse_receipt.record_count
+        || reverse_replay.protection_count != reverse_receipt.protection_count
+    {
+        return Err("reverse import replay was not exactly idempotent".into());
+    }
     let stored_reverse = store
         .state_transfer_bundle(organization_id, reverse_receipt.id)
         .await?
@@ -347,6 +368,7 @@ async fn main() -> Result<(), AnyError> {
             "production_authority": false,
             "forward_retrieval_verified": true,
             "reverse_retrieval_verified": true,
+            "reverse_replay_verified": true,
         }))?,
     )?;
     Ok(())

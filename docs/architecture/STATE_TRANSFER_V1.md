@@ -270,7 +270,12 @@ the observed xtrace-before-stdout chronology, produced `Hello World`, preserved 
 effects, advanced history to build 2, and produced reverse
 `next_build_number=3`. Forward and reverse bindings hash the executable that
 actually performed each transform: `normalize_history` for forward and
-`rehearse_history` for reverse.
+`rehearse_history` for reverse. The orchestrator independently hashes the
+forward executable, verifies the generated bundle carries that value, and
+passes it as the expected authentication binding; exact configuration,
+provenance, source/destination, and job identities are pinned in the adapter
+rather than copied from the candidate. Both forward and reverse imports prove
+exact replay against the same immutable receipt before retrieval.
 The exact forward bundle, reverse bundle, and relocated evidence manifest all
 verify in the owner-only HeMan evidence package. Their private digests are not
 published to GitHub.
@@ -297,7 +302,9 @@ chronology asserted inside the canonical build interval. Its unrepresentable nat
 set to Jenkins sentinel `-1`, its template cause and queue-timing actions were
 removed in favor of an
 exact typed canonical-trigger sidecar that was byte-verified after install,
-restart, and archival, and it was checked free of the template
+restart, and archival. The installed reverse-import receipt was likewise
+byte-verified after initial load, restart, pre-archive, and in the archive; the
+template was checked free of its
 marker and provenance before being destroyed ahead of
 the destination proof. A fresh destination controller
 then loaded private build 1 as `ABORTED`, loaded the reverse-imported build 2 as

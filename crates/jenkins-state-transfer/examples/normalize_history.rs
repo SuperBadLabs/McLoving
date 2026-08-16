@@ -5,8 +5,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use mcloving_jenkins_state_transfer::{
-    ImportBinding, admitted_destination_identity, admitted_source_identity, admitted_tree_digest,
-    load_admitted_history, normalize_single_aborted_workflow,
+    admitted_forward_binding, admitted_tree_digest, load_admitted_history,
+    normalize_single_aborted_workflow,
 };
 use mcloving_state_transfer::{BuildResult, Digest, sha256, transform};
 
@@ -32,15 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executable = fs::read(env::current_exe()?)?;
     let parsed = normalize_single_aborted_workflow(
         &history,
-        &ImportBinding {
-            source: admitted_source_identity(),
-            destination: admitted_destination_identity(),
-            transform_implementation_digest: sha256(&executable),
-            transform_configuration_digest: sha256(b"corpus052-single-aborted-workflow-v1"),
-            provenance: "MIG-005A owner-held exact admitted-case source".to_owned(),
-            source_job_id: "corpus-052-cinqict_jenkinsdev".to_owned(),
-            target_pipeline_id: "corpus-052-cinqict_jenkinsdev".to_owned(),
-        },
+        &admitted_forward_binding(sha256(&executable)),
     )?;
     let plan = transform(parsed.bundle(), parsed.expected(), &BTreeMap::new())?;
     let job = &plan.bundle.jobs[0];
