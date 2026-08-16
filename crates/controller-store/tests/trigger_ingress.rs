@@ -29,6 +29,28 @@ stages:
           args: [ok]
 "#;
 
+const SHADOW001_JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
+const SHADOW001_PIPELINE: &str =
+    include_str!("../../../migration/mario-jenkins-oracle-228/corpus-v1/compiler-v1/pipeline.yaml");
+const SHADOW001_JOBSTATE: &str =
+    include_str!("../../../migration/mario-jenkins-oracle-228/corpus-v1/compiler-v1/jobstate.yaml");
+const SHADOW001_PIPELINE_SHA256: &str =
+    "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc";
+const SHADOW001_JOBSTATE_SHA256: &str =
+    "45f86c932d04a9d109afc0dd2b8a0ef30909311a59d4f453d77ed4b0e98c5be4";
+const SHADOW001_SEMANTIC_SHA256: &str =
+    "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3";
+const SHADOW001_SOURCE_GENERATION: &str =
+    "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97";
+const SHADOW001_SOURCE_EFFECTIVE_AT_UNIX_MS: i64 = 1_785_480_257_000;
+
+fn digest_from_hex(value: &str) -> [u8; 32] {
+    hex::decode(value)
+        .expect("decode fixed SHA-256")
+        .try_into()
+        .expect("fixed SHA-256 is exactly 32 bytes")
+}
+
 async fn test_store() -> Option<Store> {
     let url = std::env::var("MCLOVING_TEST_DATABASE_URL").ok()?;
     let pool = PgPoolOptions::new()
@@ -74,6 +96,56 @@ async fn fixture(store: &Store) -> (Uuid, Uuid, Uuid) {
             )
             .await
             .expect("create trigger fixture pipeline"),
+        PipelinePutOutcome::Created(_)
+    ));
+    (organization_id, project_id, pipeline_id)
+}
+
+async fn shadow001_fixture(store: &Store) -> (Uuid, Uuid, Uuid) {
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            &format!("project-{project_id}"),
+        )
+        .await
+        .expect("create SHADOW-001 replay project");
+    let source_sha256: [u8; 32] = Sha256::digest(SHADOW001_PIPELINE.as_bytes()).into();
+    assert_eq!(
+        source_sha256,
+        digest_from_hex(SHADOW001_PIPELINE_SHA256),
+        "the replay fixture must embed the exact compiler-v1 pipeline"
+    );
+    let jobstate_sha256: [u8; 32] = Sha256::digest(SHADOW001_JOBSTATE.as_bytes()).into();
+    assert_eq!(
+        jobstate_sha256,
+        digest_from_hex(SHADOW001_JOBSTATE_SHA256),
+        "the replay fixture must embed the exact compiler-v1 job state"
+    );
+    assert!(matches!(
+        store
+            .put_pipeline_as(
+                &PipelineWrite {
+                    organization_id,
+                    project_id,
+                    pipeline_id,
+                    slug: SHADOW001_JOB_ID.to_owned(),
+                    source: SHADOW001_PIPELINE.to_owned(),
+                    source_sha256,
+                    semantic_digest: digest_from_hex(SHADOW001_SEMANTIC_SHA256),
+                    schema_major: 1,
+                    schema_minor: 0,
+                    parameter_schema: json!({}),
+                },
+                Some(0),
+                "jenkins/system",
+            )
+            .await
+            .expect("create the exact SHADOW-001 target pipeline"),
         PipelinePutOutcome::Created(_)
     ));
     (organization_id, project_id, pipeline_id)
@@ -1720,7 +1792,7 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
     };
-    let (organization_id, project_id, pipeline_id) = fixture(&store).await;
+    let (organization_id, project_id, pipeline_id) = shadow001_fixture(&store).await;
     let now = database_unix_ms(&store).await;
     let webhook_trigger_id = Uuid::new_v4();
     let api_trigger_id = Uuid::new_v4();
@@ -1812,26 +1884,61 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
         ));
     }
 
-    assert!(matches!(
-        store
-            .transition_pipeline_operational_state(&PipelineOperationalStateTransition {
-                organization_id,
-                project_id,
-                pipeline_id,
-                expected_generation: 1,
-                state: PipelineOperationalState::Disabled,
-                reason: "DIFF-002 typed ingress fence".to_owned(),
-                actor_subject: "reviewer:diff002".to_owned(),
-                source_identity: "jenkins:diff002-stateful".to_owned(),
-                source_generation: "disabled-generation-2".to_owned(),
-                source_effective_at_unix_ms: now,
-                source_provenance_sha256: Sha256::digest(b"diff002-disabled-ingress").into(),
-                idempotency_key: "diff002-disabled-ingress".to_owned(),
-            })
-            .await
-            .expect("disable the typed-ingress fixture"),
-        PipelineOperationalStateTransitionOutcome::Applied(_)
-    ));
+    let state_transition = store
+        .transition_pipeline_operational_state(&PipelineOperationalStateTransition {
+            organization_id,
+            project_id,
+            pipeline_id,
+            expected_generation: 1,
+            state: PipelineOperationalState::Disabled,
+            reason: "offline-frozen-source-state".to_owned(),
+            actor_subject: "jenkins/system".to_owned(),
+            source_identity: "mario/jenkins-oracle-228".to_owned(),
+            source_generation: SHADOW001_SOURCE_GENERATION.to_owned(),
+            source_effective_at_unix_ms: SHADOW001_SOURCE_EFFECTIVE_AT_UNIX_MS,
+            source_provenance_sha256: Sha256::digest(SHADOW001_JOBSTATE.as_bytes()).into(),
+            idempotency_key: format!("shadow001-jobstate:{SHADOW001_SOURCE_GENERATION}"),
+        })
+        .await
+        .expect("apply the exact migrated disabled state");
+    let PipelineOperationalStateTransitionOutcome::Applied(applied_state) = state_transition else {
+        panic!("the exact migrated disabled state must be newly applied")
+    };
+    assert_eq!(applied_state.source_generation, SHADOW001_SOURCE_GENERATION);
+
+    let observed_pipeline = store
+        .pipeline(organization_id, project_id, pipeline_id)
+        .await
+        .expect("read back the SHADOW-001 target pipeline")
+        .expect("SHADOW-001 target pipeline exists");
+    let observed_state = store
+        .pipeline_operational_state(organization_id, project_id, pipeline_id)
+        .await
+        .expect("read back the SHADOW-001 target state")
+        .expect("SHADOW-001 target state exists");
+    assert_eq!(observed_pipeline.slug, SHADOW001_JOB_ID);
+    assert_eq!(observed_pipeline.source, SHADOW001_PIPELINE);
+    assert_eq!(
+        observed_pipeline.source_sha256,
+        digest_from_hex(SHADOW001_PIPELINE_SHA256)
+    );
+    assert_eq!(
+        observed_pipeline.semantic_digest,
+        digest_from_hex(SHADOW001_SEMANTIC_SHA256)
+    );
+    assert_eq!(
+        observed_pipeline.operational_generation,
+        observed_state.generation
+    );
+    assert_eq!(
+        observed_pipeline.operational_state,
+        PipelineOperationalState::Disabled
+    );
+    assert_eq!(observed_state, applied_state);
+    assert_eq!(
+        observed_state.source_generation,
+        SHADOW001_SOURCE_GENERATION
+    );
 
     let manual_denied = matches!(
         store
@@ -2037,9 +2144,12 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
         };
         let bytes = serde_json::to_vec(&json!({
             "schema": "mcloving.shadow001.target-replay/v1",
-            "job_id": "corpus-052-cinqict_jenkinsdev",
-            "target_state": "disabled",
-            "target_generation": "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97",
+            "job_id": observed_pipeline.slug,
+            "target_state": match observed_state.state {
+                PipelineOperationalState::Enabled => "enabled",
+                PipelineOperationalState::Disabled => "disabled",
+            },
+            "target_generation": observed_state.source_generation,
             "observations": [
                 observation(
                     "api",

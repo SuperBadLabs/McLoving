@@ -165,6 +165,14 @@ zero production endpoint mapping, network request, credential, host mount,
 cross-fixture mount, or effect, plus completed teardown. The two fixture and
 network identities must be distinct.
 
+The target replay fixture installs the exact compiler-v1 pipeline source and
+semantic digest plus the reviewed imported job-state generation for the sole
+admitted case. It reads the pipeline and operational-state records back from
+PostgreSQL before emitting the target receipt; the receipt's job, state, and
+source generation are derived from those observed records rather than copied
+claims. Synthetic trigger definitions are only typed ingress adapters because
+trigger validation precedes the pipeline's disabled-state fence.
+
 `scripts/capture-shadow001-runtime.sh` is the reviewed runtime sidecar. From a
 clean exact head on HeMan it first builds and pins the exact verifier and
 atomically creates the distinct source and precommitted shadow key identities.
