@@ -872,6 +872,7 @@ mod tests {
             "builds": 1,
             "queued": 0,
             "next_build_number": 2,
+            "credential_lookups": 0,
         });
         let source = serde_json::to_vec(&serde_json::json!({
             "schema": "mcloving.shadow001.jenkins-source-probe/v1",
