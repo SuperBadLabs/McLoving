@@ -27,6 +27,12 @@ const ADMITTED_TREE_DIGEST: Digest = [
     0xb4, 0x7c, 0xc3, 0xe1, 0xc1, 0x9e, 0x1d, 0x48, 0x6a, 0x2d, 0xf2, 0xfc, 0x76, 0x34, 0x3e, 0x30,
     0x31, 0xee, 0x37, 0x0a, 0x79, 0x56, 0x4f, 0xe8, 0x8a, 0x47, 0x1a, 0xdb, 0xf6, 0xe5, 0x31, 0x07,
 ];
+const ADMITTED_RETENTION_POLICY_ID: &str = "jenkins-indefinite-oracle-retention";
+const ADMITTED_RETENTION_POLICY_VERSION: &str = "v1";
+const ADMITTED_RETENTION_POLICY_DIGEST: Digest = [
+    0xc2, 0xb7, 0x8e, 0x73, 0x52, 0x03, 0xec, 0x18, 0x77, 0xcc, 0xe3, 0xec, 0xb3, 0xc2, 0x97, 0x8b,
+    0xcf, 0xb6, 0x1c, 0x81, 0x59, 0x80, 0x35, 0x12, 0x54, 0xf2, 0xb0, 0x1d, 0xda, 0x11, 0xd3, 0x2a,
+];
 const EXPECTED_PATHS: [&str; 5] = [
     "1/build.xml",
     "1/log",
@@ -902,9 +908,9 @@ fn validate_text(value: &str, name: &str) -> Result<(), HistoryError> {
 fn indefinite_protection() -> Protection {
     Protection {
         retention: RetentionPolicy {
-            policy_id: "jenkins-indefinite-build-history".to_owned(),
-            policy_version: "v1".to_owned(),
-            policy_digest: sha256(b"jenkins-indefinite-build-history:v1"),
+            policy_id: ADMITTED_RETENTION_POLICY_ID.to_owned(),
+            policy_version: ADMITTED_RETENTION_POLICY_VERSION.to_owned(),
+            policy_digest: ADMITTED_RETENTION_POLICY_DIGEST,
             retain_until_unix_ms: i64::MAX,
         },
         active_holds: Vec::new(),
@@ -977,6 +983,22 @@ mod tests {
         assert_eq!(job.previous_result, Some(BuildResult::Aborted));
         assert_eq!(job.persistent_dependencies[0].key, "build-history");
         let build = &job.builds[0];
+        assert_eq!(
+            build.protection.retention.policy_id,
+            ADMITTED_RETENTION_POLICY_ID
+        );
+        assert_eq!(
+            build.protection.retention.policy_version,
+            ADMITTED_RETENTION_POLICY_VERSION
+        );
+        assert_eq!(
+            build.protection.retention.policy_digest,
+            ADMITTED_RETENTION_POLICY_DIGEST
+        );
+        assert_eq!(
+            job.persistent_dependencies[0].protection.retention,
+            build.protection.retention
+        );
         assert_eq!(build.source_queue_id, "92");
         assert_eq!(build.queued_at_unix_ms, 1232);
         assert_eq!(build.started_at_unix_ms, 1239);
