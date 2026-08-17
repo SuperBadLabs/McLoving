@@ -63,7 +63,9 @@ Seven signed gates must all precede the effect grant:
 3. One atomic re-read exactly matches all 20 certified source, shared-library,
    controller-input, compiler, mapping, component, state-transform, release,
    platform, agent, toolchain, authorization, trigger, discovery, connector,
-   SCM, credential, dependency, cache, and destination identities.
+   SCM, credential, dependency, cache, and destination identities. Its signed
+   semantic platform must also equal the session platform used to select the
+   Windows interruption-proof requirement.
 4. The relinquishing runner has paused ingress, scheduling, and grants and has
    zero queue, run, credential, connector-authority, lease, lock, retry,
    uncertain-effect, or residual effect-authority count.
@@ -109,12 +111,13 @@ effect key, status, public values, protected secret references, external IDs,
 downstream-control digest, and later-intent digest. The destination receipt must
 then match the tenant/project/pipeline/build/attempt, endpoint/account/resource,
 effect class, fence, predecessor precondition digest, publication deadline,
-and post-action time; its canonical state must equal the result committed by
-the grant before the effect. When reconciliation is present, it must preserve
-the same observer identities and scope, advance the signed cursor from the
-post-action receipt, bind the connector request digest, affirm that the effect
-was observed in its exact two-field reconciliation state, and precede the
-connector's final reconciled outcome. Connector and
+and a destination-observation time strictly after grant issuance; its canonical
+state must equal the result committed by the grant before the effect. This
+post-grant lower bound also applies when reconciliation is present, which must
+preserve the same observer identities and scope, advance the signed cursor from
+the post-action receipt, bind the connector request digest, affirm that the
+effect was observed in its exact two-field reconciliation state, and precede
+the connector's final reconciled outcome. Connector and
 observer deployment, runtime, service, and credential-issuance identities must
 be separate.
 

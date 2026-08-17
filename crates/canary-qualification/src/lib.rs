@@ -200,6 +200,7 @@ pub struct InventoryReconciliation {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeFreeze {
     pub context: ReceiptContext,
+    pub platform: Platform,
     pub certified_components: BTreeMap<String, String>,
     pub observed_components: BTreeMap<String, String>,
     pub atomic_reread: bool,
@@ -369,7 +370,7 @@ fn verify_session(
 
     verify_threat_model(&session.threat_model.body)?;
     verify_inventory(&session.inventory.body)?;
-    verify_freeze(&session.freeze.body)?;
+    verify_freeze(session)?;
     verify_quiescence(&session.quiescence.body)?;
     verify_history(&session.history.body)?;
     verify_intent(&session.intent.body)?;
@@ -535,7 +536,8 @@ fn verify_inventory(inventory: &InventoryReconciliation) -> Result<(), Qualifica
     Ok(())
 }
 
-fn verify_freeze(freeze: &RuntimeFreeze) -> Result<(), QualificationError> {
+fn verify_freeze(session: &CanarySession) -> Result<(), QualificationError> {
+    let freeze = &session.freeze.body;
     let required = REQUIRED_FREEZE_COMPONENTS
         .iter()
         .map(|value| (*value).to_owned())
@@ -545,7 +547,8 @@ fn verify_freeze(freeze: &RuntimeFreeze) -> Result<(), QualificationError> {
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
-    if !freeze.atomic_reread
+    if freeze.platform != session.platform
+        || !freeze.atomic_reread
         || !freeze.frozen_before_grant
         || actual != required
         || freeze.certified_components != freeze.observed_components
@@ -814,6 +817,7 @@ fn verify_effect_receipts(
         || observed_state_sha256 != grant.expected_post_state_sha256
         || outcome.captured_at_unix_ms < grant.issued_at_unix_ms
         || outcome.captured_at_unix_ms > grant.expires_at_unix_ms
+        || observation.destination_observed_at_unix_ms <= grant.issued_at_unix_ms
         || (!reconciled
             && observation.destination_observed_at_unix_ms < outcome.captured_at_unix_ms)
         || observation.captured_at_unix_ms < observation.destination_observed_at_unix_ms
@@ -1091,6 +1095,16 @@ mod tests {
     }
 
     #[test]
+    fn top_level_platform_must_match_signed_runtime_freeze() {
+        let (mut session, pins) = fixture();
+        session.platform = Platform::WindowsX86_64;
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_RUNTIME_FREEZE_INVALID"
+        );
+    }
+
+    #[test]
     fn pre_action_gate_cannot_be_collected_after_grant_issuance() {
         let (mut session, pins) = fixture();
         session.threat_model.body.context.collected_at_unix_ms = 201;
@@ -1155,39 +1169,20 @@ mod tests {
 
     #[test]
     fn reconciled_connector_outcome_binds_the_real_reconciliation_receipt() {
-        let (mut session, pins) = fixture();
-        let observer_public = public_key(&seed(10));
-        let post_action_digest =
-            observation_receipt_digest(&session.destination_observation).unwrap();
-        let mut reconciliation = observation(&observer_public, post_action_digest);
-        reconciliation.observation_id = Uuid::from_u128(12);
-        reconciliation.phase = ObservationPhase::Reconciliation;
-        reconciliation.request_sha256 = hash('8');
-        reconciliation.destination_cursor = 5;
-        reconciliation.destination_observed_at_unix_ms = 370;
-        reconciliation.captured_at_unix_ms = 380;
-        reconciliation.state = serde_json::json!({
-            "connector_request_sha256": hash('1'),
-            "effect_observed": true
-        });
-        sign_receipt(&mut reconciliation, &seed(10)).unwrap();
-        session.connector_outcome.observation_receipt_sha256 =
-            Some(observation_receipt_digest(&reconciliation).unwrap());
-        session.connector_outcome.status_code = "reconciled_effect_observed".to_owned();
-        session.connector_outcome.captured_at_unix_ms = 390;
-        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
-        let shadow_public = public_key(&seed(9));
-        session.shadow_replay = shadow(
-            &shadow_public,
-            outcome_receipt_digest(&session.connector_outcome).unwrap(),
-            &session.connector_outcome,
-        );
-        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
-        session.reconciliation_observation = Some(reconciliation);
+        let (session, pins) = reconciled_fixture(350, 360);
 
         let receipt = verify_session(&session, &pins).unwrap();
         assert_eq!(receipt.verified_destination_observations, 3);
         assert!(!receipt.authority_granted_by_verifier);
+    }
+
+    #[test]
+    fn reconciled_post_action_observation_must_follow_the_grant() {
+        let (session, pins) = reconciled_fixture(190, 195);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
     }
 
     #[test]
@@ -1264,10 +1259,34 @@ mod tests {
     fn windows_action_requires_persistent_host_interruption_and_reboot_proof() {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
+        session.freeze.body.platform = Platform::WindowsX86_64;
+        resign(&mut session.freeze, seed(3));
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_WINDOWS_PROOF_INVALID"
         );
+    }
+
+    #[test]
+    fn signed_windows_platform_with_interruption_proof_is_accepted() {
+        let (mut session, pins) = fixture();
+        session.platform = Platform::WindowsX86_64;
+        session.freeze.body.platform = Platform::WindowsX86_64;
+        resign(&mut session.freeze, seed(3));
+        session.windows_interruption = Some(signed(
+            WindowsInterruptionProof {
+                context: context(),
+                persistent_host_identity: "host/windows/one".to_owned(),
+                interruption_receipt_sha256: hash('6'),
+                reboot_receipt_sha256: hash('7'),
+                no_orphan_process: true,
+                no_duplicate_effect: true,
+            },
+            3,
+        ));
+
+        let receipt = verify_session(&session, &pins).unwrap();
+        assert_eq!(receipt.verified_pre_action_gates, 8);
     }
 
     fn fixture() -> (CanarySession, IndependentPins) {
@@ -1310,6 +1329,7 @@ mod tests {
         let freeze = signed(
             RuntimeFreeze {
                 context: contexts.clone(),
+                platform: Platform::LinuxX86_64,
                 certified_components: components.clone(),
                 observed_components: components,
                 atomic_reread: true,
@@ -1482,6 +1502,48 @@ mod tests {
             shadow_replay_key_sha256: content_sha256(&shadow_public),
             observer_receipt_key_sha256: content_sha256(&observer_public),
         };
+        (session, pins)
+    }
+
+    fn reconciled_fixture(
+        post_observed_at_unix_ms: i64,
+        post_captured_at_unix_ms: i64,
+    ) -> (CanarySession, IndependentPins) {
+        let (mut session, pins) = fixture();
+        session
+            .destination_observation
+            .destination_observed_at_unix_ms = post_observed_at_unix_ms;
+        session.destination_observation.captured_at_unix_ms = post_captured_at_unix_ms;
+        sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
+
+        let observer_public = public_key(&seed(10));
+        let post_action_digest =
+            observation_receipt_digest(&session.destination_observation).unwrap();
+        let mut reconciliation = observation(&observer_public, post_action_digest);
+        reconciliation.observation_id = Uuid::from_u128(12);
+        reconciliation.phase = ObservationPhase::Reconciliation;
+        reconciliation.request_sha256 = hash('8');
+        reconciliation.destination_cursor = 5;
+        reconciliation.destination_observed_at_unix_ms = 370;
+        reconciliation.captured_at_unix_ms = 380;
+        reconciliation.state = serde_json::json!({
+            "connector_request_sha256": hash('1'),
+            "effect_observed": true
+        });
+        sign_receipt(&mut reconciliation, &seed(10)).unwrap();
+        session.connector_outcome.observation_receipt_sha256 =
+            Some(observation_receipt_digest(&reconciliation).unwrap());
+        session.connector_outcome.status_code = "reconciled_effect_observed".to_owned();
+        session.connector_outcome.captured_at_unix_ms = 390;
+        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
+        let shadow_public = public_key(&seed(9));
+        session.shadow_replay = shadow(
+            &shadow_public,
+            outcome_receipt_digest(&session.connector_outcome).unwrap(),
+            &session.connector_outcome,
+        );
+        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
+        session.reconciliation_observation = Some(reconciliation);
         (session, pins)
     }
 
