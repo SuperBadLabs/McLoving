@@ -189,6 +189,7 @@ pub struct ThreatModelReview {
 pub struct InventoryReconciliation {
     pub context: ReceiptContext,
     pub source_controller: String,
+    pub source_controller_runner_binding_sha256: String,
     pub inventory_epoch: String,
     pub certified_inventory_sha256: String,
     pub observed_inventory_sha256: String,
@@ -216,6 +217,7 @@ pub struct RuntimeFreeze {
 pub struct QuiescenceProof {
     pub context: ReceiptContext,
     pub relinquishing_runner: String,
+    pub source_controller_runner_binding_sha256: String,
     pub gaining_runner: String,
     pub ingress_paused: bool,
     pub scheduling_frozen: bool,
@@ -319,6 +321,7 @@ pub struct AuthorityLedger {
     pub downstream_release_authority_identity: String,
     pub downstream_released_at_unix_ms: i64,
     pub relinquishing_runner: String,
+    pub source_controller_runner_binding_sha256: String,
     pub authoritative_runner: String,
     pub shadow_runner: String,
     pub relinquishing_runner_effect_authority_before_grant: bool,
@@ -1139,6 +1142,7 @@ fn verify_authority(
         .map_err(|_| QualificationError::new("CANARY_AUTHORITY_LEDGER_INVALID"))?;
     verify_final_authority_context(session, &session.authority.body.context)?;
     let authority = &session.authority.body;
+    verify_source_controller_runner_binding(session)?;
     let latest_observation = session.reconciliation_observation.as_ref().map_or(
         session.destination_observation.captured_at_unix_ms,
         |receipt| receipt.captured_at_unix_ms,
@@ -1180,6 +1184,55 @@ fn verify_authority(
         return Err(QualificationError::new("CANARY_AUTHORITY_LEDGER_INVALID"));
     }
     Ok(())
+}
+
+fn verify_source_controller_runner_binding(
+    session: &CanarySession,
+) -> Result<(), QualificationError> {
+    let expected = source_controller_runner_binding(
+        &session.inventory.body.source_controller,
+        &session.quiescence.body.relinquishing_runner,
+    )?;
+    if session
+        .inventory
+        .body
+        .source_controller_runner_binding_sha256
+        != expected
+        || session
+            .quiescence
+            .body
+            .source_controller_runner_binding_sha256
+            != expected
+        || session
+            .authority
+            .body
+            .source_controller_runner_binding_sha256
+            != expected
+    {
+        return Err(QualificationError::new(
+            "CANARY_SOURCE_AUTHORITY_BINDING_INVALID",
+        ));
+    }
+    Ok(())
+}
+
+fn source_controller_runner_binding(
+    source_controller: &str,
+    relinquishing_runner: &str,
+) -> Result<String, QualificationError> {
+    if source_controller.is_empty() || relinquishing_runner.is_empty() {
+        return Err(QualificationError::new(
+            "CANARY_SOURCE_AUTHORITY_BINDING_INVALID",
+        ));
+    }
+    canonical_digest(
+        b"mcloving-canary-source-controller-runner-binding-v1",
+        &serde_json::json!({
+            "source_controller": source_controller,
+            "relinquishing_runner": relinquishing_runner,
+        }),
+    )
+    .map_err(|_| QualificationError::new("CANARY_SOURCE_AUTHORITY_BINDING_INVALID"))
 }
 
 fn decode_pinned_key(encoded: &str, expected: &str) -> Result<Vec<u8>, QualificationError> {
@@ -1562,6 +1615,38 @@ mod tests {
     }
 
     #[test]
+    fn inventory_controller_must_bind_the_relinquishing_runner() {
+        let (mut session, pins) = fixture();
+        session.inventory.body.source_controller = "luigi".to_owned();
+        session
+            .inventory
+            .body
+            .source_controller_runner_binding_sha256 =
+            source_controller_runner_binding("luigi", "jenkins/mario").unwrap();
+        resign(&mut session.inventory, seed(2));
+
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_SOURCE_AUTHORITY_BINDING_INVALID"
+        );
+    }
+
+    #[test]
+    fn final_ledger_must_repeat_the_signed_source_runner_binding() {
+        let (mut session, pins) = fixture();
+        session
+            .authority
+            .body
+            .source_controller_runner_binding_sha256 = hash('f');
+        resign(&mut session.authority, seed(11));
+
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_SOURCE_AUTHORITY_BINDING_INVALID"
+        );
+    }
+
+    #[test]
     fn connector_dispatch_must_be_signed_and_follow_grant_issuance() {
         let (mut session, pins) = fixture();
         session.connector_outcome.dispatched_at_unix_ms = Some(150);
@@ -1742,6 +1827,8 @@ mod tests {
 
     fn fixture() -> (CanarySession, IndependentPins) {
         let contexts = context();
+        let source_controller_runner_binding =
+            source_controller_runner_binding("mario", "jenkins/mario").unwrap();
         let components = REQUIRED_FREEZE_COMPONENTS
             .iter()
             .map(|name| ((*name).to_owned(), digest(name.as_bytes())))
@@ -1766,6 +1853,7 @@ mod tests {
             InventoryReconciliation {
                 context: contexts.clone(),
                 source_controller: "mario".to_owned(),
+                source_controller_runner_binding_sha256: source_controller_runner_binding.clone(),
                 inventory_epoch: "epoch-2".to_owned(),
                 certified_inventory_sha256: hash('5'),
                 observed_inventory_sha256: hash('5'),
@@ -1793,6 +1881,7 @@ mod tests {
             QuiescenceProof {
                 context: contexts.clone(),
                 relinquishing_runner: "jenkins/mario".to_owned(),
+                source_controller_runner_binding_sha256: source_controller_runner_binding.clone(),
                 gaining_runner: "mcloving/canary".to_owned(),
                 ingress_paused: true,
                 scheduling_frozen: true,
@@ -1910,6 +1999,7 @@ mod tests {
                 downstream_release_authority_identity: "canary-role/11".to_owned(),
                 downstream_released_at_unix_ms: 600,
                 relinquishing_runner: "jenkins/mario".to_owned(),
+                source_controller_runner_binding_sha256: source_controller_runner_binding,
                 authoritative_runner: "mcloving/canary".to_owned(),
                 shadow_runner: "shadow/canary".to_owned(),
                 relinquishing_runner_effect_authority_before_grant: false,

@@ -60,7 +60,11 @@ Seven signed gates must all precede the effect grant:
    residual-risk acceptance are bound to at least two distinct named reviewers.
 2. A live inventory re-read exactly matches its certified digest, the job is
    enabled and explicitly canary-eligible, the effect class is known, and no
-   Jenkins-only external reader or administrative writer remains.
+   Jenkins-only external reader or administrative writer remains. Its source
+   controller and the quiescence receipt's relinquishing runner form one
+   canonical domain-separated binding digest repeated by the independently
+   signed inventory, quiescence, and final authority-ledger receipts. An
+   inventory for one controller therefore cannot clear another runner.
 3. One atomic re-read exactly matches all 20 certified source, shared-library,
    controller-input, compiler, mapping, component, state-transform, release,
    platform, agent, toolchain, authorization, trigger, discovery, connector,
@@ -145,7 +149,7 @@ operator-trust, runtime, service, configuration-authority, request-authority,
 and credential-issuance identities must be separate.
 
 The independently pinned final authority-ledger signer binds the same ceremony,
-action, old runner, authoritative runner, and signed shadow identity after the
+action, source-controller/old-runner digest, authoritative runner, and signed shadow identity after the
 connector outcome, observer chain, shadow replay, and any Windows proof. The
 signed body records when new effects were frozen, a nonnil downstream-release
 event UUID, the release authority identity, and the actual downstream-release
