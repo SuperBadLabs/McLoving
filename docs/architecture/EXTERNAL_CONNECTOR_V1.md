@@ -236,8 +236,9 @@ The shadow protocol `mcloving.external-shadow-replay/v1` accepts the complete
 signed connector receipt plus its expected digest, replay ID, shadow identity,
 caller timestamp claim, and audit provenance. The caller timestamp remains part
 of the canonical request digest for replay identity but is not trusted as replay
-evidence: the replayer samples the host clock at the replay boundary and signs
-that sampled value as `replayed_at_unix_ms`. Configuration contains no endpoint
+evidence. The replayer first verifies and durably claims the exact replay lineage
+and outcome, then samples the host clock and signs that completion-boundary value
+as `replayed_at_unix_ms`; sampling at request entry is forbidden. Configuration contains no endpoint
 URL or connector token. It explicitly lists production endpoint identities that it is forbidden
 to own; a replay must describe one of those denied endpoints. It also pins the
 connector receipt's complete implementation/image/configuration,
@@ -264,7 +265,10 @@ configuration; a changed signing or replay-authority mapping cannot return a
 receipt stored under the prior configuration.
 
 The shadow verifies the connector receipt and stores an exactly-once replay keyed
-by both replay ID and outcome digest. Exact restart replay returns the same
+by both replay ID and outcome digest. A FULL-synchronous claim transaction first
+durably records that verified replay; only then is completion time sampled and
+the signed receipt retained. A crash between those transactions resumes receipt
+finalization without re-running or backdating the replay. Exact restart replay returns the same
 signed `mcloving.external-shadow-receipt/v1`; divergent reuse fails. The receipt
 contains only typed outcome truth, public values, protected references, external
 IDs, and downstream-control/later-intent digests. It cannot execute an external

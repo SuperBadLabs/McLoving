@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use crate::store::{ShadowStore, acquire_shadow_lock};
+use crate::store::{ShadowReplayClaim, ShadowStore, acquire_shadow_lock};
 use crate::{
     ConnectorError, SHADOW_RECEIPT_SCHEMA_VERSION, SHADOW_REPLAY_SCHEMA_VERSION,
     ShadowReplayConfig, ShadowReplayReceipt, ShadowReplayRequest, canonical_digest, content_sha256,
@@ -139,7 +139,7 @@ impl ShadowReplayer {
         &self,
         request: ShadowReplayRequest,
     ) -> Result<ShadowReplayReceipt, ConnectorError> {
-        self.replay_inner(request, crate::connector::unix_time_ms()?)
+        self.replay_inner(request, None)
     }
 
     #[cfg(feature = "loopback-test")]
@@ -149,20 +149,20 @@ impl ShadowReplayer {
         request: ShadowReplayRequest,
         replayed_at_unix_ms: i64,
     ) -> Result<ShadowReplayReceipt, ConnectorError> {
-        self.replay_inner(request, replayed_at_unix_ms)
+        self.replay_inner(request, Some(replayed_at_unix_ms))
     }
 
     fn replay_inner(
         &self,
         request: ShadowReplayRequest,
-        replayed_at_unix_ms: i64,
+        completion_time_override: Option<i64>,
     ) -> Result<ShadowReplayReceipt, ConnectorError> {
         let _lineage_lock = acquire_shadow_lock(&self.config.state_dir)?;
         if request.schema_version != SHADOW_REPLAY_SCHEMA_VERSION
             || request.replay_id.is_nil()
             || request.expected_shadow_identity != self.config.shadow_identity
             || request.audit_provenance.is_empty()
-            || replayed_at_unix_ms <= 0
+            || completion_time_override.is_some_and(|timestamp| timestamp <= 0)
         {
             return Err(ConnectorError::InvalidReplay);
         }
@@ -185,6 +185,9 @@ impl ShadowReplayer {
         }
         let request_digest = canonical_digest(b"mcloving-shadow-replay-request-v1", &request)?;
         let outcome = request.outcome_receipt;
+        // Use the widest positive timestamp for the response-capacity check. The
+        // authoritative completion time is sampled only after the durable replay
+        // claim below, and its decimal representation cannot be larger than this.
         let mut receipt = ShadowReplayReceipt {
             schema_version: SHADOW_RECEIPT_SCHEMA_VERSION.to_owned(),
             replay_id: request.replay_id,
@@ -205,7 +208,7 @@ impl ShadowReplayer {
             external_ids: outcome.external_ids,
             downstream_control_digest: outcome.downstream_control_digest,
             later_intents_digest: outcome.later_intents_digest,
-            replayed_at_unix_ms,
+            replayed_at_unix_ms: i64::MAX,
             audit_provenance: request.audit_provenance,
             replay_signing_key_id: self.config.replay_signing_key_id.clone(),
             replay_signing_public_key_sha256: self.config.replay_signing_public_key_sha256.clone(),
@@ -220,15 +223,31 @@ impl ShadowReplayer {
         if response_bytes.len().saturating_add(1) > crate::MAX_FRAME_BYTES {
             return Err(ConnectorError::CapacityExceeded);
         }
-        self.store
+        let mut store = self
+            .store
             .lock()
-            .map_err(|_| ConnectorError::StateUnavailable)?
-            .replay(
-                request.replay_id,
-                &outcome_digest,
-                &request_digest,
-                &receipt,
-            )
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        match store.claim_replay(request.replay_id, &outcome_digest, &request_digest)? {
+            ShadowReplayClaim::Complete(existing) => return Ok(*existing),
+            ShadowReplayClaim::Finalize => {}
+        }
+
+        // The claim transaction durably records the verified replay lineage and
+        // outcome before this sample. Final receipt storage is evidence retention;
+        // a crash between the two transactions resumes finalization without
+        // re-running or backdating the replay.
+        receipt.replayed_at_unix_ms = match completion_time_override {
+            Some(timestamp) => timestamp,
+            None => crate::connector::unix_time_ms()?,
+        };
+        receipt.signature_base64.clear();
+        sign_shadow_receipt(&mut receipt, &self.replay_signing_seed)?;
+        store.complete_replay(
+            request.replay_id,
+            &outcome_digest,
+            &request_digest,
+            &receipt,
+        )
     }
 }
 

@@ -124,8 +124,9 @@ pre-action -> post-action -> reconciliation observer chain. This matches both
 receipt shapes emitted by `EXT-001` rather than inventing a third shape.
 
 Before downstream control flow is released, the no-authority shadow must replay
-that exact outcome digest. Its independently signed replay time is sampled by
-the shadow replayer at the replay boundary rather than copied from its caller,
+that exact outcome digest. Its independently signed replay-completion time is
+sampled by the shadow replayer only after its verified lineage and outcome are
+durably claimed, rather than copied from its caller or sampled at method entry,
 and must precede the authenticated downstream-release event. The receipt must
 also match request/build/attempt identities, fence,
 effect key, status, public values, protected secret references, external IDs,
