@@ -314,6 +314,10 @@ pub struct WindowsInterruptionProof {
 #[serde(deny_unknown_fields)]
 pub struct AuthorityLedger {
     pub context: ReceiptContext,
+    pub effects_frozen_at_unix_ms: i64,
+    pub downstream_release_event_id: Uuid,
+    pub downstream_release_authority_identity: String,
+    pub downstream_released_at_unix_ms: i64,
     pub relinquishing_runner: String,
     pub authoritative_runner: String,
     pub shadow_runner: String,
@@ -418,7 +422,8 @@ fn verify_root(session: &CanarySession) -> Result<(), QualificationError> {
         || !is_sha256(&session.mig006_receipt_sha256)
         || !is_sha256(&session.shadow_session_sha256)
         || session.completed_at_unix_ms <= 0
-        || session.downstream_released_at_unix_ms < session.completed_at_unix_ms
+        || session.downstream_released_at_unix_ms <= 0
+        || session.completed_at_unix_ms < session.downstream_released_at_unix_ms
     {
         return Err(QualificationError::new("CANARY_ROOT_BINDING_INVALID"));
     }
@@ -542,9 +547,10 @@ fn verify_final_authority_context(
     .unwrap_or(0);
     if !context_binding_matches(session, context)
         || context.collected_at_unix_ms <= latest_evidence
+        || context.collected_at_unix_ms < session.downstream_released_at_unix_ms
         || context.collected_at_unix_ms > session.completed_at_unix_ms
         || context.expires_at_unix_ms <= context.collected_at_unix_ms
-        || context.expires_at_unix_ms < session.downstream_released_at_unix_ms
+        || context.expires_at_unix_ms < session.completed_at_unix_ms
         || !is_sha256(&context.evidence_sha256)
     {
         return Err(QualificationError::new("CANARY_AUTHORITY_LEDGER_INVALID"));
@@ -939,8 +945,14 @@ fn verify_effect_receipts(
         || outcome.request_sha256 != grant.request_sha256
         || outcome.status != OutcomeStatus::Succeeded
         || outcome.ambiguous_requires_observation
-        || outcome.attempt_count == 0
-        || outcome.attempt_count > grant.max_attempts
+        || outcome.attempt_count != 1
+        || !matches!(
+            outcome.dispatched_at_unix_ms,
+            Some(dispatched_at)
+                if dispatched_at >= grant.issued_at_unix_ms
+                    && dispatched_at <= grant.expires_at_unix_ms
+                    && dispatched_at <= outcome.captured_at_unix_ms
+        )
         || shadow.outcome_receipt_sha256 != outcome_digest
         || shadow.request_id != outcome.request_id
         || shadow.tenant_id != outcome.tenant_id
@@ -1127,7 +1139,30 @@ fn verify_authority(
         .map_err(|_| QualificationError::new("CANARY_AUTHORITY_LEDGER_INVALID"))?;
     verify_final_authority_context(session, &session.authority.body.context)?;
     let authority = &session.authority.body;
-    if authority.relinquishing_runner != session.quiescence.body.relinquishing_runner
+    let latest_observation = session.reconciliation_observation.as_ref().map_or(
+        session.destination_observation.captured_at_unix_ms,
+        |receipt| receipt.captured_at_unix_ms,
+    );
+    let latest_windows_proof = session
+        .windows_interruption
+        .as_ref()
+        .map_or(0, |proof| proof.body.context.collected_at_unix_ms);
+    let latest_effect_evidence = [
+        session.connector_outcome.captured_at_unix_ms,
+        session.shadow_replay.replayed_at_unix_ms,
+        latest_observation,
+        latest_windows_proof,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    if authority.effects_frozen_at_unix_ms <= latest_effect_evidence
+        || authority.effects_frozen_at_unix_ms >= authority.downstream_released_at_unix_ms
+        || authority.downstream_release_event_id.is_nil()
+        || authority.downstream_release_authority_identity != session.authority.signing_key_id
+        || authority.downstream_released_at_unix_ms != session.downstream_released_at_unix_ms
+        || authority.context.collected_at_unix_ms < authority.downstream_released_at_unix_ms
+        || authority.relinquishing_runner != session.quiescence.body.relinquishing_runner
         || authority.authoritative_runner != session.grant.body.authoritative_runner
         || authority.shadow_runner != session.shadow_replay.shadow_identity
         || authority.relinquishing_runner == authority.authoritative_runner
@@ -1518,6 +1553,58 @@ mod tests {
     }
 
     #[test]
+    fn connector_dispatch_must_be_signed_and_follow_grant_issuance() {
+        let (mut session, pins) = fixture();
+        session.connector_outcome.dispatched_at_unix_ms = Some(150);
+        resign_outcome_and_shadow(&mut session);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
+
+        let (mut session, pins) = fixture();
+        session.connector_outcome.dispatched_at_unix_ms = None;
+        resign_outcome_and_shadow(&mut session);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
+    }
+
+    #[test]
+    fn canary_rejects_multiple_connector_dispatch_attempts() {
+        let (mut session, pins) = fixture();
+        session.connector_outcome.attempt_count = 2;
+        resign_outcome_and_shadow(&mut session);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
+    }
+
+    #[test]
+    fn downstream_release_time_must_be_authenticated_by_final_ledger() {
+        let (mut session, pins) = fixture();
+        session.downstream_released_at_unix_ms = 550;
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_AUTHORITY_LEDGER_INVALID"
+        );
+    }
+
+    #[test]
+    fn signed_release_event_must_follow_the_effect_freeze() {
+        let (mut session, pins) = fixture();
+        session.downstream_released_at_unix_ms = 450;
+        session.authority.body.downstream_released_at_unix_ms = 450;
+        resign(&mut session.authority, seed(11));
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_AUTHORITY_LEDGER_INVALID"
+        );
+    }
+
+    #[test]
     fn signing_roles_cannot_share_a_key() {
         let (session, mut pins) = fixture();
         pins.observer_receipt_key_sha256 = pins.connector_outcome_key_sha256.clone();
@@ -1805,10 +1892,14 @@ mod tests {
         sign_shadow_receipt(&mut shadow, &shadow_seed).unwrap();
 
         let mut authority_context = context();
-        authority_context.collected_at_unix_ms = 480;
+        authority_context.collected_at_unix_ms = 650;
         let authority = signed(
             AuthorityLedger {
                 context: authority_context,
+                effects_frozen_at_unix_ms: 500,
+                downstream_release_event_id: Uuid::from_u128(10),
+                downstream_release_authority_identity: "canary-role/11".to_owned(),
+                downstream_released_at_unix_ms: 600,
                 relinquishing_runner: "jenkins/mario".to_owned(),
                 authoritative_runner: "mcloving/canary".to_owned(),
                 shadow_runner: "shadow/canary".to_owned(),
@@ -1852,7 +1943,7 @@ mod tests {
             reconciliation_observation: None,
             windows_interruption: None,
             authority,
-            completed_at_unix_ms: 500,
+            completed_at_unix_ms: 700,
             downstream_released_at_unix_ms: 600,
         };
         refresh_frozen_execution_components(&mut session);
@@ -2032,6 +2123,7 @@ mod tests {
             attempt_count: 1,
             ambiguous_requires_observation: false,
             observation_receipt_sha256,
+            dispatched_at_unix_ms: Some(250),
             captured_at_unix_ms: 300,
             audit_provenance: "audit/canary".to_owned(),
             outcome_signing_key_id: "connector/outcome".to_owned(),

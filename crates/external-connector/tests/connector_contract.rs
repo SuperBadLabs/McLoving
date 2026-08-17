@@ -507,6 +507,7 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
         .unwrap();
     assert_eq!(first.status, OutcomeStatus::Succeeded);
     assert_eq!(first.attempt_count, 1);
+    assert_eq!(first.dispatched_at_unix_ms, Some(NOW));
     verify_outcome_receipt(&first, &public_key_from_seed(&rig.outcome_seed).unwrap()).unwrap();
     let replay = rig
         .restart()
@@ -623,6 +624,7 @@ async fn retry_safe_action_retries_with_one_stable_request_identity() {
         .unwrap();
     assert_eq!(receipt.status, OutcomeStatus::Succeeded);
     assert_eq!(receipt.attempt_count, 2);
+    assert_eq!(receipt.dispatched_at_unix_ms, Some(NOW));
     assert_eq!(rig.calls.load(Ordering::SeqCst), 2);
 }
 

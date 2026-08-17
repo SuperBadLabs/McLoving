@@ -111,7 +111,11 @@ and that query remains identical across the observer chain.
 The authoritative `external-connector/v1` outcome must match the grant's exact
 connector implementation, image, configuration, endpoint, account, resource,
 effect class, request/build identities, key, fence, and attempt quota. V1 accepts
-a successful bounded outcome only. A normal successful connector outcome has no
+a successful outcome with exactly one dispatch attempt only. Its connector-signed
+dispatch timestamp must be no earlier than grant issuance, no later than grant
+expiry, and no later than outcome capture; a missing timestamp or a retry count
+greater than one cannot prove that every dispatch followed the grant and fails
+closed. A normal successful connector outcome has no
 embedded observation digest and is joined to the separately signed
 `destination-observer/v1` post-action receipt by the ceremony. A successfully
 reconciled ambiguous outcome must instead embed the digest of the exact signed
@@ -137,13 +141,18 @@ and credential-issuance identities must be separate.
 
 The independently pinned final authority-ledger signer binds the same ceremony,
 action, old runner, authoritative runner, and signed shadow identity after the
-connector outcome, observer chain, shadow replay, and any Windows proof. Its
-ledger proves the old runner had no authority before the grant, the named
-authoritative runner held the single fenced action, the shadow had neither
+connector outcome, observer chain, shadow replay, and any Windows proof. The
+signed body records when new effects were frozen, a nonnil downstream-release
+event UUID, the release authority identity, and the actual downstream-release
+timestamp. Effects must be frozen after the last effect evidence and before the
+release; the ledger itself is collected at or after the release and before final
+ceremony completion. Its release authority must be its independently pinned
+signer, and its release timestamp must exactly match the top-level session value.
+The ledger also proves the old runner had no authority before the grant, the
+named authoritative runner held the single fenced action, the shadow had neither
 effect authority nor a production endpoint, exactly one action consumed the
-grant, no duplicate or ambiguous effect remains, and new effects are frozen
-again before downstream release. A later graduated action requires a completely
-fresh session.
+grant, and no duplicate or ambiguous effect remains. A later graduated action
+requires a completely fresh session.
 
 ## Retained limitation and next ceremony
 

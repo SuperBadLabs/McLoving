@@ -93,6 +93,9 @@ pub fn verify_outcome_receipt(
         || receipt.protocol_version != crate::PROTOCOL_VERSION
         || receipt.evidence_sequence == 0
         || receipt.request_id.is_nil()
+        || receipt.dispatched_at_unix_ms.is_some_and(|dispatched_at| {
+            dispatched_at <= 0 || dispatched_at > receipt.captured_at_unix_ms
+        })
         || receipt.outcome_signing_public_key_sha256 != content_sha256(public_key)
     {
         return Err(ConnectorError::InvalidReceipt);

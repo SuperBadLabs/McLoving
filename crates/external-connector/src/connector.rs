@@ -33,6 +33,28 @@ pub struct ExternalConnector {
     store: Mutex<ConnectorStore>,
 }
 
+#[derive(Clone, Copy)]
+struct OutcomeTiming {
+    dispatched_at_unix_ms: Option<i64>,
+    captured_at_unix_ms: i64,
+}
+
+impl OutcomeTiming {
+    const fn before_dispatch(captured_at_unix_ms: i64) -> Self {
+        Self {
+            dispatched_at_unix_ms: None,
+            captured_at_unix_ms,
+        }
+    }
+
+    const fn after_dispatch(dispatched_at_unix_ms: i64, captured_at_unix_ms: i64) -> Self {
+        Self {
+            dispatched_at_unix_ms: Some(dispatched_at_unix_ms),
+            captured_at_unix_ms,
+        }
+    }
+}
+
 impl ExternalConnector {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -234,11 +256,14 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::Ambiguous,
                         "transport_state_lost_after_dispatch",
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatched_at_unix_ms,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatched_at_unix_ms,
+                            )?,
+                        ),
                     );
                 }
                 Claim::RetryBudgetExhausted { attempt_count } => {
@@ -248,7 +273,7 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::RetryableFailure,
                         "bounded_retry_exhausted_before_dispatch",
-                        now_unix_ms,
+                        OutcomeTiming::before_dispatch(now_unix_ms),
                     );
                 }
                 Claim::Dispatch { attempt_count } => attempt_count,
@@ -268,7 +293,7 @@ impl ExternalConnector {
                     attempt_count,
                     OutcomeStatus::Failed,
                     ConnectorError::ExpiredAuthority.code(),
-                    dispatch_time,
+                    OutcomeTiming::before_dispatch(dispatch_time),
                 );
             }
             self.store
@@ -292,11 +317,14 @@ impl ExternalConnector {
                         &request_sha256,
                         attempt_count,
                         response,
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(ConnectorError::DestinationUnavailable)
@@ -317,11 +345,14 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::Ambiguous,
                         "transport_completion_unknown",
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(ConnectorError::DestinationUnavailable) => {
@@ -331,11 +362,14 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::RetryableFailure,
                         "bounded_retry_exhausted",
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(error @ ConnectorError::DestinationUnauthorized)
@@ -356,11 +390,14 @@ impl ExternalConnector {
                         attempt_count,
                         status,
                         status_code,
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(error) => return Err(error),
@@ -736,7 +773,7 @@ impl ExternalConnector {
         request_sha256: &str,
         attempt_count: u8,
         response: SignedDestinationOutcome,
-        now_unix_ms: i64,
+        timing: OutcomeTiming,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let response_digest = destination_outcome_digest(&response)?;
         let body = response.body;
@@ -749,7 +786,7 @@ impl ExternalConnector {
             request_sha256,
             store.next_sequence()?,
             attempt_count,
-            now_unix_ms,
+            timing,
         )?;
         receipt.status = body.status;
         receipt.status_code = body.status_code;
@@ -774,7 +811,7 @@ impl ExternalConnector {
         attempt_count: u8,
         status: OutcomeStatus,
         status_code: &str,
-        now_unix_ms: i64,
+        timing: OutcomeTiming,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let mut store = self
             .store
@@ -785,7 +822,7 @@ impl ExternalConnector {
             request_sha256,
             store.next_sequence()?,
             attempt_count,
-            now_unix_ms,
+            timing,
         )?;
         receipt.status = status;
         receipt.status_code = status_code.to_owned();
@@ -801,7 +838,7 @@ impl ExternalConnector {
         request_sha256: &str,
         evidence_sequence: u64,
         attempt_count: u8,
-        now_unix_ms: i64,
+        timing: OutcomeTiming,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         Ok(OutcomeReceipt {
             schema_version: OUTCOME_RECEIPT_SCHEMA_VERSION.to_owned(),
@@ -862,7 +899,8 @@ impl ExternalConnector {
             attempt_count,
             ambiguous_requires_observation: false,
             observation_receipt_sha256: None,
-            captured_at_unix_ms: now_unix_ms,
+            dispatched_at_unix_ms: timing.dispatched_at_unix_ms,
+            captured_at_unix_ms: timing.captured_at_unix_ms,
             audit_provenance: request.audit_provenance.clone(),
             outcome_signing_key_id: self.config.outcome_signing_key_id.clone(),
             outcome_signing_public_key_sha256: self
@@ -1314,6 +1352,7 @@ fn maximum_receipt_envelope_fits(config: &ConnectorConfig, signing_public: &[u8]
         attempt_count: config.limits.max_attempts,
         ambiguous_requires_observation: true,
         observation_receipt_sha256: Some("f".repeat(64)),
+        dispatched_at_unix_ms: Some(i64::MAX),
         captured_at_unix_ms: i64::MIN,
         audit_provenance: String::new(),
         outcome_signing_key_id: config.outcome_signing_key_id.clone(),

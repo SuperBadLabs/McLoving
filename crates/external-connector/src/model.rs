@@ -354,6 +354,8 @@ pub struct OutcomeReceipt {
     pub attempt_count: u8,
     pub ambiguous_requires_observation: bool,
     pub observation_receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_at_unix_ms: Option<i64>,
     pub captured_at_unix_ms: i64,
     pub audit_provenance: String,
     pub outcome_signing_key_id: String,
