@@ -485,11 +485,7 @@ fn verify_signed<T: Serialize>(
     {
         return Err(QualificationError::new("CANARY_GATE_KEY_MISMATCH"));
     }
-    let body = serde_json::to_vec(&receipt.body)
-        .map_err(|_| QualificationError::new("CANARY_GATE_SIGNATURE_INVALID"))?;
-    let mut message = Vec::with_capacity(RECEIPT_DOMAIN.len() + body.len());
-    message.extend_from_slice(RECEIPT_DOMAIN);
-    message.extend_from_slice(&body);
+    let message = signed_receipt_message(&receipt.signing_key_id, &receipt.body)?;
     UnparsedPublicKey::new(&ED25519, &public_key)
         .verify(&message, &signature)
         .map_err(|_| QualificationError::new("CANARY_GATE_SIGNATURE_INVALID"))
@@ -1284,11 +1280,20 @@ pub fn parse_independent_pins(bytes: &[u8]) -> Result<IndependentPins, Qualifica
     Ok(pins)
 }
 
-pub fn signed_receipt_message<T: Serialize>(body: &T) -> Result<Vec<u8>, QualificationError> {
+pub fn signed_receipt_message<T: Serialize>(
+    signing_key_id: &str,
+    body: &T,
+) -> Result<Vec<u8>, QualificationError> {
     let body = serde_json::to_vec(body)
         .map_err(|_| QualificationError::new("CANARY_GATE_SIGNATURE_INVALID"))?;
-    let mut message = Vec::with_capacity(RECEIPT_DOMAIN.len() + body.len());
+    let signing_key_id_len = u64::try_from(signing_key_id.len())
+        .map_err(|_| QualificationError::new("CANARY_GATE_SIGNATURE_INVALID"))?;
+    let mut message = Vec::with_capacity(
+        RECEIPT_DOMAIN.len() + std::mem::size_of::<u64>() + signing_key_id.len() + body.len(),
+    );
     message.extend_from_slice(RECEIPT_DOMAIN);
+    message.extend_from_slice(&signing_key_id_len.to_be_bytes());
+    message.extend_from_slice(signing_key_id.as_bytes());
     message.extend_from_slice(&body);
     Ok(message)
 }
@@ -1597,6 +1602,19 @@ mod tests {
     fn final_authority_ledger_requires_its_independent_signature() {
         let (mut session, pins) = fixture();
         session.authority.body.duplicate_effects = 1;
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_AUTHORITY_LEDGER_INVALID"
+        );
+    }
+
+    #[test]
+    fn downstream_release_authority_identity_cannot_be_substituted() {
+        let (mut session, pins) = fixture();
+        session.authority.signing_key_id = "substituted-release-authority".to_owned();
+        session.authority.body.downstream_release_authority_identity =
+            session.authority.signing_key_id.clone();
+
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_AUTHORITY_LEDGER_INVALID"
@@ -2160,7 +2178,7 @@ mod tests {
     fn resign<T: Serialize>(receipt: &mut SignedReceipt<T>, seed: Vec<u8>) {
         let pair = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
         receipt.signature_base64 = BASE64.encode(
-            pair.sign(&signed_receipt_message(&receipt.body).unwrap())
+            pair.sign(&signed_receipt_message(&receipt.signing_key_id, &receipt.body).unwrap())
                 .as_ref(),
         );
     }

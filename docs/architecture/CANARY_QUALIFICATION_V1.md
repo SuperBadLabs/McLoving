@@ -48,9 +48,12 @@ The eleven signing roles are pairwise distinct:
 
 An embedded public key is useful only when its digest equals the independently
 supplied role pin. Reusing one key for two roles rejects the complete session.
-Every CANARY gate receipt binds the same ceremony UUID, job, action UUID,
-reviewed implementation head, MIG-007 package, MIG-006 receipt, SHADOW-001
-session, evidence digest, collection time, and expiry.
+Every CANARY gate signature covers a domain-separated, length-delimited signer
+key identity followed by its canonical body. The body binds the same ceremony
+UUID, job, action UUID, reviewed implementation head, MIG-007 package, MIG-006
+receipt, SHADOW-001 session, evidence digest, collection time, and expiry. An
+assembler therefore cannot replace a signer identity—even with the identity
+named by the body—without invalidating the independently pinned signature.
 
 ## Pre-action gates
 
@@ -156,7 +159,8 @@ event UUID, the release authority identity, and the actual downstream-release
 timestamp. Effects must be frozen after the last effect evidence and before the
 release; the ledger itself is collected at or after the release and before final
 ceremony completion. Its release authority must be its independently pinned
-signer, and its release timestamp must exactly match the top-level session value.
+signer; that signer identity is itself covered by the ledger signature, and its
+release timestamp must exactly match the top-level session value.
 The ledger also proves the old runner had no authority before the grant, the
 named authoritative runner held the single fenced action, the shadow had neither
 effect authority nor a production endpoint, exactly one action consumed the
