@@ -20,6 +20,27 @@ async fn main() -> Result<()> {
     store.migrate().await.context("migrate controller store")?;
 
     match command.action.as_str() {
+        "migrate" => {
+            command.finish()?;
+            println!("migrated=true");
+        }
+        "create-project" => {
+            let organization_id = command.uuid("organization")?;
+            let organization_slug = command.required("organization-slug")?;
+            let project_id = command.uuid("project")?;
+            let project_slug = command.required("project-slug")?;
+            command.finish()?;
+            store
+                .create_project(
+                    organization_id,
+                    &organization_slug,
+                    project_id,
+                    &project_slug,
+                )
+                .await
+                .context("create organization and project")?;
+            println!("organization_id={organization_id} project_id={project_id} created=true");
+        }
         "provision-human" => {
             let organization_id = command.uuid("organization")?;
             let identity_id = command.uuid("identity")?;
@@ -124,7 +145,7 @@ async fn main() -> Result<()> {
             );
         }
         action => bail!(
-            "unsupported identity-admin action {action:?}; expected provision-human, lifecycle, revoke-service-credential, or provider-status"
+            "unsupported identity-admin action {action:?}; expected migrate, create-project, provision-human, lifecycle, revoke-service-credential, or provider-status"
         ),
     }
     pool.close().await;
@@ -295,5 +316,24 @@ mod tests {
         ])
         .expect("parse lifecycle options");
         assert!(command.required("reason").is_err());
+    }
+
+    #[test]
+    fn bootstrap_commands_reject_unused_or_incomplete_options() {
+        let migrate = Command::parse(["migrate".to_owned()]).expect("parse migrate");
+        migrate.finish().expect("migrate takes no options");
+
+        let mut project = Command::parse([
+            "create-project".to_owned(),
+            "--organization".to_owned(),
+            Uuid::nil().to_string(),
+            "--project".to_owned(),
+            Uuid::nil().to_string(),
+        ])
+        .expect("parse partial create-project");
+        project.uuid("organization").expect("organization UUID");
+        project.uuid("project").expect("project UUID");
+        assert!(project.required("organization-slug").is_err());
+        assert!(project.required("project-slug").is_err());
     }
 }

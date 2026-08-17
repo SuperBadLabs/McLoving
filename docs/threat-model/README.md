@@ -244,6 +244,32 @@ scheduler, credential, effect, deployment, canary, cutover, rollback, or
 decommission authority. Live inventory reconciliation, migration packaging,
 shadow replay, per-job canary, and later authority gates remain mandatory.
 
+### ALPHA-001 Mario product-demo review
+
+Reviewed: 2026-08-16
+
+ALPHA-001 exposes no new production boundary. Its operator script refuses any
+host other than Mario, requires a clean exact source head, uses digest-pinned
+build and PostgreSQL images, assigns a unique loopback-only database container
+and random ports, and removes only that exact container. It never addresses or
+mutates Mario's existing `jenkins-oracle-228` or `chengis-canary` containers.
+Fresh high-entropy API and artifact-agent credentials remain only in process
+environment, are never written to evidence, and the retained run directory is
+created owner-only. The controller starts from an explicit allowlisted
+environment, so ambient optional `MCLOVING_*` configuration cannot enable an
+extra listener or partially configure an identity provider. Fixed workload
+commands emit public markers and have no network, credential, Jenkins,
+connector, trigger, or external-effect authority.
+
+The demo's claims are bounded to native product usability, durable execution,
+public API/CLI/UI observability, controller restart, and idempotent submission.
+It does not prove hostile multi-tenant deployment, production secret handling,
+Jenkins compatibility, or authority transfer. Existing TM-002, TM-005, TM-006,
+TM-014, TM-016, TM-023, TM-025, and TM-030 mitigations remain unchanged; the
+acceptance run directly exercises their applicable authentication, persistence,
+execution, supply-chain, audit, and operational-state surfaces without waiving
+their production residual risks.
+
 ## Data-flow rules
 
 - Compatibility workers receive source and metadata, never execution secrets.

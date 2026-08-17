@@ -1,0 +1,30 @@
+version: 1
+name: mario-alpha
+stages:
+  - id: prepare
+    name: Prepare
+    steps:
+      - process:
+          program: /bin/sh
+          args:
+            - -c
+            - "printf 'mcloving-alpha:mario:prepare\n'"
+          timeout_seconds: 10
+  - id: test
+    name: Test
+    steps:
+      - process:
+          program: /bin/sh
+          args:
+            - -c
+            - "printf 'mcloving-alpha:mario:test\n'"
+          timeout_seconds: 10
+  - id: package
+    name: Package
+    steps:
+      - process:
+          program: /bin/sh
+          args:
+            - -c
+            - "printf 'mcloving-alpha:mario:complete\n'"
+          timeout_seconds: 10
