@@ -105,14 +105,12 @@ record_failure() {
   trap - EXIT
   set +e
   stop_services
-  if [[ ! -e "${run_dir}/result.json" ]]; then
-    jq -n \
-      --arg run_id "${run_id}" \
-      --arg source_head "${source_head}" \
-      --argjson exit_code "${status}" \
-      '{schema:"mcloving.mario-alpha-result/v1", run_id:$run_id, source_head:$source_head, alpha_demo_complete:false, exit_code:$exit_code}' \
-      >"${run_dir}/result.json"
-  fi
+  jq -n \
+    --arg run_id "${run_id}" \
+    --arg source_head "${source_head}" \
+    --argjson exit_code "${status}" \
+    '{schema:"mcloving.mario-alpha-result/v1", run_id:$run_id, source_head:$source_head, alpha_demo_complete:false, exit_code:$exit_code}' \
+    >"${run_dir}/result.json"
   echo "Mario alpha demo failed; evidence retained at ${run_dir}" >&2
   exit "${status}"
 }
