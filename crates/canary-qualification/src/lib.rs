@@ -920,6 +920,9 @@ fn verify_effect_receipts(
         .map_err(|_| QualificationError::new("CANARY_CONNECTOR_OUTCOME_INVALID"))?;
     let pre_action_digest = observation_receipt_digest(pre_action)
         .map_err(|_| QualificationError::new("CANARY_PRE_ACTION_OBSERVATION_INVALID"))?;
+    let dispatched_at_unix_ms = outcome
+        .dispatched_at_unix_ms
+        .ok_or_else(|| QualificationError::new("CANARY_EFFECT_RECEIPT_JOIN_INVALID"))?;
     let observed_state_sha256 =
         canonical_digest(b"mcloving-canary-destination-state-v1", &observation.state)
             .map_err(|_| QualificationError::new("CANARY_DESTINATION_OBSERVATION_INVALID"))?;
@@ -946,13 +949,9 @@ fn verify_effect_receipts(
         || outcome.status != OutcomeStatus::Succeeded
         || outcome.ambiguous_requires_observation
         || outcome.attempt_count != 1
-        || !matches!(
-            outcome.dispatched_at_unix_ms,
-            Some(dispatched_at)
-                if dispatched_at >= grant.issued_at_unix_ms
-                    && dispatched_at <= grant.expires_at_unix_ms
-                    && dispatched_at <= outcome.captured_at_unix_ms
-        )
+        || dispatched_at_unix_ms < grant.issued_at_unix_ms
+        || dispatched_at_unix_ms > grant.expires_at_unix_ms
+        || dispatched_at_unix_ms > outcome.captured_at_unix_ms
         || shadow.outcome_receipt_sha256 != outcome_digest
         || shadow.request_id != outcome.request_id
         || shadow.tenant_id != outcome.tenant_id
@@ -1011,6 +1010,7 @@ fn verify_effect_receipts(
         || outcome.captured_at_unix_ms < grant.issued_at_unix_ms
         || outcome.captured_at_unix_ms > grant.expires_at_unix_ms
         || observation.destination_observed_at_unix_ms <= grant.issued_at_unix_ms
+        || observation.destination_observed_at_unix_ms < dispatched_at_unix_ms
         || (!reconciled
             && observation.destination_observed_at_unix_ms < outcome.captured_at_unix_ms)
         || observation.captured_at_unix_ms < observation.destination_observed_at_unix_ms
@@ -1466,6 +1466,15 @@ mod tests {
     #[test]
     fn reconciled_post_action_observation_must_follow_the_grant() {
         let (session, pins) = reconciled_fixture(190, 195);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
+    }
+
+    #[test]
+    fn reconciled_post_action_observation_must_follow_dispatch() {
+        let (session, pins) = reconciled_fixture(240, 245);
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_EFFECT_RECEIPT_JOIN_INVALID"

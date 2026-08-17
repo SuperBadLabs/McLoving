@@ -133,7 +133,8 @@ effect key, status, public values, protected secret references, external IDs,
 downstream-control digest, and later-intent digest. The destination receipt must
 then match the tenant/project/pipeline/build/attempt, endpoint/account/resource,
 effect class, fence, predecessor precondition digest, publication deadline,
-and a destination-observation time strictly after grant issuance; its canonical
+and a destination-observation time strictly after grant issuance and no earlier
+than the connector's authenticated dispatch time; its canonical
 state must equal the result committed by the grant before the effect. This
 post-grant lower bound also applies when reconciliation is present, which must
 preserve the same observer identities and scope, advance the signed cursor from
