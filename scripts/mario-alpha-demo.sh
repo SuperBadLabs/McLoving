@@ -19,6 +19,10 @@ if [[ -n "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]];
   echo "mario-alpha-demo requires a clean source checkout" >&2
   exit 1
 fi
+if [[ "${MCLOVING_ALPHA_SKIP_BUILD:-0}" != "0" ]]; then
+  echo "mario-alpha-demo does not permit skipping the exact-head build" >&2
+  exit 1
+fi
 
 umask 077
 run_id="alpha001-$(date -u +%Y%m%dT%H%M%SZ)-$(python3 - <<'PY'
@@ -44,8 +48,8 @@ with socket.socket() as sock:
 PY
 }
 
-postgres_port="$(reserve_port)"
-controller_port="$(reserve_port)"
+postgres_port=""
+controller_port=""
 container_name="mcloving-${run_id}"
 source_head="$(git -C "${repo_root}" rev-parse HEAD)"
 organization_id="$(python3 - <<'PY'
@@ -98,6 +102,8 @@ stop_services() {
 
 record_failure() {
   local status=$?
+  trap - EXIT
+  set +e
   stop_services
   if [[ ! -e "${run_dir}/result.json" ]]; then
     jq -n \
@@ -113,21 +119,19 @@ record_failure() {
 trap record_failure EXIT
 
 target_root="${repo_root}/target/alpha-demo"
-if [[ "${MCLOVING_ALPHA_SKIP_BUILD:-0}" != "1" ]]; then
-  install -d -m 0700 "${target_root}" "${repo_root}/target/alpha-cargo-home"
-  podman run --rm \
-    --network host \
-    --volume "${repo_root}:/work:Z" \
-    --workdir /work \
-    --env CARGO_HOME=/work/target/alpha-cargo-home \
-    --env CARGO_TARGET_DIR=/work/target/alpha-demo \
-    "${MCLOVING_RUST_IMAGE}" \
-    cargo build --locked --release \
-      -p mcloving-controller \
-      -p mcloving-cli \
-      --bins \
-      >"${run_dir}/build.log" 2>&1
-fi
+install -d -m 0700 "${target_root}" "${repo_root}/target/alpha-cargo-home"
+podman run --rm \
+  --network host \
+  --volume "${repo_root}:/work:Z" \
+  --workdir /work \
+  --env CARGO_HOME=/work/target/alpha-cargo-home \
+  --env CARGO_TARGET_DIR=/work/target/alpha-demo \
+  "${MCLOVING_RUST_IMAGE}" \
+  cargo build --locked --release \
+    -p mcloving-controller \
+    -p mcloving-cli \
+    --bins \
+    >"${run_dir}/build.log" 2>&1
 
 controller_bin="${target_root}/release/mcloving-controller"
 admin_bin="${target_root}/release/mcloving-identity-admin"
@@ -143,11 +147,19 @@ sha256sum "${controller_bin}" "${admin_bin}" "${cli_bin}" \
 
 podman run --detach --rm \
   --name "${container_name}" \
-  --publish "127.0.0.1:${postgres_port}:5432" \
+  --publish "127.0.0.1::5432" \
   --env POSTGRES_USER=mcloving \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
   --env POSTGRES_DB=mcloving \
   "${MCLOVING_POSTGRES_IMAGE}" >/dev/null
+postgres_mapping="$(podman port "${container_name}" 5432/tcp)"
+postgres_port="${postgres_mapping##*:}"
+case "${postgres_port}" in
+  '' | *[!0-9]*)
+    echo "Podman returned an invalid PostgreSQL port: ${postgres_mapping}" >&2
+    exit 1
+    ;;
+esac
 for _ in $(seq 1 120); do
   if podman exec "${container_name}" pg_isready \
     --username mcloving --dbname mcloving >/dev/null 2>&1; then
@@ -175,13 +187,14 @@ MCLOVING_MIGRATION_DATABASE_URL="${migration_url}" \
   --project-slug alpha \
   >"${run_dir}/project.txt"
 
-export MCLOVING_URL="http://127.0.0.1:${controller_port}"
 export MCLOVING_API_TOKEN="${api_token}"
 export MCLOVING_ORGANIZATION_ID="${organization_id}"
 export MCLOVING_PROJECT_ID="${project_id}"
 
 start_controller() {
   local log_path=$1
+  controller_port="$(reserve_port)"
+  export MCLOVING_URL="http://127.0.0.1:${controller_port}"
   MCLOVING_MIGRATION_DATABASE_URL="${migration_url}" \
   MCLOVING_DATABASE_URL="${runtime_url}" \
   MCLOVING_API_TOKEN="${api_token}" \

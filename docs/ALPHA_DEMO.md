@@ -48,6 +48,6 @@ The default evidence root is
 `~/.local/share/mcloving/alpha-runs`; override it with
 `MCLOVING_ALPHA_RUN_ROOT` when an owner-approved retention location is needed.
 
-`MCLOVING_ALPHA_SKIP_BUILD=1` may be used only for local iteration after the
-exact binaries already exist under `target/alpha-demo/release`. The acceptance
-run must use the default build path.
+The operator path always performs the pinned, locked exact-head build. It
+rejects `MCLOVING_ALPHA_SKIP_BUILD` rather than allowing cached binaries to
+produce acceptance evidence for a different source head.
