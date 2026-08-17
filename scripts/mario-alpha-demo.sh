@@ -9,7 +9,7 @@ if [[ "$(hostname -s)" != "mario" ]]; then
   echo "mario-alpha-demo must run on the Mario host" >&2
   exit 1
 fi
-for command in podman python3 jq curl git sha256sum; do
+for command in podman python3 jq curl git sha256sum env; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "required command is unavailable: ${command}" >&2
     exit 1
@@ -201,25 +201,29 @@ start_controller() {
   local log_path=$1
   controller_port="$(reserve_port)"
   export MCLOVING_URL="http://127.0.0.1:${controller_port}"
-  MCLOVING_MIGRATION_DATABASE_URL="${migration_url}" \
-  MCLOVING_DATABASE_URL="${runtime_url}" \
-  MCLOVING_API_TOKEN="${api_token}" \
-  MCLOVING_API_TOKEN_GENERATION=1 \
-  MCLOVING_ARTIFACT_AGENT_TOKEN="${artifact_agent_token}" \
-  MCLOVING_LISTEN="127.0.0.1:${controller_port}" \
-  MCLOVING_ORGANIZATION_ID="${organization_id}" \
-  MCLOVING_AGENT_ID=mario-alpha-embedded \
-  MCLOVING_AGENT_CAPABILITIES=platform:linux \
-  MCLOVING_AGENT_TRUST_POOL=trusted-linux \
-  MCLOVING_LEASE_SECONDS=5 \
-  MCLOVING_POLL_MILLISECONDS=25 \
-  MCLOVING_CANCELLATION_POLL_MILLISECONDS=50 \
-  MCLOVING_TERMINATION_GRACE_MILLISECONDS=250 \
-  MCLOVING_SESSION_EPOCH=1 \
-  MCLOVING_WORKSPACE_ROOT="${runtime_dir}/workspace" \
-  MCLOVING_AGENT_JOURNAL="${runtime_dir}/agent.sqlite3" \
-  MCLOVING_OBJECT_ROOT="${runtime_dir}/objects" \
-  "${controller_bin}" >"${log_path}" 2>&1 &
+  env -i \
+    HOME="${HOME}" \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    MCLOVING_MIGRATION_DATABASE_URL="${migration_url}" \
+    MCLOVING_DATABASE_URL="${runtime_url}" \
+    MCLOVING_API_TOKEN="${api_token}" \
+    MCLOVING_API_TOKEN_GENERATION=1 \
+    MCLOVING_ARTIFACT_AGENT_TOKEN="${artifact_agent_token}" \
+    MCLOVING_LISTEN="127.0.0.1:${controller_port}" \
+    MCLOVING_ORGANIZATION_ID="${organization_id}" \
+    MCLOVING_AGENT_ID=mario-alpha-embedded \
+    MCLOVING_AGENT_CAPABILITIES=platform:linux \
+    MCLOVING_AGENT_TRUST_POOL=trusted-linux \
+    MCLOVING_LEASE_SECONDS=5 \
+    MCLOVING_POLL_MILLISECONDS=25 \
+    MCLOVING_CANCELLATION_POLL_MILLISECONDS=50 \
+    MCLOVING_TERMINATION_GRACE_MILLISECONDS=250 \
+    MCLOVING_SESSION_EPOCH=1 \
+    MCLOVING_WORKSPACE_ROOT="${runtime_dir}/workspace" \
+    MCLOVING_AGENT_JOURNAL="${runtime_dir}/agent.sqlite3" \
+    MCLOVING_OBJECT_ROOT="${runtime_dir}/objects" \
+    "${controller_bin}" >"${log_path}" 2>&1 &
   controller_pid=$!
   for _ in $(seq 1 240); do
     if "${cli_bin}" --output json audit --limit 1 >/dev/null 2>&1; then

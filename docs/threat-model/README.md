@@ -255,8 +255,11 @@ and random ports, and removes only that exact container. It never addresses or
 mutates Mario's existing `jenkins-oracle-228` or `chengis-canary` containers.
 Fresh high-entropy API and artifact-agent credentials remain only in process
 environment, are never written to evidence, and the retained run directory is
-created owner-only. Fixed workload commands emit public markers and have no
-network, credential, Jenkins, connector, trigger, or external-effect authority.
+created owner-only. The controller starts from an explicit allowlisted
+environment, so ambient optional `MCLOVING_*` configuration cannot enable an
+extra listener or partially configure an identity provider. Fixed workload
+commands emit public markers and have no network, credential, Jenkins,
+connector, trigger, or external-effect authority.
 
 The demo's claims are bounded to native product usability, durable execution,
 public API/CLI/UI observability, controller restart, and idempotent submission.
