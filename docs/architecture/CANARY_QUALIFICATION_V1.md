@@ -25,10 +25,12 @@ action. Configuration cannot override this eligibility boundary.
 ## Canonical private inputs
 
 The verifier accepts a canonical, duplicate-free JSON session and a separate
-canonical owner-held pin set. The raw session digest and the public-key digest
-for every signing role are pinned independently. The session is bounded to one
-MiB and operational output contains only counts and booleans; it never prints a
-session, pin, package, evidence, key, job, account, resource, or digest value.
+canonical owner-held pin set. The raw session digest, reviewed implementation
+Git head, and public-key digest for every signing role are pinned independently.
+The verifier rejects a session whose repeated implementation head differs from
+that independent expected head. The session is bounded to one MiB and
+operational output contains only counts and booleans; it never prints a session,
+pin, package, evidence, key, job, account, resource, or digest value.
 
 The ten signing roles are pairwise distinct:
 

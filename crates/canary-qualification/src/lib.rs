@@ -70,6 +70,7 @@ pub struct VerificationReceipt {
 #[serde(deny_unknown_fields)]
 pub struct IndependentPins {
     pub session_sha256: String,
+    pub expected_implementation_head: String,
     pub threat_model_key_sha256: String,
     pub inventory_key_sha256: String,
     pub freeze_key_sha256: String,
@@ -343,6 +344,7 @@ fn verify_session(
     pins: &IndependentPins,
 ) -> Result<VerificationReceipt, QualificationError> {
     verify_root(session)?;
+    verify_expected_implementation_head(session, pins)?;
     verify_pin_set(pins)?;
 
     verify_signed(&session.threat_model, &pins.threat_model_key_sha256)?;
@@ -407,6 +409,20 @@ fn verify_root(session: &CanarySession) -> Result<(), QualificationError> {
         || session.downstream_released_at_unix_ms < session.completed_at_unix_ms
     {
         return Err(QualificationError::new("CANARY_ROOT_BINDING_INVALID"));
+    }
+    Ok(())
+}
+
+fn verify_expected_implementation_head(
+    session: &CanarySession,
+    pins: &IndependentPins,
+) -> Result<(), QualificationError> {
+    if !is_git_oid(&pins.expected_implementation_head)
+        || session.implementation_head != pins.expected_implementation_head
+    {
+        return Err(QualificationError::new(
+            "CANARY_IMPLEMENTATION_HEAD_PIN_MISMATCH",
+        ));
     }
     Ok(())
 }
@@ -1086,6 +1102,16 @@ mod tests {
     }
 
     #[test]
+    fn implementation_head_must_match_independent_owner_pin() {
+        let (session, mut pins) = fixture();
+        pins.expected_implementation_head = hash40('2');
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_IMPLEMENTATION_HEAD_PIN_MISMATCH"
+        );
+    }
+
+    #[test]
     fn observer_query_must_bind_the_granted_connector_request() {
         let (mut session, pins) = fixture();
         session
@@ -1444,6 +1470,7 @@ mod tests {
         };
         let pins = IndependentPins {
             session_sha256: String::new(),
+            expected_implementation_head: hash40('1'),
             threat_model_key_sha256: key_digest(1),
             inventory_key_sha256: key_digest(2),
             freeze_key_sha256: key_digest(3),
