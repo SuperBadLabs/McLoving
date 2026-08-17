@@ -1524,7 +1524,7 @@ fn is_bearer_token68(value: &str) -> bool {
         && bytes[content_length..].iter().all(|byte| *byte == b'=')
 }
 
-fn unix_time_ms() -> Result<i64, ConnectorError> {
+pub(crate) fn unix_time_ms() -> Result<i64, ConnectorError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ConnectorError::StateUnavailable)?;

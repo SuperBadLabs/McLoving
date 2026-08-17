@@ -1786,7 +1786,9 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
     );
     secret_audit_request.audit_provenance = "audit/shadow/1".to_owned();
     let request = secret_audit_request;
-    let first = replayer.replay(request.clone()).unwrap();
+    let first = replayer.replay_at(request.clone(), NOW + 3).unwrap();
+    assert_eq!(first.replayed_at_unix_ms, NOW + 3);
+    assert_ne!(first.replayed_at_unix_ms, request.replayed_at_unix_ms);
     verify_shadow_receipt(&first, &public_key_from_seed(&replay_seed).unwrap()).unwrap();
     let replay_id = Uuid::new_v4();
     let large_output_state = tempfile::tempdir().unwrap();

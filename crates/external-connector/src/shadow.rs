@@ -139,11 +139,30 @@ impl ShadowReplayer {
         &self,
         request: ShadowReplayRequest,
     ) -> Result<ShadowReplayReceipt, ConnectorError> {
+        self.replay_inner(request, crate::connector::unix_time_ms()?)
+    }
+
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub fn replay_at(
+        &self,
+        request: ShadowReplayRequest,
+        replayed_at_unix_ms: i64,
+    ) -> Result<ShadowReplayReceipt, ConnectorError> {
+        self.replay_inner(request, replayed_at_unix_ms)
+    }
+
+    fn replay_inner(
+        &self,
+        request: ShadowReplayRequest,
+        replayed_at_unix_ms: i64,
+    ) -> Result<ShadowReplayReceipt, ConnectorError> {
         let _lineage_lock = acquire_shadow_lock(&self.config.state_dir)?;
         if request.schema_version != SHADOW_REPLAY_SCHEMA_VERSION
             || request.replay_id.is_nil()
             || request.expected_shadow_identity != self.config.shadow_identity
             || request.audit_provenance.is_empty()
+            || replayed_at_unix_ms <= 0
         {
             return Err(ConnectorError::InvalidReplay);
         }
@@ -186,7 +205,7 @@ impl ShadowReplayer {
             external_ids: outcome.external_ids,
             downstream_control_digest: outcome.downstream_control_digest,
             later_intents_digest: outcome.later_intents_digest,
-            replayed_at_unix_ms: request.replayed_at_unix_ms,
+            replayed_at_unix_ms,
             audit_provenance: request.audit_provenance,
             replay_signing_key_id: self.config.replay_signing_key_id.clone(),
             replay_signing_public_key_sha256: self.config.replay_signing_public_key_sha256.clone(),

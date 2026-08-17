@@ -234,8 +234,11 @@ unfenced absence cannot unfreeze ambiguity.
 
 The shadow protocol `mcloving.external-shadow-replay/v1` accepts the complete
 signed connector receipt plus its expected digest, replay ID, shadow identity,
-time, and audit provenance. Configuration contains no endpoint URL or connector
-token. It explicitly lists production endpoint identities that it is forbidden
+caller timestamp claim, and audit provenance. The caller timestamp remains part
+of the canonical request digest for replay identity but is not trusted as replay
+evidence: the replayer samples the host clock at the replay boundary and signs
+that sampled value as `replayed_at_unix_ms`. Configuration contains no endpoint
+URL or connector token. It explicitly lists production endpoint identities that it is forbidden
 to own; a replay must describe one of those denied endpoints. It also pins the
 connector receipt's complete implementation/image/configuration,
 deployment/runtime/service and authority identities, generation ancestry,
