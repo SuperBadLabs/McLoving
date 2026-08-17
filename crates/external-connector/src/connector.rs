@@ -33,6 +33,28 @@ pub struct ExternalConnector {
     store: Mutex<ConnectorStore>,
 }
 
+#[derive(Clone, Copy)]
+struct OutcomeTiming {
+    dispatched_at_unix_ms: Option<i64>,
+    captured_at_unix_ms: i64,
+}
+
+impl OutcomeTiming {
+    const fn before_dispatch(captured_at_unix_ms: i64) -> Self {
+        Self {
+            dispatched_at_unix_ms: None,
+            captured_at_unix_ms,
+        }
+    }
+
+    const fn after_dispatch(dispatched_at_unix_ms: i64, captured_at_unix_ms: i64) -> Self {
+        Self {
+            dispatched_at_unix_ms: Some(dispatched_at_unix_ms),
+            captured_at_unix_ms,
+        }
+    }
+}
+
 impl ExternalConnector {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -155,7 +177,8 @@ impl ExternalConnector {
     }
 
     pub async fn execute(&self, request: ActionRequest) -> Result<OutcomeReceipt, ConnectorError> {
-        self.execute_inner(request, unix_time_ms()?, true).await
+        self.execute_inner(request, unix_time_ms()?, true, None)
+            .await
     }
 
     #[cfg(feature = "loopback-test")]
@@ -165,7 +188,25 @@ impl ExternalConnector {
         request: ActionRequest,
         now_unix_ms: i64,
     ) -> Result<OutcomeReceipt, ConnectorError> {
-        self.execute_inner(request, now_unix_ms, false).await
+        self.execute_inner(request, now_unix_ms, false, Some(now_unix_ms))
+            .await
+    }
+
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub async fn execute_at_dispatch_boundary(
+        &self,
+        request: ActionRequest,
+        admission_time_unix_ms: i64,
+        dispatch_time_unix_ms: i64,
+    ) -> Result<OutcomeReceipt, ConnectorError> {
+        self.execute_inner(
+            request,
+            admission_time_unix_ms,
+            false,
+            Some(dispatch_time_unix_ms),
+        )
+        .await
     }
 
     async fn execute_inner(
@@ -173,6 +214,7 @@ impl ExternalConnector {
         request: ActionRequest,
         now_unix_ms: i64,
         resample_system_clock: bool,
+        dispatch_time_override: Option<i64>,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let _lineage_lock = acquire_connector_lock(&self.config.state_dir)?;
         self.store
@@ -234,11 +276,14 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::Ambiguous,
                         "transport_state_lost_after_dispatch",
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatched_at_unix_ms,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatched_at_unix_ms,
+                            )?,
+                        ),
                     );
                 }
                 Claim::RetryBudgetExhausted { attempt_count } => {
@@ -248,15 +293,41 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::RetryableFailure,
                         "bounded_retry_exhausted_before_dispatch",
-                        now_unix_ms,
+                        OutcomeTiming::before_dispatch(now_unix_ms),
                     );
                 }
                 Claim::Dispatch { attempt_count } => attempt_count,
             };
-            let dispatch_time = if resample_system_clock {
+            let marker_time = if resample_system_clock {
                 unix_time_ms()?
             } else {
                 now_unix_ms
+            };
+            if self
+                .validate_transport_window(&request, marker_time)
+                .is_err()
+            {
+                return self.finalize_local(
+                    &request,
+                    &request_sha256,
+                    attempt_count,
+                    OutcomeStatus::Failed,
+                    ConnectorError::ExpiredAuthority.code(),
+                    OutcomeTiming::before_dispatch(marker_time),
+                );
+            }
+            self.store
+                .lock()
+                .map_err(|_| ConnectorError::StateUnavailable)?
+                .mark_dispatched(request.request_id, &request_sha256, marker_time)?;
+
+            // The durable marker is intentionally conservative for crash
+            // recovery, but it is not the authenticated send boundary. Resample
+            // after its SQLite commit and revalidate authority immediately before
+            // entering the network dispatch.
+            let dispatch_time = match dispatch_time_override {
+                Some(timestamp) => timestamp,
+                None => unix_time_ms()?,
             };
             if self
                 .validate_transport_window(&request, dispatch_time)
@@ -268,13 +339,9 @@ impl ExternalConnector {
                     attempt_count,
                     OutcomeStatus::Failed,
                     ConnectorError::ExpiredAuthority.code(),
-                    dispatch_time,
+                    OutcomeTiming::before_dispatch(dispatch_time),
                 );
             }
-            self.store
-                .lock()
-                .map_err(|_| ConnectorError::StateUnavailable)?
-                .mark_dispatched(request.request_id, &request_sha256, dispatch_time)?;
             match self.dispatch(&request, &request_sha256).await {
                 Ok(response) => {
                     if response.body.status == OutcomeStatus::RetryableFailure
@@ -292,11 +359,14 @@ impl ExternalConnector {
                         &request_sha256,
                         attempt_count,
                         response,
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(ConnectorError::DestinationUnavailable)
@@ -317,11 +387,14 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::Ambiguous,
                         "transport_completion_unknown",
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(ConnectorError::DestinationUnavailable) => {
@@ -331,11 +404,14 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::RetryableFailure,
                         "bounded_retry_exhausted",
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(error @ ConnectorError::DestinationUnauthorized)
@@ -356,11 +432,14 @@ impl ExternalConnector {
                         attempt_count,
                         status,
                         status_code,
-                        post_dispatch_capture_time(
-                            resample_system_clock,
-                            now_unix_ms,
+                        OutcomeTiming::after_dispatch(
                             dispatch_time,
-                        )?,
+                            post_dispatch_capture_time(
+                                resample_system_clock,
+                                now_unix_ms,
+                                dispatch_time,
+                            )?,
+                        ),
                     );
                 }
                 Err(error) => return Err(error),
@@ -736,7 +815,7 @@ impl ExternalConnector {
         request_sha256: &str,
         attempt_count: u8,
         response: SignedDestinationOutcome,
-        now_unix_ms: i64,
+        timing: OutcomeTiming,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let response_digest = destination_outcome_digest(&response)?;
         let body = response.body;
@@ -749,7 +828,7 @@ impl ExternalConnector {
             request_sha256,
             store.next_sequence()?,
             attempt_count,
-            now_unix_ms,
+            timing,
         )?;
         receipt.status = body.status;
         receipt.status_code = body.status_code;
@@ -774,7 +853,7 @@ impl ExternalConnector {
         attempt_count: u8,
         status: OutcomeStatus,
         status_code: &str,
-        now_unix_ms: i64,
+        timing: OutcomeTiming,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let mut store = self
             .store
@@ -785,7 +864,7 @@ impl ExternalConnector {
             request_sha256,
             store.next_sequence()?,
             attempt_count,
-            now_unix_ms,
+            timing,
         )?;
         receipt.status = status;
         receipt.status_code = status_code.to_owned();
@@ -801,7 +880,7 @@ impl ExternalConnector {
         request_sha256: &str,
         evidence_sequence: u64,
         attempt_count: u8,
-        now_unix_ms: i64,
+        timing: OutcomeTiming,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         Ok(OutcomeReceipt {
             schema_version: OUTCOME_RECEIPT_SCHEMA_VERSION.to_owned(),
@@ -862,7 +941,8 @@ impl ExternalConnector {
             attempt_count,
             ambiguous_requires_observation: false,
             observation_receipt_sha256: None,
-            captured_at_unix_ms: now_unix_ms,
+            dispatched_at_unix_ms: timing.dispatched_at_unix_ms,
+            captured_at_unix_ms: timing.captured_at_unix_ms,
             audit_provenance: request.audit_provenance.clone(),
             outcome_signing_key_id: self.config.outcome_signing_key_id.clone(),
             outcome_signing_public_key_sha256: self
@@ -1314,6 +1394,7 @@ fn maximum_receipt_envelope_fits(config: &ConnectorConfig, signing_public: &[u8]
         attempt_count: config.limits.max_attempts,
         ambiguous_requires_observation: true,
         observation_receipt_sha256: Some("f".repeat(64)),
+        dispatched_at_unix_ms: Some(i64::MAX),
         captured_at_unix_ms: i64::MIN,
         audit_provenance: String::new(),
         outcome_signing_key_id: config.outcome_signing_key_id.clone(),
@@ -1485,7 +1566,7 @@ fn is_bearer_token68(value: &str) -> bool {
         && bytes[content_length..].iter().all(|byte| *byte == b'=')
 }
 
-fn unix_time_ms() -> Result<i64, ConnectorError> {
+pub(crate) fn unix_time_ms() -> Result<i64, ConnectorError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ConnectorError::StateUnavailable)?;

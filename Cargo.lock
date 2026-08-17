@@ -1408,6 +1408,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-canary-qualification"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "mcloving-destination-observer",
+ "mcloving-external-connector",
+ "ring",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-cli"
 version = "0.0.0"
 dependencies = [

@@ -593,6 +593,11 @@ pub(crate) struct ShadowStore {
     max_receipts: usize,
 }
 
+pub(crate) enum ShadowReplayClaim {
+    Complete(Box<ShadowReplayReceipt>),
+    Finalize,
+}
+
 impl ShadowStore {
     pub(crate) fn open(
         state_dir: &Path,
@@ -655,13 +660,12 @@ impl ShadowStore {
         })
     }
 
-    pub(crate) fn replay(
+    pub(crate) fn claim_replay(
         &mut self,
         replay_id: Uuid,
         outcome_digest: &str,
         request_digest: &str,
-        receipt: &ShadowReplayReceipt,
-    ) -> Result<ShadowReplayReceipt, ConnectorError> {
+    ) -> Result<ShadowReplayClaim, ConnectorError> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -685,10 +689,13 @@ impl ShadowStore {
             if stored_outcome != outcome_digest || stored_request != request_digest {
                 return Err(ConnectorError::ReplayMismatch);
             }
+            tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
+            if bytes.is_empty() {
+                return Ok(ShadowReplayClaim::Finalize);
+            }
             let replay =
                 serde_json::from_slice(&bytes).map_err(|_| ConnectorError::StateUnavailable)?;
-            tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
-            return Ok(replay);
+            return Ok(ShadowReplayClaim::Complete(Box::new(replay)));
         }
         let count: usize = tx
             .query_row("SELECT COUNT(*) FROM replays", [], |row| row.get(0))
@@ -696,13 +703,61 @@ impl ShadowStore {
         if count >= self.max_receipts {
             return Err(ConnectorError::CapacityExceeded);
         }
-        let bytes = serde_json::to_vec(receipt).map_err(|_| ConnectorError::InvalidReplay)?;
         tx.execute(
             "INSERT INTO replays(replay_id, outcome_receipt_sha256, request_sha256, receipt_json)
              VALUES(?1, ?2, ?3, ?4)",
-            params![replay_id.to_string(), outcome_digest, request_digest, bytes],
+            params![
+                replay_id.to_string(),
+                outcome_digest,
+                request_digest,
+                Vec::<u8>::new()
+            ],
         )
         .map_err(|_| ConnectorError::InvalidReplay)?;
+        tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
+        Ok(ShadowReplayClaim::Finalize)
+    }
+
+    pub(crate) fn complete_replay(
+        &mut self,
+        replay_id: Uuid,
+        outcome_digest: &str,
+        request_digest: &str,
+        receipt: &ShadowReplayReceipt,
+    ) -> Result<ShadowReplayReceipt, ConnectorError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        let (stored_outcome, stored_request, bytes) = tx
+            .query_row(
+                "SELECT outcome_receipt_sha256, request_sha256, receipt_json
+                 FROM replays WHERE replay_id = ?1",
+                [replay_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|_| ConnectorError::StateUnavailable)?;
+        if stored_outcome != outcome_digest || stored_request != request_digest {
+            return Err(ConnectorError::ReplayMismatch);
+        }
+        if !bytes.is_empty() {
+            let replay =
+                serde_json::from_slice(&bytes).map_err(|_| ConnectorError::StateUnavailable)?;
+            tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
+            return Ok(replay);
+        }
+        let bytes = serde_json::to_vec(receipt).map_err(|_| ConnectorError::InvalidReplay)?;
+        tx.execute(
+            "UPDATE replays SET receipt_json = ?2 WHERE replay_id = ?1",
+            params![replay_id.to_string(), bytes],
+        )
+        .map_err(|_| ConnectorError::StateUnavailable)?;
         tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
         Ok(receipt.clone())
     }

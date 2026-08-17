@@ -507,7 +507,17 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
         .unwrap();
     assert_eq!(first.status, OutcomeStatus::Succeeded);
     assert_eq!(first.attempt_count, 1);
+    assert_eq!(first.dispatched_at_unix_ms, Some(NOW));
     verify_outcome_receipt(&first, &public_key_from_seed(&rig.outcome_seed).unwrap()).unwrap();
+    let mut tampered_dispatch = first.clone();
+    tampered_dispatch.dispatched_at_unix_ms = Some(NOW - 1);
+    assert!(
+        verify_outcome_receipt(
+            &tampered_dispatch,
+            &public_key_from_seed(&rig.outcome_seed).unwrap(),
+        )
+        .is_err()
+    );
     let replay = rig
         .restart()
         .execute_at(request.clone(), NOW + 10)
@@ -623,6 +633,7 @@ async fn retry_safe_action_retries_with_one_stable_request_identity() {
         .unwrap();
     assert_eq!(receipt.status, OutcomeStatus::Succeeded);
     assert_eq!(receipt.attempt_count, 2);
+    assert_eq!(receipt.dispatched_at_unix_ms, Some(NOW));
     assert_eq!(rig.calls.load(Ordering::SeqCst), 2);
 }
 
@@ -806,6 +817,23 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
             .execute_at(too_short_for_transport, NOW)
             .await
             .is_ok()
+    );
+
+    let calls_before_dispatch_expiry = rig.calls.load(Ordering::SeqCst);
+    let mut expires_after_marker = rig.request(IdempotencyClass::ExternallyIdempotent);
+    expires_after_marker.expires_at_unix_ms = NOW + 30_000;
+    sign_action_request(&mut expires_after_marker, &rig.request_seed).unwrap();
+    let dispatch_expired = rig
+        .connector
+        .execute_at_dispatch_boundary(expires_after_marker, NOW, NOW + 29_951)
+        .await
+        .unwrap();
+    assert_eq!(dispatch_expired.status, OutcomeStatus::Failed);
+    assert_eq!(dispatch_expired.status_code, "expired_authority");
+    assert_eq!(dispatch_expired.dispatched_at_unix_ms, None);
+    assert_eq!(
+        rig.calls.load(Ordering::SeqCst),
+        calls_before_dispatch_expiry
     );
 
     let calls_before_zero_fence = rig.calls.load(Ordering::SeqCst);
@@ -1775,7 +1803,9 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
     );
     secret_audit_request.audit_provenance = "audit/shadow/1".to_owned();
     let request = secret_audit_request;
-    let first = replayer.replay(request.clone()).unwrap();
+    let first = replayer.replay_at(request.clone(), NOW + 3).unwrap();
+    assert_eq!(first.replayed_at_unix_ms, NOW + 3);
+    assert_ne!(first.replayed_at_unix_ms, request.replayed_at_unix_ms);
     verify_shadow_receipt(&first, &public_key_from_seed(&replay_seed).unwrap()).unwrap();
     let replay_id = Uuid::new_v4();
     let large_output_state = tempfile::tempdir().unwrap();

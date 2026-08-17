@@ -8,6 +8,7 @@ members = [
   "crates/agent-runtime",
   "crates/boundary-differential",
   "crates/cache",
+  "crates/canary-qualification",
   "crates/controller-api",
   "crates/controller-store",
   "crates/dependency-resolver",

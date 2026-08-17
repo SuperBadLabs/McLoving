@@ -197,8 +197,13 @@ The connector emits a signed
 `mcloving.external-outcome-receipt/v1` containing the complete action authority,
 request-payload digest, typed outcome, public values, protected references,
 external IDs, control-flow and later-intent digests, destination evidence,
-attempt count, exact credential grant, ambiguity truth, audit provenance, and
-outcome-signing identity.
+attempt count, exact credential grant, ambiguity truth, audit provenance,
+outcome-signing identity, and—after the durable dispatch marker is committed—the
+freshly resampled and revalidated pre-send `dispatched_at_unix_ms`. The marker's
+earlier timestamp is crash-recovery evidence and cannot authenticate the send.
+A terminal result produced before dispatch
+omits that optional field. Because absent optional fields are not serialized,
+previous valid v1 pre-dispatch receipts retain their canonical signed form.
 Receipts are stored durably and count against a fixed evidence quota.
 
 ## Independent ambiguity reconciliation
@@ -231,8 +236,12 @@ unfenced absence cannot unfreeze ambiguity.
 
 The shadow protocol `mcloving.external-shadow-replay/v1` accepts the complete
 signed connector receipt plus its expected digest, replay ID, shadow identity,
-time, and audit provenance. Configuration contains no endpoint URL or connector
-token. It explicitly lists production endpoint identities that it is forbidden
+caller timestamp claim, and audit provenance. The caller timestamp remains part
+of the canonical request digest for replay identity but is not trusted as replay
+evidence. The replayer first verifies and durably claims the exact replay lineage
+and outcome, then samples the host clock and signs that completion-boundary value
+as `replayed_at_unix_ms`; sampling at request entry is forbidden. Configuration contains no endpoint
+URL or connector token. It explicitly lists production endpoint identities that it is forbidden
 to own; a replay must describe one of those denied endpoints. It also pins the
 connector receipt's complete implementation/image/configuration,
 deployment/runtime/service and authority identities, generation ancestry,
@@ -258,7 +267,10 @@ configuration; a changed signing or replay-authority mapping cannot return a
 receipt stored under the prior configuration.
 
 The shadow verifies the connector receipt and stores an exactly-once replay keyed
-by both replay ID and outcome digest. Exact restart replay returns the same
+by both replay ID and outcome digest. A FULL-synchronous claim transaction first
+durably records that verified replay; only then is completion time sampled and
+the signed receipt retained. A crash between those transactions resumes receipt
+finalization without re-running or backdating the replay. Exact restart replay returns the same
 signed `mcloving.external-shadow-receipt/v1`; divergent reuse fails. The receipt
 contains only typed outcome truth, public values, protected references, external
 IDs, and downstream-control/later-intent digests. It cannot execute an external
