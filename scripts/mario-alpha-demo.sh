@@ -126,15 +126,13 @@ if [[ "${MCLOVING_ALPHA_SKIP_BUILD:-0}" != "1" ]]; then
     cargo build --locked --release \
       -p mcloving-controller \
       -p mcloving-cli \
-      --bin mcloving-controller \
-      --bin mcloving-identity-admin \
-      --bin mcloving \
+      --bins \
       >"${run_dir}/build.log" 2>&1
 fi
 
 controller_bin="${target_root}/release/mcloving-controller"
 admin_bin="${target_root}/release/mcloving-identity-admin"
-cli_bin="${target_root}/release/mcloving"
+cli_bin="${target_root}/release/mcloving-cli"
 for binary in "${controller_bin}" "${admin_bin}" "${cli_bin}"; do
   if [[ ! -x "${binary}" ]]; then
     echo "required alpha binary is missing: ${binary}" >&2
