@@ -90,7 +90,7 @@ stop_controller() {
   controller_pid=""
 }
 
-stop_services() {
+stop_services_best_effort() {
   if [[ "${services_stopped}" == true ]]; then
     return
   fi
@@ -100,11 +100,35 @@ stop_services() {
   services_stopped=true
 }
 
+stop_services() {
+  local exists_status
+  if [[ "${services_stopped}" == true ]]; then
+    return
+  fi
+  stop_controller
+  podman logs "${container_name}" >"${run_dir}/postgres.log" 2>&1 || true
+  if ! podman rm --force "${container_name}" >/dev/null 2>&1; then
+    echo "failed to remove the Mario alpha PostgreSQL container" >&2
+    return 1
+  fi
+  if podman container exists "${container_name}"; then
+    echo "Mario alpha PostgreSQL container remains after removal" >&2
+    return 1
+  else
+    exists_status=$?
+  fi
+  if [[ "${exists_status}" -ne 1 ]]; then
+    echo "could not verify Mario alpha PostgreSQL container removal" >&2
+    return "${exists_status}"
+  fi
+  services_stopped=true
+}
+
 record_failure() {
   local status=$?
   trap - EXIT
   set +e
-  stop_services
+  stop_services_best_effort
   jq -n \
     --arg run_id "${run_id}" \
     --arg source_head "${source_head}" \
