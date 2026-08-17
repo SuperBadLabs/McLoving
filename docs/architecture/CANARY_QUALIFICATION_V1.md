@@ -32,7 +32,7 @@ that independent expected head. The session is bounded to one MiB and
 operational output contains only counts and booleans; it never prints a session,
 pin, package, evidence, key, job, account, resource, or digest value.
 
-The ten signing roles are pairwise distinct:
+The eleven signing roles are pairwise distinct:
 
 - threat-model review;
 - live inventory reconciliation;
@@ -42,8 +42,9 @@ The ten signing roles are pairwise distinct:
 - canonical intent comparison;
 - one-action effect grant;
 - authoritative connector outcome;
-- effect-free shadow replay; and
-- independent destination observation.
+- effect-free shadow replay;
+- independent destination observation; and
+- final post-action authority/freeze ledger.
 
 An embedded public key is useful only when its digest equals the independently
 supplied role pin. Reusing one key for two roles rejects the complete session.
@@ -65,13 +66,15 @@ Seven signed gates must all precede the effect grant:
    platform, agent, toolchain, authorization, trigger, discovery, connector,
    SCM, credential, dependency, cache, and destination identities. Its signed
    semantic platform must also equal the session platform used to select the
-   Windows interruption-proof requirement. Four execution-critical component
-   digests have normative domain-separated meanings: `external_connector`
+   Windows interruption-proof requirement. Five execution-critical component
+   digests have normative domain-separated meanings: `agent` binds the named
+   authoritative runner, frozen persistent host, and executed connector runtime;
+   `external_connector`
    binds the granted connector ID, implementation, image, and configuration;
    `destination` binds the granted destination scope and signed observer
    implementation/deployment identities; `credential_mapping` binds the signed
    connector credential grant and authority identities; and `platform` binds
-   the semantic platform. The verifier recomputes all four from the executed
+   the semantic platform. The verifier recomputes all five from the executed
    signed receipts after validating those receipts.
 4. The relinquishing runner has paused ingress, scheduling, and grants and has
    zero queue, run, credential, connector-authority, lease, lock, retry,
@@ -128,15 +131,19 @@ post-grant lower bound also applies when reconciliation is present, which must
 preserve the same observer identities and scope, advance the signed cursor from
 the post-action receipt, bind the connector request digest, affirm that the
 effect was observed in its exact two-field reconciliation state, and precede
-the connector's final reconciled outcome. Connector and
-observer deployment, runtime, service, and credential-issuance identities must
-be separate.
+the connector's final reconciled outcome. Connector and observer deployment,
+operator-trust, runtime, service, configuration-authority, request-authority,
+and credential-issuance identities must be separate.
 
-The final authority ledger proves the old runner had no authority before the
-grant, the named authoritative runner held the single fenced action, the shadow
-had neither effect authority nor a production endpoint, exactly one action
-consumed the grant, no duplicate or ambiguous effect remains, and new effects
-are frozen again. A later graduated action requires a completely fresh session.
+The independently pinned final authority-ledger signer binds the same ceremony,
+action, old runner, authoritative runner, and signed shadow identity after the
+connector outcome, observer chain, shadow replay, and any Windows proof. Its
+ledger proves the old runner had no authority before the grant, the named
+authoritative runner held the single fenced action, the shadow had neither
+effect authority nor a production endpoint, exactly one action consumed the
+grant, no duplicate or ambiguous effect remains, and new effects are frozen
+again before downstream release. A later graduated action requires a completely
+fresh session.
 
 ## Retained limitation and next ceremony
 

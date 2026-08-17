@@ -50,6 +50,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "verified_destination_observations={}",
         receipt.verified_destination_observations
     );
+    println!(
+        "verified_authority_ledgers={}",
+        receipt.verified_authority_ledgers
+    );
     println!("duplicate_effects={}", receipt.duplicate_effects);
     println!("canary_qualified={}", receipt.canary_qualified);
     println!(

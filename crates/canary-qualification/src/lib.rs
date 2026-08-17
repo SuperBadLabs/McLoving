@@ -62,6 +62,7 @@ pub struct VerificationReceipt {
     pub verified_authoritative_outcomes: usize,
     pub verified_shadow_replays: usize,
     pub verified_destination_observations: usize,
+    pub verified_authority_ledgers: usize,
     pub duplicate_effects: u64,
     pub canary_qualified: bool,
     pub authority_granted_by_verifier: bool,
@@ -82,6 +83,7 @@ pub struct IndependentPins {
     pub connector_outcome_key_sha256: String,
     pub shadow_replay_key_sha256: String,
     pub observer_receipt_key_sha256: String,
+    pub authority_ledger_key_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,7 +134,7 @@ pub struct CanarySession {
     pub destination_observation: ObservationReceipt,
     pub reconciliation_observation: Option<ObservationReceipt>,
     pub windows_interruption: Option<SignedReceipt<WindowsInterruptionProof>>,
-    pub authority: AuthorityLedger,
+    pub authority: SignedReceipt<AuthorityLedger>,
     pub completed_at_unix_ms: i64,
     pub downstream_released_at_unix_ms: i64,
 }
@@ -202,6 +204,7 @@ pub struct InventoryReconciliation {
 pub struct RuntimeFreeze {
     pub context: ReceiptContext,
     pub platform: Platform,
+    pub persistent_host_identity: Option<String>,
     pub certified_components: BTreeMap<String, String>,
     pub observed_components: BTreeMap<String, String>,
     pub atomic_reread: bool,
@@ -310,6 +313,10 @@ pub struct WindowsInterruptionProof {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityLedger {
+    pub context: ReceiptContext,
+    pub relinquishing_runner: String,
+    pub authoritative_runner: String,
+    pub shadow_runner: String,
     pub relinquishing_runner_effect_authority_before_grant: bool,
     pub authoritative_runner_effect_authority_during_action: bool,
     pub shadow_effect_authority: bool,
@@ -377,9 +384,9 @@ fn verify_session(
     verify_intent(&session.intent.body)?;
     verify_grant(session)?;
     verify_effect_receipts(session, pins)?;
-    verify_frozen_execution_components(session)?;
     verify_windows(session, pins)?;
-    verify_authority(session)?;
+    verify_frozen_execution_components(session)?;
+    verify_authority(session, pins)?;
 
     Ok(VerificationReceipt {
         schema: SESSION_SCHEMA,
@@ -393,6 +400,7 @@ fn verify_session(
         verified_destination_observations: 2 + usize::from(
             session.reconciliation_observation.is_some(),
         ),
+        verified_authority_ledgers: 1,
         duplicate_effects: 0,
         canary_qualified: true,
         authority_granted_by_verifier: false,
@@ -443,6 +451,7 @@ fn verify_pin_set(pins: &IndependentPins) -> Result<(), QualificationError> {
         &pins.connector_outcome_key_sha256,
         &pins.shadow_replay_key_sha256,
         &pins.observer_receipt_key_sha256,
+        &pins.authority_ledger_key_sha256,
     ];
     if values.iter().any(|value| !is_sha256(value))
         || values.iter().collect::<BTreeSet<_>>().len() != values.len()
@@ -510,6 +519,39 @@ fn verify_post_action_context(
     Ok(())
 }
 
+fn verify_final_authority_context(
+    session: &CanarySession,
+    context: &ReceiptContext,
+) -> Result<(), QualificationError> {
+    let latest_observation = session.reconciliation_observation.as_ref().map_or(
+        session.destination_observation.captured_at_unix_ms,
+        |receipt| receipt.captured_at_unix_ms,
+    );
+    let latest_windows_proof = session
+        .windows_interruption
+        .as_ref()
+        .map_or(0, |proof| proof.body.context.collected_at_unix_ms);
+    let latest_evidence = [
+        session.connector_outcome.captured_at_unix_ms,
+        session.shadow_replay.replayed_at_unix_ms,
+        latest_observation,
+        latest_windows_proof,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    if !context_binding_matches(session, context)
+        || context.collected_at_unix_ms <= latest_evidence
+        || context.collected_at_unix_ms > session.completed_at_unix_ms
+        || context.expires_at_unix_ms <= context.collected_at_unix_ms
+        || context.expires_at_unix_ms < session.downstream_released_at_unix_ms
+        || !is_sha256(&context.evidence_sha256)
+    {
+        return Err(QualificationError::new("CANARY_AUTHORITY_LEDGER_INVALID"));
+    }
+    Ok(())
+}
+
 fn context_binding_matches(session: &CanarySession, context: &ReceiptContext) -> bool {
     context.schema == RECEIPT_SCHEMA
         && context.session_id == session.session_id
@@ -570,7 +612,15 @@ fn verify_freeze(session: &CanarySession) -> Result<(), QualificationError> {
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let persistent_host_valid = match freeze.platform {
+        Platform::LinuxX86_64 => freeze.persistent_host_identity.is_none(),
+        Platform::WindowsX86_64 => freeze
+            .persistent_host_identity
+            .as_deref()
+            .is_some_and(|identity| !identity.is_empty()),
+    };
     if freeze.platform != session.platform
+        || !persistent_host_valid
         || !freeze.atomic_reread
         || !freeze.frozen_before_grant
         || actual != required
@@ -604,11 +654,24 @@ fn verify_frozen_execution_components(session: &CanarySession) -> Result<(), Qua
 
 fn frozen_execution_component_digests(
     session: &CanarySession,
-) -> Result<[(&'static str, String); 4], QualificationError> {
+) -> Result<[(&'static str, String); 5], QualificationError> {
     let grant = &session.grant.body;
     let outcome = &session.connector_outcome;
     let observer = &session.pre_action_observation;
     Ok([
+        (
+            "agent",
+            frozen_component_digest(
+                b"mcloving-canary-frozen-agent-v1",
+                &serde_json::json!({
+                    "authoritative_runner": grant.authoritative_runner,
+                    "persistent_host_identity": session.freeze.body.persistent_host_identity,
+                    "connector_deployment_identity": outcome.deployment_identity,
+                    "connector_runtime_boundary_identity": outcome.runtime_boundary_identity,
+                    "connector_service_identity": outcome.service_identity,
+                }),
+            )?,
+        ),
         (
             "external_connector",
             frozen_component_digest(
@@ -634,8 +697,12 @@ fn frozen_execution_component_digests(
                     "observer_image_sha256": observer.observer_image_sha256,
                     "observer_config_sha256": observer.observer_config_sha256,
                     "observer_deployment_identity": observer.deployment_identity,
+                    "observer_operator_trust_identity": observer.operator_trust_identity,
                     "observer_runtime_boundary_identity": observer.runtime_boundary_identity,
                     "observer_service_identity": observer.service_identity,
+                    "observer_configuration_authority_identity": observer.configuration_authority_identity,
+                    "observer_request_authority_identity": observer.request_authority_identity,
+                    "observer_credential_issuance_path_identity": observer.credential_issuance_path_identity,
                     "destination_attestation_key_id": observer.destination_attestation_key_id,
                 }),
             )?,
@@ -799,6 +866,8 @@ fn verify_windows(
             verify_signed(proof, &pins.freeze_key_sha256)?;
             verify_post_action_context(session, &proof.body.context)?;
             if proof.body.persistent_host_identity.is_empty()
+                || session.freeze.body.persistent_host_identity.as_deref()
+                    != Some(proof.body.persistent_host_identity.as_str())
                 || !is_sha256(&proof.body.interruption_receipt_sha256)
                 || !is_sha256(&proof.body.reboot_receipt_sha256)
                 || !proof.body.no_orphan_process
@@ -939,8 +1008,11 @@ fn verify_effect_receipts(
         || session.completed_at_unix_ms < shadow.replayed_at_unix_ms
         || observation.publication_deadline_unix_ms < session.completed_at_unix_ms
         || outcome.deployment_identity == observation.deployment_identity
+        || outcome.operator_trust_identity == observation.operator_trust_identity
         || outcome.runtime_boundary_identity == observation.runtime_boundary_identity
         || outcome.service_identity == observation.service_identity
+        || outcome.configuration_authority_identity == observation.configuration_authority_identity
+        || outcome.request_authority_identity == observation.request_authority_identity
         || outcome.credential_issuance_path_identity
             == observation.credential_issuance_path_identity
     {
@@ -1047,9 +1119,21 @@ fn same_observer_identity(left: &ObservationReceipt, right: &ObservationReceipt)
         && left.confidentiality == right.confidentiality
 }
 
-fn verify_authority(session: &CanarySession) -> Result<(), QualificationError> {
-    let authority = &session.authority;
-    if authority.relinquishing_runner_effect_authority_before_grant
+fn verify_authority(
+    session: &CanarySession,
+    pins: &IndependentPins,
+) -> Result<(), QualificationError> {
+    verify_signed(&session.authority, &pins.authority_ledger_key_sha256)
+        .map_err(|_| QualificationError::new("CANARY_AUTHORITY_LEDGER_INVALID"))?;
+    verify_final_authority_context(session, &session.authority.body.context)?;
+    let authority = &session.authority.body;
+    if authority.relinquishing_runner != session.quiescence.body.relinquishing_runner
+        || authority.authoritative_runner != session.grant.body.authoritative_runner
+        || authority.shadow_runner != session.shadow_replay.shadow_identity
+        || authority.relinquishing_runner == authority.authoritative_runner
+        || authority.relinquishing_runner == authority.shadow_runner
+        || authority.authoritative_runner == authority.shadow_runner
+        || authority.relinquishing_runner_effect_authority_before_grant
         || !authority.authoritative_runner_effect_authority_during_action
         || authority.shadow_effect_authority
         || authority.shadow_production_endpoint
@@ -1176,6 +1260,7 @@ mod tests {
         assert_eq!(receipt.verified_pre_action_gates, 7);
         assert_eq!(receipt.verified_windows_interruption_proofs, 0);
         assert_eq!(receipt.verified_destination_observations, 2);
+        assert_eq!(receipt.verified_authority_ledgers, 1);
         assert_eq!(receipt.duplicate_effects, 0);
         assert!(
             session
@@ -1386,6 +1471,53 @@ mod tests {
     }
 
     #[test]
+    fn connector_and_observer_configuration_authorities_must_be_separate() {
+        let (mut session, pins) = fixture();
+        let shared = session
+            .connector_outcome
+            .configuration_authority_identity
+            .clone();
+        session
+            .pre_action_observation
+            .configuration_authority_identity = shared.clone();
+        sign_receipt(&mut session.pre_action_observation, &seed(10)).unwrap();
+        let pre_action_digest =
+            observation_receipt_digest(&session.pre_action_observation).unwrap();
+        session.grant.body.pre_action_observation_sha256 = pre_action_digest.clone();
+        resign(&mut session.grant, seed(7));
+        session
+            .destination_observation
+            .configuration_authority_identity = shared;
+        session.destination_observation.predecessor_receipt_sha256 = Some(pre_action_digest);
+        sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
+    }
+
+    #[test]
+    fn final_authority_ledger_requires_its_independent_signature() {
+        let (mut session, pins) = fixture();
+        session.authority.body.duplicate_effects = 1;
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_AUTHORITY_LEDGER_INVALID"
+        );
+    }
+
+    #[test]
+    fn signed_authority_ledger_cannot_report_residual_effects() {
+        let (mut session, pins) = fixture();
+        session.authority.body.duplicate_effects = 1;
+        resign(&mut session.authority, seed(11));
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_AUTHORITY_LEDGER_INVALID"
+        );
+    }
+
+    #[test]
     fn signing_roles_cannot_share_a_key() {
         let (session, mut pins) = fixture();
         pins.observer_receipt_key_sha256 = pins.connector_outcome_key_sha256.clone();
@@ -1427,6 +1559,7 @@ mod tests {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
+        session.freeze.body.persistent_host_identity = Some("host/windows/one".to_owned());
         refresh_frozen_execution_components(&mut session);
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
@@ -1439,6 +1572,7 @@ mod tests {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
+        session.freeze.body.persistent_host_identity = Some("host/windows/one".to_owned());
         refresh_frozen_execution_components(&mut session);
         let mut proof_context = context();
         proof_context.collected_at_unix_ms = 450;
@@ -1460,10 +1594,37 @@ mod tests {
     }
 
     #[test]
+    fn windows_proof_must_match_the_frozen_execution_host() {
+        let (mut session, pins) = fixture();
+        session.platform = Platform::WindowsX86_64;
+        session.freeze.body.platform = Platform::WindowsX86_64;
+        session.freeze.body.persistent_host_identity = Some("host/windows/one".to_owned());
+        refresh_frozen_execution_components(&mut session);
+        let mut proof_context = context();
+        proof_context.collected_at_unix_ms = 450;
+        session.windows_interruption = Some(signed(
+            WindowsInterruptionProof {
+                context: proof_context,
+                persistent_host_identity: "host/windows/two".to_owned(),
+                interruption_receipt_sha256: hash('6'),
+                reboot_receipt_sha256: hash('7'),
+                no_orphan_process: true,
+                no_duplicate_effect: true,
+            },
+            3,
+        ));
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_WINDOWS_PROOF_INVALID"
+        );
+    }
+
+    #[test]
     fn stale_pre_action_windows_interruption_proof_is_rejected() {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
+        session.freeze.body.persistent_host_identity = Some("host/windows/one".to_owned());
         refresh_frozen_execution_components(&mut session);
         session.windows_interruption = Some(signed(
             WindowsInterruptionProof {
@@ -1524,6 +1685,7 @@ mod tests {
             RuntimeFreeze {
                 context: contexts.clone(),
                 platform: Platform::LinuxX86_64,
+                persistent_host_identity: None,
                 certified_components: components.clone(),
                 observed_components: components,
                 atomic_reread: true,
@@ -1642,6 +1804,26 @@ mod tests {
         let mut shadow = shadow(&shadow_public, outcome_digest, &outcome);
         sign_shadow_receipt(&mut shadow, &shadow_seed).unwrap();
 
+        let mut authority_context = context();
+        authority_context.collected_at_unix_ms = 480;
+        let authority = signed(
+            AuthorityLedger {
+                context: authority_context,
+                relinquishing_runner: "jenkins/mario".to_owned(),
+                authoritative_runner: "mcloving/canary".to_owned(),
+                shadow_runner: "shadow/canary".to_owned(),
+                relinquishing_runner_effect_authority_before_grant: false,
+                authoritative_runner_effect_authority_during_action: true,
+                shadow_effect_authority: false,
+                shadow_production_endpoint: false,
+                grant_consumed_actions: 1,
+                duplicate_effects: 0,
+                ambiguous_effects: 0,
+                new_effects_frozen_after_action: true,
+            },
+            11,
+        );
+
         let mut session = CanarySession {
             schema: SESSION_SCHEMA.to_owned(),
             session_id: SESSION_ID,
@@ -1669,16 +1851,7 @@ mod tests {
             destination_observation: observation,
             reconciliation_observation: None,
             windows_interruption: None,
-            authority: AuthorityLedger {
-                relinquishing_runner_effect_authority_before_grant: false,
-                authoritative_runner_effect_authority_during_action: true,
-                shadow_effect_authority: false,
-                shadow_production_endpoint: false,
-                grant_consumed_actions: 1,
-                duplicate_effects: 0,
-                ambiguous_effects: 0,
-                new_effects_frozen_after_action: true,
-            },
+            authority,
             completed_at_unix_ms: 500,
             downstream_released_at_unix_ms: 600,
         };
@@ -1696,6 +1869,7 @@ mod tests {
             connector_outcome_key_sha256: content_sha256(&outcome_public),
             shadow_replay_key_sha256: content_sha256(&shadow_public),
             observer_receipt_key_sha256: content_sha256(&observer_public),
+            authority_ledger_key_sha256: key_digest(11),
         };
         (session, pins)
     }
