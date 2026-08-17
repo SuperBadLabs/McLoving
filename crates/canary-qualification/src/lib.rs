@@ -127,6 +127,7 @@ pub struct CanarySession {
     pub observer_receipt_public_key_base64: String,
     pub pre_action_observation: ObservationReceipt,
     pub destination_observation: ObservationReceipt,
+    pub reconciliation_observation: Option<ObservationReceipt>,
     pub windows_interruption: Option<SignedReceipt<WindowsInterruptionProof>>,
     pub authority: AuthorityLedger,
     pub completed_at_unix_ms: i64,
@@ -382,7 +383,9 @@ fn verify_session(
         verified_pre_action_gates: 7 + usize::from(session.windows_interruption.is_some()),
         verified_authoritative_outcomes: 1,
         verified_shadow_replays: 1,
-        verified_destination_observations: 2,
+        verified_destination_observations: 2 + usize::from(
+            session.reconciliation_observation.is_some(),
+        ),
         duplicate_effects: 0,
         canary_qualified: true,
         authority_granted_by_verifier: false,
@@ -708,13 +711,13 @@ fn verify_effect_receipts(
     let observation = &session.destination_observation;
     let outcome_digest = outcome_receipt_digest(outcome)
         .map_err(|_| QualificationError::new("CANARY_CONNECTOR_OUTCOME_INVALID"))?;
-    let observation_digest = observation_receipt_digest(observation)
-        .map_err(|_| QualificationError::new("CANARY_DESTINATION_OBSERVATION_INVALID"))?;
     let pre_action_digest = observation_receipt_digest(pre_action)
         .map_err(|_| QualificationError::new("CANARY_PRE_ACTION_OBSERVATION_INVALID"))?;
     let observed_state_sha256 =
         canonical_digest(b"mcloving-canary-destination-state-v1", &observation.state)
             .map_err(|_| QualificationError::new("CANARY_DESTINATION_OBSERVATION_INVALID"))?;
+    let reconciled =
+        verify_reconciliation_observation(session, grant, outcome, observation, &observer_key)?;
 
     if outcome.connector_id != grant.connector_id
         || outcome.connector_implementation_sha256 != grant.connector_implementation_sha256
@@ -737,7 +740,6 @@ fn verify_effect_receipts(
         || outcome.ambiguous_requires_observation
         || outcome.attempt_count == 0
         || outcome.attempt_count > grant.max_attempts
-        || outcome.observation_receipt_sha256.as_deref() != Some(observation_digest.as_str())
         || shadow.outcome_receipt_sha256 != outcome_digest
         || shadow.request_id != outcome.request_id
         || shadow.tenant_id != outcome.tenant_id
@@ -775,28 +777,7 @@ fn verify_effect_receipts(
         || pre_action.publication_deadline_unix_ms < grant.issued_at_unix_ms
         || observation.phase != ObservationPhase::PostAction
         || observation.predecessor_receipt_sha256.as_deref() != Some(pre_action_digest.as_str())
-        || observation.observer_id != pre_action.observer_id
-        || observation.observer_implementation_sha256 != pre_action.observer_implementation_sha256
-        || observation.observer_image_sha256 != pre_action.observer_image_sha256
-        || observation.observer_config_sha256 != pre_action.observer_config_sha256
-        || observation.deployment_identity != pre_action.deployment_identity
-        || observation.operator_trust_identity != pre_action.operator_trust_identity
-        || observation.runtime_boundary_identity != pre_action.runtime_boundary_identity
-        || observation.service_identity != pre_action.service_identity
-        || observation.credential_issuance_path_identity
-            != pre_action.credential_issuance_path_identity
-        || observation.configuration_authority_identity
-            != pre_action.configuration_authority_identity
-        || observation.request_authority_identity != pre_action.request_authority_identity
-        || observation.generation != pre_action.generation
-        || observation.activation_mode != pre_action.activation_mode
-        || observation.read_grant_id != pre_action.read_grant_id
-        || observation.read_grant_version != pre_action.read_grant_version
-        || observation.read_grant_scope != pre_action.read_grant_scope
-        || observation.destination_attestation_key_id != pre_action.destination_attestation_key_id
-        || observation.receipt_signing_key_id != pre_action.receipt_signing_key_id
-        || observation.state_schema_version != pre_action.state_schema_version
-        || observation.confidentiality != pre_action.confidentiality
+        || !same_observer_identity(observation, pre_action)
         || observation.destination_cursor <= pre_action.destination_cursor
         || observation.destination_observed_at_unix_ms < pre_action.destination_observed_at_unix_ms
         || observation.request_sha256 != grant.request_sha256
@@ -813,9 +794,11 @@ fn verify_effect_receipts(
         || observed_state_sha256 != grant.expected_post_state_sha256
         || outcome.captured_at_unix_ms < grant.issued_at_unix_ms
         || outcome.captured_at_unix_ms > grant.expires_at_unix_ms
-        || observation.destination_observed_at_unix_ms < outcome.captured_at_unix_ms
+        || (!reconciled
+            && observation.destination_observed_at_unix_ms < outcome.captured_at_unix_ms)
         || observation.captured_at_unix_ms < observation.destination_observed_at_unix_ms
         || observation.captured_at_unix_ms > observation.publication_deadline_unix_ms
+        || session.completed_at_unix_ms < outcome.captured_at_unix_ms
         || session.completed_at_unix_ms < observation.captured_at_unix_ms
         || session.completed_at_unix_ms < shadow.replayed_at_unix_ms
         || observation.publication_deadline_unix_ms < session.completed_at_unix_ms
@@ -830,6 +813,103 @@ fn verify_effect_receipts(
         ));
     }
     Ok(())
+}
+
+fn verify_reconciliation_observation(
+    session: &CanarySession,
+    grant: &EffectGrant,
+    outcome: &OutcomeReceipt,
+    post_action: &ObservationReceipt,
+    observer_key: &[u8],
+) -> Result<bool, QualificationError> {
+    let (expected_digest, reconciliation) = match (
+        outcome.observation_receipt_sha256.as_deref(),
+        session.reconciliation_observation.as_ref(),
+    ) {
+        (None, None) => return Ok(false),
+        (Some(expected), Some(receipt)) => (expected, receipt),
+        _ => {
+            return Err(QualificationError::new(
+                "CANARY_EFFECT_RECEIPT_JOIN_INVALID",
+            ));
+        }
+    };
+    verify_observation_receipt(reconciliation, observer_key)
+        .map_err(|_| QualificationError::new("CANARY_RECONCILIATION_OBSERVATION_INVALID"))?;
+    let reconciliation_digest = observation_receipt_digest(reconciliation)
+        .map_err(|_| QualificationError::new("CANARY_RECONCILIATION_OBSERVATION_INVALID"))?;
+    let post_action_digest = observation_receipt_digest(post_action)
+        .map_err(|_| QualificationError::new("CANARY_DESTINATION_OBSERVATION_INVALID"))?;
+    let state = reconciliation
+        .state
+        .as_object()
+        .filter(|state| state.len() == 2);
+    let observed_request = state
+        .and_then(|state| state.get("connector_request_sha256"))
+        .and_then(serde_json::Value::as_str);
+    let observed_effect = state
+        .and_then(|state| state.get("effect_observed"))
+        .and_then(serde_json::Value::as_bool);
+
+    if reconciliation_digest != expected_digest
+        || reconciliation.phase != ObservationPhase::Reconciliation
+        || reconciliation.predecessor_receipt_sha256.as_deref() != Some(post_action_digest.as_str())
+        || !same_observer_identity(reconciliation, post_action)
+        || reconciliation.request_sha256 != grant.request_sha256
+        || reconciliation.tenant_id != outcome.tenant_id
+        || reconciliation.project_id != outcome.project_id
+        || reconciliation.pipeline_id != outcome.pipeline_id
+        || reconciliation.build_id != outcome.build_id
+        || reconciliation.attempt_id != outcome.attempt_id
+        || reconciliation.effect_fence != outcome.effect_fence
+        || reconciliation.endpoint_identity != outcome.endpoint_identity
+        || reconciliation.account_identity != outcome.account_identity
+        || reconciliation.resource_identity != outcome.resource_identity
+        || reconciliation.effect_class != outcome.effect_class
+        || reconciliation.destination_cursor <= post_action.destination_cursor
+        || reconciliation.destination_observed_at_unix_ms
+            < post_action.destination_observed_at_unix_ms
+        || reconciliation.captured_at_unix_ms < reconciliation.destination_observed_at_unix_ms
+        || post_action.captured_at_unix_ms > reconciliation.destination_observed_at_unix_ms
+        || reconciliation.destination_observed_at_unix_ms > outcome.captured_at_unix_ms
+        || reconciliation.captured_at_unix_ms > outcome.captured_at_unix_ms
+        || reconciliation.captured_at_unix_ms > reconciliation.publication_deadline_unix_ms
+        || reconciliation.publication_deadline_unix_ms < session.completed_at_unix_ms
+        || observed_request != Some(grant.request_sha256.as_str())
+        || observed_effect != Some(true)
+    {
+        return Err(QualificationError::new(
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID",
+        ));
+    }
+    Ok(true)
+}
+
+fn same_observer_identity(left: &ObservationReceipt, right: &ObservationReceipt) -> bool {
+    left.observer_id == right.observer_id
+        && left.observer_implementation_sha256 == right.observer_implementation_sha256
+        && left.observer_image_sha256 == right.observer_image_sha256
+        && left.observer_config_sha256 == right.observer_config_sha256
+        && left.deployment_identity == right.deployment_identity
+        && left.operator_trust_identity == right.operator_trust_identity
+        && left.runtime_boundary_identity == right.runtime_boundary_identity
+        && left.service_identity == right.service_identity
+        && left.credential_issuance_path_identity == right.credential_issuance_path_identity
+        && left.configuration_authority_identity == right.configuration_authority_identity
+        && left.request_authority_identity == right.request_authority_identity
+        && left.generation == right.generation
+        && left.activation_mode == right.activation_mode
+        && left.previous_generation == right.previous_generation
+        && left.rollback_from_generation == right.rollback_from_generation
+        && left.read_grant_id == right.read_grant_id
+        && left.read_grant_version == right.read_grant_version
+        && left.read_grant_scope == right.read_grant_scope
+        && left.canonical_query == right.canonical_query
+        && left.destination_attestation_key_id == right.destination_attestation_key_id
+        && left.receipt_signing_key_id == right.receipt_signing_key_id
+        && left.receipt_signing_public_key_sha256 == right.receipt_signing_public_key_sha256
+        && left.state_schema_version == right.state_schema_version
+        && left.confidentiality == right.confidentiality
 }
 
 fn verify_authority(session: &CanarySession) -> Result<(), QualificationError> {
@@ -961,6 +1041,12 @@ mod tests {
         assert_eq!(receipt.verified_pre_action_gates, 7);
         assert_eq!(receipt.verified_destination_observations, 2);
         assert_eq!(receipt.duplicate_effects, 0);
+        assert!(
+            session
+                .connector_outcome
+                .observation_receipt_sha256
+                .is_none()
+        );
     }
 
     #[test]
@@ -1015,16 +1101,46 @@ mod tests {
         let (mut session, pins) = fixture();
         session.destination_observation.request_sha256 = hash('6');
         sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
-        session.connector_outcome.observation_receipt_sha256 =
-            Some(observation_receipt_digest(&session.destination_observation).unwrap());
-        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
-        session.shadow_replay.outcome_receipt_sha256 =
-            outcome_receipt_digest(&session.connector_outcome).unwrap();
-        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
         );
+    }
+
+    #[test]
+    fn reconciled_connector_outcome_binds_the_real_reconciliation_receipt() {
+        let (mut session, pins) = fixture();
+        let observer_public = public_key(&seed(10));
+        let post_action_digest =
+            observation_receipt_digest(&session.destination_observation).unwrap();
+        let mut reconciliation = observation(&observer_public, post_action_digest);
+        reconciliation.observation_id = Uuid::from_u128(12);
+        reconciliation.phase = ObservationPhase::Reconciliation;
+        reconciliation.destination_cursor = 5;
+        reconciliation.destination_observed_at_unix_ms = 370;
+        reconciliation.captured_at_unix_ms = 380;
+        reconciliation.state = serde_json::json!({
+            "connector_request_sha256": hash('1'),
+            "effect_observed": true
+        });
+        sign_receipt(&mut reconciliation, &seed(10)).unwrap();
+        session.connector_outcome.observation_receipt_sha256 =
+            Some(observation_receipt_digest(&reconciliation).unwrap());
+        session.connector_outcome.status_code = "reconciled_effect_observed".to_owned();
+        session.connector_outcome.captured_at_unix_ms = 390;
+        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
+        let shadow_public = public_key(&seed(9));
+        session.shadow_replay = shadow(
+            &shadow_public,
+            outcome_receipt_digest(&session.connector_outcome).unwrap(),
+            &session.connector_outcome,
+        );
+        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
+        session.reconciliation_observation = Some(reconciliation);
+
+        let receipt = verify_session(&session, &pins).unwrap();
+        assert_eq!(receipt.verified_destination_observations, 3);
+        assert!(!receipt.authority_granted_by_verifier);
     }
 
     #[test]
@@ -1054,13 +1170,6 @@ mod tests {
         let (mut session, pins) = fixture();
         session.destination_observation.observer_config_sha256 = hash('f');
         sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
-        let observation_digest =
-            observation_receipt_digest(&session.destination_observation).unwrap();
-        session.connector_outcome.observation_receipt_sha256 = Some(observation_digest);
-        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
-        session.shadow_replay.outcome_receipt_sha256 =
-            outcome_receipt_digest(&session.connector_outcome).unwrap();
-        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
@@ -1261,11 +1370,9 @@ mod tests {
 
         let mut observation = observation(&observer_public, pre_action_digest);
         sign_receipt(&mut observation, &observer_seed).unwrap();
-        let observation_digest = observation_receipt_digest(&observation).unwrap();
-
         let outcome_seed = seed(8);
         let outcome_public = public_key(&outcome_seed);
-        let mut outcome = outcome(&outcome_public, observation_digest);
+        let mut outcome = outcome(&outcome_public, None);
         sign_outcome_receipt(&mut outcome, &outcome_seed).unwrap();
         let outcome_digest = outcome_receipt_digest(&outcome).unwrap();
 
@@ -1299,6 +1406,7 @@ mod tests {
             observer_receipt_public_key_base64: BASE64.encode(&observer_public),
             pre_action_observation,
             destination_observation: observation,
+            reconciliation_observation: None,
             windows_interruption: None,
             authority: AuthorityLedger {
                 relinquishing_runner_effect_authority_before_grant: false,
@@ -1365,7 +1473,7 @@ mod tests {
         );
     }
 
-    fn outcome(public_key: &[u8], observation_digest: String) -> OutcomeReceipt {
+    fn outcome(public_key: &[u8], observation_receipt_sha256: Option<String>) -> OutcomeReceipt {
         OutcomeReceipt {
             schema_version: OUTCOME_RECEIPT_SCHEMA_VERSION.to_owned(),
             protocol_version: CONNECTOR_PROTOCOL.to_owned(),
@@ -1421,7 +1529,7 @@ mod tests {
             destination_attestation_key_id: Some("destination/key".to_owned()),
             attempt_count: 1,
             ambiguous_requires_observation: false,
-            observation_receipt_sha256: Some(observation_digest),
+            observation_receipt_sha256,
             captured_at_unix_ms: 300,
             audit_provenance: "audit/canary".to_owned(),
             outcome_signing_key_id: "connector/outcome".to_owned(),

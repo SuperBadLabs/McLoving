@@ -88,9 +88,14 @@ post-state digest.
 
 The authoritative `external-connector/v1` outcome must match the grant's exact
 connector implementation, image, configuration, endpoint, account, resource,
-effect class, request/build identities, key, fence, and attempt quota. V1 accepts a successful bounded
-outcome only. It requires the outcome to bind the digest of a separately signed
-`destination-observer/v1` post-action receipt.
+effect class, request/build identities, key, fence, and attempt quota. V1 accepts
+a successful bounded outcome only. A normal successful connector outcome has no
+embedded observation digest and is joined to the separately signed
+`destination-observer/v1` post-action receipt by the ceremony. A successfully
+reconciled ambiguous outcome must instead embed the digest of the exact signed
+reconciliation receipt; the ceremony carries and verifies the complete
+pre-action -> post-action -> reconciliation observer chain. This matches both
+receipt shapes emitted by `EXT-001` rather than inventing a third shape.
 
 Before downstream control flow is released, the no-authority shadow must replay
 that exact outcome digest and match request/build/attempt identities, fence,
@@ -99,7 +104,10 @@ downstream-control digest, and later-intent digest. The destination receipt must
 then match the tenant/project/pipeline/build/attempt, endpoint/account/resource,
 effect class, fence, predecessor precondition digest, publication deadline,
 and post-action time; its canonical state must equal the result committed by
-the grant before the effect. Connector and
+the grant before the effect. When reconciliation is present, it must preserve
+the same observer identities and scope, advance the signed cursor from the
+post-action receipt, bind the connector request digest, affirm that the effect
+was observed, and precede the connector's final reconciled outcome. Connector and
 observer deployment, runtime, service, and credential-issuance identities must
 be separate.
 
