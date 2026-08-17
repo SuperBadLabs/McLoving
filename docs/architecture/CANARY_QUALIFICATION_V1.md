@@ -79,8 +79,11 @@ Seven signed gates must all precede the effect grant:
    retained evidence, and fail-closed ambiguity handling.
 
 Windows actions additionally require a signed persistent-host interruption and
-reboot proof showing no orphan process and no duplicate effect. Supplying that
-proof for a Linux action, or omitting it for Windows, fails closed.
+reboot proof showing no orphan process and no duplicate effect. This is a
+post-action proof: it must be collected strictly after the authoritative
+connector outcome and no later than ceremony completion. Supplying that proof
+for a Linux action, omitting it for Windows, or supplying stale pre-action proof
+fails closed.
 
 ## Outcome join
 

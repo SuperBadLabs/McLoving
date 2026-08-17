@@ -35,6 +35,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         receipt.verified_pre_action_gates
     );
     println!(
+        "verified_windows_interruption_proofs={}",
+        receipt.verified_windows_interruption_proofs
+    );
+    println!(
         "verified_authoritative_outcomes={}",
         receipt.verified_authoritative_outcomes
     );

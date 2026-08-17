@@ -58,6 +58,7 @@ pub struct VerificationReceipt {
     pub job_id: String,
     pub action_id: Uuid,
     pub verified_pre_action_gates: usize,
+    pub verified_windows_interruption_proofs: usize,
     pub verified_authoritative_outcomes: usize,
     pub verified_shadow_replays: usize,
     pub verified_destination_observations: usize,
@@ -375,8 +376,8 @@ fn verify_session(
     verify_history(&session.history.body)?;
     verify_intent(&session.intent.body)?;
     verify_grant(session)?;
-    verify_windows(session, pins)?;
     verify_effect_receipts(session, pins)?;
+    verify_windows(session, pins)?;
     verify_authority(session)?;
 
     Ok(VerificationReceipt {
@@ -384,7 +385,8 @@ fn verify_session(
         session_id: session.session_id,
         job_id: session.job_id.clone(),
         action_id: session.action_id,
-        verified_pre_action_gates: 7 + usize::from(session.windows_interruption.is_some()),
+        verified_pre_action_gates: 7,
+        verified_windows_interruption_proofs: usize::from(session.windows_interruption.is_some()),
         verified_authoritative_outcomes: 1,
         verified_shadow_replays: 1,
         verified_destination_observations: 2 + usize::from(
@@ -479,15 +481,7 @@ fn verify_context(
     session: &CanarySession,
     context: &ReceiptContext,
 ) -> Result<(), QualificationError> {
-    if context.schema != RECEIPT_SCHEMA
-        || context.session_id != session.session_id
-        || context.ticket != session.ticket
-        || context.job_id != session.job_id
-        || context.action_id != session.action_id
-        || context.implementation_head != session.implementation_head
-        || context.package_sha256 != session.package_sha256
-        || context.mig006_receipt_sha256 != session.mig006_receipt_sha256
-        || context.shadow_session_sha256 != session.shadow_session_sha256
+    if !context_binding_matches(session, context)
         || context.collected_at_unix_ms <= 0
         || context.collected_at_unix_ms > session.grant.body.issued_at_unix_ms
         || context.expires_at_unix_ms <= context.collected_at_unix_ms
@@ -497,6 +491,34 @@ fn verify_context(
         return Err(QualificationError::new("CANARY_GATE_CONTEXT_MISMATCH"));
     }
     Ok(())
+}
+
+fn verify_post_action_context(
+    session: &CanarySession,
+    context: &ReceiptContext,
+) -> Result<(), QualificationError> {
+    if !context_binding_matches(session, context)
+        || context.collected_at_unix_ms <= session.connector_outcome.captured_at_unix_ms
+        || context.collected_at_unix_ms > session.completed_at_unix_ms
+        || context.expires_at_unix_ms <= context.collected_at_unix_ms
+        || context.expires_at_unix_ms < session.completed_at_unix_ms
+        || !is_sha256(&context.evidence_sha256)
+    {
+        return Err(QualificationError::new("CANARY_WINDOWS_PROOF_INVALID"));
+    }
+    Ok(())
+}
+
+fn context_binding_matches(session: &CanarySession, context: &ReceiptContext) -> bool {
+    context.schema == RECEIPT_SCHEMA
+        && context.session_id == session.session_id
+        && context.ticket == session.ticket
+        && context.job_id == session.job_id
+        && context.action_id == session.action_id
+        && context.implementation_head == session.implementation_head
+        && context.package_sha256 == session.package_sha256
+        && context.mig006_receipt_sha256 == session.mig006_receipt_sha256
+        && context.shadow_session_sha256 == session.shadow_session_sha256
 }
 
 fn verify_threat_model(review: &ThreatModelReview) -> Result<(), QualificationError> {
@@ -685,7 +707,7 @@ fn verify_windows(
             // Windows evidence is signed by the independently pinned freeze role,
             // so it cannot be introduced by the effectful runner.
             verify_signed(proof, &pins.freeze_key_sha256)?;
-            verify_context(session, &proof.body.context)?;
+            verify_post_action_context(session, &proof.body.context)?;
             if proof.body.persistent_host_identity.is_empty()
                 || !is_sha256(&proof.body.interruption_receipt_sha256)
                 || !is_sha256(&proof.body.reboot_receipt_sha256)
@@ -1062,6 +1084,7 @@ mod tests {
         assert!(receipt.canary_qualified);
         assert!(!receipt.authority_granted_by_verifier);
         assert_eq!(receipt.verified_pre_action_gates, 7);
+        assert_eq!(receipt.verified_windows_interruption_proofs, 0);
         assert_eq!(receipt.verified_destination_observations, 2);
         assert_eq!(receipt.duplicate_effects, 0);
         assert!(
@@ -1273,6 +1296,31 @@ mod tests {
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
         resign(&mut session.freeze, seed(3));
+        let mut proof_context = context();
+        proof_context.collected_at_unix_ms = 450;
+        session.windows_interruption = Some(signed(
+            WindowsInterruptionProof {
+                context: proof_context,
+                persistent_host_identity: "host/windows/one".to_owned(),
+                interruption_receipt_sha256: hash('6'),
+                reboot_receipt_sha256: hash('7'),
+                no_orphan_process: true,
+                no_duplicate_effect: true,
+            },
+            3,
+        ));
+
+        let receipt = verify_session(&session, &pins).unwrap();
+        assert_eq!(receipt.verified_pre_action_gates, 7);
+        assert_eq!(receipt.verified_windows_interruption_proofs, 1);
+    }
+
+    #[test]
+    fn stale_pre_action_windows_interruption_proof_is_rejected() {
+        let (mut session, pins) = fixture();
+        session.platform = Platform::WindowsX86_64;
+        session.freeze.body.platform = Platform::WindowsX86_64;
+        resign(&mut session.freeze, seed(3));
         session.windows_interruption = Some(signed(
             WindowsInterruptionProof {
                 context: context(),
@@ -1285,8 +1333,10 @@ mod tests {
             3,
         ));
 
-        let receipt = verify_session(&session, &pins).unwrap();
-        assert_eq!(receipt.verified_pre_action_gates, 8);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_WINDOWS_PROOF_INVALID"
+        );
     }
 
     fn fixture() -> (CanarySession, IndependentPins) {
