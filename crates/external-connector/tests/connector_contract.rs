@@ -509,6 +509,15 @@ async fn success_is_signed_exactly_once_and_restart_replays_without_transport() 
     assert_eq!(first.attempt_count, 1);
     assert_eq!(first.dispatched_at_unix_ms, Some(NOW));
     verify_outcome_receipt(&first, &public_key_from_seed(&rig.outcome_seed).unwrap()).unwrap();
+    let mut tampered_dispatch = first.clone();
+    tampered_dispatch.dispatched_at_unix_ms = Some(NOW - 1);
+    assert!(
+        verify_outcome_receipt(
+            &tampered_dispatch,
+            &public_key_from_seed(&rig.outcome_seed).unwrap(),
+        )
+        .is_err()
+    );
     let replay = rig
         .restart()
         .execute_at(request.clone(), NOW + 10)
