@@ -65,13 +65,21 @@ Seven signed gates must all precede the effect grant:
    platform, agent, toolchain, authorization, trigger, discovery, connector,
    SCM, credential, dependency, cache, and destination identities. Its signed
    semantic platform must also equal the session platform used to select the
-   Windows interruption-proof requirement.
+   Windows interruption-proof requirement. Four execution-critical component
+   digests have normative domain-separated meanings: `external_connector`
+   binds the granted connector ID, implementation, image, and configuration;
+   `destination` binds the granted destination scope and signed observer
+   implementation/deployment identities; `credential_mapping` binds the signed
+   connector credential grant and authority identities; and `platform` binds
+   the semantic platform. The verifier recomputes all four from the executed
+   signed receipts after validating those receipts.
 4. The relinquishing runner has paused ingress, scheduling, and grants and has
    zero queue, run, credential, connector-authority, lease, lock, retry,
    uncertain-effect, or residual effect-authority count.
 5. A fresh content-hashed export passes the exact certified transform; source
-   and imported record counts agree, retention is not shortened, every hold is
-   preserved, and the portable state passes its secret scan.
+   and imported record counts agree on a nonzero authenticated denominator,
+   retention is not shortened, every hold is preserved, and the portable state
+   passes its secret scan.
 6. Exactly one source intent and one target intent are buffered and their
    canonical digests, effect key, and fence match before authority is issued.
 7. The grant is for one action, a bounded positive attempt count and authority

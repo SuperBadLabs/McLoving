@@ -377,6 +377,7 @@ fn verify_session(
     verify_intent(&session.intent.body)?;
     verify_grant(session)?;
     verify_effect_receipts(session, pins)?;
+    verify_frozen_execution_components(session)?;
     verify_windows(session, pins)?;
     verify_authority(session)?;
 
@@ -584,6 +585,94 @@ fn verify_freeze(session: &CanarySession) -> Result<(), QualificationError> {
     Ok(())
 }
 
+fn verify_frozen_execution_components(session: &CanarySession) -> Result<(), QualificationError> {
+    let expected = frozen_execution_component_digests(session)
+        .map_err(|_| QualificationError::new("CANARY_RUNTIME_FREEZE_INVALID"))?;
+    if expected.iter().any(|(name, digest)| {
+        Some(digest.as_str())
+            != session
+                .freeze
+                .body
+                .observed_components
+                .get(*name)
+                .map(String::as_str)
+    }) {
+        return Err(QualificationError::new("CANARY_RUNTIME_FREEZE_INVALID"));
+    }
+    Ok(())
+}
+
+fn frozen_execution_component_digests(
+    session: &CanarySession,
+) -> Result<[(&'static str, String); 4], QualificationError> {
+    let grant = &session.grant.body;
+    let outcome = &session.connector_outcome;
+    let observer = &session.pre_action_observation;
+    Ok([
+        (
+            "external_connector",
+            frozen_component_digest(
+                b"mcloving-canary-frozen-external-connector-v1",
+                &serde_json::json!({
+                    "connector_id": grant.connector_id,
+                    "implementation_sha256": grant.connector_implementation_sha256,
+                    "image_sha256": grant.connector_image_sha256,
+                    "config_sha256": grant.connector_config_sha256,
+                }),
+            )?,
+        ),
+        (
+            "destination",
+            frozen_component_digest(
+                b"mcloving-canary-frozen-destination-v1",
+                &serde_json::json!({
+                    "endpoint_identity": grant.endpoint_identity,
+                    "account_identity": grant.account_identity,
+                    "resource_identity": grant.resource_identity,
+                    "effect_class": grant.effect_class,
+                    "observer_implementation_sha256": observer.observer_implementation_sha256,
+                    "observer_image_sha256": observer.observer_image_sha256,
+                    "observer_config_sha256": observer.observer_config_sha256,
+                    "observer_deployment_identity": observer.deployment_identity,
+                    "observer_runtime_boundary_identity": observer.runtime_boundary_identity,
+                    "observer_service_identity": observer.service_identity,
+                    "destination_attestation_key_id": observer.destination_attestation_key_id,
+                }),
+            )?,
+        ),
+        (
+            "credential_mapping",
+            frozen_component_digest(
+                b"mcloving-canary-frozen-credential-mapping-v1",
+                &serde_json::json!({
+                    "account_identity": outcome.account_identity,
+                    "configuration_authority_identity": outcome.configuration_authority_identity,
+                    "request_authority_identity": outcome.request_authority_identity,
+                    "credential_issuance_path_identity": outcome.credential_issuance_path_identity,
+                    "credential_grant_id": outcome.credential_grant_id,
+                    "credential_grant_version": outcome.credential_grant_version,
+                    "credential_grant_scope": outcome.credential_grant_scope,
+                }),
+            )?,
+        ),
+        (
+            "platform",
+            frozen_component_digest(
+                b"mcloving-canary-frozen-platform-v1",
+                &serde_json::json!({"platform": session.platform}),
+            )?,
+        ),
+    ])
+}
+
+fn frozen_component_digest<T: Serialize>(
+    domain: &[u8],
+    value: &T,
+) -> Result<String, QualificationError> {
+    canonical_digest(domain, value)
+        .map_err(|_| QualificationError::new("CANARY_RUNTIME_FREEZE_INVALID"))
+}
+
 fn verify_quiescence(proof: &QuiescenceProof) -> Result<(), QualificationError> {
     if proof.relinquishing_runner.is_empty()
         || proof.gaining_runner.is_empty()
@@ -620,6 +709,7 @@ fn verify_history(history: &HistoryTransfer) -> Result<(), QualificationError> {
     ]
     .iter()
     .any(|digest| !is_sha256(digest))
+        || history.exported_records == 0
         || history.exported_records != history.imported_records
         || !history.retention_not_shortened
         || !history.every_hold_preserved
@@ -1118,6 +1208,60 @@ mod tests {
     }
 
     #[test]
+    fn frozen_connector_must_match_the_executed_receipts() {
+        let (mut session, pins) = fixture();
+        session.grant.body.connector_implementation_sha256 = hash('f');
+        resign(&mut session.grant, seed(7));
+        session.connector_outcome.connector_implementation_sha256 = hash('f');
+        resign_outcome_and_shadow(&mut session);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_RUNTIME_FREEZE_INVALID"
+        );
+    }
+
+    #[test]
+    fn frozen_destination_must_match_the_executed_observer() {
+        let (mut session, pins) = fixture();
+        session.pre_action_observation.observer_config_sha256 = hash('f');
+        sign_receipt(&mut session.pre_action_observation, &seed(10)).unwrap();
+        let pre_action_digest =
+            observation_receipt_digest(&session.pre_action_observation).unwrap();
+        session.grant.body.pre_action_observation_sha256 = pre_action_digest.clone();
+        resign(&mut session.grant, seed(7));
+        session.destination_observation.observer_config_sha256 = hash('f');
+        session.destination_observation.predecessor_receipt_sha256 = Some(pre_action_digest);
+        sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_RUNTIME_FREEZE_INVALID"
+        );
+    }
+
+    #[test]
+    fn frozen_credential_mapping_must_match_the_executed_grant() {
+        let (mut session, pins) = fixture();
+        session.connector_outcome.credential_grant_scope = "deploy:substituted".to_owned();
+        resign_outcome_and_shadow(&mut session);
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_RUNTIME_FREEZE_INVALID"
+        );
+    }
+
+    #[test]
+    fn empty_history_transfer_is_rejected() {
+        let (mut session, pins) = fixture();
+        session.history.body.exported_records = 0;
+        session.history.body.imported_records = 0;
+        resign(&mut session.history, seed(5));
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_HISTORY_TRANSFER_INVALID"
+        );
+    }
+
+    #[test]
     fn top_level_platform_must_match_signed_runtime_freeze() {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
@@ -1283,7 +1427,7 @@ mod tests {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
-        resign(&mut session.freeze, seed(3));
+        refresh_frozen_execution_components(&mut session);
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_WINDOWS_PROOF_INVALID"
@@ -1295,7 +1439,7 @@ mod tests {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
-        resign(&mut session.freeze, seed(3));
+        refresh_frozen_execution_components(&mut session);
         let mut proof_context = context();
         proof_context.collected_at_unix_ms = 450;
         session.windows_interruption = Some(signed(
@@ -1320,7 +1464,7 @@ mod tests {
         let (mut session, pins) = fixture();
         session.platform = Platform::WindowsX86_64;
         session.freeze.body.platform = Platform::WindowsX86_64;
-        resign(&mut session.freeze, seed(3));
+        refresh_frozen_execution_components(&mut session);
         session.windows_interruption = Some(signed(
             WindowsInterruptionProof {
                 context: context(),
@@ -1498,7 +1642,7 @@ mod tests {
         let mut shadow = shadow(&shadow_public, outcome_digest, &outcome);
         sign_shadow_receipt(&mut shadow, &shadow_seed).unwrap();
 
-        let session = CanarySession {
+        let mut session = CanarySession {
             schema: SESSION_SCHEMA.to_owned(),
             session_id: SESSION_ID,
             ticket: "CANARY-001".to_owned(),
@@ -1538,6 +1682,7 @@ mod tests {
             completed_at_unix_ms: 500,
             downstream_released_at_unix_ms: 600,
         };
+        refresh_frozen_execution_components(&mut session);
         let pins = IndependentPins {
             session_sha256: String::new(),
             expected_implementation_head: hash40('1'),
@@ -1553,6 +1698,29 @@ mod tests {
             observer_receipt_key_sha256: content_sha256(&observer_public),
         };
         (session, pins)
+    }
+
+    fn refresh_frozen_execution_components(session: &mut CanarySession) {
+        for (name, digest) in frozen_execution_component_digests(session).unwrap() {
+            session
+                .freeze
+                .body
+                .certified_components
+                .insert(name.to_owned(), digest.clone());
+            session
+                .freeze
+                .body
+                .observed_components
+                .insert(name.to_owned(), digest);
+        }
+        resign(&mut session.freeze, seed(3));
+    }
+
+    fn resign_outcome_and_shadow(session: &mut CanarySession) {
+        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
+        session.shadow_replay.outcome_receipt_sha256 =
+            outcome_receipt_digest(&session.connector_outcome).unwrap();
+        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
     }
 
     fn reconciled_fixture(
