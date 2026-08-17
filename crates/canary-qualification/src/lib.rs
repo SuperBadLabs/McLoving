@@ -1609,15 +1609,15 @@ mod tests {
     }
 
     #[test]
-    fn downstream_release_authority_identity_cannot_be_substituted() {
+    fn gate_signature_binds_the_signer_identity() {
         let (mut session, pins) = fixture();
         session.authority.signing_key_id = "substituted-release-authority".to_owned();
-        session.authority.body.downstream_release_authority_identity =
-            session.authority.signing_key_id.clone();
 
         assert_eq!(
-            verify_session(&session, &pins).unwrap_err().code,
-            "CANARY_AUTHORITY_LEDGER_INVALID"
+            verify_signed(&session.authority, &pins.authority_ledger_key_sha256)
+                .unwrap_err()
+                .code,
+            "CANARY_GATE_SIGNATURE_INVALID"
         );
     }
 
