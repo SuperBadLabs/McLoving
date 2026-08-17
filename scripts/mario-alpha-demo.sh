@@ -15,8 +15,7 @@ for command in podman python3 jq curl git sha256sum; do
     exit 1
   fi
 done
-if ! git -C "${repo_root}" diff --quiet ||
-  ! git -C "${repo_root}" diff --cached --quiet; then
+if [[ -n "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]]; then
   echo "mario-alpha-demo requires a clean source checkout" >&2
   exit 1
 fi
@@ -261,6 +260,17 @@ jq -e '
 "${cli_bin}" --output json artifacts "${build_id}" >"${run_dir}/artifacts.json"
 "${cli_bin}" --output json tests "${build_id}" >"${run_dir}/tests.json"
 jq -e '.status == "succeeded"' "${run_dir}/status.json" >/dev/null
+jq -e '
+  ([.items[].text // ""] | join("")) as $logs |
+  ($logs | index("mcloving-alpha:mario:prepare")) as $prepare |
+  ($logs | index("mcloving-alpha:mario:test")) as $test |
+  ($logs | index("mcloving-alpha:mario:complete")) as $package |
+  $prepare != null and $test != null and $package != null and
+  $prepare < $test and $test < $package and
+  ([$logs | scan("mcloving-alpha:mario:prepare")] | length) == 1 and
+  ([$logs | scan("mcloving-alpha:mario:test")] | length) == 1 and
+  ([$logs | scan("mcloving-alpha:mario:complete")] | length) == 1
+' "${run_dir}/logs.json" >/dev/null
 
 stop_controller
 start_controller "${run_dir}/controller-restart.log"
