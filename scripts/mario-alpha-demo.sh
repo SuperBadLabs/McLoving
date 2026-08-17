@@ -158,15 +158,23 @@ case "${postgres_port}" in
     exit 1
     ;;
 esac
+postgres_ready=false
 for _ in $(seq 1 120); do
   if podman exec "${container_name}" pg_isready \
     --username mcloving --dbname mcloving >/dev/null 2>&1; then
-    break
+    sleep 0.25
+    if podman exec "${container_name}" pg_isready \
+      --username mcloving --dbname mcloving >/dev/null 2>&1; then
+      postgres_ready=true
+      break
+    fi
   fi
   sleep 0.25
 done
-podman exec "${container_name}" pg_isready \
-  --username mcloving --dbname mcloving >/dev/null
+if [[ "${postgres_ready}" != true ]]; then
+  echo "PostgreSQL did not become stably ready" >&2
+  exit 1
+fi
 
 migration_url="postgres://mcloving@127.0.0.1:${postgres_port}/mcloving"
 runtime_url="postgres://mcloving_tenant@127.0.0.1:${postgres_port}/mcloving"
