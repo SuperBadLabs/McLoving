@@ -468,6 +468,7 @@ fn verify_context(
         || context.mig006_receipt_sha256 != session.mig006_receipt_sha256
         || context.shadow_session_sha256 != session.shadow_session_sha256
         || context.collected_at_unix_ms <= 0
+        || context.collected_at_unix_ms > session.grant.body.issued_at_unix_ms
         || context.expires_at_unix_ms <= context.collected_at_unix_ms
         || context.expires_at_unix_ms < session.grant.body.issued_at_unix_ms
         || !is_sha256(&context.evidence_sha256)
@@ -757,6 +758,7 @@ fn verify_effect_receipts(
         || pre_action_digest != grant.pre_action_observation_sha256
         || pre_action.phase != ObservationPhase::PreAction
         || pre_action.predecessor_receipt_sha256.is_some()
+        || pre_action.request_sha256 != grant.request_sha256
         || pre_action.tenant_id != grant.tenant_id
         || pre_action.project_id != grant.project_id
         || pre_action.pipeline_id != grant.pipeline_id
@@ -797,6 +799,7 @@ fn verify_effect_receipts(
         || observation.confidentiality != pre_action.confidentiality
         || observation.destination_cursor <= pre_action.destination_cursor
         || observation.destination_observed_at_unix_ms < pre_action.destination_observed_at_unix_ms
+        || observation.request_sha256 != grant.request_sha256
         || observation.tenant_id != outcome.tenant_id
         || observation.project_id != outcome.project_id
         || observation.pipeline_id != outcome.pipeline_id
@@ -979,6 +982,48 @@ mod tests {
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_RUNTIME_FREEZE_INVALID"
+        );
+    }
+
+    #[test]
+    fn pre_action_gate_cannot_be_collected_after_grant_issuance() {
+        let (mut session, pins) = fixture();
+        session.threat_model.body.context.collected_at_unix_ms = 201;
+        resign(&mut session.threat_model, seed(1));
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_GATE_CONTEXT_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn pre_action_observation_must_bind_the_granted_request() {
+        let (mut session, pins) = fixture();
+        session.pre_action_observation.request_sha256 = hash('6');
+        sign_receipt(&mut session.pre_action_observation, &seed(10)).unwrap();
+        session.grant.body.pre_action_observation_sha256 =
+            observation_receipt_digest(&session.pre_action_observation).unwrap();
+        resign(&mut session.grant, seed(7));
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+        );
+    }
+
+    #[test]
+    fn post_action_observation_must_bind_the_granted_request() {
+        let (mut session, pins) = fixture();
+        session.destination_observation.request_sha256 = hash('6');
+        sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
+        session.connector_outcome.observation_receipt_sha256 =
+            Some(observation_receipt_digest(&session.destination_observation).unwrap());
+        sign_outcome_receipt(&mut session.connector_outcome, &seed(8)).unwrap();
+        session.shadow_replay.outcome_receipt_sha256 =
+            outcome_receipt_digest(&session.connector_outcome).unwrap();
+        sign_shadow_receipt(&mut session.shadow_replay, &seed(9)).unwrap();
+        assert_eq!(
+            verify_session(&session, &pins).unwrap_err().code,
+            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
         );
     }
 
@@ -1439,7 +1484,7 @@ mod tests {
             protocol_version: OBSERVER_PROTOCOL.to_owned(),
             evidence_sequence: 1,
             observation_id: Uuid::from_u128(11),
-            request_sha256: hash('6'),
+            request_sha256: hash('1'),
             tenant_id: TENANT_ID,
             project_id: PROJECT_ID,
             pipeline_id: PIPELINE_ID,
