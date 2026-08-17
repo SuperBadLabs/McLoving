@@ -84,7 +84,11 @@ Before the grant, the independent observer signs a fresh pre-action receipt for
 the exact tenant, project, pipeline, build, attempt, fence, endpoint, account,
 resource, and effect class. The grant binds that receipt digest as its
 precondition plus the exact connector request digest and precommitted canonical
-post-state digest.
+post-state digest. Each observer receipt retains its own native digest of its
+distinct phase-specific `ObservationRequest`; those digests are not connector
+request digests. The independently signed canonical observer query instead
+binds `connector_request_sha256` to the exact connector request in the grant,
+and that query remains identical across the observer chain.
 
 The authoritative `external-connector/v1` outcome must match the grant's exact
 connector implementation, image, configuration, endpoint, account, resource,
@@ -107,7 +111,8 @@ and post-action time; its canonical state must equal the result committed by
 the grant before the effect. When reconciliation is present, it must preserve
 the same observer identities and scope, advance the signed cursor from the
 post-action receipt, bind the connector request digest, affirm that the effect
-was observed, and precede the connector's final reconciled outcome. Connector and
+was observed in its exact two-field reconciliation state, and precede the
+connector's final reconciled outcome. Connector and
 observer deployment, runtime, service, and credential-issuance identities must
 be separate.
 

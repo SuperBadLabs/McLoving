@@ -27,6 +27,7 @@ pub const RECEIPT_SCHEMA: &str = "mcloving.canary-gate-receipt/v1";
 pub const MAX_SESSION_BYTES: usize = 1_048_576;
 
 const RECEIPT_DOMAIN: &[u8] = b"mcloving-canary-gate-receipt-v1\0";
+const CONNECTOR_REQUEST_QUERY_KEY: &str = "connector_request_sha256";
 const REQUIRED_FREEZE_COMPONENTS: [&str; 20] = [
     "agent",
     "authorization",
@@ -760,7 +761,11 @@ fn verify_effect_receipts(
         || pre_action_digest != grant.pre_action_observation_sha256
         || pre_action.phase != ObservationPhase::PreAction
         || pre_action.predecessor_receipt_sha256.is_some()
-        || pre_action.request_sha256 != grant.request_sha256
+        || pre_action
+            .canonical_query
+            .get(CONNECTOR_REQUEST_QUERY_KEY)
+            .map(String::as_str)
+            != Some(grant.request_sha256.as_str())
         || pre_action.tenant_id != grant.tenant_id
         || pre_action.project_id != grant.project_id
         || pre_action.pipeline_id != grant.pipeline_id
@@ -780,7 +785,6 @@ fn verify_effect_receipts(
         || !same_observer_identity(observation, pre_action)
         || observation.destination_cursor <= pre_action.destination_cursor
         || observation.destination_observed_at_unix_ms < pre_action.destination_observed_at_unix_ms
-        || observation.request_sha256 != grant.request_sha256
         || observation.tenant_id != outcome.tenant_id
         || observation.project_id != outcome.project_id
         || observation.pipeline_id != outcome.pipeline_id
@@ -855,7 +859,6 @@ fn verify_reconciliation_observation(
         || reconciliation.phase != ObservationPhase::Reconciliation
         || reconciliation.predecessor_receipt_sha256.as_deref() != Some(post_action_digest.as_str())
         || !same_observer_identity(reconciliation, post_action)
-        || reconciliation.request_sha256 != grant.request_sha256
         || reconciliation.tenant_id != outcome.tenant_id
         || reconciliation.project_id != outcome.project_id
         || reconciliation.pipeline_id != outcome.pipeline_id
@@ -1083,13 +1086,23 @@ mod tests {
     }
 
     #[test]
-    fn pre_action_observation_must_bind_the_granted_request() {
+    fn observer_query_must_bind_the_granted_connector_request() {
         let (mut session, pins) = fixture();
-        session.pre_action_observation.request_sha256 = hash('6');
+        session
+            .pre_action_observation
+            .canonical_query
+            .insert(CONNECTOR_REQUEST_QUERY_KEY.to_owned(), hash('f'));
         sign_receipt(&mut session.pre_action_observation, &seed(10)).unwrap();
         session.grant.body.pre_action_observation_sha256 =
             observation_receipt_digest(&session.pre_action_observation).unwrap();
         resign(&mut session.grant, seed(7));
+        session
+            .destination_observation
+            .canonical_query
+            .insert(CONNECTOR_REQUEST_QUERY_KEY.to_owned(), hash('f'));
+        session.destination_observation.predecessor_receipt_sha256 =
+            Some(observation_receipt_digest(&session.pre_action_observation).unwrap());
+        sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
         assert_eq!(
             verify_session(&session, &pins).unwrap_err().code,
             "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
@@ -1097,14 +1110,21 @@ mod tests {
     }
 
     #[test]
-    fn post_action_observation_must_bind_the_granted_request() {
-        let (mut session, pins) = fixture();
-        session.destination_observation.request_sha256 = hash('6');
-        sign_receipt(&mut session.destination_observation, &seed(10)).unwrap();
-        assert_eq!(
-            verify_session(&session, &pins).unwrap_err().code,
-            "CANARY_EFFECT_RECEIPT_JOIN_INVALID"
+    fn observer_request_digests_remain_native_and_phase_distinct() {
+        let (session, pins) = fixture();
+        assert_ne!(
+            session.pre_action_observation.request_sha256,
+            session.grant.body.request_sha256
         );
+        assert_ne!(
+            session.destination_observation.request_sha256,
+            session.grant.body.request_sha256
+        );
+        assert_ne!(
+            session.pre_action_observation.request_sha256,
+            session.destination_observation.request_sha256
+        );
+        verify_session(&session, &pins).unwrap();
     }
 
     #[test]
@@ -1116,6 +1136,7 @@ mod tests {
         let mut reconciliation = observation(&observer_public, post_action_digest);
         reconciliation.observation_id = Uuid::from_u128(12);
         reconciliation.phase = ObservationPhase::Reconciliation;
+        reconciliation.request_sha256 = hash('8');
         reconciliation.destination_cursor = 5;
         reconciliation.destination_observed_at_unix_ms = 370;
         reconciliation.captured_at_unix_ms = 380;
@@ -1574,6 +1595,7 @@ mod tests {
     fn pre_action_observation(public_key: &[u8]) -> ObservationReceipt {
         let mut receipt = observation(public_key, String::new());
         receipt.observation_id = Uuid::from_u128(10);
+        receipt.request_sha256 = hash('6');
         receipt.phase = ObservationPhase::PreAction;
         receipt.predecessor_receipt_sha256 = None;
         receipt.destination_cursor = 3;
@@ -1592,7 +1614,7 @@ mod tests {
             protocol_version: OBSERVER_PROTOCOL.to_owned(),
             evidence_sequence: 1,
             observation_id: Uuid::from_u128(11),
-            request_sha256: hash('1'),
+            request_sha256: hash('7'),
             tenant_id: TENANT_ID,
             project_id: PROJECT_ID,
             pipeline_id: PIPELINE_ID,
@@ -1623,7 +1645,10 @@ mod tests {
             read_grant_id: "grant/observer".to_owned(),
             read_grant_version: "1".to_owned(),
             read_grant_scope: "read:one".to_owned(),
-            canonical_query: BTreeMap::from([("resource".to_owned(), "one".to_owned())]),
+            canonical_query: BTreeMap::from([
+                ("resource".to_owned(), "one".to_owned()),
+                (CONNECTOR_REQUEST_QUERY_KEY.to_owned(), hash('1')),
+            ]),
             destination_cursor: 4,
             destination_observed_at_unix_ms: 350,
             captured_at_unix_ms: 360,
