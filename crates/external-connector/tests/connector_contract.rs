@@ -819,6 +819,23 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
             .is_ok()
     );
 
+    let calls_before_dispatch_expiry = rig.calls.load(Ordering::SeqCst);
+    let mut expires_after_marker = rig.request(IdempotencyClass::ExternallyIdempotent);
+    expires_after_marker.expires_at_unix_ms = NOW + 30_000;
+    sign_action_request(&mut expires_after_marker, &rig.request_seed).unwrap();
+    let dispatch_expired = rig
+        .connector
+        .execute_at_dispatch_boundary(expires_after_marker, NOW, NOW + 29_951)
+        .await
+        .unwrap();
+    assert_eq!(dispatch_expired.status, OutcomeStatus::Failed);
+    assert_eq!(dispatch_expired.status_code, "expired_authority");
+    assert_eq!(dispatch_expired.dispatched_at_unix_ms, None);
+    assert_eq!(
+        rig.calls.load(Ordering::SeqCst),
+        calls_before_dispatch_expiry
+    );
+
     let calls_before_zero_fence = rig.calls.load(Ordering::SeqCst);
     let mut zero_fence = rig.request(IdempotencyClass::NonIdempotent);
     zero_fence.effect_fence = 0;

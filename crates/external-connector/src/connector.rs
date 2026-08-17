@@ -177,7 +177,8 @@ impl ExternalConnector {
     }
 
     pub async fn execute(&self, request: ActionRequest) -> Result<OutcomeReceipt, ConnectorError> {
-        self.execute_inner(request, unix_time_ms()?, true).await
+        self.execute_inner(request, unix_time_ms()?, true, None)
+            .await
     }
 
     #[cfg(feature = "loopback-test")]
@@ -187,7 +188,25 @@ impl ExternalConnector {
         request: ActionRequest,
         now_unix_ms: i64,
     ) -> Result<OutcomeReceipt, ConnectorError> {
-        self.execute_inner(request, now_unix_ms, false).await
+        self.execute_inner(request, now_unix_ms, false, Some(now_unix_ms))
+            .await
+    }
+
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub async fn execute_at_dispatch_boundary(
+        &self,
+        request: ActionRequest,
+        admission_time_unix_ms: i64,
+        dispatch_time_unix_ms: i64,
+    ) -> Result<OutcomeReceipt, ConnectorError> {
+        self.execute_inner(
+            request,
+            admission_time_unix_ms,
+            false,
+            Some(dispatch_time_unix_ms),
+        )
+        .await
     }
 
     async fn execute_inner(
@@ -195,6 +214,7 @@ impl ExternalConnector {
         request: ActionRequest,
         now_unix_ms: i64,
         resample_system_clock: bool,
+        dispatch_time_override: Option<i64>,
     ) -> Result<OutcomeReceipt, ConnectorError> {
         let _lineage_lock = acquire_connector_lock(&self.config.state_dir)?;
         self.store
@@ -278,10 +298,36 @@ impl ExternalConnector {
                 }
                 Claim::Dispatch { attempt_count } => attempt_count,
             };
-            let dispatch_time = if resample_system_clock {
+            let marker_time = if resample_system_clock {
                 unix_time_ms()?
             } else {
                 now_unix_ms
+            };
+            if self
+                .validate_transport_window(&request, marker_time)
+                .is_err()
+            {
+                return self.finalize_local(
+                    &request,
+                    &request_sha256,
+                    attempt_count,
+                    OutcomeStatus::Failed,
+                    ConnectorError::ExpiredAuthority.code(),
+                    OutcomeTiming::before_dispatch(marker_time),
+                );
+            }
+            self.store
+                .lock()
+                .map_err(|_| ConnectorError::StateUnavailable)?
+                .mark_dispatched(request.request_id, &request_sha256, marker_time)?;
+
+            // The durable marker is intentionally conservative for crash
+            // recovery, but it is not the authenticated send boundary. Resample
+            // after its SQLite commit and revalidate authority immediately before
+            // entering the network dispatch.
+            let dispatch_time = match dispatch_time_override {
+                Some(timestamp) => timestamp,
+                None => unix_time_ms()?,
             };
             if self
                 .validate_transport_window(&request, dispatch_time)
@@ -296,10 +342,6 @@ impl ExternalConnector {
                     OutcomeTiming::before_dispatch(dispatch_time),
                 );
             }
-            self.store
-                .lock()
-                .map_err(|_| ConnectorError::StateUnavailable)?
-                .mark_dispatched(request.request_id, &request_sha256, dispatch_time)?;
             match self.dispatch(&request, &request_sha256).await {
                 Ok(response) => {
                     if response.body.status == OutcomeStatus::RetryableFailure

@@ -198,8 +198,10 @@ The connector emits a signed
 request-payload digest, typed outcome, public values, protected references,
 external IDs, control-flow and later-intent digests, destination evidence,
 attempt count, exact credential grant, ambiguity truth, audit provenance,
-outcome-signing identity, and—after the durable dispatch boundary—the trusted
-pre-send `dispatched_at_unix_ms`. A terminal result produced before dispatch
+outcome-signing identity, and—after the durable dispatch marker is committed—the
+freshly resampled and revalidated pre-send `dispatched_at_unix_ms`. The marker's
+earlier timestamp is crash-recovery evidence and cannot authenticate the send.
+A terminal result produced before dispatch
 omits that optional field. Because absent optional fields are not serialized,
 previous valid v1 pre-dispatch receipts retain their canonical signed form.
 Receipts are stored durably and count against a fixed evidence quota.
