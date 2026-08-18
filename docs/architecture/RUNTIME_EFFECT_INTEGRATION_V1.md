@@ -41,7 +41,8 @@ production credential or invoke the destination.
 
 1. Under the current attempt lease and fence, persist `prepared` with the exact
    canonical request digest, mapping/runtime/configuration digests, grant
-   requirement, and pre-action observation digest.
+   requirement, pre-action observation digest, and pairwise-distinct request,
+   connector-outcome, observer, and shadow signing roles.
 2. Re-read operational state, attempt/fence, release, runtime, mapping,
    connector, observer, credential mapping, authority, and one-action grant.
    Any mismatch moves the node to a visible fail-closed state before dispatch.
@@ -53,7 +54,8 @@ production credential or invoke the destination.
    ambiguous, never an ordinary failed process step.
 5. Join the independent `OBS-001` post-action or reconciliation receipt and
    persist `confirmed` only when all request, destination, fence, result,
-   freshness, and identity bindings match.
+   freshness, and identity bindings match. The observer request must name the
+   exact frozen pre-action receipt as its predecessor before connector dispatch.
 6. Deliver the exact confirmed outcome to the deny-authority shadow replayer
    and persist its signed durable replay receipt.
 7. Release downstream execution only after the outcome, observation, and
@@ -63,7 +65,11 @@ production credential or invoke the destination.
 The controller API exposes the state and evidence digests but never private
 request values, credentials, or protected outputs. Cancellation or lease loss
 after `prepared` cannot erase ambiguity or transfer authority to another
-attempt.
+attempt. A controller reconciliation path may append only missing write-once
+receipt slots for the exact fenced effect while the attempt is explicitly
+`reconciliation_required` with no executable lease. It cannot restore dispatch
+authority, replace a receipt, cross a restore epoch, or release downstream work
+before the complete outcome/observation/shadow join is confirmed.
 
 ## Deployment and authority boundary
 
@@ -82,21 +88,27 @@ accepted intent blocks dispatch and quarantines unresolved work.
 ## Current implementation boundary
 
 Exact implementation head
-`b87609857226fb7a44d124a2f1002f75f4bd22c8` includes Pipeline IR v1.3
+`36f83f561068b7854c59d13ba8b249a7df28ccdd` includes Pipeline IR v1.3
 connector intents, execution-spec v2, deployment-backed exact mapping
 admission, immutable PostgreSQL outcome/observation/reconciliation/shadow
 receipts, redacted public evidence digests, the controller-owned fenced state
 machine, and digest-pinned out-of-process connector, observer, and shadow
-invocations. Real-PostgreSQL proofs use three distinct Ed25519 receipt roles,
-hold terminal publication until the signed shadow receipt is durable, reject a
-substituted executable before dispatch, and freeze every post-dispatch timeout,
-substituted signed response, crash, lease-loss, cancellation, retry, and
-reconciliation ambiguity without a duplicate fixture effect.
+invocations. Real-PostgreSQL proofs use four pairwise-distinct Ed25519 authority
+and receipt roles, bind the post-action observer request to the exact frozen
+pre-action receipt, hold terminal publication until the signed shadow receipt
+is durable, reject a substituted executable before dispatch, permit an exact
+fenced reconciliation to complete missing immutable receipt slots without an
+execution lease, and freeze every post-dispatch timeout, substituted signed
+response, crash, lease-loss, cancellation, retry, and reconciliation ambiguity
+without a duplicate fixture effect.
 
-The exact-head effect-free Mario rehearsal passed all 14 execution-spine tests
-on an internal-only runtime network with real PostgreSQL and all production,
-canary, and cutover authority flags false. Its owner-only result receipt SHA-256
-is `44ad8eb55386a38dfbe42a62407fd198b87aac53c9eca709f8a387bb0a81d8c7`.
+The retained earlier-candidate effect-free Mario rehearsal passed all 14 then-
+current execution-spine tests on an internal-only runtime network with real
+PostgreSQL and all production, canary, and cutover authority flags false. Its
+owner-only result receipt SHA-256 is
+`44ad8eb55386a38dfbe42a62407fd198b87aac53c9eca709f8a387bb0a81d8c7`.
+It is not exact-head evidence for `36f83f5`; a fresh 17-test effect-free Mario
+rehearsal remains required.
 `docs/evidence/EXT-002_SECURITY_REVIEW.md` records the detailed implementation
 and rehearsal evidence. Exact-head review, protected CI, merge, and
 protected-main verification remain required before EXT-002 may become `DONE`.

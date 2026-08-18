@@ -2,8 +2,8 @@
 
 Date: 2026-08-17
 
-Verdict: IMPLEMENTATION AND MARIO REHEARSAL PASS; exact-head review,
-protected CI, merge, and protected-main verification remain open.
+Verdict: IMPLEMENTATION PASSES LOCALLY; fresh exact-head Mario rehearsal,
+review, protected CI, merge, and protected-main verification remain open.
 
 ## Scope
 
@@ -27,12 +27,12 @@ grant to a new fence.
 ## Exact implementation evidence
 
 - Exact implementation head:
-  `b87609857226fb7a44d124a2f1002f75f4bd22c8`.
+  `36f83f561068b7854c59d13ba8b249a7df28ccdd`.
 - Deployment mapping admission rejects an unknown mapping, a floating or stale
   digest, a duplicate catalog entry, a substituted catalog file, partial
   configuration, and plan/catalog drift at validation, planning, persistence,
   build admission, and shipped-controller startup.
-- The real-PostgreSQL harness passed 42 controller-store tests and 14
+- The real-PostgreSQL harness passed 43 controller-store tests and 17
   execution-spine tests, plus the deployable controller, admitted differential,
   and shipped mTLS agent tests. The runtime cases cover successful and
   ambiguous/reconciled outcomes, pre-dispatch executable substitution,
@@ -40,6 +40,14 @@ grant to a new fence.
   substitution, cancellation after dispatch, crash after dispatch, lease loss,
   controller restart, retry denial, durable outcome/observation/reconciliation/
   shadow evidence, and exactly one physical fixture dispatch.
+- The post-action observer request must bind the exact frozen pre-action
+  receipt before dispatch. A mismatched predecessor produces a terminal
+  abandoned effect with zero receipt slots and zero connector dispatches.
+- Explicit reconciliation may fill only missing immutable receipt slots for an
+  exact fenced effect while the attempt has no executable lease. The regression
+  rejects a substituted restore epoch, completes outcome, observation, and
+  shadow receipts without restoring dispatch authority, and permits terminal
+  publication only after confirmation of the complete join.
 - The positive path holds the shadow reply open and observes the attempt still
   `running` after outcome and independent observation are durable. Only the
   durable signed shadow receipt permits terminal publication.
@@ -47,10 +55,10 @@ grant to a new fence.
   evidence digests while omitting frozen values, request bodies, receipt bodies,
   protected outputs, and credentials.
 
-## Mario effect-free rehearsal
+## Earlier-candidate Mario effect-free rehearsal
 
-Mario ran the complete 14-test real execution spine at the exact implementation
-head using real PostgreSQL. Compilation occurred before runtime. Runtime used a
+Mario ran the complete 14-test real execution spine at the then-current
+candidate using real PostgreSQL. Compilation occurred before runtime. Runtime used a
 fresh internal-only container network, a disposable database, the process-
 isolated connector/observer/shadow fixture, and three pairwise-distinct Ed25519
 receipt roles. The run completed with zero failed tests, exactly-once dispatch
@@ -71,6 +79,10 @@ canary, and cutover authority flag false.
 The evidence directory is mode `0700`; every retained file is mode `0600`.
 The rehearsal created no production mapping, endpoint, credential, action,
 canary, or authority transfer.
+
+This retained receipt predates implementation head `36f83f5` and is not used as
+exact-head closure evidence. A fresh effect-free Mario rehearsal over the
+current 17-test spine remains open.
 
 ## Remaining closure gates
 
