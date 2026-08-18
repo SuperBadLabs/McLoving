@@ -444,6 +444,12 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                     }
                 }
                 2 if schema.minor >= 3 => {
+                    if stage_steps != 1 {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(1),
+                            "connector intent stage must contain exactly one step",
+                        ));
+                    }
                     let mapping_id = reader.string()?;
                     if !is_mapping_identifier(&mapping_id) {
                         return Err(CanonicalError::new(
@@ -783,5 +789,46 @@ impl ParameterValue {
             Self::Integer(_) => ParameterType::Integer,
             Self::String(_) => ParameterType::String,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ParseLimits, compile_strict_yaml};
+
+    #[test]
+    fn independent_validator_rejects_a_connector_in_a_multi_step_stage() {
+        let mut pipeline = compile_strict_yaml(
+            "fixture://canonical-connector",
+            r#"
+version: 1
+name: canonical-connector
+stages:
+  - id: notify
+    name: Notify
+    steps:
+      - connector_intent:
+          mapping_id: notification.v1
+          mapping_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          effect_class: externally_idempotent
+          effect_key_template: build.notification
+          public_input_schema: {message: string}
+          protected_secret_ref_schema: {token: string}
+          expected_public_result_schema: {delivery_id: string}
+          timeout_seconds: 30
+          ambiguity_policy: observe_then_reconcile
+          downstream_control_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+"#,
+            ParseLimits::default(),
+        )
+        .expect("compile singleton connector stage");
+        let duplicate = pipeline.stages[0].steps[0].clone();
+        pipeline.stages[0].steps.push(duplicate);
+        let bytes = encode_pipeline(&pipeline);
+
+        let error = validate_canonical_bytes(&bytes)
+            .expect_err("canonical multi-step connector stage must fail");
+        assert!(error.message.contains("exactly one step"));
     }
 }

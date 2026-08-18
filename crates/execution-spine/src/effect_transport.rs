@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
 const MAX_SERVICE_FRAME_BYTES: usize = 256 * 1024;
@@ -48,6 +48,8 @@ pub enum EffectServiceError {
     AmbiguousTimeout,
     #[error("effect service process failed")]
     ServiceFailed,
+    #[error("effect service could not be spawned before request dispatch")]
+    SpawnFailed,
     #[error("effect service protocol response is invalid")]
     InvalidResponse,
     #[error("effect service I/O failed")]
@@ -218,17 +220,9 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let mut child = child
-        .spawn()
-        .map_err(|_| EffectServiceError::ServiceFailed)?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or(EffectServiceError::ServiceFailed)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or(EffectServiceError::ServiceFailed)?;
+    let mut child = child.spawn().map_err(|_| EffectServiceError::SpawnFailed)?;
+    let mut stdin = child.stdin.take().ok_or(EffectServiceError::SpawnFailed)?;
+    let mut stdout = child.stdout.take().ok_or(EffectServiceError::SpawnFailed)?;
     let exchange = async {
         stdin.write_all(&request_bytes).await?;
         stdin.shutdown().await?;
@@ -341,13 +335,54 @@ async fn validate_service(
         return Err(EffectServiceError::InvalidBinding);
     }
     #[cfg(target_os = "linux")]
-    let digest = digest_file(&mut file).await?;
+    let sealed_descriptor = nix::sys::memfd::memfd_create(
+        "mcloving-effect-service",
+        nix::sys::memfd::MFdFlags::MFD_CLOEXEC | nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
+    )
+    .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    let mut sealed = tokio::fs::File::from_std(std::fs::File::from(sealed_descriptor));
+    #[cfg(target_os = "linux")]
+    let copied = tokio::io::copy(&mut file, &mut sealed)
+        .await
+        .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    if copied != metadata.len() {
+        return Err(EffectServiceError::ExecutableSubstituted);
+    }
+    #[cfg(target_os = "linux")]
+    sealed
+        .flush()
+        .await
+        .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    let sealed = sealed.into_std().await;
+    #[cfg(target_os = "linux")]
+    nix::fcntl::fcntl(
+        &sealed,
+        nix::fcntl::FcntlArg::F_ADD_SEALS(
+            nix::fcntl::SealFlag::F_SEAL_WRITE
+                | nix::fcntl::SealFlag::F_SEAL_GROW
+                | nix::fcntl::SealFlag::F_SEAL_SHRINK
+                | nix::fcntl::SealFlag::F_SEAL_SEAL,
+        ),
+    )
+    .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    let mut sealed = tokio::fs::File::from_std(sealed);
+    #[cfg(target_os = "linux")]
+    sealed
+        .seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    let digest = digest_file(&mut sealed).await?;
     #[cfg(target_os = "linux")]
     if digest != service.executable_sha256 {
         return Err(EffectServiceError::ExecutableSubstituted);
     }
     #[cfg(target_os = "linux")]
-    let file = file.into_std().await;
+    let file = sealed.into_std().await;
     #[cfg(target_os = "linux")]
     nix::fcntl::fcntl(
         &file,
@@ -407,7 +442,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn verified_executable_inode_survives_path_replacement() {
+    async fn sealed_executable_survives_same_inode_mutation_and_path_replacement() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempfile::tempdir().expect("temporary executable root");
@@ -439,7 +474,9 @@ mod tests {
         };
         let verified = validate_service(&service)
             .await
-            .expect("verify and retain executable inode");
+            .expect("verify and seal executable bytes");
+
+        std::fs::copy(false_program, &service_path).expect("mutate verified source inode");
 
         std::fs::copy(false_program, &replacement_path).expect("copy substituted executable");
         std::fs::set_permissions(&replacement_path, std::fs::Permissions::from_mode(0o700))
@@ -452,5 +489,35 @@ mod tests {
             .expect("execute retained inode");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"verified-inode");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn invalid_executable_format_is_a_pre_dispatch_spawn_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary executable root");
+        let service_path = root.path().join("invalid-service");
+        std::fs::write(&service_path, b"not-an-executable-format")
+            .expect("write invalid executable");
+        std::fs::set_permissions(&service_path, std::fs::Permissions::from_mode(0o700))
+            .expect("set executable mode");
+        let executable_sha256 =
+            Sha256::digest(std::fs::read(&service_path).expect("read invalid executable"))
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        let service = validate_service_command(&PinnedServiceCommand {
+            executable: service_path,
+            executable_sha256,
+            arguments: Vec::new(),
+            timeout_millis: 1_000,
+        })
+        .await
+        .expect("seal invalid executable bytes");
+
+        let result =
+            invoke_validated::<_, Value>(&service, &serde_json::json!({"test": true})).await;
+        assert!(matches!(result, Err(EffectServiceError::SpawnFailed)));
     }
 }
