@@ -131,6 +131,33 @@ pub async fn prepare_effect(
     })
 }
 
+/// Close a prepared intent only when no dispatch or receipt was ever recorded.
+/// This is the cancellation path before the connector call begins.
+pub async fn abandon_prepared_effect(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    prepared: &PreparedEffect,
+) -> Result<(), EffectRuntimeError> {
+    if !store
+        .checkpoint_effect(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            agent_id,
+            &prepared.effect_key,
+            prepared.effect_class,
+            EffectStatus::Abandoned,
+            &prepared.payload,
+        )
+        .await?
+    {
+        return Err(EffectRuntimeError::StaleAuthority);
+    }
+    Ok(())
+}
+
 /// Verify and durably record the connector response before any retry decision.
 pub async fn record_effect_outcome(
     store: &Store,

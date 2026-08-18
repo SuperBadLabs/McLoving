@@ -1,4 +1,8 @@
 ALTER TABLE attempt_effects
+    DROP CONSTRAINT attempt_effects_status_check,
+    ADD CONSTRAINT attempt_effects_status_check CHECK (
+        status IN ('prepared', 'applied', 'confirmed', 'uncertain', 'abandoned')
+    ),
     ADD COLUMN outcome_receipt jsonb,
     ADD COLUMN outcome_receipt_digest bytea,
     ADD COLUMN reconciliation_receipt jsonb,

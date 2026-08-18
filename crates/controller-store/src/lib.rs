@@ -314,6 +314,7 @@ pub enum EffectStatus {
     Applied,
     Confirmed,
     Uncertain,
+    Abandoned,
 }
 
 /// One independently signed receipt slot in the controller-owned effect join.
@@ -352,6 +353,7 @@ impl EffectStatus {
             Self::Applied => "applied",
             Self::Confirmed => "confirmed",
             Self::Uncertain => "uncertain",
+            Self::Abandoned => "abandoned",
         }
     }
 }
@@ -3040,8 +3042,12 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
-        let existing = sqlx::query_as::<_, (String, String, Vec<u8>)>(
-            "SELECT effect_class, status, payload_digest
+        let existing = sqlx::query_as::<_, (String, String, Vec<u8>, bool)>(
+            "SELECT effect_class, status, payload_digest,
+                    outcome_receipt IS NOT NULL
+                    OR reconciliation_receipt IS NOT NULL
+                    OR observation_receipt IS NOT NULL
+                    OR shadow_replay_receipt IS NOT NULL AS has_evidence
              FROM attempt_effects
              WHERE organization_id = $1
                AND attempt_id = $2
@@ -3055,9 +3061,10 @@ impl Store {
         .bind(effect_key)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((existing_class, existing_status, existing_digest)) = existing {
+        if let Some((existing_class, existing_status, existing_digest, has_evidence)) = existing {
             let valid = existing_class == effect_class.as_str()
                 && existing_digest == payload_digest
+                && !(status == EffectStatus::Abandoned && has_evidence)
                 && valid_effect_transition(&existing_status, status);
             if !valid {
                 tx.rollback().await?;
@@ -3241,7 +3248,7 @@ impl Store {
             return Ok(false);
         };
         let ordering_valid = match kind {
-            EffectEvidenceKind::Outcome => true,
+            EffectEvidenceKind::Outcome => status != "abandoned",
             EffectEvidenceKind::ReconciliationOutcome => {
                 outcome_digest.is_some() && observation_digest.is_some() && status == "uncertain"
             }
@@ -5510,6 +5517,41 @@ impl Store {
             return Ok(false);
         }
 
+        let incomplete_runtime_effects = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND payload ->> 'schema_version' = 'mcloving.controller-effect-prepared/v1'
+               AND (
+                   (status = 'abandoned' AND $4 <> 'aborted')
+                   OR (
+                       status <> 'abandoned'
+                       AND (
+                           status <> 'confirmed'
+                           OR outcome_receipt IS NULL
+                           OR observation_receipt IS NULL
+                           OR shadow_replay_receipt IS NULL
+                           OR (
+                               outcome_receipt ->> 'status' = 'ambiguous'
+                               AND reconciliation_receipt IS NULL
+                           )
+                       )
+                   )
+               )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(outcome.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if incomplete_runtime_effects > 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
         sqlx::query(
             "UPDATE attempts
              SET status = $3,
@@ -5988,7 +6030,10 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
         (current, requested),
         (
             "prepared",
-            EffectStatus::Prepared | EffectStatus::Applied | EffectStatus::Uncertain
+            EffectStatus::Prepared
+                | EffectStatus::Applied
+                | EffectStatus::Uncertain
+                | EffectStatus::Abandoned
         ) | (
             "applied",
             EffectStatus::Applied | EffectStatus::Confirmed | EffectStatus::Uncertain
@@ -5997,6 +6042,7 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
                 "uncertain",
                 EffectStatus::Uncertain | EffectStatus::Confirmed
             )
+            | ("abandoned", EffectStatus::Abandoned)
     )
 }
 
@@ -6056,6 +6102,7 @@ fn parse_effect_status(value: &str) -> Result<EffectStatus, StoreError> {
         "applied" => Ok(EffectStatus::Applied),
         "confirmed" => Ok(EffectStatus::Confirmed),
         "uncertain" => Ok(EffectStatus::Uncertain),
+        "abandoned" => Ok(EffectStatus::Abandoned),
         other => Err(StoreError::InvalidEffectPayload(format!(
             "unknown effect status {other}"
         ))),
