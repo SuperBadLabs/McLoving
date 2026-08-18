@@ -1731,6 +1731,105 @@ async fn execution_reads_cancellation_after_the_pipeline_lock() {
 }
 
 #[tokio::test]
+async fn execution_revalidates_lease_after_the_pipeline_lock() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "post-lock-lease",
+        )
+        .await
+        .expect("create post-lock lease tenant");
+    store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "post-lock-lease".into(),
+            pipeline_digest: [0x83; 32],
+            node_key: "post-lock-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit post-lock lease build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "post-lock-lease-scheduler".into(),
+            agent_id: "post-lock-lease-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim post-lock lease attempt")
+        .expect("post-lock lease attempt is claimable");
+
+    let mut authority_loss = store.pool().begin().await.expect("begin lease race");
+    sqlx::query(
+        "SELECT d.pipeline_id
+         FROM pipeline_definitions AS d
+         WHERE d.organization_id=$1 AND d.pipeline_id=$2
+         FOR UPDATE OF d",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(&mut *authority_loss)
+    .await
+    .expect("lock pipeline before lease expiry");
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at=clock_timestamp() - interval '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(&mut *authority_loss)
+    .await
+    .expect("stage lease expiry behind the pipeline lock");
+
+    let execution_store = store.clone();
+    let execution_claim = claim.clone();
+    let execution = tokio::spawn(async move {
+        execution_store
+            .attempt_execution(
+                execution_claim.organization_id,
+                execution_claim.attempt_id,
+                execution_claim.fence,
+                execution_claim.restore_epoch,
+                &execution_claim.agent_id,
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    authority_loss
+        .commit()
+        .await
+        .expect("commit lease expiry before execution acquires the pipeline lock");
+    let loaded = execution
+        .await
+        .expect("join post-lock execution read")
+        .expect("load post-lock execution result");
+    assert!(
+        loaded.is_none(),
+        "the complete execution-authority predicate must be revalidated after the pipeline lock"
+    );
+}
+
+#[tokio::test]
 async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

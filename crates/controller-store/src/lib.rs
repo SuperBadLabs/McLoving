@@ -2803,7 +2803,50 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
-        let mut row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
+        let build_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT b.id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('offered', 'accepted', 'running', 'finalizing', 'cancelling')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = build_id else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(None)
+                }
+                other => Err(other),
+            };
+        }
+        // Waiting for the pipeline-definition lock can outlive or otherwise
+        // invalidate the authority observed above. Repeat the complete
+        // execution-authority predicate after acquiring that lock; refreshing
+        // cancellation alone could dispatch after lease expiry, requeue, or a
+        // restore/fence handoff.
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
             "SELECT b.id, b.project_id, b.pipeline_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
@@ -2829,34 +2872,6 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((build_id, _, _, _, _)) = row.as_ref()
-            && let Err(error) =
-                lock_enabled_build_pipeline(&mut tx, organization_id, *build_id).await
-        {
-            tx.rollback().await?;
-            return match error {
-                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
-                    Ok(None)
-                }
-                other => Err(other),
-            };
-        }
-        if let Some((build_id, _, _, _, cancellation_requested)) = row.as_mut() {
-            let current_cancellation = sqlx::query_scalar::<_, bool>(
-                "SELECT cancellation_requested_at IS NOT NULL
-                 FROM builds
-                 WHERE organization_id = $1 AND id = $2",
-            )
-            .bind(organization_id)
-            .bind(*build_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(current_cancellation) = current_cancellation else {
-                tx.rollback().await?;
-                return Ok(None);
-            };
-            *cancellation_requested = current_cancellation;
-        }
         tx.commit().await?;
         Ok(row.map(
             |(build_id, project_id, pipeline_id, execution_spec, cancellation_requested)| {
