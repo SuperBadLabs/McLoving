@@ -842,6 +842,48 @@ async fn preflight_reserves_receipt_and_evidence_capacity_atomically_until_expir
 }
 
 #[tokio::test]
+async fn released_preflight_reservation_immediately_restores_capacity() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 1;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    let first = rig.prepare(first);
+    let first_digest = observation_request_digest(&first).unwrap();
+    assert_eq!(
+        observer.preflight_request_at(&first, NOW).unwrap(),
+        first_digest
+    );
+    assert_eq!(
+        observer.release_preflight_request(&first).unwrap(),
+        first_digest
+    );
+    assert_eq!(
+        observer.release_preflight_request(&first).unwrap(),
+        first_digest
+    );
+
+    let mut replacement = rig.request(ObservationPhase::PreAction);
+    replacement.effect_fence = 18;
+    replacement.expected_config_sha256 = observer.config_sha256().to_owned();
+    let replacement = rig.prepare(replacement);
+    observer
+        .preflight_request_at(&replacement, NOW)
+        .expect("released reservation restores the sole receipt slot");
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     let rig = Rig::new().await;
     let pre_request = rig.prepare(rig.request(ObservationPhase::PreAction));
@@ -2281,10 +2323,15 @@ async fn evidence_capacity_failure_releases_the_destination_claim() {
         request.expected_config_sha256 = observer.config_sha256().to_owned();
         let request = rig.prepare(request);
         assert_eq!(
+            observer.preflight_request_at(&request, NOW),
+            Err(ObserverError::CapacityExceeded)
+        );
+        assert_eq!(
             observer.observe_at(request, NOW).await,
             Err(ObserverError::CapacityExceeded)
         );
     }
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
 
     let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
     let pending_count: u64 = connection

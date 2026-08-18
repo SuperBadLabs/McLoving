@@ -629,6 +629,56 @@ impl ObserverStore {
             .map_err(|_| ObserverError::StateUnavailable)
     }
 
+    pub(crate) fn release_pending(
+        &self,
+        generation: u64,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        request_sha256: &str,
+    ) -> Result<(), ObserverError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        assert_active_transaction(&transaction, generation, config_sha256)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM observations WHERE observation_id=?1 AND request_sha256=?2 AND status='pending' AND reservation_reached=0",
+                params![request.observation_id.to_string(), request_sha256],
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if changed == 0 {
+            let existing: Option<(String, String, bool)> = transaction
+                .query_row(
+                    "SELECT request_sha256, status, reservation_reached FROM observations WHERE observation_id=?1",
+                    [request.observation_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            match existing {
+                None => {}
+                Some((stored_request_sha256, status, reservation_reached))
+                    if stored_request_sha256 == request_sha256
+                        && status == "pending"
+                        && reservation_reached =>
+                {
+                    return Err(ObserverError::ObservationPending);
+                }
+                Some((stored_request_sha256, _, _)) if stored_request_sha256 != request_sha256 => {
+                    return Err(ObserverError::ReplayMismatch);
+                }
+                Some(_) => return Err(ObserverError::ReplayMismatch),
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)
+    }
+
     pub(crate) fn fail_pending(
         &self,
         generation: u64,
@@ -976,8 +1026,10 @@ fn reserve_receipt_capacity(
         &config.implementation_sha256,
         request,
     )
-    .ok_or(ObserverError::StateUnavailable)?
-    .min(config.limits.max_evidence_bytes);
+    .ok_or(ObserverError::StateUnavailable)?;
+    if reservation > config.limits.max_evidence_bytes {
+        return Err(ObserverError::CapacityExceeded);
+    }
     if total
         .checked_add(reservation)
         .is_none_or(|value| value > config.limits.max_evidence_bytes)

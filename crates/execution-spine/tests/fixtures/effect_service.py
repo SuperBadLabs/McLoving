@@ -425,6 +425,14 @@ def main():
             scenario,
             preflight_ledger,
         )
+    elif command.get("operation") == "release":
+        append_dispatch(
+            preflight_ledger, "release:" + command["request"]["observation_id"]
+        )
+        response = {
+            "status": "released",
+            "request_sha256": observation_digest(command["request"]),
+        }
     elif "operation" in command:
         response = observer_response(command, openssl, observer_key, scenario)
     elif command.get("command") == "replay":

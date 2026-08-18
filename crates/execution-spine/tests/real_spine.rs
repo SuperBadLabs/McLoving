@@ -825,7 +825,23 @@ fn dispatch_count(root: &Path) -> usize {
 
 fn preflight_count(root: &Path) -> usize {
     std::fs::read_to_string(root.join("effect-fixture-preflights.txt"))
-        .map(|contents| contents.lines().count())
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|line| !line.starts_with("release:"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn reservation_release_count(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("effect-fixture-preflights.txt"))
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|line| line.starts_with("release:"))
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -1530,6 +1546,80 @@ async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
 }
 
 #[tokio::test]
+async fn exhausted_effect_timeout_budget_is_terminal_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-timeout-budget-exhausted",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    plan.observer_service.timeout_millis = 30_000;
+    let config = runtime_effect_worker(root.path(), plan);
+
+    let receipt = run_claim(&store, &claim, &config)
+        .await
+        .expect("deterministic timeout exhaustion is terminal");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(preflight_count(root.path()), 0);
+    let effect_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attempt_effects WHERE organization_id=$1 AND attempt_id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count timeout-budget effects");
+    assert_eq!(effect_count, 0);
+
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at=NOW() - INTERVAL '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("force timeout lease timestamp behind the requeue boundary");
+    assert!(
+        !store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("terminal timeout failure must not requeue")
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-after-timeout-exhaustion".into(),
+                agent_id: "agent-after-timeout-exhaustion".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim after timeout terminalization")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1576,6 +1666,7 @@ async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch
         .expect("pre-dispatch cancellation outcome");
     assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
     assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(reservation_release_count(root.path()), 1);
     let effect: (String, i64) = sqlx::query_as(
         "SELECT status,
                 ((outcome_receipt IS NOT NULL)::int

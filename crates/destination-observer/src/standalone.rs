@@ -26,6 +26,9 @@ pub enum ObserverCommand {
         request: ObservationRequest,
         required_validity_ms: u64,
     },
+    Release {
+        request: ObservationRequest,
+    },
     Write {
         request: ObservationRequest,
     },
@@ -39,6 +42,9 @@ pub enum ObserverResponse {
     },
     Observed {
         receipt: Box<ObservationReceipt>,
+    },
+    Released {
+        request_sha256: String,
     },
     Error {
         code: &'static str,
@@ -200,6 +206,10 @@ pub async fn serve_stdio(observer: &DestinationObserver) -> Result<(), ObserverE
                 .map(|receipt| ObserverResponse::Observed {
                     receipt: Box::new(receipt),
                 })
+                .unwrap_or_else(|error| ObserverResponse::from_error(&error)),
+            Ok(ObserverCommand::Release { request }) => observer
+                .release_preflight_request(&request)
+                .map(|request_sha256| ObserverResponse::Released { request_sha256 })
                 .unwrap_or_else(|error| ObserverResponse::from_error(&error)),
             Ok(ObserverCommand::Write { request: _ }) => {
                 ObserverResponse::from_error(&ObserverError::UnauthorizedRequest)

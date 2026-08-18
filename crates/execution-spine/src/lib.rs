@@ -9,10 +9,10 @@ pub use effect_runtime::{
     finalize_effect_shadow_join_as, mark_effect_uncertain, prepare_effect, record_effect_outcome,
     record_reconciled_effect_outcome,
 };
-use effect_transport::preflight_effect_services;
 pub use effect_transport::{
     EffectServiceError, PinnedServiceCommand, invoke_connector, invoke_observer, invoke_shadow,
 };
+use effect_transport::{ValidatedEffectServices, preflight_effect_services};
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -602,12 +602,24 @@ async fn run_effect_claim_under_lease(
         )
         .await;
     };
-    let connector_service = bounded_connector_service(
+    let connector_service = match bounded_connector_service(
         &plan.connector_service,
         intent,
         plan.observer_service.timeout_millis,
         remaining_action_authority_ms,
-    )?;
+    ) {
+        Ok(service) => service,
+        Err(_) => {
+            return finalize_effect_attempt(
+                store,
+                claim,
+                config,
+                TerminalOutcome::Failed,
+                json!({"reason": "effect_timeout_budget_exhausted"}),
+            )
+            .await;
+        }
+    };
     let preflight_validity_ms = connector_service
         .timeout_millis
         .checked_add(plan.observer_service.timeout_millis)
@@ -707,7 +719,7 @@ async fn run_effect_claim_under_lease(
         .await;
     }
 
-    let pre_dispatch = store
+    let pre_dispatch = match store
         .attempt_execution(
             claim.organization_id,
             claim.attempt_id,
@@ -715,31 +727,71 @@ async fn run_effect_claim_under_lease(
             claim.restore_epoch,
             &config.agent_id,
         )
-        .await?
-        .ok_or(SpineError::StaleAuthority)?;
+        .await
+    {
+        Ok(Some(execution)) => execution,
+        Ok(None) => {
+            let _ = services
+                .release_observer_request(plan.observation_request.clone())
+                .await;
+            return Err(SpineError::StaleAuthority);
+        }
+        Err(error) => {
+            let _ = services
+                .release_observer_request(plan.observation_request.clone())
+                .await;
+            return Err(error.into());
+        }
+    };
     if pre_dispatch.cancellation_requested {
-        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
-        return finalize_effect_attempt(
+        return finalize_verified_pre_dispatch_exit(
             store,
             claim,
             config,
-            TerminalOutcome::Aborted,
-            json!({"reason": "cancelled_during_effect_preflight"}),
+            &prepared,
+            &services,
+            &plan.observation_request,
+            (
+                TerminalOutcome::Aborted,
+                json!({"reason": "cancelled_during_effect_preflight"}),
+            ),
         )
         .await;
     }
+    let dispatch_now = match unix_time_millis() {
+        Ok(now) => now,
+        Err(_) => {
+            return finalize_verified_pre_dispatch_exit(
+                store,
+                claim,
+                config,
+                &prepared,
+                &services,
+                &plan.observation_request,
+                (
+                    TerminalOutcome::Failed,
+                    json!({"reason": "effect_dispatch_clock_unavailable"}),
+                ),
+            )
+            .await;
+        }
+    };
     if !action_request_covers_execution_window(
         &plan.freeze.action_request,
-        unix_time_millis()?,
+        dispatch_now,
         connector_service.timeout_millis,
     ) {
-        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
-        return finalize_effect_attempt(
+        return finalize_verified_pre_dispatch_exit(
             store,
             claim,
             config,
-            TerminalOutcome::Failed,
-            json!({"reason": "effect_action_request_preflight_failed"}),
+            &prepared,
+            &services,
+            &plan.observation_request,
+            (
+                TerminalOutcome::Failed,
+                json!({"reason": "effect_action_request_preflight_failed"}),
+            ),
         )
         .await;
     }
@@ -757,13 +809,17 @@ async fn run_effect_claim_under_lease(
             return Err(SpineError::EffectReconciliationRequired);
         }
         Err(error) => {
-            abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
-            return finalize_effect_attempt(
+            return finalize_verified_pre_dispatch_exit(
                 store,
                 claim,
                 config,
-                TerminalOutcome::Failed,
-                json!({"reason": "effect_service_preflight_failed", "code": error.to_string()}),
+                &prepared,
+                &services,
+                &plan.observation_request,
+                (
+                    TerminalOutcome::Failed,
+                    json!({"reason": "effect_service_preflight_failed", "code": error.to_string()}),
+                ),
             )
             .await;
         }
@@ -971,6 +1027,32 @@ fn validate_observation_request(
         return Err(SpineError::EffectRuntimeUnavailable);
     }
     Ok(())
+}
+
+async fn finalize_verified_pre_dispatch_exit(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    prepared: &PreparedEffect,
+    services: &ValidatedEffectServices,
+    observation_request: &ObservationRequest,
+    outcome: (TerminalOutcome, Value),
+) -> Result<RunReceipt, SpineError> {
+    let (terminal, mut summary) = outcome;
+    let release = services
+        .release_observer_request(observation_request.clone())
+        .await;
+    abandon_prepared_effect(store, claim, &config.agent_id, prepared).await?;
+    if let Some(summary) = summary.as_object_mut() {
+        summary.insert(
+            "observer_reservation_release".to_owned(),
+            match release {
+                Ok(()) => json!({"status": "released"}),
+                Err(error) => json!({"status": "failed", "code": error.to_string()}),
+            },
+        );
+    }
+    finalize_effect_attempt(store, claim, config, terminal, summary).await
 }
 
 fn bounded_connector_service(

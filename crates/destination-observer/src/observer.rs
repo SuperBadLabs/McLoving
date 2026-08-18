@@ -199,6 +199,23 @@ impl DestinationObserver {
         self.preflight_request_with_trusted_time(request, unix_time_ms()?, required_validity_ms)
     }
 
+    /// Releases an exact preflight reservation after the controller has
+    /// definitively decided that no connector dispatch occurred.
+    pub fn release_preflight_request(
+        &self,
+        request: &ObservationRequest,
+    ) -> Result<String, ObserverError> {
+        self.validate_request(request)?;
+        let request_sha256 = observation_request_digest(request)?;
+        self.store.release_pending(
+            self.config.generation,
+            &self.config_sha256,
+            request,
+            &request_sha256,
+        )?;
+        Ok(request_sha256)
+    }
+
     /// Deterministic clock entry point for the contained literal-loopback test boundary only.
     #[cfg(feature = "loopback-test")]
     #[doc(hidden)]

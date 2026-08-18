@@ -112,6 +112,7 @@ async fn invoke_validated_observer(
     match response {
         ObserverClientResponse::Observed { receipt } => Ok(*receipt),
         ObserverClientResponse::Verified { .. } => Err(EffectServiceError::InvalidResponse),
+        ObserverClientResponse::Released { .. } => Err(EffectServiceError::InvalidResponse),
         ObserverClientResponse::Error { code, message } => {
             let _ = (code, message);
             Err(EffectServiceError::ServiceFailed)
@@ -148,6 +149,28 @@ impl ValidatedEffectServices {
             }
             ObserverClientResponse::Verified { .. } => Err(EffectServiceError::InvalidResponse),
             ObserverClientResponse::Observed { .. } => Err(EffectServiceError::InvalidResponse),
+            ObserverClientResponse::Released { .. } => Err(EffectServiceError::InvalidResponse),
+            ObserverClientResponse::Error { code, message } => {
+                let _ = (code, message);
+                Err(EffectServiceError::ServiceFailed)
+            }
+        }
+    }
+
+    pub(crate) async fn release_observer_request(
+        &self,
+        request: ObservationRequest,
+    ) -> Result<(), EffectServiceError> {
+        let expected = observation_request_digest(&request)
+            .map_err(|_| EffectServiceError::InvalidResponse)?;
+        let command = ObserverCommand::Release { request };
+        match invoke_validated::<_, ObserverClientResponse>(&self.observer, &command).await? {
+            ObserverClientResponse::Released { request_sha256 } if request_sha256 == expected => {
+                Ok(())
+            }
+            ObserverClientResponse::Released { .. }
+            | ObserverClientResponse::Verified { .. }
+            | ObserverClientResponse::Observed { .. } => Err(EffectServiceError::InvalidResponse),
             ObserverClientResponse::Error { code, message } => {
                 let _ = (code, message);
                 Err(EffectServiceError::ServiceFailed)
@@ -194,6 +217,7 @@ pub(crate) async fn preflight_effect_services(
 enum ObserverClientResponse {
     Verified { request_sha256: String },
     Observed { receipt: Box<ObservationReceipt> },
+    Released { request_sha256: String },
     Error { code: String, message: String },
 }
 
