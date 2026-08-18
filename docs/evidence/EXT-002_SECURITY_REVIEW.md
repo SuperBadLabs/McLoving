@@ -43,8 +43,8 @@ grant to a new fence.
 - The positive path holds the shadow reply open and observes the attempt still
   `running` after outcome and independent observation are durable. Only the
   durable signed shadow receipt permits terminal publication.
-- Redacted store and HTTP projections expose the payload and four evidence
-  digests while omitting frozen values, request bodies, receipt bodies,
+- Redacted store and HTTP projections expose the payload digest and four
+  evidence digests while omitting frozen values, request bodies, receipt bodies,
   protected outputs, and credentials.
 
 ## Mario effect-free rehearsal
