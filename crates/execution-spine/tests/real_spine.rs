@@ -1323,11 +1323,48 @@ async fn signed_runtime_scope_must_match_the_durable_build_before_dispatch() {
     plan.freeze.action_request.project_id = Uuid::new_v4();
     plan.freeze.action_request.pipeline_id = Uuid::new_v4();
     sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
-    assert!(matches!(
-        run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan)).await,
-        Err(SpineError::EffectRuntimeUnavailable)
-    ));
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("scope mismatch is durably terminalized before dispatch");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
     assert_eq!(dispatch_count(root.path()), 0);
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read scope-mismatch build")
+        .expect("scope-mismatch build exists");
+    assert_eq!(snapshot.build_status, "failed");
+    assert_eq!(snapshot.attempt_status, "failed");
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at=NOW() - INTERVAL '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("force the old lease timestamp behind the requeue boundary");
+    assert!(
+        !store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("terminal mismatch must not requeue")
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-after-scope-mismatch".into(),
+                agent_id: "agent-after-scope-mismatch".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim after terminal scope mismatch")
+            .is_none()
+    );
 }
 
 #[tokio::test]

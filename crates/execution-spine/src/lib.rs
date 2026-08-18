@@ -551,7 +551,14 @@ async fn run_effect_claim_under_lease(
     if plan.freeze.action_request.project_id != accepted.project_id
         || plan.freeze.action_request.pipeline_id != pipeline_id
     {
-        return Err(SpineError::EffectRuntimeUnavailable);
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Failed,
+            json!({"reason": "effect_plan_scope_mismatch"}),
+        )
+        .await;
     }
     if accepted.cancellation_requested {
         return finalize_effect_attempt(
@@ -576,12 +583,35 @@ async fn run_effect_claim_under_lease(
         return Err(SpineError::StaleAuthority);
     }
 
-    let connector_service = bounded_connector_service(&plan.connector_service, intent)?;
+    let prepare_now = unix_time_millis()?;
+    let remaining_action_authority_ms = plan
+        .freeze
+        .action_request
+        .expires_at_unix_ms
+        .checked_sub(prepare_now)
+        .and_then(|remaining| u64::try_from(remaining).ok());
+    let Some(remaining_action_authority_ms) = remaining_action_authority_ms
+        .filter(|remaining| *remaining > plan.observer_service.timeout_millis)
+    else {
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Failed,
+            json!({"reason": "effect_action_request_preflight_failed"}),
+        )
+        .await;
+    };
+    let connector_service = bounded_connector_service(
+        &plan.connector_service,
+        intent,
+        plan.observer_service.timeout_millis,
+        remaining_action_authority_ms,
+    )?;
     let preflight_validity_ms = connector_service
         .timeout_millis
         .checked_add(plan.observer_service.timeout_millis)
         .ok_or(SpineError::EffectRuntimeUnavailable)?;
-    let prepare_now = unix_time_millis()?;
     if !action_request_covers_execution_window(
         &plan.freeze.action_request,
         prepare_now,
@@ -946,13 +976,20 @@ fn validate_observation_request(
 fn bounded_connector_service(
     service: &PinnedServiceCommand,
     intent: &ConnectorIntentSpec,
+    observer_preflight_timeout_millis: u64,
+    remaining_action_authority_millis: u64,
 ) -> Result<PinnedServiceCommand, SpineError> {
-    let timeout_millis = intent
+    let intent_timeout_millis = intent
         .timeout_seconds
         .checked_mul(1_000)
         .ok_or(SpineError::EffectRuntimeUnavailable)?;
+    let total_budget_millis = intent_timeout_millis.min(remaining_action_authority_millis);
+    let connector_budget_millis = total_budget_millis
+        .checked_sub(observer_preflight_timeout_millis)
+        .filter(|budget| *budget > 0)
+        .ok_or(SpineError::EffectRuntimeUnavailable)?;
     let mut bounded = service.clone();
-    bounded.timeout_millis = bounded.timeout_millis.min(timeout_millis);
+    bounded.timeout_millis = bounded.timeout_millis.min(connector_budget_millis);
     if bounded.timeout_millis == 0 {
         return Err(SpineError::EffectRuntimeUnavailable);
     }
@@ -1328,11 +1365,12 @@ mod tests {
             timeout_millis: 30_000,
         };
         assert_eq!(
-            bounded_connector_service(&service, &intent)
+            bounded_connector_service(&service, &intent, 500, 1_900)
                 .expect("bound service timeout")
                 .timeout_millis,
-            2_000
+            1_400
         );
+        assert!(bounded_connector_service(&service, &intent, 500, 500).is_err());
     }
 
     #[test]
