@@ -23,6 +23,7 @@ const MAX_SERVICE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 pub struct PinnedServiceCommand {
     pub executable: PathBuf,
     pub executable_sha256: String,
+    pub arguments: Vec<PathBuf>,
     pub timeout_millis: u64,
 }
 
@@ -106,7 +107,9 @@ where
     }
     request_bytes.push(b'\n');
 
-    let mut child = Command::new(&service.executable)
+    let mut child = Command::new(&service.executable);
+    child
+        .args(&service.arguments)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -156,6 +159,8 @@ async fn validate_service(service: &PinnedServiceCommand) -> Result<(), EffectSe
     if service.timeout_millis == 0
         || !service.executable.is_absolute()
         || !is_sha256(&service.executable_sha256)
+        || service.arguments.len() > 16
+        || service.arguments.iter().any(|path| !path.is_absolute())
     {
         return Err(EffectServiceError::InvalidBinding);
     }

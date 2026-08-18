@@ -1061,6 +1061,7 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
     let unavailable_service = PinnedServiceCommand {
         executable: std::fs::canonicalize("/bin/false").unwrap(),
         executable_sha256: "0".repeat(64),
+        arguments: Vec::new(),
         timeout_millis: 1_000,
     };
     let plan = EffectExecutionPlan {
