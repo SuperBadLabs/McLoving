@@ -205,7 +205,8 @@ pub async fn run_claim(
     let spec: ExecutionSpec = serde_json::from_value(execution.execution_spec)?;
     let process = match (spec.version, spec.steps.as_slice()) {
         (1, [ExecutionStep::Process(process)]) => process,
-        (2, [ExecutionStep::ConnectorIntent(_)]) => {
+        (2, [ExecutionStep::ConnectorIntent(intent)]) => {
+            let _ = intent;
             return Err(SpineError::EffectRuntimeUnavailable);
         }
         _ => return Err(SpineError::UnsupportedSpec),

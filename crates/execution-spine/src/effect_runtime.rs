@@ -324,6 +324,7 @@ fn validate_freeze(
         || request.effect_fence != fence
         || request.effect_key != intent.effect_key_template
         || request.idempotency_class != connector_effect_class(intent.effect_class)
+        || !public_payload_matches(&intent.public_input_schema, &request.request_payload)
         || request.expires_at_unix_ms <= now_unix_ms
         || request.expires_at_unix_ms > freeze.grant.expires_at_unix_ms
         || request.requested_at_unix_ms < freeze.grant.issued_at_unix_ms
@@ -474,6 +475,21 @@ fn public_values_match(
     schema: &std::collections::BTreeMap<String, JsonFieldType>,
     values: &std::collections::BTreeMap<String, Value>,
 ) -> bool {
+    schema.len() == values.len()
+        && schema.iter().all(|(name, kind)| {
+            values
+                .get(name)
+                .is_some_and(|value| json_kind_matches(*kind, value))
+        })
+}
+
+fn public_payload_matches(
+    schema: &std::collections::BTreeMap<String, JsonFieldType>,
+    payload: &Value,
+) -> bool {
+    let Some(values) = payload.as_object() else {
+        return false;
+    };
     schema.len() == values.len()
         && schema.iter().all(|(name, kind)| {
             values
