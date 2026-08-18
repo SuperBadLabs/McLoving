@@ -513,7 +513,7 @@ async fn run_effect_claim(
     {
         return Err(SpineError::StaleAuthority);
     }
-    let lease_guard = EffectLeaseGuard::start(store, claim, config);
+    let lease_guard = EffectLeaseGuard::start(store, claim, config).await?;
     let result = run_effect_claim_under_lease(store, claim, config, intent, plan).await;
     lease_guard.finish().await;
     result
@@ -927,7 +927,25 @@ struct EffectLeaseGuard {
 }
 
 impl EffectLeaseGuard {
-    fn start(store: &Store, claim: &ClaimedAttempt, config: &WorkerConfig) -> Self {
+    async fn start(
+        store: &Store,
+        claim: &ClaimedAttempt,
+        config: &WorkerConfig,
+    ) -> Result<Self, SpineError> {
+        if store
+            .renew_attempt_lease(
+                claim.organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &config.agent_id,
+                config.lease_seconds,
+            )
+            .await?
+            .is_none()
+        {
+            return Err(SpineError::StaleAuthority);
+        }
         let shutdown = CancellationToken::new();
         let renewal_interval = Duration::from_millis(
             u64::try_from(config.lease_seconds)
@@ -946,10 +964,10 @@ impl EffectLeaseGuard {
             config.lease_seconds,
             shutdown.clone(),
         ));
-        Self {
+        Ok(Self {
             shutdown,
             task: Some(task),
-        }
+        })
     }
 
     async fn finish(mut self) {
