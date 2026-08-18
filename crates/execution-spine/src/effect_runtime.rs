@@ -3,9 +3,8 @@ use mcloving_controller_store::{
     TerminalOutcome,
 };
 use mcloving_destination_observer::{
-    ObservationPhase, ObservationReceipt, ObservationRequest,
-    content_sha256 as observer_content_sha256, observation_receipt_digest,
-    observation_request_message, verify_observation_receipt,
+    ObservationPhase, ObservationReceipt, ObservationRequest, observation_receipt_digest,
+    observation_request_digest, verify_observation_receipt,
 };
 use mcloving_external_connector::{
     ActionRequest, IdempotencyClass, OutcomeReceipt, OutcomeStatus, ProtectedSecretRef,
@@ -604,10 +603,8 @@ fn validate_observation(
     observation: &ObservationReceipt,
 ) -> Result<(), EffectRuntimeError> {
     let fence = u64::try_from(claim.fence).map_err(|_| EffectRuntimeError::InvalidObservation)?;
-    let request_sha256 = observer_content_sha256(
-        &observation_request_message(request)
-            .map_err(|_| EffectRuntimeError::InvalidObservation)?,
-    );
+    let request_sha256 =
+        observation_request_digest(request).map_err(|_| EffectRuntimeError::InvalidObservation)?;
     if observation.observation_id != request.observation_id
         || observation.request_sha256 != request_sha256
         || observation.observer_id != freeze.expected_observer_id

@@ -639,6 +639,46 @@ async fn run_effect_claim_under_lease(
         }
     };
 
+    if let Err(error) = services
+        .verify_observer_request(plan.observation_request.clone())
+        .await
+    {
+        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Failed,
+            json!({
+                "reason": "effect_observation_request_preflight_failed",
+                "code": error.to_string()
+            }),
+        )
+        .await;
+    }
+
+    let pre_dispatch = store
+        .attempt_execution(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+        )
+        .await?
+        .ok_or(SpineError::StaleAuthority)?;
+    if pre_dispatch.cancellation_requested {
+        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Aborted,
+            json!({"reason": "cancelled_during_effect_preflight"}),
+        )
+        .await;
+    }
+
     let outcome = match services
         .invoke_connector(ConnectorCommand::Execute {
             request: Box::new(plan.freeze.action_request.clone()),

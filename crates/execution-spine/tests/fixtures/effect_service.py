@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from copy import deepcopy
 
 
 def compact(value):
@@ -73,12 +74,72 @@ def action_digest(request):
 
 
 def observation_digest(request):
-    unsigned = dict(request)
-    unsigned["authorization"] = dict(request["authorization"])
-    unsigned["authorization"]["signature_base64"] = ""
     return hashlib.sha256(
-        observer_frame(b"mcloving-destination-observation-request-v1", unsigned)
+        observer_frame(b"mcloving-observer-request-digest-v1", request)
     ).hexdigest()
+
+
+def verify_observation_request(openssl, authority_key, request, scenario, preflight_ledger):
+    with open(preflight_ledger, "a", encoding="utf-8") as ledger:
+        ledger.write(request["observation_id"] + "\n")
+        ledger.flush()
+        os.fsync(ledger.fileno())
+    if scenario == "slow_preflight":
+        time.sleep(0.5)
+    unsigned = deepcopy(request)
+    signature = base64.b64decode(unsigned["authorization"]["signature_base64"], validate=True)
+    unsigned["authorization"]["signature_base64"] = ""
+    with tempfile.NamedTemporaryFile() as message, tempfile.NamedTemporaryFile() as signature_file:
+        message.write(observer_frame(b"mcloving-destination-observation-request-v1", unsigned))
+        message.flush()
+        signature_file.write(signature)
+        signature_file.flush()
+        verified = subprocess.run(
+            [
+                openssl,
+                "pkeyutl",
+                "-verify",
+                "-inkey",
+                authority_key,
+                "-keyform",
+                "DER",
+                "-rawin",
+                "-in",
+                message.name,
+                "-sigfile",
+                signature_file.name,
+            ],
+            capture_output=True,
+        )
+    now = int(time.time() * 1000)
+    if verified.returncode != 0:
+        raise ValueError("invalid observation request signature")
+    if (
+        request["schema_version"] != "mcloving.destination-observation-request/v1"
+        or request["protocol_version"] != "mcloving.destination-observer/v1"
+        or request["observer_id"] != "fixture-observer"
+        or request["request_authority_identity"] != "controller"
+        or request["expected_implementation_sha256"] != "4" * 64
+        or request["expected_image_sha256"] != "5" * 64
+        or request["expected_config_sha256"] != "6" * 64
+        or request["expected_generation"] != 1
+        or request["activation_mode"] != "current"
+        or request["previous_generation"] is not None
+        or request["rollback_from_generation"] is not None
+        or request["endpoint_identity"] != "fixture-endpoint"
+        or request["account_identity"] != "fixture-account"
+        or request["resource_identity"] != "fixture-resource"
+        or request["effect_class"] != "notification"
+        or request["read_grant_id"] != "fixture-read"
+        or request["read_grant_version"] != "v1"
+        or request["read_grant_scope"] != "fixture-resource"
+        or request["authorization"]["key_id"] != "observer-request-key"
+        or request["requested_at_unix_ms"] > now
+        or request["expires_at_unix_ms"] < now
+        or request["expires_at_unix_ms"] - request["requested_at_unix_ms"] > 60_000
+    ):
+        raise ValueError("invalid observation request deployment binding")
+    return {"status": "verified", "request_sha256": observation_digest(request)}
 
 
 def append_dispatch(ledger, request_id):
@@ -329,24 +390,34 @@ def shadow_response(command, openssl, shadow_key, scenario):
 
 
 def main():
-    if len(sys.argv) != 9:
+    if len(sys.argv) != 11:
         raise ValueError(
-            "expected openssl, three role-key paths, diagnostic, scenario, state, and ledger paths"
+            "expected openssl, four role-key paths, diagnostic, scenario, state, and two ledger paths"
         )
     (
         openssl,
         outcome_key,
         observer_key,
         shadow_key,
+        observer_request_key,
         _diagnostic,
         scenario_path,
         state_path,
         ledger,
+        preflight_ledger,
     ) = sys.argv[1:]
     with open(scenario_path, "r", encoding="utf-8") as source:
         scenario = source.read().strip()
     command = json.loads(sys.stdin.readline())
-    if "operation" in command:
+    if command.get("operation") == "verify":
+        response = verify_observation_request(
+            openssl,
+            observer_request_key,
+            command["request"],
+            scenario,
+            preflight_ledger,
+        )
+    elif "operation" in command:
         response = observer_response(command, openssl, observer_key, scenario)
     elif command.get("command") == "replay":
         response = shadow_response(command, openssl, shadow_key, scenario)
@@ -361,7 +432,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        if len(sys.argv) == 9:
-            with open(sys.argv[5], "w", encoding="utf-8") as output:
+        if len(sys.argv) == 11:
+            with open(sys.argv[6], "w", encoding="utf-8") as output:
                 output.write(repr(error))
         raise

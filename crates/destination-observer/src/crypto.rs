@@ -7,6 +7,7 @@ use sha2::{Digest as _, Sha256};
 use crate::{ObservationReceipt, ObservationRequest, ObserverError, SignedDestinationState};
 
 const REQUEST_DOMAIN: &[u8] = b"mcloving-destination-observation-request-v1";
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-request-digest-v1";
 const DESTINATION_DOMAIN: &[u8] = b"mcloving-destination-state-v1";
 const RECEIPT_DOMAIN: &[u8] = b"mcloving-destination-observation-receipt-v1";
 const RECEIPT_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-receipt-digest-v1";
@@ -38,6 +39,10 @@ pub fn observation_request_message(request: &ObservationRequest) -> Result<Vec<u
     let mut unsigned = request.clone();
     unsigned.authorization.signature_base64.clear();
     message(REQUEST_DOMAIN, &unsigned)
+}
+
+pub fn observation_request_digest(request: &ObservationRequest) -> Result<String, ObserverError> {
+    canonical_digest(REQUEST_DIGEST_DOMAIN, request)
 }
 
 pub fn destination_state_message(state: &SignedDestinationState) -> Result<Vec<u8>, ObserverError> {

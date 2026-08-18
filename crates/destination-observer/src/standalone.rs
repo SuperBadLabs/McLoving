@@ -20,12 +20,16 @@ const MAX_RUNTIME_IMAGE_DIGEST_BYTES: usize = 66;
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObserverCommand {
     Observe { request: ObservationRequest },
+    Verify { request: ObservationRequest },
     Write { request: ObservationRequest },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ObserverResponse {
+    Verified {
+        request_sha256: String,
+    },
     Observed {
         receipt: Box<ObservationReceipt>,
     },
@@ -176,6 +180,10 @@ pub async fn serve_stdio(observer: &DestinationObserver) -> Result<(), ObserverE
             }
         };
         let response = match parse_json_no_duplicates::<ObserverCommand>(&frame) {
+            Ok(ObserverCommand::Verify { request }) => observer
+                .preflight_request(&request)
+                .map(|request_sha256| ObserverResponse::Verified { request_sha256 })
+                .unwrap_or_else(|error| ObserverResponse::from_error(&error)),
             Ok(ObserverCommand::Observe { request }) => observer
                 .observe(request)
                 .await

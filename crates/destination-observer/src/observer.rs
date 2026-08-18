@@ -14,8 +14,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::crypto::{
-    canonical_digest, content_sha256, observation_receipt_digest, public_key_from_seed,
-    sign_receipt, verify_destination_state, verify_observation_receipt, verify_request,
+    canonical_digest, content_sha256, observation_receipt_digest, observation_request_digest,
+    public_key_from_seed, sign_receipt, verify_destination_state, verify_observation_receipt,
+    verify_request,
 };
 use crate::store::{ClaimResult, ObserverStore, validate_state_dir, validate_temporal};
 use crate::strict_json::collect_decoded_json_strings;
@@ -25,7 +26,6 @@ use crate::{
     REQUEST_SCHEMA_VERSION, SignedDestinationState, parse_json_no_duplicates,
 };
 
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-request-digest-v1";
 const QUERY_DOMAIN: &[u8] = b"mcloving-observer-query-v1";
 const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
 const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
@@ -182,6 +182,12 @@ impl DestinationObserver {
             .await
     }
 
+    /// Verifies the complete signed request and the currently loaded deployment
+    /// authority without reading the destination or reserving an observation.
+    pub fn preflight_request(&self, request: &ObservationRequest) -> Result<String, ObserverError> {
+        self.preflight_request_with_trusted_time(request, unix_time_ms()?)
+    }
+
     /// Deterministic clock entry point for the contained literal-loopback test boundary only.
     #[cfg(feature = "loopback-test")]
     #[doc(hidden)]
@@ -196,6 +202,40 @@ impl DestinationObserver {
         self.observe_with_trusted_time(request, now_ms).await
     }
 
+    /// Deterministic preflight clock for the contained literal-loopback tests.
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub fn preflight_request_at(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+    ) -> Result<String, ObserverError> {
+        if !is_literal_loopback_test_endpoint(&self.config) {
+            return Err(ObserverError::InvalidConfig);
+        }
+        self.preflight_request_with_trusted_time(request, now_ms)
+    }
+
+    fn preflight_request_with_trusted_time(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+    ) -> Result<String, ObserverError> {
+        let started_at = Instant::now();
+        self.validate_request(request)?;
+        let request_sha256 = observation_request_digest(request)?;
+        let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(request))?;
+        self.store.validate_admission(
+            &self.config,
+            &self.config_sha256,
+            request,
+            &scope_sha256,
+            now_ms,
+            started_at,
+        )?;
+        Ok(request_sha256)
+    }
+
     async fn observe_with_trusted_time(
         &self,
         request: ObservationRequest,
@@ -203,7 +243,7 @@ impl DestinationObserver {
     ) -> Result<ObservationReceipt, ObserverError> {
         let started_at = Instant::now();
         self.validate_request(&request)?;
-        let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, &request)?;
+        let request_sha256 = observation_request_digest(&request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(&request))?;
         let destination_scope_sha256 = canonical_digest(
             b"mcloving-observer-destination-scope-v1",
@@ -441,7 +481,7 @@ impl DestinationObserver {
         started_at: Instant,
     ) -> Result<(SignedDestinationState, Vec<u8>, i64), ObserverError> {
         let query_sha256 = canonical_digest(QUERY_DOMAIN, &request.query)?;
-        let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, request)?;
+        let request_sha256 = observation_request_digest(request)?;
         let mut url =
             Url::parse(&self.config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
         {

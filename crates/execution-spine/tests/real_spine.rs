@@ -13,7 +13,7 @@ use mcloving_controller_store::{
 use mcloving_destination_observer::{
     ActivationMode as ObserverActivationMode, ObservationPhase, ObservationRequest,
     PROTOCOL_VERSION as OBSERVER_PROTOCOL_V1, REQUEST_SCHEMA_VERSION as OBSERVER_REQUEST_V1,
-    RequestAuthorization as ObserverAuthorization,
+    RequestAuthorization as ObserverAuthorization, sign_observation_request,
 };
 use mcloving_execution_spine::{
     EffectExecutionPlan, EffectRuntimeFreeze, FreshOneActionGrant, PinnedServiceCommand,
@@ -617,13 +617,16 @@ fn pinned_effect_fixture_scenario(
     let outcome_key = root.join("outcome-key.pkcs8");
     let observer_key = root.join("observer-key.pkcs8");
     let shadow_key = root.join("shadow-key.pkcs8");
+    let observer_request_key = root.join("observer-request-key.pkcs8");
     let diagnostic = root.join("effect-fixture-error.txt");
     let scenario_path = root.join("effect-fixture-scenario.txt");
     let state_path = root.join("effect-fixture-state.json");
     let dispatch_ledger = root.join("effect-fixture-dispatches.txt");
+    let preflight_ledger = root.join("effect-fixture-preflights.txt");
     write_test_pkcs8(&outcome_key, &[12_u8; 32]);
     write_test_pkcs8(&observer_key, &[13_u8; 32]);
     write_test_pkcs8(&shadow_key, &[14_u8; 32]);
+    write_test_pkcs8(&observer_request_key, &[15_u8; 32]);
     std::fs::write(&scenario_path, scenario).expect("write effect fixture scenario");
     let executable_sha256 = hex(&Sha256::digest(
         std::fs::read(&fixture).expect("read effect fixture"),
@@ -636,10 +639,12 @@ fn pinned_effect_fixture_scenario(
             outcome_key,
             observer_key,
             shadow_key,
+            observer_request_key,
             diagnostic,
             scenario_path,
             state_path,
             dispatch_ledger,
+            preflight_ledger,
         ],
         timeout_millis,
     }
@@ -719,7 +724,7 @@ fn runtime_effect_plan(
     };
     sign_action_request(&mut action_request, &request_seed).unwrap();
     let connector_request_sha256 = action_request_digest(&action_request).unwrap();
-    let observation_request = ObservationRequest {
+    let mut observation_request = ObservationRequest {
         schema_version: OBSERVER_REQUEST_V1.into(),
         protocol_version: OBSERVER_PROTOCOL_V1.into(),
         observation_id: Uuid::new_v4(),
@@ -762,6 +767,7 @@ fn runtime_effect_plan(
             signature_base64: "fixture-request-signature".into(),
         },
     };
+    sign_observation_request(&mut observation_request, &[15_u8; 32]).unwrap();
     let service = pinned_effect_fixture_scenario(root, scenario, timeout_millis);
     EffectExecutionPlan {
         schema_version: "mcloving.controller-effect-plan/v1".into(),
@@ -815,6 +821,12 @@ fn dispatch_count(root: &Path) -> usize {
     std::fs::read_to_string(root.join("effect-fixture-dispatches.txt"))
         .map(|entries| entries.lines().count())
         .unwrap_or_default()
+}
+
+fn preflight_count(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("effect-fixture-preflights.txt"))
+        .map(|contents| contents.lines().count())
+        .unwrap_or(0)
 }
 
 #[tokio::test]
@@ -1364,6 +1376,147 @@ async fn observer_predecessor_must_match_the_frozen_pre_action_receipt_before_di
 }
 
 #[tokio::test]
+async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    for case in [
+        "bad_signature",
+        "expired",
+        "wrong_protocol",
+        "wrong_binding",
+    ] {
+        let (organization_id, project_id, admission, claim) = admitted_claim(
+            &store,
+            runtime_effect_spec(),
+            &format!("effect-observer-request-{case}"),
+            60,
+        )
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = runtime_effect_plan(
+            root.path(),
+            organization_id,
+            project_id,
+            &admission,
+            &claim,
+            "success",
+            5_000,
+        );
+        match case {
+            "bad_signature" => {
+                plan.observation_request.authorization.signature_base64 = "AAAA".into();
+            }
+            "expired" => {
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap();
+                plan.observation_request.requested_at_unix_ms = now - 10_000;
+                plan.observation_request.expires_at_unix_ms = now - 1;
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            "wrong_protocol" => {
+                plan.observation_request.protocol_version =
+                    "mcloving.destination-observer/substituted".into();
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            "wrong_binding" => {
+                plan.observation_request.expected_config_sha256 = "f".repeat(64);
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+            .await
+            .expect("invalid observation request fails as a terminal preflight error");
+        assert_eq!(receipt.outcome, TerminalOutcome::Failed, "case={case}");
+        assert_eq!(dispatch_count(root.path()), 0, "case={case}");
+        let effect: (String, i64) = sqlx::query_as(
+            "SELECT status,
+                    ((outcome_receipt IS NOT NULL)::int
+                     + (observation_receipt IS NOT NULL)::int
+                     + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+             FROM attempt_effects
+             WHERE organization_id = $1 AND attempt_id = $2",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read rejected observation-request effect");
+        assert_eq!(effect, ("abandoned".into(), 0), "case={case}");
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-cancel-during-preflight",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_preflight",
+        5_000,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if preflight_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(preflight_count(root.path()), 1);
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request cancellation during observer preflight")
+    );
+    let receipt = execution
+        .await
+        .expect("worker task")
+        .expect("pre-dispatch cancellation outcome");
+    assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
+    assert_eq!(dispatch_count(root.path()), 0);
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read cancelled preflight effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
+}
+
+#[tokio::test]
 async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1679,7 +1832,7 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
     };
     sign_action_request(&mut action_request, &request_seed).unwrap();
     let connector_request_sha256 = action_request_digest(&action_request).unwrap();
-    let observation_request = ObservationRequest {
+    let mut observation_request = ObservationRequest {
         schema_version: OBSERVER_REQUEST_V1.into(),
         protocol_version: OBSERVER_PROTOCOL_V1.into(),
         observation_id: Uuid::new_v4(),
@@ -1722,6 +1875,7 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
             signature_base64: "fixture-request-signature".into(),
         },
     };
+    sign_observation_request(&mut observation_request, &[15_u8; 32]).unwrap();
     let root = tempfile::tempdir().unwrap();
     let service = pinned_effect_fixture(root.path());
     let plan = EffectExecutionPlan {

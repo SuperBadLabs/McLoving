@@ -4,7 +4,9 @@ use std::process::Stdio;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd as _;
 
-use mcloving_destination_observer::{ObservationReceipt, ObservationRequest, ObserverCommand};
+use mcloving_destination_observer::{
+    ObservationReceipt, ObservationRequest, ObserverCommand, observation_request_digest,
+};
 use mcloving_external_connector::{
     ConnectorCommand, ConnectorResponse, OutcomeReceipt, ShadowCommand, ShadowReplayReceipt,
     ShadowReplayRequest, ShadowResponse,
@@ -107,6 +109,7 @@ async fn invoke_validated_observer(
     let response: ObserverClientResponse = invoke_validated(service, &command).await?;
     match response {
         ObserverClientResponse::Observed { receipt } => Ok(*receipt),
+        ObserverClientResponse::Verified { .. } => Err(EffectServiceError::InvalidResponse),
         ObserverClientResponse::Error { code, message } => {
             let _ = (code, message);
             Err(EffectServiceError::ServiceFailed)
@@ -121,6 +124,26 @@ pub(crate) struct ValidatedEffectServices {
 }
 
 impl ValidatedEffectServices {
+    pub(crate) async fn verify_observer_request(
+        &self,
+        request: ObservationRequest,
+    ) -> Result<(), EffectServiceError> {
+        let expected = observation_request_digest(&request)
+            .map_err(|_| EffectServiceError::InvalidResponse)?;
+        let command = ObserverCommand::Verify { request };
+        match invoke_validated::<_, ObserverClientResponse>(&self.observer, &command).await? {
+            ObserverClientResponse::Verified { request_sha256 } if request_sha256 == expected => {
+                Ok(())
+            }
+            ObserverClientResponse::Verified { .. } => Err(EffectServiceError::InvalidResponse),
+            ObserverClientResponse::Observed { .. } => Err(EffectServiceError::InvalidResponse),
+            ObserverClientResponse::Error { code, message } => {
+                let _ = (code, message);
+                Err(EffectServiceError::ServiceFailed)
+            }
+        }
+    }
+
     pub(crate) async fn invoke_connector(
         &self,
         command: ConnectorCommand,
@@ -158,6 +181,7 @@ pub(crate) async fn preflight_effect_services(
 #[derive(serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum ObserverClientResponse {
+    Verified { request_sha256: String },
     Observed { receipt: Box<ObservationReceipt> },
     Error { code: String, message: String },
 }

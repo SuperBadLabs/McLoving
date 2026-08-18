@@ -31,7 +31,8 @@ use mcloving_destination_observer::{
     ObservationReceipt, ObservationRequest, ObserverCommand, ObserverConfig, ObserverError,
     ObserverLimits, PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization,
     SignedDestinationState, StateFieldSchema, content_sha256, destination_state_message,
-    observation_receipt_digest, sign_observation_request, verify_observation_receipt,
+    observation_receipt_digest, observation_request_digest, sign_observation_request,
+    verify_observation_receipt,
 };
 use mcloving_external_connector::{
     OutcomeReceipt as ConnectorOutcomeReceipt, OutcomeStatus as ConnectorOutcomeStatus,
@@ -723,6 +724,50 @@ fn oversized_escaped_secret_body(size: usize) -> Vec<u8> {
     let mut body = br#"{"leak":"read-only-observer-\u0074oken"}"#.to_vec();
     body.resize(size, b'x');
     body
+}
+
+#[tokio::test]
+async fn request_preflight_verifies_authority_time_and_deployment_without_destination_io() {
+    let rig = Rig::new().await;
+    let mut request = rig.request(ObservationPhase::PreAction);
+    sign_observation_request(&mut request, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&request, NOW).unwrap(),
+        observation_request_digest(&request).unwrap()
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
+
+    let mut invalid_signature = request.clone();
+    invalid_signature.authorization.signature_base64 = "AAAA".to_owned();
+    assert_eq!(
+        rig.observer.preflight_request_at(&invalid_signature, NOW),
+        Err(ObserverError::UnauthorizedRequest)
+    );
+
+    let mut expired = request.clone();
+    expired.expires_at_unix_ms = NOW - 1;
+    sign_observation_request(&mut expired, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&expired, NOW),
+        Err(ObserverError::ExpiredRequest)
+    );
+
+    let mut wrong_protocol = request.clone();
+    wrong_protocol.protocol_version = "mcloving.destination-observer/substituted".to_owned();
+    sign_observation_request(&mut wrong_protocol, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&wrong_protocol, NOW),
+        Err(ObserverError::MalformedRequest)
+    );
+
+    let mut wrong_binding = request;
+    wrong_binding.expected_config_sha256 = "f".repeat(64);
+    sign_observation_request(&mut wrong_binding, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&wrong_binding, NOW),
+        Err(ObserverError::BindingMismatch)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
