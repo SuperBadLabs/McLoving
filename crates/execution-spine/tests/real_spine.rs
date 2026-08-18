@@ -1418,7 +1418,8 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
         "crash_after_dispatch",
         10_000,
     );
-    let config = runtime_effect_worker(root.path(), plan);
+    let mut config = runtime_effect_worker(root.path(), plan);
+    config.lease_seconds = 1;
     let run_store = store.clone();
     let run_claim_value = claim.clone();
     let execution =
