@@ -1139,9 +1139,24 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
     let mut execution = Box::pin(run_claim(&store, &claim, &config));
     let before_shadow = loop {
         tokio::select! {
-            result = &mut execution => panic!(
-                "effect execution terminated before the shadow join checkpoint: {result:?}"
-            ),
+            result = &mut execution => {
+                let state: Option<(String, i64)> = sqlx::query_as(
+                    "SELECT e.status,
+                            ((e.outcome_receipt IS NOT NULL)::int
+                             + (e.observation_receipt IS NOT NULL)::int
+                             + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+                     FROM attempt_effects AS e
+                     WHERE e.organization_id = $1 AND e.attempt_id = $2",
+                )
+                .bind(organization_id)
+                .bind(admission.attempt_id)
+                .fetch_optional(store.pool())
+                .await
+                .expect("read early effect termination state");
+                panic!(
+                    "effect execution terminated before the shadow join checkpoint: {result:?}; durable state: {state:?}"
+                );
+            },
             () = tokio::time::sleep(Duration::from_millis(10)) => {
             let state: Option<(String, i64)> = sqlx::query_as(
                 "SELECT a.status,
