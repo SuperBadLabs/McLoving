@@ -1510,12 +1510,11 @@ async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
             }
             _ => unreachable!(),
         }
-        let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
-            .await
-            .expect("invalid observation request fails as a terminal preflight error");
-        assert_eq!(receipt.outcome, TerminalOutcome::Failed, "case={case}");
+        let result = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan)).await;
         assert_eq!(dispatch_count(root.path()), 0, "case={case}");
         if case == "insufficient_action_validity" {
+            let receipt = result.expect("locally expired action authority is terminal");
+            assert_eq!(receipt.outcome, TerminalOutcome::Failed, "case={case}");
             let effect_count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM attempt_effects
                  WHERE organization_id = $1 AND attempt_id = $2",
@@ -1528,6 +1527,10 @@ async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
             assert_eq!(effect_count, 0, "case={case}");
             continue;
         }
+        assert!(
+            matches!(result, Err(SpineError::EffectReconciliationRequired)),
+            "observer transport closure after a potentially delivered verify is ambiguous: case={case}"
+        );
         let effect: (String, i64) = sqlx::query_as(
             "SELECT status,
                     ((outcome_receipt IS NOT NULL)::int
@@ -1541,7 +1544,7 @@ async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
         .fetch_one(store.pool())
         .await
         .expect("read rejected observation-request effect");
-        assert_eq!(effect, ("abandoned".into(), 0), "case={case}");
+        assert_eq!(effect, ("release_pending".into(), 0), "case={case}");
     }
 }
 
@@ -1769,6 +1772,67 @@ async fn dead_observer_release_session_routes_to_durable_reconciliation() {
 }
 
 #[tokio::test]
+async fn ambiguous_observer_verify_failure_retains_release_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-ambiguous-observer-verify",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "verify_session_exit",
+        5_000,
+    );
+    let result = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan)).await;
+    assert!(matches!(
+        result,
+        Err(SpineError::EffectReconciliationRequired)
+    ));
+    assert_eq!(preflight_count(root.path()), 1);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        reservation_release_count(root.path()),
+        0,
+        "the dead observer session cannot consume the idempotent release command"
+    );
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read ambiguous observer verification state");
+    assert_eq!(
+        state,
+        (
+            "reconciliation_required".into(),
+            "release_pending".into(),
+            0
+        )
+    );
+}
+
+#[tokio::test]
 async fn authority_loss_after_observer_verification_records_release_pending() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1804,6 +1868,11 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(preflight_count(root.path()), 1);
+    let mut authority_loss = store.pool().begin().await.expect("begin renewal race");
+    let authority_loss_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *authority_loss)
+        .await
+        .expect("read renewal-race blocker backend PID");
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at=clock_timestamp() - interval '1 second'
@@ -1811,9 +1880,34 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
     )
     .bind(organization_id)
     .bind(claim.attempt_id)
-    .execute(store.pool())
+    .execute(&mut *authority_loss)
     .await
-    .expect("expire authority while observer verification is in flight");
+    .expect("stage authority expiry while observer verification is in flight");
+    let mut renewal_blocked = false;
+    for _ in 0..200 {
+        renewal_blocked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid))
+             )",
+        )
+        .bind(authority_loss_backend_pid)
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect lease-renewal waiter");
+        if renewal_blocked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        renewal_blocked,
+        "lease renewal must be in flight behind the held authority row"
+    );
+    authority_loss
+        .commit()
+        .await
+        .expect("commit authority expiry before the dispatch gate");
     let result = tokio::time::timeout(Duration::from_secs(2), execution)
         .await
         .expect("authority-loss cleanup must not pin the worker")

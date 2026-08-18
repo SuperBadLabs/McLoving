@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -519,6 +520,7 @@ async fn run_effect_claim(
     renew_effect_lease(store, claim, config).await?;
     let renewal_interval = effect_renewal_interval(config);
     let dispatch_state = Arc::new(AtomicU8::new(EFFECT_PREDISPATCH));
+    let renewal_gate = Arc::new(Mutex::new(()));
     let effect = run_effect_claim_under_lease(
         store,
         claim,
@@ -526,8 +528,15 @@ async fn run_effect_claim(
         intent,
         plan,
         Arc::clone(&dispatch_state),
+        Arc::clone(&renewal_gate),
     );
-    let renewal = maintain_effect_lease(store, claim, config, renewal_interval);
+    let renewal = maintain_effect_lease(
+        store,
+        claim,
+        config,
+        renewal_interval,
+        Arc::clone(&renewal_gate),
+    );
     tokio::pin!(effect, renewal);
     tokio::select! {
         result = &mut effect => result,
@@ -562,6 +571,7 @@ async fn run_effect_claim_under_lease(
     intent: &ConnectorIntentSpec,
     plan: &EffectExecutionPlan,
     dispatch_state: Arc<AtomicU8>,
+    renewal_gate: Arc<Mutex<()>>,
 ) -> Result<RunReceipt, SpineError> {
     let accepted = store
         .attempt_execution(
@@ -734,20 +744,44 @@ async fn run_effect_claim_under_lease(
         .verify_observer_request(plan.observation_request.clone())
         .await
     {
-        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
-        return finalize_effect_attempt(
+        return finalize_reserved_pre_dispatch_exit(
             store,
             claim,
             config,
-            TerminalOutcome::Failed,
-            json!({
-                "reason": "effect_observation_request_preflight_failed",
-                "code": error.to_string()
-            }),
+            &prepared,
+            &services,
+            &plan.observation_request,
+            (
+                TerminalOutcome::Failed,
+                json!({
+                    "reason": "effect_observation_request_preflight_failed",
+                    "code": error.to_string()
+                }),
+            ),
         )
         .await;
     }
 
+    // Exclude an in-flight renewal query from the final durable authority
+    // check and local dispatch commit. The fresh renewal gives the connector
+    // call a full lease window; attempt_execution then revalidates the exact
+    // fence after its pipeline lock before the local commit is published.
+    let dispatch_renewal_guard = renewal_gate.lock().await;
+    if let Err(error) = renew_effect_lease(store, claim, config).await {
+        let released = services
+            .release_observer_request(plan.observation_request.clone())
+            .await
+            .is_ok();
+        persist_undispatched_release_disposition(
+            store,
+            claim,
+            &config.agent_id,
+            &prepared,
+            released,
+        )
+        .await?;
+        return Err(error);
+    }
     let pre_dispatch = match store
         .attempt_execution(
             claim.organization_id,
@@ -791,7 +825,7 @@ async fn run_effect_claim_under_lease(
         }
     };
     if pre_dispatch.cancellation_requested {
-        return finalize_verified_pre_dispatch_exit(
+        return finalize_reserved_pre_dispatch_exit(
             store,
             claim,
             config,
@@ -808,7 +842,7 @@ async fn run_effect_claim_under_lease(
     let dispatch_now = match unix_time_millis() {
         Ok(now) => now,
         Err(_) => {
-            return finalize_verified_pre_dispatch_exit(
+            return finalize_reserved_pre_dispatch_exit(
                 store,
                 claim,
                 config,
@@ -828,7 +862,7 @@ async fn run_effect_claim_under_lease(
         dispatch_now,
         connector_service.timeout_millis,
     ) {
-        return finalize_verified_pre_dispatch_exit(
+        return finalize_reserved_pre_dispatch_exit(
             store,
             claim,
             config,
@@ -870,6 +904,7 @@ async fn run_effect_claim_under_lease(
         .await?;
         return Err(SpineError::StaleAuthority);
     }
+    drop(dispatch_renewal_guard);
 
     let outcome = match services
         .invoke_connector(ConnectorCommand::Execute {
@@ -884,7 +919,7 @@ async fn run_effect_claim_under_lease(
             return Err(SpineError::EffectReconciliationRequired);
         }
         Err(error) => {
-            return finalize_verified_pre_dispatch_exit(
+            return finalize_reserved_pre_dispatch_exit(
                 store,
                 claim,
                 config,
@@ -1144,7 +1179,7 @@ async fn persist_undispatched_release_disposition(
     }
 }
 
-async fn finalize_verified_pre_dispatch_exit(
+async fn finalize_reserved_pre_dispatch_exit(
     store: &Store,
     claim: &ClaimedAttempt,
     config: &WorkerConfig,
@@ -1325,9 +1360,11 @@ async fn maintain_effect_lease(
     claim: &ClaimedAttempt,
     config: &WorkerConfig,
     interval: Duration,
+    renewal_gate: Arc<Mutex<()>>,
 ) -> Result<(), SpineError> {
     loop {
         tokio::time::sleep(interval).await;
+        let _renewal_guard = renewal_gate.lock().await;
         renew_effect_lease(store, claim, config).await?;
     }
 }

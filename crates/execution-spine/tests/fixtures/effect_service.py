@@ -426,6 +426,10 @@ def main():
                 scenario,
                 preflight_ledger,
             )
+            if "verify_session_exit" in scenario:
+                raise RuntimeError(
+                    "fixture observer session exited after reserving verification"
+                )
         elif command.get("operation") == "release":
             append_dispatch(
                 preflight_ledger, "release:" + command["request"]["observation_id"]
