@@ -736,22 +736,14 @@ async fn run_effect_claim_under_lease(
                 .release_observer_request(plan.observation_request.clone())
                 .await
                 .is_ok();
-            if !store
-                .record_undispatched_release_after_authority_loss(
-                    claim.organization_id,
-                    claim.attempt_id,
-                    claim.fence,
-                    claim.restore_epoch,
-                    &config.agent_id,
-                    &prepared.effect_key,
-                    prepared.effect_class,
-                    &prepared.payload,
-                    released,
-                )
-                .await?
-            {
-                return Err(SpineError::EffectRuntimeUnavailable);
-            }
+            persist_undispatched_release_disposition(
+                store,
+                claim,
+                &config.agent_id,
+                &prepared,
+                released,
+            )
+            .await?;
             return Err(SpineError::StaleAuthority);
         }
         Err(error) => {
@@ -759,19 +751,14 @@ async fn run_effect_claim_under_lease(
                 .release_observer_request(plan.observation_request.clone())
                 .await
                 .is_ok();
-            let _ = store
-                .record_undispatched_release_after_authority_loss(
-                    claim.organization_id,
-                    claim.attempt_id,
-                    claim.fence,
-                    claim.restore_epoch,
-                    &config.agent_id,
-                    &prepared.effect_key,
-                    prepared.effect_class,
-                    &prepared.payload,
-                    released,
-                )
-                .await;
+            persist_undispatched_release_disposition(
+                store,
+                claim,
+                &config.agent_id,
+                &prepared,
+                released,
+            )
+            .await?;
             return Err(error.into());
         }
     };
@@ -1059,6 +1046,46 @@ fn validate_observation_request(
         return Err(SpineError::EffectRuntimeUnavailable);
     }
     Ok(())
+}
+
+/// Persist cleanup through the current lease when it is still authoritative,
+/// falling back to the lease-less transition only after authority is stale.
+async fn persist_undispatched_release_disposition(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    prepared: &PreparedEffect,
+    released: bool,
+) -> Result<(), SpineError> {
+    let live_checkpoint = if released {
+        abandon_prepared_effect(store, claim, agent_id, prepared).await
+    } else {
+        mark_effect_release_pending(store, claim, agent_id, prepared).await
+    };
+    match live_checkpoint {
+        Ok(()) => Ok(()),
+        Err(EffectRuntimeError::StaleAuthority) => {
+            if store
+                .record_undispatched_release_after_authority_loss(
+                    claim.organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    agent_id,
+                    &prepared.effect_key,
+                    prepared.effect_class,
+                    &prepared.payload,
+                    released,
+                )
+                .await?
+            {
+                Ok(())
+            } else {
+                Err(SpineError::EffectRuntimeUnavailable)
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn finalize_verified_pre_dispatch_exit(
