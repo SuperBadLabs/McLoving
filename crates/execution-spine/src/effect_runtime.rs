@@ -242,6 +242,7 @@ pub async fn record_effect_outcome(
 }
 
 /// Join the independently signed destination state and move to confirmed.
+#[allow(clippy::too_many_arguments)]
 pub async fn confirm_effect_observation(
     store: &Store,
     claim: &ClaimedAttempt,
