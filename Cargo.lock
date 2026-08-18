@@ -1572,6 +1572,8 @@ dependencies = [
  "mcloving-agent-runtime",
  "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-destination-observer",
+ "mcloving-external-connector",
  "reqwest",
  "serde",
  "serde_json",
