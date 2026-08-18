@@ -162,7 +162,7 @@ import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
 match = re.search(r"test result: ok\. (\d+) passed; 0 failed", text)
-if not match or int(match.group(1)) != 17:
+if not match or int(match.group(1)) != 19:
     raise SystemExit("complete real_spine result was not observed")
 PY
 
@@ -191,7 +191,7 @@ result = {
     "test_binary_sha256": test_binary_sha256,
     "complete": True,
     "real_postgresql": True,
-    "real_spine_tests_passed": 17,
+    "real_spine_tests_passed": 19,
     "runtime_network_internal": True,
     "connector_observer_shadow_process_isolation": True,
     "pairwise_distinct_receipt_keys": True,
