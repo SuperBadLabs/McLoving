@@ -22,8 +22,9 @@ Pipeline IR gains a connector-intent step. Its semantic fields are limited to:
 - a versioned mapping identifier and mapping digest;
 - a canonical effect class and effect key template;
 - a typed public input schema plus a closed protected secret-reference schema,
-  whose field names are the required reference taints/names and whose string
-  values are opaque provider references (never secret bytes);
+  whose field names are required reference taints/names; the matching outcome
+  projects each field to an opaque provider-reference string, never secret
+  bytes;
 - the expected public result schema;
 - a timeout and explicit ambiguity policy; and
 - a downstream-control digest.
@@ -90,7 +91,7 @@ accepted intent blocks dispatch and quarantines unresolved work.
 ## Current implementation boundary
 
 Exact implementation head
-`eb6d5782b93fdeb8a98cef964ade4afbd5df03fa` includes Pipeline IR v1.3
+`edc392524a5c229c3e5d2a1462b14d45d4611f27` includes Pipeline IR v1.3
 connector intents, execution-spec v2, deployment-backed exact mapping
 admission, immutable PostgreSQL outcome/observation/reconciliation/shadow
 receipts, redacted public evidence digests, the controller-owned fenced state
@@ -104,12 +105,21 @@ execution lease, and freeze every post-dispatch timeout, substituted signed
 response, crash, lease-loss, cancellation, retry, and reconciliation ambiguity
 without a duplicate fixture effect.
 
+The Pipeline IR uses an algorithm-qualified downstream-control reference while
+the EXT-001 outcome wire format carries the raw digest; the runtime compares
+their canonical digest components explicitly. Protected-reference schemas are
+closed and string-only at admission, and runtime outcome validation rejects
+missing, extra, duplicate-taint, malformed, or contract-incompatible protected
+references. Public build status includes redacted effects from every fence of
+the exact attempt and retains each fence identity, so historical restore
+uncertainty cannot become invisible while blocking terminal reconciliation.
+
 The retained earlier-candidate effect-free Mario rehearsal passed all 14 then-
 current execution-spine tests on an internal-only runtime network with real
 PostgreSQL and all production, canary, and cutover authority flags false. Its
 owner-only result receipt SHA-256 is
 `44ad8eb55386a38dfbe42a62407fd198b87aac53c9eca709f8a387bb0a81d8c7`.
-It is not exact-head evidence for `eb6d578`; a fresh 17-test effect-free Mario
+It is not exact-head evidence for `edc3925`; a fresh 17-test effect-free Mario
 rehearsal remains required.
 `docs/evidence/EXT-002_SECURITY_REVIEW.md` records the detailed implementation
 and rehearsal evidence. Exact-head review, protected CI, merge, and

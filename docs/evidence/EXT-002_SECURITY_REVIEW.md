@@ -27,7 +27,7 @@ grant to a new fence.
 ## Exact implementation evidence
 
 - Exact implementation head:
-  `eb6d5782b93fdeb8a98cef964ade4afbd5df03fa`.
+  `edc392524a5c229c3e5d2a1462b14d45d4611f27`.
 - Deployment mapping admission rejects an unknown mapping, a floating or stale
   digest, a duplicate catalog entry, a substituted catalog file, partial
   configuration, and plan/catalog drift at validation, planning, persistence,
@@ -48,11 +48,20 @@ grant to a new fence.
   rejects a substituted restore epoch, completes outcome, observation, and
   shadow receipts without restoring dispatch authority, and permits terminal
   publication only after confirmation of the complete join.
+- Pipeline IR's `sha256:<64 lowercase hex>` downstream-control reference is
+  compared to the shipped connector receipt's raw 64-character digest at an
+  explicit canonical boundary. The contained fixture now uses the shipped
+  receipt format, so it can no longer mask a format mismatch.
+- A connector intent's protected-reference schema is closed and string-only at
+  admission. Outcome validation projects each protected reference as its
+  required taint/name to opaque provider reference, rejecting missing, extra,
+  duplicate-taint, malformed, or wrong-type references before downstream work.
 - The positive path holds the shadow reply open and observes the attempt still
   `running` after outcome and independent observation are durable. Only the
   durable signed shadow receipt permits terminal publication.
-- Redacted store and HTTP projections expose the payload digest and four
-  evidence digests while omitting frozen values, request bodies, receipt bodies,
+- Redacted store and HTTP projections expose every fence of the exact attempt,
+  including historical restore fences, plus the payload digest and four
+  evidence digests. They omit frozen values, request bodies, receipt bodies,
   protected outputs, and credentials.
 
 ## Earlier-candidate Mario effect-free rehearsal
@@ -80,7 +89,7 @@ The evidence directory is mode `0700`; every retained file is mode `0600`.
 The rehearsal created no production mapping, endpoint, credential, action,
 canary, or authority transfer.
 
-This retained receipt predates implementation head `eb6d578` and is not used as
+This retained receipt predates implementation head `edc3925` and is not used as
 exact-head closure evidence. A fresh effect-free Mario rehearsal over the
 current 17-test spine remains open.
 
