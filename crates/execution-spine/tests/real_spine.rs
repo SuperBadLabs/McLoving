@@ -760,7 +760,7 @@ fn runtime_effect_plan(
         expected_previous_cursor: None,
         predecessor_receipt_sha256: Some("a".repeat(64)),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 20_000,
+        expires_at_unix_ms: now + 59_000,
         audit_provenance: format!("ext-002/{scenario}/observation"),
         authorization: ObserverAuthorization {
             key_id: "observer-request-key".into(),
@@ -1384,6 +1384,7 @@ async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
     for case in [
         "bad_signature",
         "expired",
+        "insufficient_validity",
         "wrong_protocol",
         "wrong_binding",
     ] {
@@ -1418,6 +1419,18 @@ async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
                 .unwrap();
                 plan.observation_request.requested_at_unix_ms = now - 10_000;
                 plan.observation_request.expires_at_unix_ms = now - 1;
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            "insufficient_validity" => {
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap();
+                plan.observation_request.requested_at_unix_ms = now - 1_000;
+                plan.observation_request.expires_at_unix_ms = now + 1_000;
                 sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
             }
             "wrong_protocol" => {

@@ -737,6 +737,15 @@ async fn request_preflight_verifies_authority_time_and_deployment_without_destin
     );
     assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
 
+    let mut insufficient_validity = request.clone();
+    insufficient_validity.expires_at_unix_ms = NOW + 999;
+    sign_observation_request(&mut insufficient_validity, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer
+            .preflight_request_for_duration_at(&insufficient_validity, NOW, 1_000,),
+        Err(ObserverError::ExpiredRequest)
+    );
+
     let mut invalid_signature = request.clone();
     invalid_signature.authorization.signature_base64 = "AAAA".to_owned();
     assert_eq!(
@@ -2244,8 +2253,13 @@ async fn exhausted_evidence_bytes_are_rejected_before_destination_access() {
     let reads_before = rig.server.reads.load(Ordering::SeqCst);
     let mut second = rig.request(ObservationPhase::PreAction);
     second.effect_fence = 18;
+    let second = rig.prepare(second);
     assert_eq!(
-        rig.observer.observe_at(rig.prepare(second), NOW).await,
+        rig.observer.preflight_request_at(&second, NOW),
+        Err(ObserverError::CapacityExceeded)
+    );
+    assert_eq!(
+        rig.observer.observe_at(second, NOW).await,
         Err(ObserverError::CapacityExceeded)
     );
     assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads_before);

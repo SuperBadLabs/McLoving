@@ -335,11 +335,13 @@ impl ObserverStore {
         outcome
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn validate_admission(
         &self,
         config: &ObserverConfig,
         config_sha256: &str,
         request: &ObservationRequest,
+        request_sha256: &str,
         scope_sha256: &str,
         started_at_ms: i64,
         started_at: Instant,
@@ -356,6 +358,27 @@ impl ObserverStore {
         validate_temporal(config, request, admission_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         enforce_scope_head_capacity(&transaction, config, scope_sha256, admission_at_ms)?;
+        let existing_request_sha256: Option<String> = transaction
+            .query_row(
+                "SELECT request_sha256 FROM observations WHERE observation_id=?1",
+                [request.observation_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if let Some(existing_request_sha256) = existing_request_sha256 {
+            if existing_request_sha256 != request_sha256 {
+                return Err(ObserverError::ReplayMismatch);
+            }
+        } else {
+            enforce_receipt_capacity(&transaction, config)?;
+            let observation_count: usize = transaction
+                .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            if observation_count >= config.limits.max_observations {
+                return Err(ObserverError::CapacityExceeded);
+            }
+        }
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)

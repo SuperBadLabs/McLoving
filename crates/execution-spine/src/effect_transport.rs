@@ -130,7 +130,16 @@ impl ValidatedEffectServices {
     ) -> Result<(), EffectServiceError> {
         let expected = observation_request_digest(&request)
             .map_err(|_| EffectServiceError::InvalidResponse)?;
-        let command = ObserverCommand::Verify { request };
+        let required_validity_ms = self
+            .connector
+            .command
+            .timeout_millis
+            .checked_add(self.observer.command.timeout_millis)
+            .ok_or(EffectServiceError::InvalidBinding)?;
+        let command = ObserverCommand::Verify {
+            request,
+            required_validity_ms,
+        };
         match invoke_validated::<_, ObserverClientResponse>(&self.observer, &command).await? {
             ObserverClientResponse::Verified { request_sha256 } if request_sha256 == expected => {
                 Ok(())

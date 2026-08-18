@@ -185,7 +185,17 @@ impl DestinationObserver {
     /// Verifies the complete signed request and the currently loaded deployment
     /// authority without reading the destination or reserving an observation.
     pub fn preflight_request(&self, request: &ObservationRequest) -> Result<String, ObserverError> {
-        self.preflight_request_with_trusted_time(request, unix_time_ms()?)
+        self.preflight_request_with_trusted_time(request, unix_time_ms()?, 0)
+    }
+
+    /// Verifies the request with enough remaining authority for the caller's
+    /// bounded connector and post-action observation window.
+    pub fn preflight_request_for_duration(
+        &self,
+        request: &ObservationRequest,
+        required_validity_ms: u64,
+    ) -> Result<String, ObserverError> {
+        self.preflight_request_with_trusted_time(request, unix_time_ms()?, required_validity_ms)
     }
 
     /// Deterministic clock entry point for the contained literal-loopback test boundary only.
@@ -213,22 +223,47 @@ impl DestinationObserver {
         if !is_literal_loopback_test_endpoint(&self.config) {
             return Err(ObserverError::InvalidConfig);
         }
-        self.preflight_request_with_trusted_time(request, now_ms)
+        self.preflight_request_with_trusted_time(request, now_ms, 0)
+    }
+
+    /// Deterministic bounded-validity preflight for contained literal-loopback tests.
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub fn preflight_request_for_duration_at(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+        required_validity_ms: u64,
+    ) -> Result<String, ObserverError> {
+        if !is_literal_loopback_test_endpoint(&self.config) {
+            return Err(ObserverError::InvalidConfig);
+        }
+        self.preflight_request_with_trusted_time(request, now_ms, required_validity_ms)
     }
 
     fn preflight_request_with_trusted_time(
         &self,
         request: &ObservationRequest,
         now_ms: i64,
+        required_validity_ms: u64,
     ) -> Result<String, ObserverError> {
         let started_at = Instant::now();
         self.validate_request(request)?;
+        let required_validity_ms =
+            i64::try_from(required_validity_ms).map_err(|_| ObserverError::MalformedRequest)?;
+        let required_valid_until = now_ms
+            .checked_add(required_validity_ms)
+            .ok_or(ObserverError::MalformedRequest)?;
+        if request.expires_at_unix_ms < required_valid_until {
+            return Err(ObserverError::ExpiredRequest);
+        }
         let request_sha256 = observation_request_digest(request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(request))?;
         self.store.validate_admission(
             &self.config,
             &self.config_sha256,
             request,
+            &request_sha256,
             &scope_sha256,
             now_ms,
             started_at,
@@ -263,6 +298,7 @@ impl DestinationObserver {
             &self.config,
             &self.config_sha256,
             &request,
+            &request_sha256,
             &scope_sha256,
             now_ms,
             started_at,

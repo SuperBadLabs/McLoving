@@ -79,7 +79,14 @@ def observation_digest(request):
     ).hexdigest()
 
 
-def verify_observation_request(openssl, authority_key, request, scenario, preflight_ledger):
+def verify_observation_request(
+    openssl,
+    authority_key,
+    request,
+    required_validity_ms,
+    scenario,
+    preflight_ledger,
+):
     with open(preflight_ledger, "a", encoding="utf-8") as ledger:
         ledger.write(request["observation_id"] + "\n")
         ledger.flush()
@@ -135,7 +142,7 @@ def verify_observation_request(openssl, authority_key, request, scenario, prefli
         or request["read_grant_scope"] != "fixture-resource"
         or request["authorization"]["key_id"] != "observer-request-key"
         or request["requested_at_unix_ms"] > now
-        or request["expires_at_unix_ms"] < now
+        or request["expires_at_unix_ms"] < now + required_validity_ms
         or request["expires_at_unix_ms"] - request["requested_at_unix_ms"] > 60_000
     ):
         raise ValueError("invalid observation request deployment binding")
@@ -414,6 +421,7 @@ def main():
             openssl,
             observer_request_key,
             command["request"],
+            command["required_validity_ms"],
             scenario,
             preflight_ledger,
         )
