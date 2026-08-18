@@ -3541,7 +3541,7 @@ impl Store {
                      AND e.attempt_id = a.id
                      AND e.payload ->> 'schema_version' = 'mcloving.controller-effect-prepared/v1'
                      AND (
-                         (e.status = 'abandoned' AND $4 <> 'aborted')
+                         (e.status = 'abandoned' AND $4 = 'succeeded')
                          OR (
                              e.status <> 'abandoned'
                              AND (
@@ -5548,7 +5548,7 @@ impl Store {
                AND fence = $3
                AND payload ->> 'schema_version' = 'mcloving.controller-effect-prepared/v1'
                AND (
-                   (status = 'abandoned' AND $4 <> 'aborted')
+                   (status = 'abandoned' AND $4 = 'succeeded')
                    OR (
                        status <> 'abandoned'
                        AND (
