@@ -16,6 +16,8 @@ use effect_transport::{ValidatedEffectServices, preflight_effect_services};
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::executor::{
@@ -516,17 +518,42 @@ async fn run_effect_claim(
     }
     renew_effect_lease(store, claim, config).await?;
     let renewal_interval = effect_renewal_interval(config);
-    let effect = run_effect_claim_under_lease(store, claim, config, intent, plan);
+    let dispatch_state = Arc::new(AtomicU8::new(EFFECT_PREDISPATCH));
+    let effect = run_effect_claim_under_lease(
+        store,
+        claim,
+        config,
+        intent,
+        plan,
+        Arc::clone(&dispatch_state),
+    );
     let renewal = maintain_effect_lease(store, claim, config, renewal_interval);
     tokio::pin!(effect, renewal);
     tokio::select! {
         result = &mut effect => result,
         result = &mut renewal => {
-            result?;
-            Err(SpineError::StaleAuthority)
+            let renewal_error = match result {
+                Ok(()) => SpineError::StaleAuthority,
+                Err(error) => error,
+            };
+            let _ = dispatch_state.compare_exchange(
+                EFFECT_PREDISPATCH,
+                EFFECT_RENEWAL_LOST,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            match (&mut effect).await {
+                Ok(receipt) => Ok(receipt),
+                Err(SpineError::StaleAuthority) => Err(renewal_error),
+                Err(error) => Err(error),
+            }
         }
     }
 }
+
+const EFFECT_PREDISPATCH: u8 = 0;
+const EFFECT_DISPATCH_COMMITTED: u8 = 1;
+const EFFECT_RENEWAL_LOST: u8 = 2;
 
 async fn run_effect_claim_under_lease(
     store: &Store,
@@ -534,6 +561,7 @@ async fn run_effect_claim_under_lease(
     config: &WorkerConfig,
     intent: &ConnectorIntentSpec,
     plan: &EffectExecutionPlan,
+    dispatch_state: Arc<AtomicU8>,
 ) -> Result<RunReceipt, SpineError> {
     let accepted = store
         .attempt_execution(
@@ -813,6 +841,34 @@ async fn run_effect_claim_under_lease(
             ),
         )
         .await;
+    }
+
+    // Linearize the local dispatch decision against lease-renewal failure. If
+    // renewal loses first, this future owns release plus durable cleanup. If
+    // dispatch commits first, the renewal branch waits for all evidence joins
+    // instead of dropping an in-flight effect future.
+    if dispatch_state
+        .compare_exchange(
+            EFFECT_PREDISPATCH,
+            EFFECT_DISPATCH_COMMITTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        let released = services
+            .release_observer_request(plan.observation_request.clone())
+            .await
+            .is_ok();
+        persist_undispatched_release_disposition(
+            store,
+            claim,
+            &config.agent_id,
+            &prepared,
+            released,
+        )
+        .await?;
+        return Err(SpineError::StaleAuthority);
     }
 
     let outcome = match services

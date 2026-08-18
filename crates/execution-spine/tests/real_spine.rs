@@ -1791,7 +1791,8 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
         "slow_preflight_release_session_exit",
         5_000,
     );
-    let config = runtime_effect_worker(root.path(), plan);
+    let mut config = runtime_effect_worker(root.path(), plan);
+    config.lease_seconds = 1;
     let run_store = store.clone();
     let run_claim_value = claim.clone();
     let execution =
