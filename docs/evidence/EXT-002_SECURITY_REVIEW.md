@@ -27,7 +27,7 @@ grant to a new fence.
 ## Exact implementation evidence
 
 - Exact implementation head:
-  `36f83f561068b7854c59d13ba8b249a7df28ccdd`.
+  `eb6d5782b93fdeb8a98cef964ade4afbd5df03fa`.
 - Deployment mapping admission rejects an unknown mapping, a floating or stale
   digest, a duplicate catalog entry, a substituted catalog file, partial
   configuration, and plan/catalog drift at validation, planning, persistence,
@@ -80,7 +80,7 @@ The evidence directory is mode `0700`; every retained file is mode `0600`.
 The rehearsal created no production mapping, endpoint, credential, action,
 canary, or authority transfer.
 
-This retained receipt predates implementation head `36f83f5` and is not used as
+This retained receipt predates implementation head `eb6d578` and is not used as
 exact-head closure evidence. A fresh effect-free Mario rehearsal over the
 current 17-test spine remains open.
 

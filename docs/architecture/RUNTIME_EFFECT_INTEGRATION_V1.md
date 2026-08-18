@@ -88,7 +88,7 @@ accepted intent blocks dispatch and quarantines unresolved work.
 ## Current implementation boundary
 
 Exact implementation head
-`36f83f561068b7854c59d13ba8b249a7df28ccdd` includes Pipeline IR v1.3
+`eb6d5782b93fdeb8a98cef964ade4afbd5df03fa` includes Pipeline IR v1.3
 connector intents, execution-spec v2, deployment-backed exact mapping
 admission, immutable PostgreSQL outcome/observation/reconciliation/shadow
 receipts, redacted public evidence digests, the controller-owned fenced state
@@ -107,7 +107,7 @@ current execution-spine tests on an internal-only runtime network with real
 PostgreSQL and all production, canary, and cutover authority flags false. Its
 owner-only result receipt SHA-256 is
 `44ad8eb55386a38dfbe42a62407fd198b87aac53c9eca709f8a387bb0a81d8c7`.
-It is not exact-head evidence for `36f83f5`; a fresh 17-test effect-free Mario
+It is not exact-head evidence for `eb6d578`; a fresh 17-test effect-free Mario
 rehearsal remains required.
 `docs/evidence/EXT-002_SECURITY_REVIEW.md` records the detailed implementation
 and rehearsal evidence. Exact-head review, protected CI, merge, and
