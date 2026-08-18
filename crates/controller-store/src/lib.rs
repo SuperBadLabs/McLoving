@@ -2181,6 +2181,10 @@ impl Store {
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
             .await?;
+        // Lease renewal acquires the pipeline-definition row before it updates
+        // the attempt/build graph. Use the same order here so cancellation
+        // cannot hold the build graph while waiting for that pipeline row.
+        lock_build_pipeline_truth(&mut tx, organization_id, build_id).await?;
         let dag_mode = sqlx::query_scalar::<_, bool>(
             "SELECT dag_mode
              FROM builds
@@ -5943,6 +5947,33 @@ pub(crate) async fn lock_enabled_build_pipeline(
     organization_id: Uuid,
     build_id: Uuid,
 ) -> Result<(Uuid, i64), StoreError> {
+    let (pipeline_id, admitted_generation, current_generation, state) =
+        lock_build_pipeline_truth(tx, organization_id, build_id).await?;
+    if state == "disabled" {
+        return Err(StoreError::PipelineDisabled {
+            pipeline_id,
+            generation: current_generation,
+        });
+    }
+    if state != "enabled" {
+        return Err(StoreError::InvalidPipelineState(format!(
+            "stored pipeline operational state '{state}' is invalid"
+        )));
+    }
+    if current_generation != admitted_generation {
+        return Err(StoreError::PipelineStateConflict(format!(
+            "build pipeline generation {admitted_generation} is stale; current generation is \
+             {current_generation}"
+        )));
+    }
+    Ok((pipeline_id, current_generation))
+}
+
+async fn lock_build_pipeline_truth(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+) -> Result<(Uuid, i64, i64, String), StoreError> {
     let binding = sqlx::query_as::<_, (Option<Uuid>, Option<i64>)>(
         "SELECT pipeline_id, pipeline_operational_generation
          FROM builds
@@ -5976,24 +6007,7 @@ pub(crate) async fn lock_enabled_build_pipeline(
             "build pipeline operational-state truth is missing".to_owned(),
         ));
     };
-    if state == "disabled" {
-        return Err(StoreError::PipelineDisabled {
-            pipeline_id,
-            generation: current_generation,
-        });
-    }
-    if state != "enabled" {
-        return Err(StoreError::InvalidPipelineState(format!(
-            "stored pipeline operational state '{state}' is invalid"
-        )));
-    }
-    if current_generation != admitted_generation {
-        return Err(StoreError::PipelineStateConflict(format!(
-            "build pipeline generation {admitted_generation} is stale; current generation is \
-             {current_generation}"
-        )));
-    }
-    Ok((pipeline_id, current_generation))
+    Ok((pipeline_id, admitted_generation, current_generation, state))
 }
 
 async fn append_event_and_outbox(
