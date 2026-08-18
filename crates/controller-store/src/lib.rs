@@ -164,6 +164,8 @@ pub const PIPELINE_OPERATIONAL_STATE_V27: &str =
 pub const TRIGGER_INGRESS_V28: &str = include_str!("../migrations/0028_trigger_ingress.sql");
 /// Versioned multibranch and organization-folder discovery truth.
 pub const DISCOVERY_V29: &str = include_str!("../migrations/0029_discovery.sql");
+/// Immutable transition evidence for controller-owned external effects.
+pub const EFFECT_EVIDENCE_V30: &str = include_str!("../migrations/0030_effect_evidence.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -312,6 +314,31 @@ pub enum EffectStatus {
     Applied,
     Confirmed,
     Uncertain,
+}
+
+/// One independently signed receipt slot in the controller-owned effect join.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectEvidenceKind {
+    Outcome,
+    Observation,
+    ShadowReplay,
+}
+
+impl EffectEvidenceKind {
+    fn columns(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Outcome => ("outcome_receipt", "outcome_receipt_digest"),
+            Self::Observation => ("observation_receipt", "observation_receipt_digest"),
+            Self::ShadowReplay => ("shadow_replay_receipt", "shadow_replay_receipt_digest"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectEvidence {
+    pub kind: EffectEvidenceKind,
+    pub receipt: Value,
+    pub receipt_digest: [u8; 32],
 }
 
 impl EffectStatus {
@@ -1225,6 +1252,7 @@ impl Store {
         apply_migration(&mut tx, 27, PIPELINE_OPERATIONAL_STATE_V27).await?;
         apply_migration(&mut tx, 28, TRIGGER_INGRESS_V28).await?;
         apply_migration(&mut tx, 29, DISCOVERY_V29).await?;
+        apply_migration(&mut tx, 30, EFFECT_EVIDENCE_V30).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3097,6 +3125,184 @@ impl Store {
         }
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// Appends one immutable signed receipt to an existing fenced effect.
+    ///
+    /// The prepared payload remains immutable. Each receipt slot is write-once:
+    /// an exact replay succeeds, while substitution is rejected. Receipt
+    /// persistence is intentionally separate from status advancement so a
+    /// controller restart can observe and finish a partially completed join.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_effect_evidence(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        effect_key: &str,
+        kind: EffectEvidenceKind,
+        receipt: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let receipt_bytes = serde_json::to_vec(receipt)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let receipt_digest: [u8; 32] = Sha256::digest(receipt_bytes).into();
+        let (receipt_column, digest_column) = kind.columns();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let authority = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = authority else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
+        let query = format!(
+            "SELECT {receipt_column}, {digest_column}
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4
+             FOR UPDATE"
+        );
+        let existing = sqlx::query_as::<_, (Option<Value>, Option<Vec<u8>>)>(&query)
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(fence)
+            .bind(effect_key)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((existing_receipt, existing_digest)) = existing else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if let Some(existing_digest) = existing_digest {
+            let exact =
+                existing_digest == receipt_digest && existing_receipt.as_ref() == Some(receipt);
+            if exact {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            return Ok(exact);
+        }
+        let update = format!(
+            "UPDATE attempt_effects
+             SET {receipt_column} = $5,
+                 {digest_column} = $6,
+                 updated_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4"
+        );
+        sqlx::query(&update)
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(fence)
+            .bind(effect_key)
+            .bind(receipt)
+            .bind(receipt_digest.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Loads the immutable receipt join for one exact fenced effect.
+    pub async fn effect_evidence(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        effect_key: &str,
+    ) -> Result<Vec<EffectEvidence>, StoreError> {
+        type EvidenceRow = (
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+        );
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, EvidenceRow>(
+            "SELECT outcome_receipt, outcome_receipt_digest,
+                    observation_receipt, observation_receipt_digest,
+                    shadow_replay_receipt, shadow_replay_receipt_digest
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some((outcome, outcome_digest, observation, observation_digest, shadow, shadow_digest)) =
+            row
+        else {
+            return Ok(Vec::new());
+        };
+        let mut evidence = Vec::with_capacity(3);
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::Outcome,
+            outcome,
+            outcome_digest,
+        )?;
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::Observation,
+            observation,
+            observation_digest,
+        )?;
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::ShadowReplay,
+            shadow,
+            shadow_digest,
+        )?;
+        Ok(evidence)
     }
 
     /// Confirms one fenced uncertain effect without restoring execution authority.
@@ -5723,6 +5929,33 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
                 EffectStatus::Uncertain | EffectStatus::Confirmed
             )
     )
+}
+
+fn push_effect_evidence(
+    evidence: &mut Vec<EffectEvidence>,
+    kind: EffectEvidenceKind,
+    receipt: Option<Value>,
+    digest: Option<Vec<u8>>,
+) -> Result<(), StoreError> {
+    match (receipt, digest) {
+        (None, None) => Ok(()),
+        (Some(receipt), Some(digest)) => {
+            let receipt_digest = digest.try_into().map_err(|_| {
+                StoreError::InvalidEffectPayload(
+                    "stored evidence digest is not 32 bytes".to_owned(),
+                )
+            })?;
+            evidence.push(EffectEvidence {
+                kind,
+                receipt,
+                receipt_digest,
+            });
+            Ok(())
+        }
+        _ => Err(StoreError::InvalidEffectPayload(
+            "stored effect evidence is incomplete".to_owned(),
+        )),
+    }
 }
 
 fn recoverable_finalization_status(status: &str) -> bool {

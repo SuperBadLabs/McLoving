@@ -786,6 +786,7 @@ pub struct PipelineStagePlan {
     pub id: String,
     pub name: String,
     pub process_steps: usize,
+    pub connector_intent_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4225,6 +4226,9 @@ fn invalid_platform() -> ApiError {
 }
 
 fn execution_spec(steps: &[Step]) -> Value {
+    let contains_connector_intent = steps
+        .iter()
+        .any(|step| matches!(step, Step::ConnectorIntent(_)));
     let steps = steps
         .iter()
         .map(|step| match step {
@@ -4236,9 +4240,37 @@ fn execution_spec(steps: &[Step]) -> Value {
                 "env": process.env,
                 "timeout_seconds": process.timeout_seconds,
             }),
+            Step::ConnectorIntent(intent) => json!({
+                "kind": "connector_intent",
+                "mapping_id": intent.mapping_id,
+                "mapping_digest": intent.mapping_digest,
+                "effect_class": match intent.effect_class {
+                    mcloving_pipeline_ir::ConnectorEffectClass::Idempotent => "idempotent",
+                    mcloving_pipeline_ir::ConnectorEffectClass::ExternallyIdempotent => "externally_idempotent",
+                    mcloving_pipeline_ir::ConnectorEffectClass::NonIdempotent => "non_idempotent",
+                },
+                "effect_key_template": intent.effect_key_template,
+                "public_input_schema": intent.public_input_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "protected_secret_ref_schema": intent.protected_secret_ref_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "expected_public_result_schema": intent.expected_public_result_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "timeout_seconds": intent.timeout_seconds,
+                "ambiguity_policy": "observe_then_reconcile",
+                "downstream_control_digest": intent.downstream_control_digest,
+            }),
         })
         .collect::<Vec<_>>();
-    json!({"version": 1, "steps": steps})
+    json!({"version": if contains_connector_intent { 2 } else { 1 }, "steps": steps})
+}
+
+fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
+    match kind {
+        mcloving_pipeline_ir::JsonFieldType::Array => "array",
+        mcloving_pipeline_ir::JsonFieldType::Boolean => "boolean",
+        mcloving_pipeline_ir::JsonFieldType::Null => "null",
+        mcloving_pipeline_ir::JsonFieldType::Number => "number",
+        mcloving_pipeline_ir::JsonFieldType::Object => "object",
+        mcloving_pipeline_ir::JsonFieldType::String => "string",
+    }
 }
 
 fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
@@ -4386,7 +4418,16 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
             .map(|stage| PipelineStagePlan {
                 id: stage.id.clone(),
                 name: stage.name.clone(),
-                process_steps: stage.steps.len(),
+                process_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Process(_)))
+                    .count(),
+                connector_intent_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::ConnectorIntent(_)))
+                    .count(),
             })
             .collect(),
     })

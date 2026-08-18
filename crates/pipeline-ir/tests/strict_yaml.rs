@@ -1,6 +1,6 @@
 use mcloving_pipeline_ir::{
-    ErrorCode, IR_V1_2, ParseLimits, ProcessMode, Step, YamlValue, compile_strict_yaml,
-    parse_strict,
+    AmbiguityPolicy, ConnectorEffectClass, ErrorCode, IR_V1_2, IR_V1_3, JsonFieldType, ParseLimits,
+    ProcessMode, Step, YamlValue, compile_strict_yaml, parse_strict,
 };
 
 const VALID_PIPELINE: &str = r#"
@@ -17,6 +17,81 @@ stages:
             CI: "true"
           timeout_seconds: 600
 "#;
+
+const CONNECTOR_PIPELINE: &str = r#"
+version: 1
+name: notify
+stages:
+  - id: notify
+    name: Notify
+    steps:
+      - connector_intent:
+          mapping_id: notification.v1
+          mapping_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          effect_class: externally_idempotent
+          effect_key_template: build.notification
+          public_input_schema:
+            message: string
+          protected_secret_ref_schema:
+            token: string
+          expected_public_result_schema:
+            delivery_id: string
+          timeout_seconds: 30
+          ambiguity_policy: observe_then_reconcile
+          downstream_control_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+"#;
+
+#[test]
+fn admits_typed_connector_intent_without_authority_fields() {
+    let pipeline = compile_strict_yaml(
+        "fixture://connector-intent",
+        CONNECTOR_PIPELINE,
+        ParseLimits::default(),
+    )
+    .expect("compile connector intent");
+    assert_eq!(pipeline.schema, IR_V1_3);
+    let Step::ConnectorIntent(intent) = &pipeline.stages[0].steps[0] else {
+        panic!("expected connector intent");
+    };
+    assert_eq!(
+        intent.effect_class,
+        ConnectorEffectClass::ExternallyIdempotent
+    );
+    assert_eq!(
+        intent.ambiguity_policy,
+        AmbiguityPolicy::ObserveThenReconcile
+    );
+    assert_eq!(intent.public_input_schema["message"], JsonFieldType::String);
+    validate_no_authority_material(&pipeline.canonical_bytes().unwrap());
+}
+
+#[test]
+fn connector_intent_rejects_endpoint_and_credential_overrides() {
+    for forbidden in [
+        "          endpoint_url: https://destination.invalid\n",
+        "          credential: bearer-secret\n",
+        "          program: /bin/sh\n",
+    ] {
+        let source = CONNECTOR_PIPELINE.replace(
+            "          timeout_seconds: 30\n",
+            &format!("{forbidden}          timeout_seconds: 30\n"),
+        );
+        let error = compile_strict_yaml(
+            "fixture://connector-authority",
+            &source,
+            ParseLimits::default(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("unknown field"));
+    }
+}
+
+fn validate_no_authority_material(bytes: &[u8]) {
+    let text = String::from_utf8_lossy(bytes);
+    for forbidden in ["https://", "bearer-secret", "/bin/sh"] {
+        assert!(!text.contains(forbidden));
+    }
+}
 
 #[test]
 fn parses_restricted_yaml_with_exact_key_span() {
@@ -105,6 +180,7 @@ stages:
         .iter()
         .map(|step| match step {
             Step::Process(process) => process.mode,
+            Step::ConnectorIntent(_) => panic!("fixture contains only process steps"),
         })
         .collect::<Vec<_>>();
     assert_eq!(

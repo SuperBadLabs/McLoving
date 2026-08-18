@@ -7,8 +7,9 @@ use crate::expression::{
     EvaluatedValue, Expression, ExpressionLimits, ParameterValue, evaluate_expression,
 };
 use crate::model::{
-    MAX_EXPRESSION_BINDINGS, MAX_IR_STRING_BYTES, MAX_PARAMETERS, MAX_STAGES, MAX_STEPS,
-    ParameterType, PipelineIr, ProcessMode, SchemaVersion, Step,
+    AmbiguityPolicy, ConnectorEffectClass, JsonFieldType, MAX_EXPRESSION_BINDINGS,
+    MAX_IR_STRING_BYTES, MAX_PARAMETERS, MAX_STAGES, MAX_STEPS, ParameterType, PipelineIr,
+    ProcessMode, SchemaVersion, Step,
 };
 
 const MAGIC: &[u8] = b"MCLOVING-IR\0";
@@ -74,6 +75,19 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
                         None => writer.u8(0),
                     }
                 }
+                Step::ConnectorIntent(intent) => {
+                    writer.u8(2);
+                    writer.string(&intent.mapping_id);
+                    writer.string(&intent.mapping_digest);
+                    writer.connector_effect_class(intent.effect_class);
+                    writer.string(&intent.effect_key_template);
+                    writer.json_field_schema(&intent.public_input_schema);
+                    writer.json_field_schema(&intent.protected_secret_ref_schema);
+                    writer.json_field_schema(&intent.expected_public_result_schema);
+                    writer.u64(intent.timeout_seconds);
+                    writer.ambiguity_policy(intent.ambiguity_policy);
+                    writer.string(&intent.downstream_control_digest);
+                }
             }
         }
     }
@@ -122,6 +136,35 @@ impl Writer {
             ProcessMode::Direct => 0,
             ProcessMode::WindowsCmd => 1,
             ProcessMode::PowerShell => 2,
+        });
+    }
+
+    fn connector_effect_class(&mut self, effect_class: ConnectorEffectClass) {
+        self.u8(match effect_class {
+            ConnectorEffectClass::Idempotent => 1,
+            ConnectorEffectClass::ExternallyIdempotent => 2,
+            ConnectorEffectClass::NonIdempotent => 3,
+        });
+    }
+
+    fn json_field_schema(&mut self, schema: &BTreeMap<String, JsonFieldType>) {
+        self.u32(schema.len());
+        for (name, field_type) in schema {
+            self.string(name);
+            self.u8(match field_type {
+                JsonFieldType::Array => 1,
+                JsonFieldType::Boolean => 2,
+                JsonFieldType::Null => 3,
+                JsonFieldType::Number => 4,
+                JsonFieldType::Object => 5,
+                JsonFieldType::String => 6,
+            });
+        }
+    }
+
+    fn ambiguity_policy(&mut self, policy: AmbiguityPolicy) {
+        self.u8(match policy {
+            AmbiguityPolicy::ObserveThenReconcile => 1,
         });
     }
 
@@ -221,7 +264,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 2 {
+    if schema.major != 1 || schema.minor > 3 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -359,56 +402,110 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
             .filter(|count| *count <= MAX_STEPS)
             .ok_or_else(|| CanonicalError::new(reader.offset, "total step count exceeds limit"))?;
         for step_index in 0..stage_steps {
-            if reader.u8()? != 1 {
-                return Err(CanonicalError::new(
-                    reader.offset.saturating_sub(1),
-                    "unknown step opcode",
-                ));
-            }
-            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
-            if schema.minor >= 2 {
-                match reader.u8()? {
-                    0..=2 => {}
-                    _ => {
-                        return Err(CanonicalError::new(
-                            reader.offset.saturating_sub(1),
-                            "invalid process mode",
-                        ));
+            match reader.u8()? {
+                1 => {
+                    let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+                    if schema.minor >= 2 {
+                        match reader.u8()? {
+                            0..=2 => {}
+                            _ => {
+                                return Err(CanonicalError::new(
+                                    reader.offset.saturating_sub(1),
+                                    "invalid process mode",
+                                ));
+                            }
+                        }
+                    }
+                    materialized_fields.insert(format!("{base}.program"), reader.string()?);
+                    let arguments = reader.count(MAX_STEPS, "argument")?;
+                    for argument_index in 0..arguments {
+                        materialized_fields
+                            .insert(format!("{base}.args[{argument_index}]"), reader.string()?);
+                    }
+                    let environment = reader.count(MAX_STEPS, "environment entry")?;
+                    let mut previous_key: Option<String> = None;
+                    for _ in 0..environment {
+                        let key =
+                            reader.canonical_string_after(&mut previous_key, "environment")?;
+                        let value = reader.string()?;
+                        materialized_fields.insert(format!("{base}.env.{key}"), value);
+                    }
+                    match reader.u8()? {
+                        0 => {}
+                        1 => {
+                            reader.u64()?;
+                        }
+                        _ => {
+                            return Err(CanonicalError::new(
+                                reader.offset.saturating_sub(1),
+                                "invalid timeout presence marker",
+                            ));
+                        }
                     }
                 }
-            }
-            materialized_fields.insert(format!("{base}.program"), reader.string()?);
-            let arguments = reader.count(MAX_STEPS, "argument")?;
-            for argument_index in 0..arguments {
-                materialized_fields
-                    .insert(format!("{base}.args[{argument_index}]"), reader.string()?);
-            }
-            let environment = reader.count(MAX_STEPS, "environment entry")?;
-            let mut previous_key: Option<String> = None;
-            for _ in 0..environment {
-                let key = reader.string()?;
-                if previous_key
-                    .as_ref()
-                    .is_some_and(|previous| previous >= &key)
-                {
-                    return Err(CanonicalError::new(
-                        reader.offset,
-                        "environment keys are not in canonical order",
-                    ));
-                }
-                let value = reader.string()?;
-                materialized_fields.insert(format!("{base}.env.{key}"), value);
-                previous_key = Some(key);
-            }
-            match reader.u8()? {
-                0 => {}
-                1 => {
-                    reader.u64()?;
+                2 if schema.minor >= 3 => {
+                    let mapping_id = reader.string()?;
+                    if !is_mapping_identifier(&mapping_id) {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(mapping_id.len()),
+                            "invalid connector mapping identifier",
+                        ));
+                    }
+                    validate_sha256_reference(&reader.string()?, reader.offset)?;
+                    if !matches!(reader.u8()?, 1..=3) {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(1),
+                            "invalid connector effect class",
+                        ));
+                    }
+                    if reader.string()?.trim().is_empty() {
+                        return Err(CanonicalError::new(
+                            reader.offset,
+                            "empty connector effect key template",
+                        ));
+                    }
+                    for description in [
+                        "public input",
+                        "protected secret reference",
+                        "public result",
+                    ] {
+                        let fields = reader.count(MAX_PARAMETERS, description)?;
+                        let mut previous = None;
+                        for _ in 0..fields {
+                            let name = reader.canonical_string_after(&mut previous, description)?;
+                            if !is_mapping_identifier(&name) {
+                                return Err(CanonicalError::new(
+                                    reader.offset,
+                                    format!("invalid {description} field name"),
+                                ));
+                            }
+                            if !matches!(reader.u8()?, 1..=6) {
+                                return Err(CanonicalError::new(
+                                    reader.offset.saturating_sub(1),
+                                    format!("invalid {description} field type"),
+                                ));
+                            }
+                        }
+                    }
+                    let timeout = reader.u64()?;
+                    if timeout == 0 || timeout > 86_400 {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(8),
+                            "invalid connector timeout",
+                        ));
+                    }
+                    if reader.u8()? != 1 {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(1),
+                            "invalid ambiguity policy",
+                        ));
+                    }
+                    validate_sha256_reference(&reader.string()?, reader.offset)?;
                 }
                 _ => {
                     return Err(CanonicalError::new(
                         reader.offset.saturating_sub(1),
-                        "invalid timeout presence marker",
+                        "unknown step opcode",
                     ));
                 }
             }
@@ -462,6 +559,30 @@ fn is_parameter_identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn is_mapping_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_sha256_reference(value: &str, offset: usize) -> Result<(), CanonicalError> {
+    let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(CanonicalError::new(
+            offset.saturating_sub(value.len()),
+            "invalid sha256 reference",
+        ))
+    }
 }
 
 struct Reader<'a> {
