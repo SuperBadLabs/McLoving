@@ -166,6 +166,9 @@ pub const TRIGGER_INGRESS_V28: &str = include_str!("../migrations/0028_trigger_i
 pub const DISCOVERY_V29: &str = include_str!("../migrations/0029_discovery.sql");
 /// Immutable transition evidence for controller-owned external effects.
 pub const EFFECT_EVIDENCE_V30: &str = include_str!("../migrations/0030_effect_evidence.sql");
+/// Explicit cleanup state for an undispatched observer reservation.
+pub const EFFECT_RELEASE_PENDING_V31: &str =
+    include_str!("../migrations/0031_effect_release_pending.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -315,6 +318,7 @@ pub enum EffectStatus {
     Applied,
     Confirmed,
     Uncertain,
+    ReleasePending,
     Abandoned,
 }
 
@@ -369,6 +373,7 @@ impl EffectStatus {
             Self::Applied => "applied",
             Self::Confirmed => "confirmed",
             Self::Uncertain => "uncertain",
+            Self::ReleasePending => "release_pending",
             Self::Abandoned => "abandoned",
         }
     }
@@ -1275,6 +1280,7 @@ impl Store {
         apply_migration(&mut tx, 28, TRIGGER_INGRESS_V28).await?;
         apply_migration(&mut tx, 29, DISCOVERY_V29).await?;
         apply_migration(&mut tx, 30, EFFECT_EVIDENCE_V30).await?;
+        apply_migration(&mut tx, 31, EFFECT_RELEASE_PENDING_V31).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1770,7 +1776,7 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND status = 'uncertain'",
+               AND status IN ('uncertain', 'release_pending')",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -3616,6 +3622,86 @@ impl Store {
         Ok(reconciled.is_some())
     }
 
+    /// Abandons a definitively undispatched effect only after its observer
+    /// reservation has expired according to the controller database clock.
+    ///
+    /// This transition is intentionally unavailable to ordinary `uncertain`
+    /// effects: a connector timeout with no receipt may still have dispatched.
+    /// Only the dedicated `release_pending` state, an exact immutable payload,
+    /// zero effect receipts, and a lease-less reconciliation attempt qualify.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn abandon_expired_release_pending_effect(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let abandoned = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE attempt_effects AS e
+             SET status = 'abandoned',
+                 updated_at = CASE
+                     WHEN e.status = 'release_pending' THEN clock_timestamp()
+                     ELSE e.updated_at
+                 END
+             FROM attempts AS a, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $4
+               AND e.effect_class = $5
+               AND e.payload_digest = $6
+               AND e.status IN ('release_pending', 'abandoned')
+               AND e.outcome_receipt IS NULL
+               AND e.reconciliation_receipt IS NULL
+               AND e.observation_receipt IS NULL
+               AND e.shadow_replay_receipt IS NULL
+               AND e.payload ->> 'schema_version' =
+                   'mcloving.controller-effect-prepared/v1'
+               AND jsonb_typeof(
+                   e.payload -> 'observer_reservation_expires_at_unix_ms'
+               ) = 'number'
+               AND to_timestamp(
+                   ((e.payload ->> 'observer_reservation_expires_at_unix_ms')::bigint)
+                   / 1000.0
+               ) <= clock_timestamp()
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND a.status = 'reconciliation_required'
+               AND a.lease_expires_at IS NULL
+               AND m.singleton
+               AND a.restore_epoch <= m.restore_epoch
+               AND (
+                   (a.restore_epoch = m.restore_epoch AND e.fence = a.fence)
+                   OR (
+                       a.restore_epoch < m.restore_epoch
+                       AND e.fence <= a.fence
+                   )
+               )
+             RETURNING e.attempt_id",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(abandoned.is_some())
+    }
+
     /// Terminates one fully resolved reconciliation without granting a lease.
     ///
     /// An explicit operator decision may close the attempt only after every
@@ -3696,7 +3782,7 @@ impl Store {
                    FROM attempt_effects AS e
                    WHERE e.organization_id = a.organization_id
                      AND e.attempt_id = a.id
-                     AND e.status = 'uncertain'
+                     AND e.status IN ('uncertain', 'release_pending')
                )
                AND NOT EXISTS (
                    SELECT 1
@@ -3795,7 +3881,8 @@ impl Store {
             "SELECT attempt_id, fence, effect_key, effect_class, status,
                     payload, payload_digest
              FROM attempt_effects
-             WHERE organization_id = $1 AND status = 'uncertain'
+             WHERE organization_id = $1
+               AND status IN ('uncertain', 'release_pending')
              ORDER BY updated_at, attempt_id, effect_key",
         )
         .bind(organization_id)
@@ -5647,7 +5734,7 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND status = 'uncertain'",
+               AND status IN ('uncertain', 'release_pending')",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -6230,6 +6317,7 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
             EffectStatus::Prepared
                 | EffectStatus::Applied
                 | EffectStatus::Uncertain
+                | EffectStatus::ReleasePending
                 | EffectStatus::Abandoned
         ) | (
             "applied",
@@ -6240,6 +6328,9 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
         ) | (
             "uncertain",
             EffectStatus::Uncertain | EffectStatus::Confirmed
+        ) | (
+            "release_pending",
+            EffectStatus::ReleasePending | EffectStatus::Abandoned
         ) | ("abandoned", EffectStatus::Abandoned)
     )
 }
@@ -6310,6 +6401,7 @@ fn parse_effect_status(value: &str) -> Result<EffectStatus, StoreError> {
         "applied" => Ok(EffectStatus::Applied),
         "confirmed" => Ok(EffectStatus::Confirmed),
         "uncertain" => Ok(EffectStatus::Uncertain),
+        "release_pending" => Ok(EffectStatus::ReleasePending),
         "abandoned" => Ok(EffectStatus::Abandoned),
         other => Err(StoreError::InvalidEffectPayload(format!(
             "unknown effect status {other}"

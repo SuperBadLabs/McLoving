@@ -1760,7 +1760,11 @@ async fn dead_observer_release_session_routes_to_durable_reconciliation() {
     .expect("read observer-release reconciliation state");
     assert_eq!(
         state,
-        ("reconciliation_required".into(), "uncertain".into(), 0)
+        (
+            "reconciliation_required".into(),
+            "release_pending".into(),
+            0
+        )
     );
 }
 

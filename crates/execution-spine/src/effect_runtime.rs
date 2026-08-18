@@ -85,6 +85,7 @@ pub async fn prepare_effect(
     agent_id: &str,
     intent: &ConnectorIntentSpec,
     freeze: &EffectRuntimeFreeze,
+    observer_reservation_expires_at_unix_ms: i64,
     now_unix_ms: i64,
 ) -> Result<PreparedEffect, EffectRuntimeError> {
     validate_freeze(claim, intent, freeze, now_unix_ms)?;
@@ -99,6 +100,7 @@ pub async fn prepare_effect(
         "runtime_attestation_sha256": freeze.runtime_attestation_sha256.clone(),
         "credential_mapping_generation": freeze.credential_mapping_generation,
         "pre_action_observation_sha256": freeze.pre_action_observation_sha256.clone(),
+        "observer_reservation_expires_at_unix_ms": observer_reservation_expires_at_unix_ms,
         "grant_sha256": freeze.grant.grant_sha256.clone(),
         "request_sha256": request_sha256,
         "request": freeze.action_request.clone(),
@@ -177,6 +179,33 @@ pub async fn mark_effect_uncertain(
             &prepared.effect_key,
             prepared.effect_class,
             EffectStatus::Uncertain,
+            &prepared.payload,
+        )
+        .await?
+    {
+        return Err(EffectRuntimeError::StaleAuthority);
+    }
+    Ok(())
+}
+
+/// Retain a definitively undispatched effect until the observer reservation's
+/// controller-recorded expiry permits explicit reconciliation cleanup.
+pub async fn mark_effect_release_pending(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    prepared: &PreparedEffect,
+) -> Result<(), EffectRuntimeError> {
+    if !store
+        .checkpoint_effect(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            agent_id,
+            &prepared.effect_key,
+            prepared.effect_class,
+            EffectStatus::ReleasePending,
             &prepared.payload,
         )
         .await?

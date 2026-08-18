@@ -6,8 +6,8 @@ mod effect_transport;
 pub use effect_runtime::{
     EffectRuntimeError, EffectRuntimeFreeze, FreshOneActionGrant, PreparedEffect,
     abandon_prepared_effect, confirm_effect_observation, finalize_effect_shadow_join,
-    finalize_effect_shadow_join_as, mark_effect_uncertain, prepare_effect, record_effect_outcome,
-    record_reconciled_effect_outcome,
+    finalize_effect_shadow_join_as, mark_effect_release_pending, mark_effect_uncertain,
+    prepare_effect, record_effect_outcome, record_reconciled_effect_outcome,
 };
 pub use effect_transport::{
     EffectServiceError, PinnedServiceCommand, invoke_connector, invoke_observer, invoke_shadow,
@@ -645,6 +645,7 @@ async fn run_effect_claim_under_lease(
         &config.agent_id,
         intent,
         &plan.freeze,
+        plan.observation_request.expires_at_unix_ms,
         prepare_now,
     )
     .await?;
@@ -1054,14 +1055,24 @@ async fn finalize_verified_pre_dispatch_exit(
         }
     }
     if !released {
-        route_effect_reconciliation(
-            store,
-            claim,
-            config,
-            prepared,
-            "observer_reservation_release",
-        )
-        .await?;
+        mark_effect_release_pending(store, claim, &config.agent_id, prepared).await?;
+        let published = store
+            .finalize_attempt(
+                claim.organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &config.agent_id,
+                TerminalOutcome::Failed,
+                json!({
+                    "reason": "effect_reconciliation_required",
+                    "phase": "observer_reservation_release"
+                }),
+            )
+            .await?;
+        if published {
+            return Err(SpineError::EffectRuntimeUnavailable);
+        }
         return Err(SpineError::EffectReconciliationRequired);
     }
     abandon_prepared_effect(store, claim, &config.agent_id, prepared).await?;

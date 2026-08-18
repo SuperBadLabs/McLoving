@@ -4420,6 +4420,190 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
 }
 
 #[tokio::test]
+async fn expired_undispatched_reservation_can_be_abandoned_and_closed() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "expired-release-pending",
+        )
+        .await
+        .expect("create release-pending tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "expired-release-pending".into(),
+            pipeline_digest: [0x84; 32],
+            node_key: "release-pending-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit release-pending build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "release-pending-scheduler".into(),
+            agent_id: "release-pending-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim release-pending attempt")
+        .expect("release-pending attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept release-pending offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    for (status, label) in [
+        (EffectStatus::Prepared, "prepare undispatched effect"),
+        (
+            EffectStatus::ReleasePending,
+            "retain failed observer reservation release",
+        ),
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &payload,
+                )
+                .await
+                .expect(label)
+        );
+    }
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"reason": "observer_reservation_release"}),
+            )
+            .await
+            .expect("route release-pending effect to reconciliation")
+    );
+    let pending = store
+        .uncertain_effects(organization_id)
+        .await
+        .expect("list release-pending effect");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, EffectStatus::ReleasePending);
+    assert!(
+        !store
+            .confirm_uncertain_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("release-pending effect cannot be confirmed as dispatched")
+    );
+    let mut substituted_payload = payload.clone();
+    substituted_payload["request_sha256"] = json!("b".repeat(64));
+    assert!(
+        !store
+            .abandon_expired_release_pending_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &substituted_payload,
+            )
+            .await
+            .expect("reject substituted cleanup payload")
+    );
+    assert!(
+        store
+            .abandon_expired_release_pending_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("abandon expired undispatched reservation")
+    );
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "release-reconciler",
+                TerminalOutcome::Succeeded,
+                json!({"reason": "observer_reservation_expired"}),
+            )
+            .await
+            .expect("abandoned effect cannot become a success")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "release-reconciler",
+                TerminalOutcome::Aborted,
+                json!({"reason": "observer_reservation_expired"}),
+            )
+            .await
+            .expect("close expired undispatched reservation")
+    );
+    let terminal = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("load closed release-pending build")
+        .expect("release-pending build exists");
+    assert_eq!(terminal.build_status, "aborted");
+    assert_eq!(terminal.attempt_status, "aborted");
+}
+
+#[tokio::test]
 async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
