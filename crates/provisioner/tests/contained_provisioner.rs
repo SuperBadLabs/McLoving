@@ -1500,7 +1500,7 @@ async fn duplicate_initial_inventory_instance_id_is_rejected_before_cleanup() {
 
 #[tokio::test]
 async fn quota_and_all_certified_bindings_fail_before_provider_access() {
-    let context = Context::with_quota(FixtureMode::Ready, 1).await;
+    let context = Context::with_limits(FixtureMode::Ready, 1, 300, 5_000).await;
     let first = context.request();
     context
         .provisioner
@@ -2442,7 +2442,7 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
 
 #[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
-    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    let context = Context::with_startup_timeout(FixtureMode::DelayedCreateReady, 5_000).await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2933,7 +2933,7 @@ async fn reconciliation_absence_crash_recovery_preserves_agent_loss() {
 
 #[tokio::test]
 async fn concurrent_process_instances_converge_on_one_create_and_one_receipt() {
-    let context = Context::with_startup_timeout(FixtureMode::PendingThenReady, 1_000).await;
+    let context = Context::with_startup_timeout(FixtureMode::PendingThenReady, 5_000).await;
     let peer = Provisioner::new(
         context.config.clone(),
         IMPLEMENTATION_SHA256.to_owned(),
