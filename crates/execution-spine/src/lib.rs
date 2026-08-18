@@ -6,7 +6,8 @@ mod effect_transport;
 pub use effect_runtime::{
     EffectRuntimeError, EffectRuntimeFreeze, FreshOneActionGrant, PreparedEffect,
     abandon_prepared_effect, confirm_effect_observation, finalize_effect_shadow_join,
-    prepare_effect, record_effect_outcome, record_reconciled_effect_outcome,
+    finalize_effect_shadow_join_as, mark_effect_uncertain, prepare_effect, record_effect_outcome,
+    record_reconciled_effect_outcome,
 };
 pub use effect_transport::{
     EffectServiceError, PinnedServiceCommand, invoke_connector, invoke_observer, invoke_shadow,
@@ -14,7 +15,7 @@ pub use effect_transport::{
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
@@ -24,8 +25,13 @@ use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Journal, JournalError, MAX_ATTEMPT_OUTPUT_BYTES, SpoolEntry,
 };
 use mcloving_controller_store::{ClaimedAttempt, NewLogChunk, Store, StoreError, TerminalOutcome};
+use mcloving_destination_observer::{ObservationPhase, ObservationRequest};
+use mcloving_external_connector::{
+    ConnectorCommand, OutcomeStatus, RECONCILE_REQUEST_SCHEMA_VERSION, ReconcileRequest,
+    SHADOW_REPLAY_SCHEMA_VERSION, ShadowReplayRequest, outcome_receipt_digest,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +46,21 @@ pub struct WorkerConfig {
     pub cancellation_poll: Duration,
     pub lease_seconds: i32,
     pub termination_grace: Duration,
+    pub effect_plan: Option<EffectExecutionPlan>,
+}
+
+/// One exact, deployment-owned, one-action runtime plan. It contains signed
+/// public requests and public keys, never a destination credential or token.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectExecutionPlan {
+    pub schema_version: String,
+    pub freeze: EffectRuntimeFreeze,
+    pub connector_service: PinnedServiceCommand,
+    pub observer_service: PinnedServiceCommand,
+    pub shadow_service: PinnedServiceCommand,
+    pub observation_request: ObservationRequest,
+    pub audit_provenance: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,6 +114,12 @@ pub enum SpineError {
     UnsupportedSpec,
     #[error("connector intent requires a configured controller-owned effect runtime")]
     EffectRuntimeUnavailable,
+    #[error("effect runtime failed: {0}")]
+    EffectRuntime(#[from] EffectRuntimeError),
+    #[error("effect service failed: {0}")]
+    EffectService(#[from] EffectServiceError),
+    #[error("effect is durably frozen pending reconciliation")]
+    EffectReconciliationRequired,
     #[error("numeric value cannot be represented by the durable protocol")]
     FenceOverflow,
     #[error("lease duration must be positive and exceed the cancellation poll interval")]
@@ -210,10 +237,10 @@ pub async fn run_claim(
     let spec: ExecutionSpec = serde_json::from_value(execution.execution_spec)?;
     let process = match (spec.version, spec.steps.as_slice()) {
         (1, [ExecutionStep::Process(process)]) => process,
-        (2, [ExecutionStep::ConnectorIntent(intent)]) => {
-            let _ = intent;
-            return Err(SpineError::EffectRuntimeUnavailable);
-        }
+        (2, [ExecutionStep::ConnectorIntent(intent)]) => match &config.effect_plan {
+            Some(plan) => return run_effect_claim(store, claim, config, intent, plan).await,
+            None => return Err(SpineError::EffectRuntimeUnavailable),
+        },
         _ => return Err(SpineError::UnsupportedSpec),
     };
     let database_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
@@ -460,6 +487,357 @@ pub async fn run_claim(
         stdout_sha256: outcome.stdout.digest,
         stderr_sha256: outcome.stderr.digest,
     })
+}
+
+async fn run_effect_claim(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    intent: &ConnectorIntentSpec,
+    plan: &EffectExecutionPlan,
+) -> Result<RunReceipt, SpineError> {
+    if plan.schema_version != "mcloving.controller-effect-plan/v1"
+        || plan.audit_provenance.is_empty()
+    {
+        return Err(SpineError::EffectRuntimeUnavailable);
+    }
+    if !store
+        .accept_offer(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+        )
+        .await?
+    {
+        return Err(SpineError::StaleAuthority);
+    }
+    let accepted = store
+        .attempt_execution(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+        )
+        .await?
+        .ok_or(SpineError::StaleAuthority)?;
+    if accepted.cancellation_requested {
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Aborted,
+            json!({"reason": "cancelled_before_effect_prepare"}),
+        )
+        .await;
+    }
+    if !store
+        .mark_attempt_running(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+        )
+        .await?
+    {
+        return Err(SpineError::StaleAuthority);
+    }
+
+    let prepared = prepare_effect(
+        store,
+        claim,
+        &config.agent_id,
+        intent,
+        &plan.freeze,
+        unix_time_millis()?,
+    )
+    .await?;
+    let frozen = store
+        .attempt_execution(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+        )
+        .await?
+        .ok_or(SpineError::StaleAuthority)?;
+    if frozen.cancellation_requested {
+        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Aborted,
+            json!({"reason": "cancelled_before_effect_dispatch"}),
+        )
+        .await;
+    }
+    validate_observation_request(claim, plan)?;
+
+    let outcome = match invoke_connector(
+        &plan.connector_service,
+        ConnectorCommand::Execute {
+            request: Box::new(plan.freeze.action_request.clone()),
+        },
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) if service_may_have_dispatched(&error) => {
+            route_effect_reconciliation(store, claim, config, &prepared, "connector_dispatch")
+                .await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+        Err(error) => {
+            abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+            return finalize_effect_attempt(
+                store,
+                claim,
+                config,
+                TerminalOutcome::Failed,
+                json!({"reason": "effect_service_preflight_failed", "code": error.to_string()}),
+            )
+            .await;
+        }
+    };
+    record_effect_outcome(
+        store,
+        claim,
+        &config.agent_id,
+        intent,
+        &plan.freeze,
+        &prepared,
+        &outcome,
+    )
+    .await?;
+
+    let observation =
+        match invoke_observer(&plan.observer_service, plan.observation_request.clone()).await {
+            Ok(observation) => observation,
+            Err(_) => {
+                route_effect_reconciliation(store, claim, config, &prepared, "observer_join")
+                    .await?;
+                return Err(SpineError::EffectReconciliationRequired);
+            }
+        };
+    confirm_effect_observation(
+        store,
+        claim,
+        &config.agent_id,
+        &plan.freeze,
+        &prepared,
+        &outcome,
+        &observation,
+    )
+    .await?;
+
+    let effective_outcome =
+        if outcome.status == OutcomeStatus::Ambiguous || outcome.ambiguous_requires_observation {
+            let observed_effect = observation
+                .state
+                .get("effect_observed")
+                .and_then(Value::as_bool)
+                .ok_or(SpineError::EffectReconciliationRequired)?;
+            let reconciled = match invoke_connector(
+                &plan.connector_service,
+                ConnectorCommand::Reconcile {
+                    request: Box::new(ReconcileRequest {
+                        schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                        request_id: outcome.request_id,
+                        expected_request_sha256: outcome.request_sha256.clone(),
+                        expected_ambiguous_receipt_sha256: outcome_receipt_digest(&outcome)
+                            .map_err(|_| SpineError::EffectReconciliationRequired)?,
+                        observed_effect,
+                        observation_receipt: observation.clone(),
+                        audit_provenance: plan.audit_provenance.clone(),
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(reconciled) => reconciled,
+                Err(_) => {
+                    route_effect_reconciliation(
+                        store,
+                        claim,
+                        config,
+                        &prepared,
+                        "connector_reconciliation",
+                    )
+                    .await?;
+                    return Err(SpineError::EffectReconciliationRequired);
+                }
+            };
+            record_reconciled_effect_outcome(
+                store,
+                claim,
+                &config.agent_id,
+                intent,
+                &plan.freeze,
+                &prepared,
+                &outcome,
+                &observation,
+                &reconciled,
+            )
+            .await?;
+            reconciled
+        } else {
+            outcome
+        };
+
+    let outcome_sha256 = outcome_receipt_digest(&effective_outcome)
+        .map_err(|_| SpineError::EffectReconciliationRequired)?;
+    let shadow = match invoke_shadow(
+        &plan.shadow_service,
+        ShadowReplayRequest {
+            schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
+            replay_id: Uuid::new_v4(),
+            expected_outcome_receipt_sha256: outcome_sha256,
+            expected_shadow_identity: plan.freeze.expected_shadow_identity.clone(),
+            outcome_receipt: effective_outcome.clone(),
+            replayed_at_unix_ms: unix_time_millis()?,
+            audit_provenance: plan.audit_provenance.clone(),
+        },
+    )
+    .await
+    {
+        Ok(shadow) => shadow,
+        Err(_) => {
+            route_effect_reconciliation(store, claim, config, &prepared, "shadow_replay").await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+    };
+    let cancellation_requested = store
+        .attempt_execution(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+        )
+        .await?
+        .ok_or(SpineError::StaleAuthority)?
+        .cancellation_requested;
+    let terminal = finalize_effect_shadow_join_as(
+        store,
+        claim,
+        &config.agent_id,
+        &plan.freeze,
+        &prepared,
+        &effective_outcome,
+        &shadow,
+        cancellation_requested.then_some(TerminalOutcome::Aborted),
+    )
+    .await?;
+    Ok(RunReceipt {
+        build_id: claim.build_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        outcome: terminal,
+        exit_code: None,
+        stdout_sha256: [0; 32],
+        stderr_sha256: [0; 32],
+    })
+}
+
+fn validate_observation_request(
+    claim: &ClaimedAttempt,
+    plan: &EffectExecutionPlan,
+) -> Result<(), SpineError> {
+    let fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
+    if plan.observation_request.tenant_id != claim.organization_id
+        || plan.observation_request.build_id != claim.build_id
+        || plan.observation_request.attempt_id != claim.attempt_id
+        || plan.observation_request.effect_fence != fence
+        || plan.observation_request.observer_id != plan.freeze.expected_observer_id
+        || !matches!(
+            plan.observation_request.phase,
+            ObservationPhase::PostAction | ObservationPhase::Reconciliation
+        )
+    {
+        return Err(SpineError::EffectRuntimeUnavailable);
+    }
+    Ok(())
+}
+
+fn service_may_have_dispatched(error: &EffectServiceError) -> bool {
+    matches!(
+        error,
+        EffectServiceError::AmbiguousTimeout
+            | EffectServiceError::ResponseTooLarge
+            | EffectServiceError::ServiceFailed
+            | EffectServiceError::InvalidResponse
+            | EffectServiceError::Io(_)
+    )
+}
+
+async fn route_effect_reconciliation(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    prepared: &PreparedEffect,
+    phase: &str,
+) -> Result<(), SpineError> {
+    mark_effect_uncertain(store, claim, &config.agent_id, prepared).await?;
+    let published = store
+        .finalize_attempt(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+            TerminalOutcome::Failed,
+            json!({"reason": "effect_reconciliation_required", "phase": phase}),
+        )
+        .await?;
+    if published {
+        return Err(SpineError::EffectRuntimeUnavailable);
+    }
+    Ok(())
+}
+
+async fn finalize_effect_attempt(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    outcome: TerminalOutcome,
+    summary: Value,
+) -> Result<RunReceipt, SpineError> {
+    if !store
+        .finalize_attempt(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
+            outcome,
+            summary,
+        )
+        .await?
+    {
+        return Err(SpineError::StaleAuthority);
+    }
+    Ok(RunReceipt {
+        build_id: claim.build_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        outcome,
+        exit_code: None,
+        stdout_sha256: [0; 32],
+        stderr_sha256: [0; 32],
+    })
+}
+
+fn unix_time_millis() -> Result<i64, SpineError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| SpineError::FenceOverflow)?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| SpineError::FenceOverflow)
 }
 
 async fn cancellation_poller(

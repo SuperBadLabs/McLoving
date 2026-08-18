@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use mcloving_destination_observer::{ObservationReceipt, ObservationRequest, ObserverCommand};
 use mcloving_external_connector::{
@@ -19,11 +18,12 @@ const MAX_SERVICE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Deployment-selected executable identity for one independently confined
 /// connector, observer, or shadow service.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PinnedServiceCommand {
     pub executable: PathBuf,
     pub executable_sha256: String,
-    pub timeout: Duration,
+    pub timeout_millis: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -134,9 +134,12 @@ where
         let status = child.wait().await?;
         Ok::<_, std::io::Error>((status, response))
     };
-    let (status, response) = tokio::time::timeout(service.timeout, exchange)
-        .await
-        .map_err(|_| EffectServiceError::AmbiguousTimeout)??;
+    let (status, response) = tokio::time::timeout(
+        std::time::Duration::from_millis(service.timeout_millis),
+        exchange,
+    )
+    .await
+    .map_err(|_| EffectServiceError::AmbiguousTimeout)??;
     if !status.success() {
         return Err(EffectServiceError::ServiceFailed);
     }
@@ -150,7 +153,7 @@ where
 }
 
 async fn validate_service(service: &PinnedServiceCommand) -> Result<(), EffectServiceError> {
-    if service.timeout.is_zero()
+    if service.timeout_millis == 0
         || !service.executable.is_absolute()
         || !is_sha256(&service.executable_sha256)
     {

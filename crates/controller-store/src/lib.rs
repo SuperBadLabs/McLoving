@@ -3534,6 +3534,29 @@ impl Store {
                      AND e.attempt_id = a.id
                      AND e.status = 'uncertain'
                )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM attempt_effects AS e
+                   WHERE e.organization_id = a.organization_id
+                     AND e.attempt_id = a.id
+                     AND e.payload ->> 'schema_version' = 'mcloving.controller-effect-prepared/v1'
+                     AND (
+                         (e.status = 'abandoned' AND $4 <> 'aborted')
+                         OR (
+                             e.status <> 'abandoned'
+                             AND (
+                                 e.status <> 'confirmed'
+                                 OR e.outcome_receipt IS NULL
+                                 OR e.observation_receipt IS NULL
+                                 OR e.shadow_replay_receipt IS NULL
+                                 OR (
+                                     e.outcome_receipt ->> 'status' = 'ambiguous'
+                                     AND e.reconciliation_receipt IS NULL
+                                 )
+                             )
+                         )
+                     )
+               )
              RETURNING n.id, n.build_id, a.restore_epoch",
         )
         .bind(organization_id)
@@ -6037,12 +6060,13 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
         ) | (
             "applied",
             EffectStatus::Applied | EffectStatus::Confirmed | EffectStatus::Uncertain
-        ) | ("confirmed", EffectStatus::Confirmed)
-            | (
-                "uncertain",
-                EffectStatus::Uncertain | EffectStatus::Confirmed
-            )
-            | ("abandoned", EffectStatus::Abandoned)
+        ) | (
+            "confirmed",
+            EffectStatus::Confirmed | EffectStatus::Uncertain
+        ) | (
+            "uncertain",
+            EffectStatus::Uncertain | EffectStatus::Confirmed
+        ) | ("abandoned", EffectStatus::Abandoned)
     )
 }
 

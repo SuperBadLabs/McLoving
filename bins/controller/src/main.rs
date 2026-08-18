@@ -30,7 +30,7 @@ use mcloving_controller_store::{
     NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
     StoreError, TerminalOutcome, authz::ServiceScope,
 };
-use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
+use mcloving_execution_spine::{EffectExecutionPlan, WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -1465,6 +1465,7 @@ impl EmbeddedWorker {
                 cancellation_poll: Duration::from_millis(cancellation_milliseconds),
                 lease_seconds,
                 termination_grace: Duration::from_millis(termination_grace_milliseconds),
+                effect_plan: effect_plan_from_environment()?,
             },
         })
     }
@@ -1524,6 +1525,35 @@ async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Res
 
 fn required(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("{name} is required"))
+}
+
+fn effect_plan_from_environment() -> Result<Option<EffectExecutionPlan>> {
+    let path = match std::env::var("MCLOVING_EFFECT_RUNTIME_PLAN") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_EFFECT_RUNTIME_PLAN must not be empty"),
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error).context("read MCLOVING_EFFECT_RUNTIME_PLAN"),
+    };
+    if !path.is_absolute() {
+        bail!("MCLOVING_EFFECT_RUNTIME_PLAN must be an absolute path");
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect effect runtime plan {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("effect runtime plan must be a bounded regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("effect runtime plan must not be accessible by group or other users");
+        }
+    }
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read effect runtime plan {}", path.display()))?;
+    mcloving_external_connector::parse_json_no_duplicates(&bytes)
+        .context("parse strict effect runtime plan")
+        .map(Some)
 }
 
 fn parse_positive<T>(name: &str) -> Result<T>

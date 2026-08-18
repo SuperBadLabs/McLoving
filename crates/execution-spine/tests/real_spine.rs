@@ -245,6 +245,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 60,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -683,6 +684,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
         cancellation_poll: Duration::from_millis(5),
         lease_seconds: 60,
         termination_grace: Duration::from_millis(100),
+        effect_plan: None,
     };
     let run_store = store.clone();
     let run_claim_value = claim.clone();
@@ -797,6 +799,7 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 30,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -854,6 +857,7 @@ async fn lease_is_renewed_while_a_long_process_runs() {
             cancellation_poll: Duration::from_millis(100),
             lease_seconds: 1,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -902,6 +906,7 @@ async fn process_spawn_failure_is_published_as_terminal_failure() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 30,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await

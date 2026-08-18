@@ -31,7 +31,8 @@ pub struct FreshOneActionGrant {
 
 /// Deployment-owned immutable bindings. None of these values originate in
 /// pipeline source or agent output.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectRuntimeFreeze {
     pub mapping_id: String,
     pub mapping_digest: String,
@@ -149,6 +150,32 @@ pub async fn abandon_prepared_effect(
             &prepared.effect_key,
             prepared.effect_class,
             EffectStatus::Abandoned,
+            &prepared.payload,
+        )
+        .await?
+    {
+        return Err(EffectRuntimeError::StaleAuthority);
+    }
+    Ok(())
+}
+
+/// Freeze retry when dispatch or a post-dispatch join becomes ambiguous.
+pub async fn mark_effect_uncertain(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    prepared: &PreparedEffect,
+) -> Result<(), EffectRuntimeError> {
+    if !store
+        .checkpoint_effect(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            agent_id,
+            &prepared.effect_key,
+            prepared.effect_class,
+            EffectStatus::Uncertain,
             &prepared.payload,
         )
         .await?
@@ -339,6 +366,25 @@ pub async fn finalize_effect_shadow_join(
     outcome: &OutcomeReceipt,
     shadow: &ShadowReplayReceipt,
 ) -> Result<TerminalOutcome, EffectRuntimeError> {
+    finalize_effect_shadow_join_as(
+        store, claim, agent_id, freeze, prepared, outcome, shadow, None,
+    )
+    .await
+}
+
+/// Variant used when a cancellation arrived after dispatch. Evidence still
+/// completes before the attempt is published as aborted.
+#[allow(clippy::too_many_arguments)]
+pub async fn finalize_effect_shadow_join_as(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    freeze: &EffectRuntimeFreeze,
+    prepared: &PreparedEffect,
+    outcome: &OutcomeReceipt,
+    shadow: &ShadowReplayReceipt,
+    terminal_override: Option<TerminalOutcome>,
+) -> Result<TerminalOutcome, EffectRuntimeError> {
     verify_shadow_receipt(shadow, &freeze.shadow_replay_public_key)
         .map_err(|_| EffectRuntimeError::InvalidShadow)?;
     validate_shadow(claim, freeze, outcome, shadow)?;
@@ -375,12 +421,21 @@ pub async fn finalize_effect_shadow_join(
             "incomplete effect evidence join",
         ));
     }
-    let terminal = match outcome.status {
+    let outcome_terminal = match outcome.status {
         OutcomeStatus::Succeeded => TerminalOutcome::Succeeded,
         OutcomeStatus::Failed | OutcomeStatus::RetryableFailure => TerminalOutcome::Failed,
         OutcomeStatus::Ambiguous => {
             return Err(EffectRuntimeError::InvalidBinding(
                 "ambiguous outcome requires reconciliation",
+            ));
+        }
+    };
+    let terminal = match terminal_override {
+        None => outcome_terminal,
+        Some(TerminalOutcome::Aborted) => TerminalOutcome::Aborted,
+        Some(_) => {
+            return Err(EffectRuntimeError::InvalidBinding(
+                "only cancellation may override a joined effect outcome",
             ));
         }
     };
