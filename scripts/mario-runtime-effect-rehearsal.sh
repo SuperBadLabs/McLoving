@@ -10,7 +10,7 @@ if [[ "$(hostname -s)" != "mario" ]]; then
   echo "runtime-effect rehearsal must run on Mario" >&2
   exit 1
 fi
-for command in podman python3 sha256sum git find chmod; do
+for command in podman python3 sha256sum git find chmod install cut sort seq; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command is unavailable: ${command}" >&2
     exit 1

@@ -92,21 +92,21 @@ pub async fn prepare_effect(
     let effect_class = store_effect_class(intent.effect_class);
     let payload = json!({
         "schema_version": "mcloving.controller-effect-prepared/v1",
-        "mapping_id": freeze.mapping_id,
-        "mapping_digest": freeze.mapping_digest,
-        "deployment_binding_sha256": freeze.deployment_binding_sha256,
-        "runtime_attestation_sha256": freeze.runtime_attestation_sha256,
+        "mapping_id": freeze.mapping_id.clone(),
+        "mapping_digest": freeze.mapping_digest.clone(),
+        "deployment_binding_sha256": freeze.deployment_binding_sha256.clone(),
+        "runtime_attestation_sha256": freeze.runtime_attestation_sha256.clone(),
         "credential_mapping_generation": freeze.credential_mapping_generation,
-        "pre_action_observation_sha256": freeze.pre_action_observation_sha256,
-        "grant_sha256": freeze.grant.grant_sha256,
+        "pre_action_observation_sha256": freeze.pre_action_observation_sha256.clone(),
+        "grant_sha256": freeze.grant.grant_sha256.clone(),
         "request_sha256": request_sha256,
-        "request": freeze.action_request,
+        "request": freeze.action_request.clone(),
         "connector_outcome_key_sha256": content_sha256(&freeze.connector_outcome_public_key),
         "observer_receipt_key_sha256": mcloving_destination_observer::content_sha256(&freeze.observer_receipt_public_key),
         "shadow_replay_key_sha256": content_sha256(&freeze.shadow_replay_public_key),
-        "expected_observer_id": freeze.expected_observer_id,
-        "expected_shadow_identity": freeze.expected_shadow_identity,
-        "downstream_control_digest": intent.downstream_control_digest,
+        "expected_observer_id": freeze.expected_observer_id.clone(),
+        "expected_shadow_identity": freeze.expected_shadow_identity.clone(),
+        "downstream_control_digest": intent.downstream_control_digest.clone(),
     });
     if !store
         .checkpoint_effect(
@@ -448,8 +448,8 @@ pub async fn finalize_effect_shadow_join_as(
             agent_id,
             terminal,
             json!({
-                "effect_key": prepared.effect_key,
-                "request_sha256": prepared.request_sha256,
+                "effect_key": prepared.effect_key.clone(),
+                "request_sha256": prepared.request_sha256.clone(),
                 "outcome_receipt_sha256": outcome_receipt_digest(outcome).map_err(|_| EffectRuntimeError::InvalidOutcome)?,
                 "observation_joined": true,
                 "shadow_replay_joined": true,
