@@ -609,6 +609,7 @@ fn pinned_effect_fixture(root: &Path) -> PinnedServiceCommand {
     let outcome_key = root.join("outcome-key.pkcs8");
     let observer_key = root.join("observer-key.pkcs8");
     let shadow_key = root.join("shadow-key.pkcs8");
+    let diagnostic = root.join("effect-fixture-error.txt");
     write_test_pkcs8(&outcome_key, &[12_u8; 32]);
     write_test_pkcs8(&observer_key, &[13_u8; 32]);
     write_test_pkcs8(&shadow_key, &[14_u8; 32]);
@@ -618,7 +619,7 @@ fn pinned_effect_fixture(root: &Path) -> PinnedServiceCommand {
     PinnedServiceCommand {
         executable: fixture,
         executable_sha256,
-        arguments: vec![openssl, outcome_key, observer_key, shadow_key],
+        arguments: vec![openssl, outcome_key, observer_key, shadow_key, diagnostic],
         timeout_millis: 5_000,
     }
 }
@@ -1153,8 +1154,10 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
                 .fetch_optional(store.pool())
                 .await
                 .expect("read early effect termination state");
+                let diagnostic = std::fs::read_to_string(root.path().join("effect-fixture-error.txt"))
+                    .unwrap_or_else(|_| "no fixture diagnostic".into());
                 panic!(
-                    "effect execution terminated before the shadow join checkpoint: {result:?}; durable state: {state:?}"
+                    "effect execution terminated before the shadow join checkpoint: {result:?}; durable state: {state:?}; fixture: {diagnostic}"
                 );
             },
             () = tokio::time::sleep(Duration::from_millis(10)) => {

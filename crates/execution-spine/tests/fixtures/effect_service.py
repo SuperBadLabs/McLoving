@@ -228,9 +228,9 @@ def shadow_response(command, openssl, shadow_key):
 
 
 def main():
-    if len(sys.argv) != 5:
-        raise ValueError("expected openssl and three role-key paths")
-    openssl, outcome_key, observer_key, shadow_key = sys.argv[1:]
+    if len(sys.argv) != 6:
+        raise ValueError("expected openssl, three role-key paths, and a diagnostic path")
+    openssl, outcome_key, observer_key, shadow_key, _diagnostic = sys.argv[1:]
     command = json.loads(sys.stdin.readline())
     if "operation" in command:
         response = observer_response(command, openssl, observer_key)
@@ -242,4 +242,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        if len(sys.argv) == 6:
+            with open(sys.argv[5], "w", encoding="utf-8") as output:
+                output.write(repr(error))
+        raise
