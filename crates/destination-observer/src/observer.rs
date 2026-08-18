@@ -183,7 +183,8 @@ impl DestinationObserver {
     }
 
     /// Verifies the complete signed request and the currently loaded deployment
-    /// authority without reading the destination or reserving an observation.
+    /// authority, and creates an expiring capacity reservation without reading
+    /// the destination.
     pub fn preflight_request(&self, request: &ObservationRequest) -> Result<String, ObserverError> {
         self.preflight_request_with_trusted_time(request, unix_time_ms()?, 0)
     }
@@ -259,15 +260,25 @@ impl DestinationObserver {
         }
         let request_sha256 = observation_request_digest(request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(request))?;
-        self.store.validate_admission(
+        let destination_scope_sha256 = canonical_digest(
+            b"mcloving-observer-destination-scope-v1",
+            &DestinationScope::from_request(request),
+        )?;
+        match self.store.claim(
             &self.config,
             &self.config_sha256,
             request,
             &request_sha256,
             &scope_sha256,
+            &destination_scope_sha256,
             now_ms,
             started_at,
-        )?;
+        )? {
+            ClaimResult::Completed(receipt) => {
+                self.validate_replayed_receipt(request, &request_sha256, &receipt)?;
+            }
+            ClaimResult::Claimed { .. } => {}
+        }
         Ok(request_sha256)
     }
 
@@ -1362,11 +1373,11 @@ fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
     })
 }
 
-fn maximum_receipt_envelope_fits(
+fn maximum_receipt(
     config: &ObserverConfig,
     config_sha256: &str,
     implementation_sha256: &str,
-) -> bool {
+) -> Option<ObservationReceipt> {
     let maximum_query_value = "\0".repeat(MAX_QUERY_VALUE_BYTES);
     let canonical_query: BTreeMap<String, String> = config
         .allowed_query_keys
@@ -1423,8 +1434,8 @@ fn maximum_receipt_envelope_fits(
         destination_attestation_key_id: config.destination_attestation_key_id.clone(),
         state: match maximum_schema_state_serialized_len(config) {
             Some(length) if length >= 2 => serde_json::Value::String("x".repeat(length - 2)),
-            None => return false,
-            _ => return false,
+            None => return None,
+            _ => return None,
         },
         retry_count: config.limits.retry_attempts,
         audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
@@ -1432,7 +1443,38 @@ fn maximum_receipt_envelope_fits(
         receipt_signing_public_key_sha256: config.receipt_signing_public_key_sha256.clone(),
         signature_base64: "A".repeat(88),
     };
-    crate::standalone::observed_response_fits(&maximum)
+    Some(maximum)
+}
+
+pub(crate) fn maximum_receipt_evidence_bytes_for_request(
+    config: &ObserverConfig,
+    config_sha256: &str,
+    implementation_sha256: &str,
+    request: &ObservationRequest,
+) -> Option<u64> {
+    let mut maximum = maximum_receipt(config, config_sha256, implementation_sha256)?;
+    maximum.observation_id = request.observation_id;
+    maximum.tenant_id = request.tenant_id;
+    maximum.project_id = request.project_id;
+    maximum.pipeline_id = request.pipeline_id;
+    maximum.build_id = request.build_id;
+    maximum.attempt_id = request.attempt_id;
+    maximum.effect_fence = request.effect_fence;
+    maximum.phase = request.phase;
+    maximum.predecessor_receipt_sha256 = request.predecessor_receipt_sha256.clone();
+    maximum.canonical_query = request.query.clone();
+    maximum.audit_provenance = request.audit_provenance.clone();
+    let evidence_bytes = serde_json::to_vec(&maximum).ok()?.len();
+    u64::try_from(evidence_bytes).ok()
+}
+
+fn maximum_receipt_envelope_fits(
+    config: &ObserverConfig,
+    config_sha256: &str,
+    implementation_sha256: &str,
+) -> bool {
+    maximum_receipt(config, config_sha256, implementation_sha256)
+        .is_some_and(|maximum| crate::standalone::observed_response_fits(&maximum))
 }
 
 fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize> {

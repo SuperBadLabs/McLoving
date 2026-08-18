@@ -780,6 +780,68 @@ async fn request_preflight_verifies_authority_time_and_deployment_without_destin
 }
 
 #[tokio::test]
+async fn preflight_reserves_receipt_and_evidence_capacity_atomically_until_expiry() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 1;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.expires_at_unix_ms = NOW + 1_000;
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    let first = rig.prepare(first);
+    let first_digest = observation_request_digest(&first).unwrap();
+    assert_eq!(
+        observer.preflight_request_at(&first, NOW).unwrap(),
+        first_digest
+    );
+    assert_eq!(
+        observer.preflight_request_at(&first, NOW).unwrap(),
+        first_digest
+    );
+
+    let mut second = rig.request(ObservationPhase::PreAction);
+    second.effect_fence = 18;
+    second.expected_config_sha256 = observer.config_sha256().to_owned();
+    let second = rig.prepare(second);
+    assert_eq!(
+        observer.preflight_request_at(&second, NOW),
+        Err(ObserverError::CapacityExceeded)
+    );
+
+    let later = NOW + 1_001;
+    let mut replacement = second;
+    replacement.requested_at_unix_ms = later - 1;
+    replacement.expires_at_unix_ms = later + 1_000;
+    let replacement = rig.prepare(replacement);
+    assert_eq!(
+        observer.preflight_request_at(&replacement, later).unwrap(),
+        observation_request_digest(&replacement).unwrap()
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
+
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let reserved: (u64, u64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(evidence_bytes), 0)
+             FROM observations WHERE status='pending'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(reserved.0, 1);
+    assert!(reserved.1 > 0);
+}
+
+#[tokio::test]
 async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     let rig = Rig::new().await;
     let pre_request = rig.prepare(rig.request(ObservationPhase::PreAction));
@@ -2539,7 +2601,7 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
     let mut config = rig.config.clone();
     config.state_dir = state.path().to_path_buf();
     config.limits.max_receipts = 2;
-    config.limits.max_evidence_bytes = 8 * 1024;
+    config.limits.max_evidence_bytes = 16 * 1024;
     let observer = rig.observer_for_config(config).unwrap();
 
     let mut first = rig.request(ObservationPhase::PreAction);
@@ -2565,9 +2627,8 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
 
     let first_bytes = serde_json::to_vec(&first_receipt).unwrap().len();
     let second_bytes = serde_json::to_vec(&second_receipt).unwrap().len();
-    assert!(first_bytes < 8 * 1024);
-    assert!(second_bytes < 8 * 1024);
-    assert!(first_bytes + second_bytes > 8 * 1024);
+    assert!(first_bytes < 16 * 1024);
+    assert!(second_bytes < 16 * 1024);
     let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
     let complete: u64 = connection
         .query_row(
@@ -2577,6 +2638,17 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
         )
         .unwrap();
     assert_eq!(complete, 1);
+    let retained_observation_id: String = connection
+        .query_row(
+            "SELECT observation_id FROM observations WHERE status='complete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retained_observation_id,
+        second_receipt.observation_id.to_string()
+    );
 }
 
 #[tokio::test]
