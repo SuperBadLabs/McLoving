@@ -1936,12 +1936,10 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
             signature_base64: "not-reached".into(),
         },
     };
-    let unavailable_service = PinnedServiceCommand {
-        executable: std::fs::canonicalize("/bin/false").unwrap(),
-        executable_sha256: "0".repeat(64),
-        arguments: Vec::new(),
-        timeout_millis: 1_000,
-    };
+    let root = tempfile::tempdir().unwrap();
+    let valid_service = pinned_effect_fixture(root.path());
+    let mut unavailable_observer = valid_service.clone();
+    unavailable_observer.executable_sha256 = "0".repeat(64);
     let plan = EffectExecutionPlan {
         schema_version: "mcloving.controller-effect-plan/v1".into(),
         freeze: EffectRuntimeFreeze {
@@ -1969,13 +1967,12 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
             expected_observer_id: "fixture-observer".into(),
             expected_shadow_identity: "fixture-shadow".into(),
         },
-        connector_service: unavailable_service.clone(),
-        observer_service: unavailable_service.clone(),
-        shadow_service: unavailable_service,
+        connector_service: valid_service.clone(),
+        observer_service: unavailable_observer,
+        shadow_service: valid_service,
         observation_request,
         audit_provenance: "effect-free-preflight-test".into(),
     };
-    let root = tempfile::tempdir().unwrap();
     let receipt = run_claim(
         &store,
         &claim,
@@ -1993,6 +1990,7 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
     .await
     .expect("pre-dispatch service substitution becomes a terminal failure");
     assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
     let effect: (String, i64) = sqlx::query_as(
         "SELECT status,
                 ((outcome_receipt IS NOT NULL)::int

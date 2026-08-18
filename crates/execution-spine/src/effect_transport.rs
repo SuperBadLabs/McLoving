@@ -56,7 +56,15 @@ pub async fn invoke_connector(
     service: &PinnedServiceCommand,
     command: ConnectorCommand,
 ) -> Result<OutcomeReceipt, EffectServiceError> {
-    match invoke::<_, ConnectorResponse>(service, &command).await? {
+    let service = validate_service_command(service).await?;
+    invoke_validated_connector(&service, command).await
+}
+
+async fn invoke_validated_connector(
+    service: &ValidatedServiceCommand,
+    command: ConnectorCommand,
+) -> Result<OutcomeReceipt, EffectServiceError> {
+    match invoke_validated::<_, ConnectorResponse>(service, &command).await? {
         ConnectorResponse::Ok { receipt } => Ok(*receipt),
         ConnectorResponse::Error { .. } => Err(EffectServiceError::ServiceFailed),
     }
@@ -66,10 +74,18 @@ pub async fn invoke_shadow(
     service: &PinnedServiceCommand,
     request: ShadowReplayRequest,
 ) -> Result<ShadowReplayReceipt, EffectServiceError> {
+    let service = validate_service_command(service).await?;
+    invoke_validated_shadow(&service, request).await
+}
+
+async fn invoke_validated_shadow(
+    service: &ValidatedServiceCommand,
+    request: ShadowReplayRequest,
+) -> Result<ShadowReplayReceipt, EffectServiceError> {
     let command = ShadowCommand::Replay {
         request: Box::new(request),
     };
-    match invoke::<_, ShadowResponse>(service, &command).await? {
+    match invoke_validated::<_, ShadowResponse>(service, &command).await? {
         ShadowResponse::Ok { receipt } => Ok(*receipt),
         ShadowResponse::Error { .. } => Err(EffectServiceError::ServiceFailed),
     }
@@ -79,8 +95,16 @@ pub async fn invoke_observer(
     service: &PinnedServiceCommand,
     request: ObservationRequest,
 ) -> Result<ObservationReceipt, EffectServiceError> {
+    let service = validate_service_command(service).await?;
+    invoke_validated_observer(&service, request).await
+}
+
+async fn invoke_validated_observer(
+    service: &ValidatedServiceCommand,
+    request: ObservationRequest,
+) -> Result<ObservationReceipt, EffectServiceError> {
     let command = ObserverCommand::Observe { request };
-    let response: ObserverClientResponse = invoke(service, &command).await?;
+    let response: ObserverClientResponse = invoke_validated(service, &command).await?;
     match response {
         ObserverClientResponse::Observed { receipt } => Ok(*receipt),
         ObserverClientResponse::Error { code, message } => {
@@ -90,6 +114,47 @@ pub async fn invoke_observer(
     }
 }
 
+pub(crate) struct ValidatedEffectServices {
+    connector: ValidatedServiceCommand,
+    observer: ValidatedServiceCommand,
+    shadow: ValidatedServiceCommand,
+}
+
+impl ValidatedEffectServices {
+    pub(crate) async fn invoke_connector(
+        &self,
+        command: ConnectorCommand,
+    ) -> Result<OutcomeReceipt, EffectServiceError> {
+        invoke_validated_connector(&self.connector, command).await
+    }
+
+    pub(crate) async fn invoke_observer(
+        &self,
+        request: ObservationRequest,
+    ) -> Result<ObservationReceipt, EffectServiceError> {
+        invoke_validated_observer(&self.observer, request).await
+    }
+
+    pub(crate) async fn invoke_shadow(
+        &self,
+        request: ShadowReplayRequest,
+    ) -> Result<ShadowReplayReceipt, EffectServiceError> {
+        invoke_validated_shadow(&self.shadow, request).await
+    }
+}
+
+pub(crate) async fn preflight_effect_services(
+    connector: &PinnedServiceCommand,
+    observer: &PinnedServiceCommand,
+    shadow: &PinnedServiceCommand,
+) -> Result<ValidatedEffectServices, EffectServiceError> {
+    Ok(ValidatedEffectServices {
+        connector: validate_service_command(connector).await?,
+        observer: validate_service_command(observer).await?,
+        shadow: validate_service_command(shadow).await?,
+    })
+}
+
 #[derive(serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum ObserverClientResponse {
@@ -97,12 +162,14 @@ enum ObserverClientResponse {
     Error { code: String, message: String },
 }
 
-async fn invoke<T, R>(service: &PinnedServiceCommand, request: &T) -> Result<R, EffectServiceError>
+async fn invoke_validated<T, R>(
+    service: &ValidatedServiceCommand,
+    request: &T,
+) -> Result<R, EffectServiceError>
 where
     T: Serialize,
     R: DeserializeOwned,
 {
-    let executable = validate_service(service).await?;
     let mut request_bytes =
         serde_json::to_vec(request).map_err(|_| EffectServiceError::InvalidResponse)?;
     if request_bytes.len() >= MAX_SERVICE_FRAME_BYTES {
@@ -110,9 +177,9 @@ where
     }
     request_bytes.push(b'\n');
 
-    let mut child = Command::new(executable.program());
+    let mut child = Command::new(service.executable.program());
     child
-        .args(&service.arguments)
+        .args(&service.command.arguments)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -121,7 +188,6 @@ where
     let mut child = child
         .spawn()
         .map_err(|_| EffectServiceError::ServiceFailed)?;
-    drop(executable);
     let mut stdin = child
         .stdin
         .take()
@@ -143,7 +209,7 @@ where
         Ok::<_, std::io::Error>((status, response))
     };
     let (status, response) = tokio::time::timeout(
-        std::time::Duration::from_millis(service.timeout_millis),
+        std::time::Duration::from_millis(service.command.timeout_millis),
         exchange,
     )
     .await
@@ -158,6 +224,20 @@ where
     let value: Value = mcloving_external_connector::parse_json_no_duplicates(response)
         .map_err(|_| EffectServiceError::InvalidResponse)?;
     serde_json::from_value(value).map_err(|_| EffectServiceError::InvalidResponse)
+}
+
+struct ValidatedServiceCommand {
+    command: PinnedServiceCommand,
+    executable: ValidatedServiceExecutable,
+}
+
+async fn validate_service_command(
+    service: &PinnedServiceCommand,
+) -> Result<ValidatedServiceCommand, EffectServiceError> {
+    Ok(ValidatedServiceCommand {
+        command: service.clone(),
+        executable: validate_service(service).await?,
+    })
 }
 
 #[cfg(target_os = "linux")]

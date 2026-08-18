@@ -9,6 +9,7 @@ pub use effect_runtime::{
     finalize_effect_shadow_join_as, mark_effect_uncertain, prepare_effect, record_effect_outcome,
     record_reconciled_effect_outcome,
 };
+use effect_transport::preflight_effect_services;
 pub use effect_transport::{
     EffectServiceError, PinnedServiceCommand, invoke_connector, invoke_observer, invoke_shadow,
 };
@@ -516,13 +517,13 @@ async fn run_effect_claim(
     renew_effect_lease(store, claim, config).await?;
     let renewal_interval = effect_renewal_interval(config);
     let effect = run_effect_claim_under_lease(store, claim, config, intent, plan);
-    tokio::pin!(effect);
-    loop {
-        tokio::select! {
-            result = &mut effect => return result,
-            () = tokio::time::sleep(renewal_interval) => {
-                renew_effect_lease(store, claim, config).await?;
-            }
+    let renewal = maintain_effect_lease(store, claim, config, renewal_interval);
+    tokio::pin!(effect, renewal);
+    tokio::select! {
+        result = &mut effect => result,
+        result = &mut renewal => {
+            result?;
+            Err(SpineError::StaleAuthority)
         }
     }
 }
@@ -607,14 +608,32 @@ async fn run_effect_claim_under_lease(
     }
     validate_observation_request(claim, accepted.project_id, pipeline_id, plan)?;
     let connector_service = bounded_connector_service(&plan.connector_service, intent)?;
-
-    let outcome = match invoke_connector(
+    let services = match preflight_effect_services(
         &connector_service,
-        ConnectorCommand::Execute {
-            request: Box::new(plan.freeze.action_request.clone()),
-        },
+        &plan.observer_service,
+        &plan.shadow_service,
     )
     .await
+    {
+        Ok(services) => services,
+        Err(error) => {
+            abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+            return finalize_effect_attempt(
+                store,
+                claim,
+                config,
+                TerminalOutcome::Failed,
+                json!({"reason": "effect_service_preflight_failed", "code": error.to_string()}),
+            )
+            .await;
+        }
+    };
+
+    let outcome = match services
+        .invoke_connector(ConnectorCommand::Execute {
+            request: Box::new(plan.freeze.action_request.clone()),
+        })
+        .await
     {
         Ok(outcome) => outcome,
         Err(error) if service_may_have_dispatched(&error) => {
@@ -650,15 +669,16 @@ async fn run_effect_claim_under_lease(
         return Err(SpineError::EffectReconciliationRequired);
     }
 
-    let observation =
-        match invoke_observer(&plan.observer_service, plan.observation_request.clone()).await {
-            Ok(observation) => observation,
-            Err(_) => {
-                route_effect_reconciliation(store, claim, config, &prepared, "observer_join")
-                    .await?;
-                return Err(SpineError::EffectReconciliationRequired);
-            }
-        };
+    let observation = match services
+        .invoke_observer(plan.observation_request.clone())
+        .await
+    {
+        Ok(observation) => observation,
+        Err(_) => {
+            route_effect_reconciliation(store, claim, config, &prepared, "observer_join").await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+    };
     if confirm_effect_observation(
         store,
         claim,
@@ -687,9 +707,8 @@ async fn run_effect_claim_under_lease(
             route_effect_reconciliation(store, claim, config, &prepared, "observer_state").await?;
             return Err(SpineError::EffectReconciliationRequired);
         };
-        let reconciled = match invoke_connector(
-            &connector_service,
-            ConnectorCommand::Reconcile {
+        let reconciled = match services
+            .invoke_connector(ConnectorCommand::Reconcile {
                 request: Box::new(ReconcileRequest {
                     schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
                     request_id: outcome.request_id,
@@ -700,9 +719,8 @@ async fn run_effect_claim_under_lease(
                     observation_receipt: observation.clone(),
                     audit_provenance: plan.audit_provenance.clone(),
                 }),
-            },
-        )
-        .await
+            })
+            .await
         {
             Ok(reconciled) => reconciled,
             Err(_) => {
@@ -753,9 +771,8 @@ async fn run_effect_claim_under_lease(
             return Err(SpineError::EffectReconciliationRequired);
         }
     };
-    let shadow = match invoke_shadow(
-        &plan.shadow_service,
-        ShadowReplayRequest {
+    let shadow = match services
+        .invoke_shadow(ShadowReplayRequest {
             schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
             replay_id: Uuid::new_v4(),
             expected_outcome_receipt_sha256: outcome_sha256,
@@ -763,9 +780,8 @@ async fn run_effect_claim_under_lease(
             outcome_receipt: effective_outcome.clone(),
             replayed_at_unix_ms: unix_time_millis()?,
             audit_provenance: plan.audit_provenance.clone(),
-        },
-    )
-    .await
+        })
+        .await
     {
         Ok(shadow) => shadow,
         Err(_) => {
@@ -938,7 +954,18 @@ fn effect_renewal_interval(config: &WorkerConfig) -> Duration {
             .unwrap_or(1)
             .max(1),
     )
-    .max(config.cancellation_poll)
+}
+
+async fn maintain_effect_lease(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    interval: Duration,
+) -> Result<(), SpineError> {
+    loop {
+        tokio::time::sleep(interval).await;
+        renew_effect_lease(store, claim, config).await?;
+    }
 }
 
 async fn renew_effect_lease(
@@ -1204,6 +1231,24 @@ mod tests {
                 .expect("bound service timeout")
                 .timeout_millis,
             2_000
+        );
+    }
+
+    #[test]
+    fn effect_renewal_is_capped_well_before_lease_expiry() {
+        let config = WorkerConfig {
+            agent_id: "renewal-test".into(),
+            session_epoch: 1,
+            workspace_root: PathBuf::from("/unused/workspace"),
+            journal_path: PathBuf::from("/unused/journal"),
+            cancellation_poll: Duration::from_millis(4_900),
+            lease_seconds: 5,
+            termination_grace: Duration::from_secs(1),
+            effect_plan: None,
+        };
+        assert_eq!(
+            effect_renewal_interval(&config),
+            Duration::from_millis(1_666)
         );
     }
 }

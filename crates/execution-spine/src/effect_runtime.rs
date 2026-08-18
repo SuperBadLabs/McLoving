@@ -486,6 +486,16 @@ fn validate_freeze(
         ))?;
     let fence = u64::try_from(claim.fence)
         .map_err(|_| EffectRuntimeError::InvalidBinding("negative effect fence"))?;
+    if !valid_distinct_role_keys([
+        &freeze.request_authority_public_key,
+        &freeze.connector_outcome_public_key,
+        &freeze.observer_receipt_public_key,
+        &freeze.shadow_replay_public_key,
+    ]) {
+        return Err(EffectRuntimeError::InvalidBinding(
+            "effect role signing keys",
+        ));
+    }
     verify_action_request(request, &freeze.request_authority_public_key)
         .map_err(|_| EffectRuntimeError::InvalidBinding("request signature"))?;
     if freeze.mapping_id != intent.mapping_id
@@ -527,6 +537,14 @@ fn validate_freeze(
         ));
     }
     Ok(())
+}
+
+fn valid_distinct_role_keys(keys: [&[u8]; 4]) -> bool {
+    keys.iter().all(|key| key.len() == 32)
+        && keys
+            .iter()
+            .enumerate()
+            .all(|(index, key)| keys[index + 1..].iter().all(|other| key != other))
 }
 
 fn validate_outcome(
@@ -734,4 +752,29 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_distinct_role_keys;
+
+    #[test]
+    fn effect_role_keys_are_structurally_valid_and_pairwise_distinct() {
+        let request = [1_u8; 32];
+        let outcome = [2_u8; 32];
+        let observer = [3_u8; 32];
+        let shadow = [4_u8; 32];
+        assert!(valid_distinct_role_keys([
+            &request, &outcome, &observer, &shadow
+        ]));
+        assert!(!valid_distinct_role_keys([
+            &request, &outcome, &outcome, &shadow
+        ]));
+        assert!(!valid_distinct_role_keys([
+            &request[..31],
+            &outcome,
+            &observer,
+            &shadow,
+        ]));
+    }
 }
