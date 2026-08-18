@@ -11,6 +11,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -34,12 +35,25 @@ def public_key_digest(openssl, key):
 def sign(openssl, key, domain, value):
     unsigned = dict(value)
     unsigned["signature_base64"] = ""
-    result = subprocess.run(
-        [openssl, "pkeyutl", "-sign", "-inkey", key, "-keyform", "DER", "-rawin"],
-        input=domain + b"\0" + compact(unsigned),
-        check=True,
-        capture_output=True,
-    )
+    with tempfile.NamedTemporaryFile() as message:
+        message.write(domain + b"\0" + compact(unsigned))
+        message.flush()
+        result = subprocess.run(
+            [
+                openssl,
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                key,
+                "-keyform",
+                "DER",
+                "-rawin",
+                "-in",
+                message.name,
+            ],
+            check=True,
+            capture_output=True,
+        )
     value["signature_base64"] = base64.b64encode(result.stdout).decode()
 
 
