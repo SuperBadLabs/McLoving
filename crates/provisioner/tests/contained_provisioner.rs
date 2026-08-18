@@ -1190,7 +1190,7 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
 
 #[tokio::test]
 async fn ambiguous_create_restart_orphan_and_agent_loss_reconcile() {
-    let context = Context::new(FixtureMode::MalformedCreateOnce).await;
+    let context = Context::with_startup_timeout(FixtureMode::MalformedCreateOnce, 5_000).await;
     let request = context.request();
     let ambiguous_receipt = context
         .provisioner
