@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 mcloving-agent-runtime = { version = "0.0.0", path = "../agent-runtime" }
 mcloving-controller-store = { version = "0.0.0", path = "../controller-store" }
+mcloving-destination-observer = { version = "0.0.0", path = "../destination-observer" }
+mcloving-external-connector = { version = "0.0.0", path = "../external-connector" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 sha2 = "=0.10.9"

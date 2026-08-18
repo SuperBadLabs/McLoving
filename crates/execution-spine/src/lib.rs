@@ -1,5 +1,12 @@
 //! The smallest truthful controller-to-agent execution spine.
 
+mod effect_runtime;
+
+pub use effect_runtime::{
+    EffectRuntimeError, EffectRuntimeFreeze, FreshOneActionGrant, PreparedEffect,
+    confirm_effect_observation, finalize_effect_shadow_join, prepare_effect, record_effect_outcome,
+};
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,7 +19,7 @@ use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Journal, JournalError, MAX_ATTEMPT_OUTPUT_BYTES, SpoolEntry,
 };
 use mcloving_controller_store::{ClaimedAttempt, NewLogChunk, Store, StoreError, TerminalOutcome};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -79,6 +86,8 @@ pub enum SpineError {
     StaleAuthority,
     #[error("execution specification must contain exactly one process step")]
     UnsupportedSpec,
+    #[error("connector intent requires a configured controller-owned effect runtime")]
+    EffectRuntimeUnavailable,
     #[error("numeric value cannot be represented by the durable protocol")]
     FenceOverflow,
     #[error("lease duration must be positive and exceed the cancellation poll interval")]
@@ -90,12 +99,19 @@ pub enum SpineError {
 #[derive(Deserialize)]
 struct ExecutionSpec {
     version: u16,
-    steps: Vec<ProcessSpec>,
+    steps: Vec<ExecutionStep>,
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExecutionStep {
+    Process(ProcessSpec),
+    ConnectorIntent(ConnectorIntentSpec),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProcessSpec {
-    kind: String,
     #[serde(default)]
     mode: ProcessMode,
     program: String,
@@ -104,6 +120,46 @@ struct ProcessSpec {
     #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
     timeout_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorIntentSpec {
+    pub mapping_id: String,
+    pub mapping_digest: String,
+    pub effect_class: ConnectorEffectClass,
+    pub effect_key_template: String,
+    pub public_input_schema: std::collections::BTreeMap<String, JsonFieldType>,
+    pub protected_secret_ref_schema: std::collections::BTreeMap<String, JsonFieldType>,
+    pub expected_public_result_schema: std::collections::BTreeMap<String, JsonFieldType>,
+    pub timeout_seconds: u64,
+    pub ambiguity_policy: AmbiguityPolicy,
+    pub downstream_control_digest: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorEffectClass {
+    Idempotent,
+    ExternallyIdempotent,
+    NonIdempotent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonFieldType {
+    Array,
+    Boolean,
+    Null,
+    Number,
+    Object,
+    String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbiguityPolicy {
+    ObserveThenReconcile,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -147,10 +203,13 @@ pub async fn run_claim(
     let payload_digest: [u8; 32] =
         Sha256::digest(serde_json::to_vec(&execution.execution_spec)?).into();
     let spec: ExecutionSpec = serde_json::from_value(execution.execution_spec)?;
-    if spec.version != 1 || spec.steps.len() != 1 || spec.steps[0].kind != "process" {
-        return Err(SpineError::UnsupportedSpec);
-    }
-    let process = &spec.steps[0];
+    let process = match (spec.version, spec.steps.as_slice()) {
+        (1, [ExecutionStep::Process(process)]) => process,
+        (2, [ExecutionStep::ConnectorIntent(_)]) => {
+            return Err(SpineError::EffectRuntimeUnavailable);
+        }
+        _ => return Err(SpineError::UnsupportedSpec),
+    };
     let database_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
     let journal_fence = journal_authority_token(claim.restore_epoch, claim.fence)?;
     let organization = claim.organization_id.to_string();
@@ -561,7 +620,13 @@ mod tests {
                 }]
             }))
             .expect("accept supported PowerShell wire spelling");
-            assert!(matches!(spec.steps[0].mode, ProcessMode::PowerShell));
+            assert!(matches!(
+                spec.steps[0],
+                ExecutionStep::Process(ProcessSpec {
+                    mode: ProcessMode::PowerShell,
+                    ..
+                })
+            ));
         }
 
         assert!(
@@ -576,5 +641,32 @@ mod tests {
             .is_err(),
             "unknown execution modes must remain fail-closed"
         );
+    }
+
+    #[test]
+    fn connector_intent_protocol_is_closed_and_never_accepts_authority_overrides() {
+        let spec = json!({
+            "version": 2,
+            "steps": [{
+                "kind": "connector_intent",
+                "mapping_id": "notification.v1",
+                "mapping_digest": format!("sha256:{}", "a".repeat(64)),
+                "effect_class": "externally_idempotent",
+                "effect_key_template": "build.notification",
+                "public_input_schema": {"message": "string"},
+                "protected_secret_ref_schema": {"token": "string"},
+                "expected_public_result_schema": {"delivery_id": "string"},
+                "timeout_seconds": 30,
+                "ambiguity_policy": "observe_then_reconcile",
+                "downstream_control_digest": format!("sha256:{}", "b".repeat(64)),
+            }]
+        });
+        let parsed: ExecutionSpec = serde_json::from_value(spec.clone()).expect("typed intent");
+        assert!(matches!(parsed.steps[0], ExecutionStep::ConnectorIntent(_)));
+        for forbidden in ["endpoint_url", "credential", "program"] {
+            let mut mutated = spec.clone();
+            mutated["steps"][0][forbidden] = json!("forbidden");
+            assert!(serde_json::from_value::<ExecutionSpec>(mutated).is_err());
+        }
     }
 }
