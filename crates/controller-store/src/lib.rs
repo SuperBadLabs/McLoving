@@ -169,6 +169,9 @@ pub const EFFECT_EVIDENCE_V30: &str = include_str!("../migrations/0030_effect_ev
 /// Explicit cleanup state for an undispatched observer reservation.
 pub const EFFECT_RELEASE_PENDING_V31: &str =
     include_str!("../migrations/0031_effect_release_pending.sql");
+/// Durable dispatch commitment before an external connector can be invoked.
+pub const EFFECT_DISPATCH_COMMIT_V32: &str =
+    include_str!("../migrations/0032_effect_dispatch_commit.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -1281,6 +1284,7 @@ impl Store {
         apply_migration(&mut tx, 29, DISCOVERY_V29).await?;
         apply_migration(&mut tx, 30, EFFECT_EVIDENCE_V30).await?;
         apply_migration(&mut tx, 31, EFFECT_RELEASE_PENDING_V31).await?;
+        apply_migration(&mut tx, 32, EFFECT_DISPATCH_COMMIT_V32).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3119,12 +3123,13 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
-        let existing = sqlx::query_as::<_, (String, String, Vec<u8>, bool)>(
+        let existing = sqlx::query_as::<_, (String, String, Vec<u8>, bool, bool)>(
             "SELECT effect_class, status, payload_digest,
                     outcome_receipt IS NOT NULL
                     OR reconciliation_receipt IS NOT NULL
                     OR observation_receipt IS NOT NULL
-                    OR shadow_replay_receipt IS NOT NULL AS has_evidence
+                    OR shadow_replay_receipt IS NOT NULL AS has_evidence,
+                    dispatch_committed_at IS NOT NULL AS dispatch_committed
              FROM attempt_effects
              WHERE organization_id = $1
                AND attempt_id = $2
@@ -3138,10 +3143,22 @@ impl Store {
         .bind(effect_key)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((existing_class, existing_status, existing_digest, has_evidence)) = existing {
+        if let Some((
+            existing_class,
+            existing_status,
+            existing_digest,
+            has_evidence,
+            dispatch_committed,
+        )) = existing
+        {
             let valid = existing_class == effect_class.as_str()
                 && existing_digest == payload_digest
                 && !(status == EffectStatus::Abandoned && has_evidence)
+                && !(dispatch_committed
+                    && matches!(
+                        status,
+                        EffectStatus::Abandoned | EffectStatus::ReleasePending
+                    ))
                 && valid_effect_transition(&existing_status, status);
             if !valid {
                 tx.rollback().await?;
@@ -3213,6 +3230,110 @@ impl Store {
         }
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// Atomically commits external dispatch while the exact fenced lease and
+    /// immutable prepared effect are still authoritative.
+    ///
+    /// The marker is written before the connector process can be invoked. A
+    /// crash or lease expiry after this commit must therefore reconcile the
+    /// effect rather than infer that it was never dispatched.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_effect_dispatch(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let build_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = build_id else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
+        let committed = sqlx::query_scalar::<_, bool>(
+            "UPDATE attempt_effects AS e
+             SET dispatch_committed_at = COALESCE(e.dispatch_committed_at, clock_timestamp()),
+                 updated_at = clock_timestamp()
+             FROM attempts AS a, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $6
+               AND e.effect_class = $7
+               AND e.status = 'prepared'
+               AND e.payload_digest = $8
+               AND e.outcome_receipt IS NULL
+               AND e.reconciliation_receipt IS NULL
+               AND e.observation_receipt IS NULL
+               AND e.shadow_replay_receipt IS NULL
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND a.fence = e.fence
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             RETURNING true",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(committed.unwrap_or(false))
     }
 
     /// Appends one immutable signed receipt to an existing fenced effect.

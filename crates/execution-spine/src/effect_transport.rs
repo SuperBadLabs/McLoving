@@ -48,6 +48,8 @@ pub enum EffectServiceError {
     AmbiguousTimeout,
     #[error("effect service process failed")]
     ServiceFailed,
+    #[error("destination observer definitively rejected verification: {0}")]
+    ObserverRejected(String),
     #[error("effect service could not be spawned before request dispatch")]
     SpawnFailed,
     #[error("effect service protocol response is invalid")]
@@ -156,8 +158,12 @@ impl ValidatedEffectServices {
             ObserverClientResponse::Observed { .. } => Err(EffectServiceError::InvalidResponse),
             ObserverClientResponse::Released { .. } => Err(EffectServiceError::InvalidResponse),
             ObserverClientResponse::Error { code, message } => {
-                let _ = (code, message);
-                Err(EffectServiceError::ServiceFailed)
+                let _ = message;
+                if observer_verify_rejection_is_definitive(&code) {
+                    Err(EffectServiceError::ObserverRejected(code))
+                } else {
+                    Err(EffectServiceError::ServiceFailed)
+                }
             }
         }
     }
@@ -221,6 +227,25 @@ impl ValidatedEffectServices {
     ) -> Result<ShadowReplayReceipt, EffectServiceError> {
         invoke_validated_shadow(&self.shadow, request).await
     }
+}
+
+fn observer_verify_rejection_is_definitive(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_config"
+            | "malformed_request"
+            | "oversized_request"
+            | "unauthorized_request"
+            | "binding_mismatch"
+            | "expired_request"
+            | "expired_grant"
+            | "runtime_fenced"
+            | "replay_mismatch"
+            | "observation_pending"
+            | "phase_mismatch"
+            | "capacity_exceeded"
+            | "invalid_receipt"
+    )
 }
 
 pub(crate) async fn preflight_effect_services(
@@ -559,6 +584,22 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observer_verify_rejections_distinguish_acknowledged_denials_from_ambiguity() {
+        for code in [
+            "malformed_request",
+            "unauthorized_request",
+            "binding_mismatch",
+            "expired_request",
+            "capacity_exceeded",
+        ] {
+            assert!(observer_verify_rejection_is_definitive(code), "{code}");
+        }
+        for code in ["state_unavailable", "destination_unavailable", "unknown"] {
+            assert!(!observer_verify_rejection_is_definitive(code), "{code}");
+        }
+    }
 
     #[test]
     fn response_framing_is_exactly_one_bounded_json_line() {

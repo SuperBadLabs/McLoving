@@ -4705,6 +4705,81 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     );
     assert!(first_prepare.expect("prepare effect"));
     assert!(concurrent_replay.expect("concurrent prepared replay"));
+    assert!(
+        !store
+            .commit_effect_dispatch(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "wrong-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("reject dispatch commit from non-owner")
+    );
+    assert!(
+        !store
+            .commit_effect_dispatch(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                &json!({"destination": "deploy/production", "release": "substituted"}),
+            )
+            .await
+            .expect("reject substituted dispatch commit")
+    );
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("commit dispatch under live fenced authority")
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT dispatch_committed_at IS NOT NULL
+             FROM attempt_effects
+             WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND effect_key=$4",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .bind(claim.fence)
+        .bind("deploy")
+        .fetch_one(store.pool())
+        .await
+        .expect("read durable dispatch commit")
+    );
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Abandoned,
+                &payload,
+            )
+            .await
+            .expect("dispatch commit forbids undispatched abandonment")
+    );
     let outcome_receipt = json!({
         "schema_version": "mcloving.external-outcome-receipt/v1",
         "request_sha256": "sha256:exact-request",

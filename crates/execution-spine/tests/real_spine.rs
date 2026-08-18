@@ -1772,6 +1772,55 @@ async fn dead_observer_release_session_routes_to_durable_reconciliation() {
 }
 
 #[tokio::test]
+async fn definitive_observer_verify_rejection_is_terminal_without_release() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-definitive-observer-verify-rejection",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "verify_rejected",
+        5_000,
+    );
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("acknowledged observer rejection is terminal");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(preflight_count(root.path()), 1);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(reservation_release_count(root.path()), 0);
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read definitive observer rejection state");
+    assert_eq!(state, ("failed".into(), "abandoned".into(), 0));
+}
+
+#[tokio::test]
 async fn ambiguous_observer_verify_failure_retains_release_reconciliation() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1915,8 +1964,8 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
     assert!(matches!(result, Err(SpineError::StaleAuthority)));
     assert_eq!(dispatch_count(root.path()), 0);
     assert_eq!(reservation_release_count(root.path()), 1);
-    let effect_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM attempt_effects
+    let effect_state = sqlx::query_as::<_, (String, bool)>(
+        "SELECT status, dispatch_committed_at IS NOT NULL FROM attempt_effects
          WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
     )
     .bind(organization_id)
@@ -1925,7 +1974,7 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
     .fetch_one(store.pool())
     .await
     .expect("read authority-loss release state");
-    assert_eq!(effect_status, "release_pending");
+    assert_eq!(effect_state, ("release_pending".into(), false));
     assert!(
         store
             .requeue_one_expired(organization_id)
@@ -1981,6 +2030,19 @@ async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
         .expect("renew short lease through connector, observer, and shadow joins");
     assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
     assert_eq!(dispatch_count(root.path()), 1);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT dispatch_committed_at IS NOT NULL
+             FROM attempt_effects
+             WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .bind(claim.fence)
+        .fetch_one(store.pool())
+        .await
+        .expect("read durable dispatch marker")
+    );
 }
 
 #[tokio::test]

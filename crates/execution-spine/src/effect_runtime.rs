@@ -135,6 +135,32 @@ pub async fn prepare_effect(
     })
 }
 
+/// Durably commits dispatch under the exact current fenced authority before
+/// the connector can be invoked.
+pub async fn commit_effect_dispatch(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    prepared: &PreparedEffect,
+) -> Result<(), EffectRuntimeError> {
+    if !store
+        .commit_effect_dispatch(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            agent_id,
+            &prepared.effect_key,
+            prepared.effect_class,
+            &prepared.payload,
+        )
+        .await?
+    {
+        return Err(EffectRuntimeError::StaleAuthority);
+    }
+    Ok(())
+}
+
 /// Close a prepared intent only when no dispatch or receipt was ever recorded.
 /// This is the cancellation path before the connector call begins.
 pub async fn abandon_prepared_effect(

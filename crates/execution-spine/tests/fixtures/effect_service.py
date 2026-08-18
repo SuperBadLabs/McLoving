@@ -93,6 +93,12 @@ def verify_observation_request(
         os.fsync(ledger.fileno())
     if "slow_preflight" in scenario:
         time.sleep(0.5)
+    if "verify_rejected" in scenario:
+        return {
+            "status": "error",
+            "code": "malformed_request",
+            "message": "fixture definitively rejected verification",
+        }
     unsigned = deepcopy(request)
     signature = base64.b64decode(unsigned["authorization"]["signature_base64"], validate=True)
     unsigned["authorization"]["signature_base64"] = ""

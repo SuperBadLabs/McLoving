@@ -5,9 +5,9 @@ mod effect_transport;
 
 pub use effect_runtime::{
     EffectRuntimeError, EffectRuntimeFreeze, FreshOneActionGrant, PreparedEffect,
-    abandon_prepared_effect, confirm_effect_observation, finalize_effect_shadow_join,
-    finalize_effect_shadow_join_as, mark_effect_release_pending, mark_effect_uncertain,
-    prepare_effect, record_effect_outcome, record_reconciled_effect_outcome,
+    abandon_prepared_effect, commit_effect_dispatch, confirm_effect_observation,
+    finalize_effect_shadow_join, finalize_effect_shadow_join_as, mark_effect_release_pending,
+    mark_effect_uncertain, prepare_effect, record_effect_outcome, record_reconciled_effect_outcome,
 };
 pub use effect_transport::{
     EffectServiceError, PinnedServiceCommand, invoke_connector, invoke_observer, invoke_shadow,
@@ -563,6 +563,7 @@ async fn run_effect_claim(
 const EFFECT_PREDISPATCH: u8 = 0;
 const EFFECT_DISPATCH_COMMITTED: u8 = 1;
 const EFFECT_RENEWAL_LOST: u8 = 2;
+const EFFECT_DISPATCH_COMMITTING: u8 = 3;
 
 async fn run_effect_claim_under_lease(
     store: &Store,
@@ -744,6 +745,20 @@ async fn run_effect_claim_under_lease(
         .verify_observer_request(plan.observation_request.clone())
         .await
     {
+        if matches!(&error, EffectServiceError::ObserverRejected(_)) {
+            abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+            return finalize_effect_attempt(
+                store,
+                claim,
+                config,
+                TerminalOutcome::Failed,
+                json!({
+                    "reason": "effect_observation_request_rejected",
+                    "code": error.to_string()
+                }),
+            )
+            .await;
+        }
         return finalize_reserved_pre_dispatch_exit(
             store,
             claim,
@@ -877,14 +892,12 @@ async fn run_effect_claim_under_lease(
         .await;
     }
 
-    // Linearize the local dispatch decision against lease-renewal failure. If
-    // renewal loses first, this future owns release plus durable cleanup. If
-    // dispatch commits first, the renewal branch waits for all evidence joins
-    // instead of dropping an in-flight effect future.
+    // Reserve the local commit state before the durable checkpoint. Holding the
+    // renewal gate prevents a renewal failure from racing this transition.
     if dispatch_state
         .compare_exchange(
             EFFECT_PREDISPATCH,
-            EFFECT_DISPATCH_COMMITTED,
+            EFFECT_DISPATCH_COMMITTING,
             Ordering::AcqRel,
             Ordering::Acquire,
         )
@@ -904,6 +917,27 @@ async fn run_effect_claim_under_lease(
         .await?;
         return Err(SpineError::StaleAuthority);
     }
+
+    // This is the durable dispatch commit. Once it succeeds, lease-expiry
+    // recovery must treat the connector as possibly dispatched even if this
+    // process is paused before the invocation below. The exact fenced lease
+    // and immutable prepared payload are checked in the same store transaction.
+    if let Err(error) = commit_effect_dispatch(store, claim, &config.agent_id, &prepared).await {
+        let released = services
+            .release_observer_request(plan.observation_request.clone())
+            .await
+            .is_ok();
+        persist_undispatched_release_disposition(
+            store,
+            claim,
+            &config.agent_id,
+            &prepared,
+            released,
+        )
+        .await?;
+        return Err(error.into());
+    }
+    dispatch_state.store(EFFECT_DISPATCH_COMMITTED, Ordering::Release);
     drop(dispatch_renewal_guard);
 
     let outcome = match services
@@ -913,25 +947,10 @@ async fn run_effect_claim_under_lease(
         .await
     {
         Ok(outcome) => outcome,
-        Err(error) if service_may_have_dispatched(&error) => {
+        Err(_) => {
             route_effect_reconciliation(store, claim, config, &prepared, "connector_dispatch")
                 .await?;
             return Err(SpineError::EffectReconciliationRequired);
-        }
-        Err(error) => {
-            return finalize_reserved_pre_dispatch_exit(
-                store,
-                claim,
-                config,
-                &prepared,
-                &services,
-                &plan.observation_request,
-                (
-                    TerminalOutcome::Failed,
-                    json!({"reason": "effect_service_preflight_failed", "code": error.to_string()}),
-                ),
-            )
-            .await;
         }
     };
     if record_effect_outcome(
@@ -1266,17 +1285,6 @@ fn action_request_covers_execution_window(
         .ok()
         .and_then(|required| now_unix_ms.checked_add(required))
         .is_some_and(|deadline| deadline <= request.expires_at_unix_ms)
-}
-
-fn service_may_have_dispatched(error: &EffectServiceError) -> bool {
-    matches!(
-        error,
-        EffectServiceError::AmbiguousTimeout
-            | EffectServiceError::ResponseTooLarge
-            | EffectServiceError::ServiceFailed
-            | EffectServiceError::InvalidResponse
-            | EffectServiceError::Io(_)
-    )
 }
 
 async fn route_effect_reconciliation(
