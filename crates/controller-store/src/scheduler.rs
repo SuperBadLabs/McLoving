@@ -623,7 +623,9 @@ impl Store {
                    OR payload ->> 'schema_version' =
                       'mcloving.controller-effect-prepared/v1'
                )
-               AND status IN ('prepared', 'applied', 'confirmed', 'uncertain')
+               AND status IN (
+                   'prepared', 'applied', 'confirmed', 'uncertain', 'release_pending'
+               )
              ORDER BY effect_key
              FOR UPDATE",
         )

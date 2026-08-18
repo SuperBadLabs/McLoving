@@ -3622,6 +3622,114 @@ impl Store {
         Ok(reconciled.is_some())
     }
 
+    /// Records the observer-release disposition for a definitively
+    /// undispatched effect after the exact worker authority is no longer live.
+    ///
+    /// The transition is restricted to zero-receipt runtime effects and is
+    /// rejected while the same fence/epoch/owner still has an executable lease
+    /// on the enabled admitted pipeline generation. This lets a stale worker
+    /// preserve cleanup truth without restoring execution authority.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_undispatched_release_after_authority_loss(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+        released: bool,
+    ) -> Result<bool, StoreError> {
+        if agent_id.is_empty()
+            || agent_id.len() > 256
+            || effect_key.is_empty()
+            || effect_key.len() > 256
+        {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let target_status = if released {
+            "abandoned"
+        } else {
+            "release_pending"
+        };
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let recorded = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE attempt_effects AS e
+             SET status = $9, updated_at = clock_timestamp()
+             FROM attempts AS a, nodes AS n, builds AS b, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $6
+               AND e.effect_class = $7
+               AND e.payload_digest = $8
+               AND (
+                   ($9 = 'abandoned' AND e.status IN (
+                       'prepared', 'uncertain', 'release_pending', 'abandoned'
+                   ))
+                   OR ($9 = 'release_pending' AND e.status IN (
+                       'prepared', 'uncertain', 'release_pending'
+                   ))
+               )
+               AND e.outcome_receipt IS NULL
+               AND e.reconciliation_receipt IS NULL
+               AND e.observation_receipt IS NULL
+               AND e.shadow_replay_receipt IS NULL
+               AND e.payload ->> 'schema_version' =
+                   'mcloving.controller-effect-prepared/v1'
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND n.organization_id = a.organization_id
+               AND n.id = a.node_id
+               AND b.organization_id = n.organization_id
+               AND b.id = n.build_id
+               AND m.singleton
+               AND NOT (
+                   a.fence = $3
+                   AND a.restore_epoch = $4
+                   AND a.restore_epoch = m.restore_epoch
+                   AND a.lease_owner = $5
+                   AND a.lease_expires_at > clock_timestamp()
+                   AND a.status IN (
+                       'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+                   )
+                   AND EXISTS (
+                       SELECT 1
+                       FROM pipeline_definitions AS d
+                       JOIN pipeline_operational_state_history AS h
+                         ON h.organization_id = d.organization_id
+                        AND h.pipeline_id = d.pipeline_id
+                        AND h.generation = d.operational_generation
+                       WHERE d.organization_id = b.organization_id
+                         AND d.pipeline_id = b.pipeline_id
+                         AND d.operational_generation =
+                             b.pipeline_operational_generation
+                         AND h.state = 'enabled'
+                   )
+               )
+             RETURNING e.attempt_id",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .bind(target_status)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(recorded.is_some())
+    }
+
     /// Abandons a definitively undispatched effect only after its observer
     /// reservation has expired according to the controller database clock.
     ///

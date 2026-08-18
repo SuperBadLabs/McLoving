@@ -732,14 +732,45 @@ async fn run_effect_claim_under_lease(
     {
         Ok(Some(execution)) => execution,
         Ok(None) => {
-            let _ = services
+            let released = services
                 .release_observer_request(plan.observation_request.clone())
-                .await;
+                .await
+                .is_ok();
+            if !store
+                .record_undispatched_release_after_authority_loss(
+                    claim.organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &config.agent_id,
+                    &prepared.effect_key,
+                    prepared.effect_class,
+                    &prepared.payload,
+                    released,
+                )
+                .await?
+            {
+                return Err(SpineError::EffectRuntimeUnavailable);
+            }
             return Err(SpineError::StaleAuthority);
         }
         Err(error) => {
-            let _ = services
+            let released = services
                 .release_observer_request(plan.observation_request.clone())
+                .await
+                .is_ok();
+            let _ = store
+                .record_undispatched_release_after_authority_loss(
+                    claim.organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &config.agent_id,
+                    &prepared.effect_key,
+                    prepared.effect_class,
+                    &prepared.payload,
+                    released,
+                )
                 .await;
             return Err(error.into());
         }

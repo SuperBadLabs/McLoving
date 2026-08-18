@@ -1769,6 +1769,94 @@ async fn dead_observer_release_session_routes_to_durable_reconciliation() {
 }
 
 #[tokio::test]
+async fn authority_loss_after_observer_verification_records_release_pending() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-authority-loss-after-observer-verification",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_preflight_release_session_exit",
+        5_000,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if preflight_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(preflight_count(root.path()), 1);
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at=clock_timestamp() - interval '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire authority while observer verification is in flight");
+    let result = tokio::time::timeout(Duration::from_secs(2), execution)
+        .await
+        .expect("authority-loss cleanup must not pin the worker")
+        .expect("worker task");
+    assert!(matches!(result, Err(SpineError::StaleAuthority)));
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(reservation_release_count(root.path()), 1);
+    let effect_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM attempt_effects
+         WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read authority-loss release state");
+    assert_eq!(effect_status, "release_pending");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route expired release-pending attempt")
+    );
+    let state: (String, String) = sqlx::query_as(
+        "SELECT a.status, e.status
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id=a.organization_id AND e.attempt_id=a.id
+         WHERE a.organization_id=$1 AND a.id=$2 AND e.fence=$3",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read expired release-pending reconciliation state");
+    assert_eq!(
+        state,
+        ("reconciliation_required".into(), "release_pending".into())
+    );
+}
+
+#[tokio::test]
 async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
