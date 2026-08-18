@@ -1369,7 +1369,7 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
 
 #[tokio::test]
 async fn final_inventory_substitution_is_reported_as_escaped_compute() {
-    let context = Context::new(FixtureMode::Ready).await;
+    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
     let request = context.request();
     context
         .provisioner
@@ -2215,7 +2215,7 @@ async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation()
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observation() {
-    let context = Context::new(FixtureMode::Ready).await;
+    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
     let request = context.request();
     let provisioned = context
         .provisioner
@@ -2442,7 +2442,7 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
 
 #[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
-    let context = Context::with_startup_timeout(FixtureMode::DelayedCreateReady, 5_000).await;
+    let context = Context::with_limits(FixtureMode::DelayedCreateReady, 4, 5_000, 5_000).await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
