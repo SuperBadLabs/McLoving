@@ -5,6 +5,7 @@ mod effect_runtime;
 pub use effect_runtime::{
     EffectRuntimeError, EffectRuntimeFreeze, FreshOneActionGrant, PreparedEffect,
     confirm_effect_observation, finalize_effect_shadow_join, prepare_effect, record_effect_outcome,
+    record_reconciled_effect_outcome,
 };
 
 use std::ffi::OsString;

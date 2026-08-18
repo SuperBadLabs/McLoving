@@ -320,6 +320,7 @@ pub enum EffectStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectEvidenceKind {
     Outcome,
+    ReconciliationOutcome,
     Observation,
     ShadowReplay,
 }
@@ -328,6 +329,9 @@ impl EffectEvidenceKind {
     fn columns(self) -> (&'static str, &'static str) {
         match self {
             Self::Outcome => ("outcome_receipt", "outcome_receipt_digest"),
+            Self::ReconciliationOutcome => {
+                ("reconciliation_receipt", "reconciliation_receipt_digest")
+            }
             Self::Observation => ("observation_receipt", "observation_receipt_digest"),
             Self::ShadowReplay => ("shadow_replay_receipt", "shadow_replay_receipt_digest"),
         }
@@ -3199,10 +3203,13 @@ impl Store {
             Option<Vec<u8>>,
             Option<Value>,
             Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
         );
         let existing = sqlx::query_as::<_, JoinRow>(
             "SELECT status,
                     outcome_receipt, outcome_receipt_digest,
+                    reconciliation_receipt, reconciliation_receipt_digest,
                     observation_receipt, observation_receipt_digest,
                     shadow_replay_receipt, shadow_replay_receipt_digest
              FROM attempt_effects
@@ -3222,6 +3229,8 @@ impl Store {
             status,
             outcome,
             outcome_digest,
+            reconciliation,
+            reconciliation_digest,
             observation,
             observation_digest,
             shadow,
@@ -3233,6 +3242,9 @@ impl Store {
         };
         let ordering_valid = match kind {
             EffectEvidenceKind::Outcome => true,
+            EffectEvidenceKind::ReconciliationOutcome => {
+                outcome_digest.is_some() && observation_digest.is_some() && status == "uncertain"
+            }
             EffectEvidenceKind::Observation => {
                 outcome_digest.is_some()
                     && matches!(status.as_str(), "applied" | "uncertain" | "confirmed")
@@ -3247,6 +3259,7 @@ impl Store {
         }
         let (existing_receipt, existing_digest) = match kind {
             EffectEvidenceKind::Outcome => (outcome, outcome_digest),
+            EffectEvidenceKind::ReconciliationOutcome => (reconciliation, reconciliation_digest),
             EffectEvidenceKind::Observation => (observation, observation_digest),
             EffectEvidenceKind::ShadowReplay => (shadow, shadow_digest),
         };
@@ -3298,10 +3311,13 @@ impl Store {
             Option<Vec<u8>>,
             Option<Value>,
             Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
         );
         let mut tx = self.tenant_transaction(organization_id).await?;
         let row = sqlx::query_as::<_, EvidenceRow>(
             "SELECT outcome_receipt, outcome_receipt_digest,
+                    reconciliation_receipt, reconciliation_receipt_digest,
                     observation_receipt, observation_receipt_digest,
                     shadow_replay_receipt, shadow_replay_receipt_digest
              FROM attempt_effects
@@ -3317,17 +3333,31 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
-        let Some((outcome, outcome_digest, observation, observation_digest, shadow, shadow_digest)) =
-            row
+        let Some((
+            outcome,
+            outcome_digest,
+            reconciliation,
+            reconciliation_digest,
+            observation,
+            observation_digest,
+            shadow,
+            shadow_digest,
+        )) = row
         else {
             return Ok(Vec::new());
         };
-        let mut evidence = Vec::with_capacity(3);
+        let mut evidence = Vec::with_capacity(4);
         push_effect_evidence(
             &mut evidence,
             EffectEvidenceKind::Outcome,
             outcome,
             outcome_digest,
+        )?;
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::ReconciliationOutcome,
+            reconciliation,
+            reconciliation_digest,
         )?;
         push_effect_evidence(
             &mut evidence,

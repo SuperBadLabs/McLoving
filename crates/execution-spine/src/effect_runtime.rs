@@ -3,7 +3,7 @@ use mcloving_controller_store::{
     TerminalOutcome,
 };
 use mcloving_destination_observer::{
-    ObservationPhase, ObservationReceipt, verify_observation_receipt,
+    ObservationPhase, ObservationReceipt, observation_receipt_digest, verify_observation_receipt,
 };
 use mcloving_external_connector::{
     ActionRequest, IdempotencyClass, OutcomeReceipt, OutcomeStatus, ShadowReplayReceipt,
@@ -211,6 +211,77 @@ pub async fn confirm_effect_observation(
             &receipt,
         )
         .await?
+    {
+        return Err(EffectRuntimeError::StaleAuthority);
+    }
+    if outcome.status == OutcomeStatus::Ambiguous || outcome.ambiguous_requires_observation {
+        return Ok(());
+    }
+    if !store
+        .checkpoint_effect(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            agent_id,
+            &prepared.effect_key,
+            prepared.effect_class,
+            EffectStatus::Confirmed,
+            &prepared.payload,
+        )
+        .await?
+    {
+        return Err(EffectRuntimeError::StaleAuthority);
+    }
+    Ok(())
+}
+
+/// Persist a reconciliation result without replacing the original ambiguous
+/// receipt, then confirm the already joined independent observation.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_reconciled_effect_outcome(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    agent_id: &str,
+    intent: &ConnectorIntentSpec,
+    freeze: &EffectRuntimeFreeze,
+    prepared: &PreparedEffect,
+    ambiguous: &OutcomeReceipt,
+    observation: &ObservationReceipt,
+    reconciled: &OutcomeReceipt,
+) -> Result<(), EffectRuntimeError> {
+    verify_outcome_receipt(reconciled, &freeze.connector_outcome_public_key)
+        .map_err(|_| EffectRuntimeError::InvalidOutcome)?;
+    validate_outcome(claim, intent, freeze, prepared, reconciled)?;
+    if ambiguous.status != OutcomeStatus::Ambiguous
+        || !ambiguous.ambiguous_requires_observation
+        || reconciled.status == OutcomeStatus::Ambiguous
+        || reconciled.ambiguous_requires_observation
+        || reconciled.evidence_sequence <= ambiguous.evidence_sequence
+        || reconciled.request_id != ambiguous.request_id
+        || reconciled.request_sha256 != ambiguous.request_sha256
+        || reconciled.observation_receipt_sha256.as_deref()
+            != Some(
+                observation_receipt_digest(observation)
+                    .map_err(|_| EffectRuntimeError::InvalidObservation)?
+                    .as_str(),
+            )
+    {
+        return Err(EffectRuntimeError::InvalidOutcome);
+    }
+    let receipt = serde_json::to_value(reconciled)?;
+    if !store
+        .append_effect_evidence(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            agent_id,
+            &prepared.effect_key,
+            EffectEvidenceKind::ReconciliationOutcome,
+            &receipt,
+        )
+        .await?
         || !store
             .checkpoint_effect(
                 claim.organization_id,
@@ -268,7 +339,11 @@ pub async fn finalize_effect_shadow_join(
             &prepared.effect_key,
         )
         .await?;
-    if evidence.len() != 3 {
+    let has_reconciliation = evidence
+        .iter()
+        .any(|item| item.kind == EffectEvidenceKind::ReconciliationOutcome);
+    let expected_evidence = if has_reconciliation { 4 } else { 3 };
+    if evidence.len() != expected_evidence {
         return Err(EffectRuntimeError::InvalidBinding(
             "incomplete effect evidence join",
         ));

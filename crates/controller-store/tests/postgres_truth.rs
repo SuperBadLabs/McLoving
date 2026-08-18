@@ -4327,6 +4327,78 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .await
             .expect("mark uncertain")
     );
+    let reconciliation_receipt = json!({
+        "schema_version": "mcloving.external-outcome-receipt/v1",
+        "request_sha256": "sha256:exact-request",
+        "evidence_sequence": 2,
+        "signature_base64": "signed-reconciliation",
+    });
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::ReconciliationOutcome,
+                &reconciliation_receipt,
+            )
+            .await
+            .expect("reject reconciliation before observation")
+    );
+    let observation_receipt = json!({
+        "schema_version": "mcloving.destination-observation-receipt/v1",
+        "phase": "reconciliation",
+        "signature_base64": "signed-observation",
+    });
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Observation,
+                &observation_receipt,
+            )
+            .await
+            .expect("append reconciliation observation")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::ReconciliationOutcome,
+                &reconciliation_receipt,
+            )
+            .await
+            .expect("append reconciliation outcome")
+    );
+    let joined_evidence = store
+        .effect_evidence(organization_id, admission.attempt_id, claim.fence, "deploy")
+        .await
+        .expect("load ambiguity evidence join");
+    assert_eq!(joined_evidence.len(), 3);
+    assert_eq!(
+        joined_evidence
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            EffectEvidenceKind::Outcome,
+            EffectEvidenceKind::ReconciliationOutcome,
+            EffectEvidenceKind::Observation,
+        ]
+    );
     assert!(
         !store
             .checkpoint_effect(
