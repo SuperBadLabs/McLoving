@@ -21,8 +21,9 @@ use mcloving_agent_protocol::{
     WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
-    ApiState, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
-    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
+    ApiState, ConnectorMappingCatalog, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
+    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
+    OidcClientConfig, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -83,6 +84,18 @@ async fn main() -> Result<()> {
     let artifact_agent_digest: [u8; 32] = Sha256::digest(artifact_agent_token.as_bytes()).into();
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
+    let connector_mapping_catalog = connector_mapping_catalog_from_environment()?;
+    match (&worker.config.effect_plan, &connector_mapping_catalog) {
+        (Some(plan), Some(catalog))
+            if catalog.contains_exact(&plan.freeze.mapping_id, &plan.freeze.mapping_digest) => {}
+        (Some(_), Some(_)) => {
+            bail!("effect runtime plan is not admitted by the exact connector mapping catalog")
+        }
+        (Some(_), None) => {
+            bail!("MCLOVING_EFFECT_MAPPING_CATALOG is required with an effect runtime plan")
+        }
+        (None, _) => {}
+    }
     let oidc = oidc_environment(worker.organization_id)?;
     let object_root = PathBuf::from(
         std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
@@ -135,6 +148,11 @@ async fn main() -> Result<()> {
         .await
         .context("preflight PostgreSQL runtime tenant access")?;
     let mut state = ApiState::new_durable(store.clone());
+    if let Some(catalog) = connector_mapping_catalog {
+        state = state
+            .with_connector_mapping_catalog(catalog)
+            .context("configure connector mapping admission catalog")?;
+    }
     if let Some(oidc) = &oidc {
         state = state
             .with_oidc_client(oidc.client.clone())
@@ -1554,6 +1572,61 @@ fn effect_plan_from_environment() -> Result<Option<EffectExecutionPlan>> {
     mcloving_external_connector::parse_json_no_duplicates(&bytes)
         .context("parse strict effect runtime plan")
         .map(Some)
+}
+
+fn connector_mapping_catalog_from_environment() -> Result<Option<ConnectorMappingCatalog>> {
+    let path = match std::env::var("MCLOVING_EFFECT_MAPPING_CATALOG") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_EFFECT_MAPPING_CATALOG must not be empty"),
+        Err(std::env::VarError::NotPresent) => {
+            if std::env::var_os("MCLOVING_EFFECT_MAPPING_CATALOG_SHA256").is_some() {
+                bail!(
+                    "MCLOVING_EFFECT_MAPPING_CATALOG_SHA256 requires MCLOVING_EFFECT_MAPPING_CATALOG"
+                );
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read MCLOVING_EFFECT_MAPPING_CATALOG"),
+    };
+    if !path.is_absolute() {
+        bail!("MCLOVING_EFFECT_MAPPING_CATALOG must be an absolute path");
+    }
+    let expected_digest = required("MCLOVING_EFFECT_MAPPING_CATALOG_SHA256")?;
+    if expected_digest.len() != 64
+        || !expected_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("MCLOVING_EFFECT_MAPPING_CATALOG_SHA256 must be lowercase SHA-256 hex");
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect connector mapping catalog {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("connector mapping catalog must be a bounded regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            bail!("connector mapping catalog must not be writable by group or other users");
+        }
+    }
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read connector mapping catalog {}", path.display()))?;
+    let actual_digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual_digest != expected_digest {
+        bail!("connector mapping catalog digest does not match deployment configuration");
+    }
+    let catalog: ConnectorMappingCatalog =
+        mcloving_external_connector::parse_json_no_duplicates(&bytes)
+            .context("parse strict connector mapping catalog")?;
+    catalog
+        .validate()
+        .context("validate connector mapping catalog")?;
+    Ok(Some(catalog))
 }
 
 fn parse_positive<T>(name: &str) -> Result<T>
