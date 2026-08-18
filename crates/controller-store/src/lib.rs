@@ -3191,25 +3191,64 @@ impl Store {
                 other => Err(other),
             };
         }
-        let query = format!(
-            "SELECT {receipt_column}, {digest_column}
+        type JoinRow = (
+            String,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+        );
+        let existing = sqlx::query_as::<_, JoinRow>(
+            "SELECT status,
+                    outcome_receipt, outcome_receipt_digest,
+                    observation_receipt, observation_receipt_digest,
+                    shadow_replay_receipt, shadow_replay_receipt_digest
              FROM attempt_effects
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
                AND effect_key = $4
-             FOR UPDATE"
-        );
-        let existing = sqlx::query_as::<_, (Option<Value>, Option<Vec<u8>>)>(&query)
-            .bind(organization_id)
-            .bind(attempt_id)
-            .bind(fence)
-            .bind(effect_key)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some((existing_receipt, existing_digest)) = existing else {
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((
+            status,
+            outcome,
+            outcome_digest,
+            observation,
+            observation_digest,
+            shadow,
+            shadow_digest,
+        )) = existing
+        else {
             tx.rollback().await?;
             return Ok(false);
+        };
+        let ordering_valid = match kind {
+            EffectEvidenceKind::Outcome => true,
+            EffectEvidenceKind::Observation => {
+                outcome_digest.is_some()
+                    && matches!(status.as_str(), "applied" | "uncertain" | "confirmed")
+            }
+            EffectEvidenceKind::ShadowReplay => {
+                observation_digest.is_some() && status == "confirmed"
+            }
+        };
+        if !ordering_valid {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let (existing_receipt, existing_digest) = match kind {
+            EffectEvidenceKind::Outcome => (outcome, outcome_digest),
+            EffectEvidenceKind::Observation => (observation, observation_digest),
+            EffectEvidenceKind::ShadowReplay => (shadow, shadow_digest),
         };
         if let Some(existing_digest) = existing_digest {
             let exact =

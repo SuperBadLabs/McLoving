@@ -5,9 +5,9 @@ use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, BuildAdmission, ClaimRequest, ComponentPutOutcome,
     ComponentWrite, DagAdmission, DagDependency, DagNodeKind, DependencyCondition, EffectClass,
-    EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
-    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
-    ObjectStatus, PipelinePutOutcome, PipelineRecord, PipelineWrite,
+    EffectEvidenceKind, EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent,
+    NewBuild, NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk,
+    ObjectKind, ObjectStatus, PipelinePutOutcome, PipelineRecord, PipelineWrite,
     ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
     TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
@@ -4239,6 +4239,78 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     );
     assert!(first_prepare.expect("prepare effect"));
     assert!(concurrent_replay.expect("concurrent prepared replay"));
+    let outcome_receipt = json!({
+        "schema_version": "mcloving.external-outcome-receipt/v1",
+        "request_sha256": "sha256:exact-request",
+        "signature_base64": "signed-outcome",
+    });
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "wrong-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome_receipt,
+            )
+            .await
+            .expect("reject outcome from non-owner")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome_receipt,
+            )
+            .await
+            .expect("append outcome receipt")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome_receipt,
+            )
+            .await
+            .expect("replay exact outcome receipt")
+    );
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &json!({"signature_base64": "substituted"}),
+            )
+            .await
+            .expect("reject substituted outcome receipt")
+    );
+    let evidence = store
+        .effect_evidence(organization_id, admission.attempt_id, claim.fence, "deploy")
+        .await
+        .expect("load effect evidence");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].kind, EffectEvidenceKind::Outcome);
+    assert_eq!(evidence[0].receipt, outcome_receipt);
     assert!(
         store
             .checkpoint_effect(
