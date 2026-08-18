@@ -9,6 +9,7 @@ boundary.  The three Ed25519 PKCS#8 keys are supplied by the test deployment.
 import base64
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -80,15 +81,21 @@ def observation_digest(request):
     ).hexdigest()
 
 
-def connector_response(command, openssl, outcome_key):
-    if command.get("command") != "execute":
-        raise ValueError("only execute is supported by the positive fixture")
-    request = command["request"]
+def append_dispatch(ledger, request_id):
+    descriptor = os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(descriptor, (request_id + "\n").encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def outcome_receipt(request, openssl, outcome_key, evidence_sequence=1):
     now = int(time.time() * 1000)
     receipt = {
         "schema_version": "mcloving.external-outcome-receipt/v1",
         "protocol_version": "mcloving.external-connector/v1",
-        "evidence_sequence": 1,
+        "evidence_sequence": evidence_sequence,
         "request_id": request["request_id"],
         "request_sha256": action_digest(request),
         "tenant_id": request["tenant_id"],
@@ -145,6 +152,41 @@ def connector_response(command, openssl, outcome_key):
         "outcome_signing_public_key_sha256": public_key_digest(openssl, outcome_key),
         "signature_base64": "",
     }
+    return receipt
+
+
+def connector_response(command, openssl, outcome_key, scenario, state_path, ledger):
+    operation = command.get("command")
+    if operation == "execute":
+        request = command["request"]
+        append_dispatch(ledger, request["request_id"])
+        with open(state_path, "w", encoding="utf-8") as output:
+            json.dump(request, output, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        if scenario in ("timeout_after_dispatch", "crash_after_dispatch"):
+            time.sleep(5)
+        receipt = outcome_receipt(request, openssl, outcome_key)
+        if scenario == "ambiguous_then_reconcile":
+            receipt["status"] = "ambiguous"
+            receipt["status_code"] = "fixture_ambiguous"
+            receipt["ambiguous_requires_observation"] = True
+        elif scenario == "substituted_connector_response":
+            receipt["attempt_id"] = "00000000-0000-0000-0000-000000000000"
+    elif operation == "reconcile":
+        if scenario != "ambiguous_then_reconcile":
+            raise ValueError("unexpected reconciliation command")
+        with open(state_path, "r", encoding="utf-8") as source:
+            request = json.load(source)
+        reconcile = command["request"]
+        receipt = outcome_receipt(request, openssl, outcome_key, evidence_sequence=2)
+        observation = reconcile["observation_receipt"]
+        receipt["observation_receipt_sha256"] = hashlib.sha256(
+            observer_frame(b"mcloving-observer-receipt-digest-v1", observation)
+        ).hexdigest()
+        receipt["status_code"] = "fixture_reconciled"
+    else:
+        raise ValueError("unsupported connector operation")
     sign(
         openssl,
         outcome_key,
@@ -155,7 +197,7 @@ def connector_response(command, openssl, outcome_key):
     return {"status": "ok", "receipt": receipt}
 
 
-def observer_response(command, openssl, observer_key):
+def observer_response(command, openssl, observer_key, scenario):
     if command.get("operation") != "observe":
         raise ValueError("only observe is supported by the positive fixture")
     request = command["request"]
@@ -213,6 +255,8 @@ def observer_response(command, openssl, observer_key):
         "receipt_signing_public_key_sha256": public_key_digest(openssl, observer_key),
         "signature_base64": "",
     }
+    if scenario == "substituted_observer_response":
+        receipt["attempt_id"] = "00000000-0000-0000-0000-000000000000"
     sign(
         openssl,
         observer_key,
@@ -223,7 +267,7 @@ def observer_response(command, openssl, observer_key):
     return {"status": "observed", "receipt": receipt}
 
 
-def shadow_response(command, openssl, shadow_key):
+def shadow_response(command, openssl, shadow_key, scenario):
     if command.get("command") != "replay":
         raise ValueError("only replay is supported by the positive fixture")
     request = command["request"]
@@ -258,6 +302,8 @@ def shadow_response(command, openssl, shadow_key):
         "replay_signing_public_key_sha256": public_key_digest(openssl, shadow_key),
         "signature_base64": "",
     }
+    if scenario == "substituted_shadow_response":
+        receipt["attempt_id"] = "00000000-0000-0000-0000-000000000000"
     sign(
         openssl,
         shadow_key,
@@ -269,16 +315,31 @@ def shadow_response(command, openssl, shadow_key):
 
 
 def main():
-    if len(sys.argv) != 6:
-        raise ValueError("expected openssl, three role-key paths, and a diagnostic path")
-    openssl, outcome_key, observer_key, shadow_key, _diagnostic = sys.argv[1:]
+    if len(sys.argv) != 9:
+        raise ValueError(
+            "expected openssl, three role-key paths, diagnostic, scenario, state, and ledger paths"
+        )
+    (
+        openssl,
+        outcome_key,
+        observer_key,
+        shadow_key,
+        _diagnostic,
+        scenario_path,
+        state_path,
+        ledger,
+    ) = sys.argv[1:]
+    with open(scenario_path, "r", encoding="utf-8") as source:
+        scenario = source.read().strip()
     command = json.loads(sys.stdin.readline())
     if "operation" in command:
-        response = observer_response(command, openssl, observer_key)
+        response = observer_response(command, openssl, observer_key, scenario)
     elif command.get("command") == "replay":
-        response = shadow_response(command, openssl, shadow_key)
+        response = shadow_response(command, openssl, shadow_key, scenario)
     else:
-        response = connector_response(command, openssl, outcome_key)
+        response = connector_response(
+            command, openssl, outcome_key, scenario, state_path, ledger
+        )
     sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
 
 
@@ -286,7 +347,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        if len(sys.argv) == 6:
+        if len(sys.argv) == 9:
             with open(sys.argv[5], "w", encoding="utf-8") as output:
                 output.write(repr(error))
         raise

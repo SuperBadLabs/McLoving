@@ -604,7 +604,7 @@ async fn run_effect_claim(
             .await;
         }
     };
-    record_effect_outcome(
+    if record_effect_outcome(
         store,
         claim,
         &config.agent_id,
@@ -613,7 +613,12 @@ async fn run_effect_claim(
         &prepared,
         &outcome,
     )
-    .await?;
+    .await
+    .is_err()
+    {
+        route_effect_reconciliation(store, claim, config, &prepared, "connector_outcome").await?;
+        return Err(SpineError::EffectReconciliationRequired);
+    }
 
     let observation =
         match invoke_observer(&plan.observer_service, plan.observation_request.clone()).await {
@@ -624,7 +629,7 @@ async fn run_effect_claim(
                 return Err(SpineError::EffectReconciliationRequired);
             }
         };
-    confirm_effect_observation(
+    if confirm_effect_observation(
         store,
         claim,
         &config.agent_id,
@@ -633,64 +638,90 @@ async fn run_effect_claim(
         &outcome,
         &observation,
     )
-    .await?;
+    .await
+    .is_err()
+    {
+        route_effect_reconciliation(store, claim, config, &prepared, "observer_outcome").await?;
+        return Err(SpineError::EffectReconciliationRequired);
+    }
 
-    let effective_outcome =
-        if outcome.status == OutcomeStatus::Ambiguous || outcome.ambiguous_requires_observation {
-            let observed_effect = observation
-                .state
-                .get("effect_observed")
-                .and_then(Value::as_bool)
-                .ok_or(SpineError::EffectReconciliationRequired)?;
-            let reconciled = match invoke_connector(
-                &plan.connector_service,
-                ConnectorCommand::Reconcile {
-                    request: Box::new(ReconcileRequest {
-                        schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
-                        request_id: outcome.request_id,
-                        expected_request_sha256: outcome.request_sha256.clone(),
-                        expected_ambiguous_receipt_sha256: outcome_receipt_digest(&outcome)
-                            .map_err(|_| SpineError::EffectReconciliationRequired)?,
-                        observed_effect,
-                        observation_receipt: observation.clone(),
-                        audit_provenance: plan.audit_provenance.clone(),
-                    }),
-                },
-            )
-            .await
-            {
-                Ok(reconciled) => reconciled,
-                Err(_) => {
-                    route_effect_reconciliation(
-                        store,
-                        claim,
-                        config,
-                        &prepared,
-                        "connector_reconciliation",
-                    )
-                    .await?;
-                    return Err(SpineError::EffectReconciliationRequired);
-                }
-            };
-            record_reconciled_effect_outcome(
+    let effective_outcome = if outcome.status == OutcomeStatus::Ambiguous
+        || outcome.ambiguous_requires_observation
+    {
+        let Some(observed_effect) = observation
+            .state
+            .get("effect_observed")
+            .and_then(Value::as_bool)
+        else {
+            route_effect_reconciliation(store, claim, config, &prepared, "observer_state").await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        };
+        let reconciled = match invoke_connector(
+            &plan.connector_service,
+            ConnectorCommand::Reconcile {
+                request: Box::new(ReconcileRequest {
+                    schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                    request_id: outcome.request_id,
+                    expected_request_sha256: outcome.request_sha256.clone(),
+                    expected_ambiguous_receipt_sha256: outcome_receipt_digest(&outcome)
+                        .map_err(|_| SpineError::EffectReconciliationRequired)?,
+                    observed_effect,
+                    observation_receipt: observation.clone(),
+                    audit_provenance: plan.audit_provenance.clone(),
+                }),
+            },
+        )
+        .await
+        {
+            Ok(reconciled) => reconciled,
+            Err(_) => {
+                route_effect_reconciliation(
+                    store,
+                    claim,
+                    config,
+                    &prepared,
+                    "connector_reconciliation",
+                )
+                .await?;
+                return Err(SpineError::EffectReconciliationRequired);
+            }
+        };
+        if record_reconciled_effect_outcome(
+            store,
+            claim,
+            &config.agent_id,
+            intent,
+            &plan.freeze,
+            &prepared,
+            &outcome,
+            &observation,
+            &reconciled,
+        )
+        .await
+        .is_err()
+        {
+            route_effect_reconciliation(
                 store,
                 claim,
-                &config.agent_id,
-                intent,
-                &plan.freeze,
+                config,
                 &prepared,
-                &outcome,
-                &observation,
-                &reconciled,
+                "connector_reconciliation_outcome",
             )
             .await?;
-            reconciled
-        } else {
-            outcome
-        };
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+        reconciled
+    } else {
+        outcome
+    };
 
-    let outcome_sha256 = outcome_receipt_digest(&effective_outcome)
-        .map_err(|_| SpineError::EffectReconciliationRequired)?;
+    let outcome_sha256 = match outcome_receipt_digest(&effective_outcome) {
+        Ok(digest) => digest,
+        Err(_) => {
+            route_effect_reconciliation(store, claim, config, &prepared, "shadow_request").await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+    };
     let shadow = match invoke_shadow(
         &plan.shadow_service,
         ShadowReplayRequest {
@@ -722,7 +753,7 @@ async fn run_effect_claim(
         .await?
         .ok_or(SpineError::StaleAuthority)?
         .cancellation_requested;
-    let terminal = finalize_effect_shadow_join_as(
+    let terminal = match finalize_effect_shadow_join_as(
         store,
         claim,
         &config.agent_id,
@@ -732,7 +763,14 @@ async fn run_effect_claim(
         &shadow,
         cancellation_requested.then_some(TerminalOutcome::Aborted),
     )
-    .await?;
+    .await
+    {
+        Ok(terminal) => terminal,
+        Err(_) => {
+            route_effect_reconciliation(store, claim, config, &prepared, "shadow_outcome").await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+    };
     Ok(RunReceipt {
         build_id: claim.build_id,
         attempt_id: claim.attempt_id,

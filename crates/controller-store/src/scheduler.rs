@@ -618,7 +618,11 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND effect_class = 'non_idempotent'
+               AND (
+                   effect_class = 'non_idempotent'
+                   OR payload ->> 'schema_version' =
+                      'mcloving.controller-effect-prepared/v1'
+               )
                AND status IN ('prepared', 'applied', 'confirmed', 'uncertain')
              ORDER BY effect_key
              FOR UPDATE",
@@ -634,7 +638,11 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND effect_class = 'non_idempotent'
+               AND (
+                   effect_class = 'non_idempotent'
+                   OR payload ->> 'schema_version' =
+                      'mcloving.controller-effect-prepared/v1'
+               )
                AND status IN ('prepared', 'applied')",
         )
         .bind(organization_id)
