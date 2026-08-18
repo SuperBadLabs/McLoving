@@ -19,8 +19,13 @@ def compact(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def digest(domain, value):
-    return hashlib.sha256(domain + b"\0" + compact(value)).hexdigest()
+def connector_frame(domain, value):
+    encoded = compact(value)
+    return len(domain).to_bytes(8, "big") + domain + len(encoded).to_bytes(8, "big") + encoded
+
+
+def observer_frame(domain, value):
+    return domain + b"\0" + compact(value)
 
 
 def public_key_digest(openssl, key):
@@ -32,11 +37,11 @@ def public_key_digest(openssl, key):
     return hashlib.sha256(result.stdout[-32:]).hexdigest()
 
 
-def sign(openssl, key, domain, value):
+def sign(openssl, key, domain, value, frame):
     unsigned = dict(value)
     unsigned["signature_base64"] = ""
     with tempfile.NamedTemporaryFile() as message:
-        message.write(domain + b"\0" + compact(unsigned))
+        message.write(frame(domain, unsigned))
         message.flush()
         result = subprocess.run(
             [
@@ -61,14 +66,18 @@ def action_digest(request):
     unsigned = dict(request)
     unsigned["authorization"] = dict(request["authorization"])
     unsigned["authorization"]["signature_base64"] = ""
-    return digest(b"mcloving-external-action-request-v1", unsigned)
+    return hashlib.sha256(
+        connector_frame(b"mcloving-external-action-request-v1", unsigned)
+    ).hexdigest()
 
 
 def observation_digest(request):
     unsigned = dict(request)
     unsigned["authorization"] = dict(request["authorization"])
     unsigned["authorization"]["signature_base64"] = ""
-    return digest(b"mcloving-destination-observation-request-v1", unsigned)
+    return hashlib.sha256(
+        observer_frame(b"mcloving-destination-observation-request-v1", unsigned)
+    ).hexdigest()
 
 
 def connector_response(command, openssl, outcome_key):
@@ -136,7 +145,13 @@ def connector_response(command, openssl, outcome_key):
         "outcome_signing_public_key_sha256": public_key_digest(openssl, outcome_key),
         "signature_base64": "",
     }
-    sign(openssl, outcome_key, b"mcloving-external-outcome-receipt-v1", receipt)
+    sign(
+        openssl,
+        outcome_key,
+        b"mcloving-external-outcome-receipt-v1",
+        receipt,
+        connector_frame,
+    )
     return {"status": "ok", "receipt": receipt}
 
 
@@ -198,7 +213,13 @@ def observer_response(command, openssl, observer_key):
         "receipt_signing_public_key_sha256": public_key_digest(openssl, observer_key),
         "signature_base64": "",
     }
-    sign(openssl, observer_key, b"mcloving-destination-observation-receipt-v1", receipt)
+    sign(
+        openssl,
+        observer_key,
+        b"mcloving-destination-observation-receipt-v1",
+        receipt,
+        observer_frame,
+    )
     return {"status": "observed", "receipt": receipt}
 
 
@@ -237,7 +258,13 @@ def shadow_response(command, openssl, shadow_key):
         "replay_signing_public_key_sha256": public_key_digest(openssl, shadow_key),
         "signature_base64": "",
     }
-    sign(openssl, shadow_key, b"mcloving-external-shadow-receipt-v1", receipt)
+    sign(
+        openssl,
+        shadow_key,
+        b"mcloving-external-shadow-receipt-v1",
+        receipt,
+        connector_frame,
+    )
     return {"status": "ok", "receipt": receipt}
 
 
