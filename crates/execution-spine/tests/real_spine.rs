@@ -1688,6 +1688,83 @@ async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch
 }
 
 #[tokio::test]
+async fn dead_observer_release_session_routes_to_durable_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-dead-observer-release",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_preflight_release_session_exit",
+        5_000,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if preflight_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(preflight_count(root.path()), 1);
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request cancellation during observer preflight")
+    );
+    let result = tokio::time::timeout(Duration::from_secs(2), execution)
+        .await
+        .expect("dead observer release must not pin the worker or lease")
+        .expect("worker task");
+    assert!(matches!(
+        result,
+        Err(SpineError::EffectReconciliationRequired)
+    ));
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        reservation_release_count(root.path()),
+        1,
+        "the dead retained session cannot accept a second release command"
+    );
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read observer-release reconciliation state");
+    assert_eq!(
+        state,
+        ("reconciliation_required".into(), "uncertain".into(), 0)
+    );
+}
+
+#[tokio::test]
 async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

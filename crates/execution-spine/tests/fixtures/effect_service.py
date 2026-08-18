@@ -430,6 +430,8 @@ def main():
             append_dispatch(
                 preflight_ledger, "release:" + command["request"]["observation_id"]
             )
+            if "release_session_exit" in scenario:
+                raise RuntimeError("fixture observer session exited during release")
             with open(preflight_ledger, "r", encoding="utf-8") as releases:
                 release_attempts = sum(
                     1 for entry in releases if entry.startswith("release:")

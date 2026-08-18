@@ -1039,15 +1039,30 @@ async fn finalize_verified_pre_dispatch_exit(
     outcome: (TerminalOutcome, Value),
 ) -> Result<RunReceipt, SpineError> {
     let (terminal, mut summary) = outcome;
-    loop {
+    let mut released = false;
+    for attempt in 1..=3 {
         if services
             .release_observer_request(observation_request.clone())
             .await
             .is_ok()
         {
+            released = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    if !released {
+        route_effect_reconciliation(
+            store,
+            claim,
+            config,
+            prepared,
+            "observer_reservation_release",
+        )
+        .await?;
+        return Err(SpineError::EffectReconciliationRequired);
     }
     abandon_prepared_effect(store, claim, &config.agent_id, prepared).await?;
     if let Some(summary) = summary.as_object_mut() {
