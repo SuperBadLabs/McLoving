@@ -91,7 +91,7 @@ def verify_observation_request(
         ledger.write(request["observation_id"] + "\n")
         ledger.flush()
         os.fsync(ledger.fileno())
-    if scenario == "slow_preflight":
+    if "slow_preflight" in scenario:
         time.sleep(0.5)
     unsigned = deepcopy(request)
     signature = base64.b64decode(unsigned["authorization"]["signature_base64"], validate=True)
@@ -415,33 +415,46 @@ def main():
     ) = sys.argv[1:]
     with open(scenario_path, "r", encoding="utf-8") as source:
         scenario = source.read().strip()
-    command = json.loads(sys.stdin.readline())
-    if command.get("operation") == "verify":
-        response = verify_observation_request(
-            openssl,
-            observer_request_key,
-            command["request"],
-            command["required_validity_ms"],
-            scenario,
-            preflight_ledger,
-        )
-    elif command.get("operation") == "release":
-        append_dispatch(
-            preflight_ledger, "release:" + command["request"]["observation_id"]
-        )
-        response = {
-            "status": "released",
-            "request_sha256": observation_digest(command["request"]),
-        }
-    elif "operation" in command:
-        response = observer_response(command, openssl, observer_key, scenario)
-    elif command.get("command") == "replay":
-        response = shadow_response(command, openssl, shadow_key, scenario)
-    else:
-        response = connector_response(
-            command, openssl, outcome_key, scenario, state_path, ledger
-        )
-    sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+    for line in sys.stdin:
+        command = json.loads(line)
+        if command.get("operation") == "verify":
+            response = verify_observation_request(
+                openssl,
+                observer_request_key,
+                command["request"],
+                command["required_validity_ms"],
+                scenario,
+                preflight_ledger,
+            )
+        elif command.get("operation") == "release":
+            append_dispatch(
+                preflight_ledger, "release:" + command["request"]["observation_id"]
+            )
+            with open(preflight_ledger, "r", encoding="utf-8") as releases:
+                release_attempts = sum(
+                    1 for entry in releases if entry.startswith("release:")
+                )
+            if "release_failure_once" in scenario and release_attempts == 1:
+                response = {
+                    "status": "error",
+                    "code": "state_unavailable",
+                    "message": "fixture release failure",
+                }
+            else:
+                response = {
+                    "status": "released",
+                    "request_sha256": observation_digest(command["request"]),
+                }
+        elif "operation" in command:
+            response = observer_response(command, openssl, observer_key, scenario)
+        elif command.get("command") == "replay":
+            response = shadow_response(command, openssl, shadow_key, scenario)
+        else:
+            response = connector_response(
+                command, openssl, outcome_key, scenario, state_path, ledger
+            )
+        sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

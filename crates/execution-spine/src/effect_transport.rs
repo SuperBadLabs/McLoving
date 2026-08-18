@@ -122,7 +122,8 @@ async fn invoke_validated_observer(
 
 pub(crate) struct ValidatedEffectServices {
     connector: ValidatedServiceCommand,
-    observer: ValidatedServiceCommand,
+    observer: tokio::sync::Mutex<ValidatedObserverSession>,
+    observer_timeout_millis: u64,
     shadow: ValidatedServiceCommand,
 }
 
@@ -137,13 +138,17 @@ impl ValidatedEffectServices {
             .connector
             .command
             .timeout_millis
-            .checked_add(self.observer.command.timeout_millis)
+            .checked_add(self.observer_timeout_millis)
             .ok_or(EffectServiceError::InvalidBinding)?;
         let command = ObserverCommand::Verify {
             request,
             required_validity_ms,
         };
-        match invoke_validated::<_, ObserverClientResponse>(&self.observer, &command).await? {
+        let mut observer = self.observer.lock().await;
+        match observer
+            .invoke::<_, ObserverClientResponse>(&command)
+            .await?
+        {
             ObserverClientResponse::Verified { request_sha256 } if request_sha256 == expected => {
                 Ok(())
             }
@@ -164,7 +169,11 @@ impl ValidatedEffectServices {
         let expected = observation_request_digest(&request)
             .map_err(|_| EffectServiceError::InvalidResponse)?;
         let command = ObserverCommand::Release { request };
-        match invoke_validated::<_, ObserverClientResponse>(&self.observer, &command).await? {
+        let mut observer = self.observer.lock().await;
+        match observer
+            .invoke::<_, ObserverClientResponse>(&command)
+            .await?
+        {
             ObserverClientResponse::Released { request_sha256 } if request_sha256 == expected => {
                 Ok(())
             }
@@ -189,7 +198,21 @@ impl ValidatedEffectServices {
         &self,
         request: ObservationRequest,
     ) -> Result<ObservationReceipt, EffectServiceError> {
-        invoke_validated_observer(&self.observer, request).await
+        let command = ObserverCommand::Observe { request };
+        let mut observer = self.observer.lock().await;
+        match observer
+            .invoke::<_, ObserverClientResponse>(&command)
+            .await?
+        {
+            ObserverClientResponse::Observed { receipt } => Ok(*receipt),
+            ObserverClientResponse::Verified { .. } | ObserverClientResponse::Released { .. } => {
+                Err(EffectServiceError::InvalidResponse)
+            }
+            ObserverClientResponse::Error { code, message } => {
+                let _ = (code, message);
+                Err(EffectServiceError::ServiceFailed)
+            }
+        }
     }
 
     pub(crate) async fn invoke_shadow(
@@ -205,11 +228,92 @@ pub(crate) async fn preflight_effect_services(
     observer: &PinnedServiceCommand,
     shadow: &PinnedServiceCommand,
 ) -> Result<ValidatedEffectServices, EffectServiceError> {
+    let observer = validate_service_command(observer).await?;
+    let observer_timeout_millis = observer.command.timeout_millis;
     Ok(ValidatedEffectServices {
         connector: validate_service_command(connector).await?,
-        observer: validate_service_command(observer).await?,
+        observer: tokio::sync::Mutex::new(ValidatedObserverSession::spawn(observer)?),
+        observer_timeout_millis,
         shadow: validate_service_command(shadow).await?,
     })
+}
+
+struct ValidatedObserverSession {
+    _binding: ValidatedServiceCommand,
+    _child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    timeout_millis: u64,
+}
+
+impl ValidatedObserverSession {
+    fn spawn(binding: ValidatedServiceCommand) -> Result<Self, EffectServiceError> {
+        let mut child = Command::new(binding.executable.program());
+        child
+            .args(&binding.command.arguments)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = child.spawn().map_err(|_| EffectServiceError::SpawnFailed)?;
+        let stdin = child.stdin.take().ok_or(EffectServiceError::SpawnFailed)?;
+        let stdout = child.stdout.take().ok_or(EffectServiceError::SpawnFailed)?;
+        let timeout_millis = binding.command.timeout_millis;
+        Ok(Self {
+            _binding: binding,
+            _child: child,
+            stdin,
+            stdout,
+            timeout_millis,
+        })
+    }
+
+    async fn invoke<T, R>(&mut self, request: &T) -> Result<R, EffectServiceError>
+    where
+        T: Serialize,
+        R: DeserializeOwned,
+    {
+        let mut request_bytes =
+            serde_json::to_vec(request).map_err(|_| EffectServiceError::InvalidResponse)?;
+        if request_bytes.len() >= MAX_SERVICE_FRAME_BYTES {
+            return Err(EffectServiceError::RequestTooLarge);
+        }
+        request_bytes.push(b'\n');
+        let exchange = async {
+            self.stdin.write_all(&request_bytes).await?;
+            self.stdin.flush().await?;
+            let mut response = Vec::new();
+            loop {
+                let mut byte = [0_u8; 1];
+                let read = self.stdout.read(&mut byte).await?;
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "observer session closed before its response",
+                    ));
+                }
+                response.push(byte[0]);
+                if response.len() > MAX_SERVICE_FRAME_BYTES || byte[0] == b'\n' {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(response)
+        };
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(self.timeout_millis),
+            exchange,
+        )
+        .await
+        .map_err(|_| EffectServiceError::AmbiguousTimeout)??;
+        if response.len() > MAX_SERVICE_FRAME_BYTES {
+            return Err(EffectServiceError::ResponseTooLarge);
+        }
+        let response = one_json_line(&response)?;
+        let value: Value = mcloving_external_connector::parse_json_no_duplicates(response)
+            .map_err(|_| EffectServiceError::InvalidResponse)?;
+        serde_json::from_value(value).map_err(|_| EffectServiceError::InvalidResponse)
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -543,5 +647,57 @@ mod tests {
         let result =
             invoke_validated::<_, Value>(&service, &serde_json::json!({"test": true})).await;
         assert!(matches!(result, Err(EffectServiceError::SpawnFailed)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn persistent_observer_session_pins_loaded_inputs_across_requests() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary observer root");
+        let service_path = root.path().join("observer-service");
+        let input_path = root.path().join("observer-authority");
+        let replacement_path = root.path().join("replacement-authority");
+        std::fs::write(
+            &service_path,
+            b"#!/bin/sh\nIFS= read -r pinned < \"$1\" || exit 2\nwhile IFS= read -r request; do\n  printf '{\"pinned\":\"%s\"}\\n' \"$pinned\"\ndone\n",
+        )
+        .expect("write observer fixture");
+        std::fs::set_permissions(&service_path, std::fs::Permissions::from_mode(0o700))
+            .expect("make observer fixture executable");
+        std::fs::write(&input_path, b"verified-input\n").expect("write verified authority");
+        std::fs::set_permissions(&input_path, std::fs::Permissions::from_mode(0o600))
+            .expect("protect verified authority");
+        let executable_sha256 =
+            Sha256::digest(std::fs::read(&service_path).expect("read observer fixture"))
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        let binding = validate_service_command(&PinnedServiceCommand {
+            executable: service_path,
+            executable_sha256,
+            arguments: vec![input_path.clone()],
+            timeout_millis: 1_000,
+        })
+        .await
+        .expect("seal observer fixture");
+        let mut observer = ValidatedObserverSession::spawn(binding).expect("start observer once");
+        let first: Value = observer
+            .invoke(&serde_json::json!({"operation": "verify"}))
+            .await
+            .expect("first observer response");
+        assert_eq!(first["pinned"], "verified-input");
+
+        std::fs::write(&replacement_path, b"substituted-input\n")
+            .expect("write substituted authority");
+        std::fs::rename(&replacement_path, &input_path).expect("replace observer authority path");
+        let second: Value = observer
+            .invoke(&serde_json::json!({"operation": "observe"}))
+            .await
+            .expect("second observer response");
+        assert_eq!(
+            second["pinned"], "verified-input",
+            "post-action observation must remain in the process that loaded verified inputs"
+        );
     }
 }

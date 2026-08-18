@@ -1639,7 +1639,7 @@ async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch
         project_id,
         &admission,
         &claim,
-        "slow_preflight",
+        "slow_preflight_release_failure_once",
         5_000,
     );
     let config = runtime_effect_worker(root.path(), plan);
@@ -1666,7 +1666,11 @@ async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch
         .expect("pre-dispatch cancellation outcome");
     assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
     assert_eq!(dispatch_count(root.path()), 0);
-    assert_eq!(reservation_release_count(root.path()), 1);
+    assert_eq!(
+        reservation_release_count(root.path()),
+        2,
+        "the attempt must remain non-terminal until idempotent release succeeds"
+    );
     let effect: (String, i64) = sqlx::query_as(
         "SELECT status,
                 ((outcome_receipt IS NOT NULL)::int

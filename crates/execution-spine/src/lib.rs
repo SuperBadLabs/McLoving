@@ -1039,17 +1039,21 @@ async fn finalize_verified_pre_dispatch_exit(
     outcome: (TerminalOutcome, Value),
 ) -> Result<RunReceipt, SpineError> {
     let (terminal, mut summary) = outcome;
-    let release = services
-        .release_observer_request(observation_request.clone())
-        .await;
+    loop {
+        if services
+            .release_observer_request(observation_request.clone())
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     abandon_prepared_effect(store, claim, &config.agent_id, prepared).await?;
     if let Some(summary) = summary.as_object_mut() {
         summary.insert(
             "observer_reservation_release".to_owned(),
-            match release {
-                Ok(()) => json!({"status": "released"}),
-                Err(error) => json!({"status": "failed", "code": error.to_string()}),
-            },
+            json!({"status": "released"}),
         );
     }
     finalize_effect_attempt(store, claim, config, terminal, summary).await
