@@ -1,11 +1,15 @@
 //! The smallest truthful controller-to-agent execution spine.
 
 mod effect_runtime;
+mod effect_transport;
 
 pub use effect_runtime::{
     EffectRuntimeError, EffectRuntimeFreeze, FreshOneActionGrant, PreparedEffect,
     confirm_effect_observation, finalize_effect_shadow_join, prepare_effect, record_effect_outcome,
     record_reconciled_effect_outcome,
+};
+pub use effect_transport::{
+    EffectServiceError, PinnedServiceCommand, invoke_connector, invoke_observer, invoke_shadow,
 };
 
 use std::ffi::OsString;
