@@ -21,8 +21,8 @@ use mcloving_execution_spine::{
 };
 use mcloving_external_connector::{
     ActionRequest, IdempotencyClass, PROTOCOL_VERSION as CONNECTOR_PROTOCOL_V1,
-    REQUEST_SCHEMA_VERSION as CONNECTOR_REQUEST_V1, RequestAuthorization, public_key_from_seed,
-    sign_action_request,
+    REQUEST_SCHEMA_VERSION as CONNECTOR_REQUEST_V1, RequestAuthorization, action_request_digest,
+    public_key_from_seed, sign_action_request,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -710,7 +710,7 @@ fn runtime_effect_plan(
         credential_grant_version: "v1".into(),
         credential_grant_scope: "one-notification".into(),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 60_000,
+        expires_at_unix_ms: now + 20_000,
         audit_provenance: format!("ext-002/{scenario}/request"),
         authorization: RequestAuthorization {
             key_id: "request-key".into(),
@@ -718,6 +718,7 @@ fn runtime_effect_plan(
         },
     };
     sign_action_request(&mut action_request, &request_seed).unwrap();
+    let connector_request_sha256 = action_request_digest(&action_request).unwrap();
     let observation_request = ObservationRequest {
         schema_version: OBSERVER_REQUEST_V1.into(),
         protocol_version: OBSERVER_PROTOCOL_V1.into(),
@@ -745,11 +746,16 @@ fn runtime_effect_plan(
         read_grant_id: "fixture-read".into(),
         read_grant_version: "v1".into(),
         read_grant_scope: "fixture-resource".into(),
-        query: Default::default(),
+        query: [(
+            "connector_request_sha256".to_owned(),
+            connector_request_sha256,
+        )]
+        .into_iter()
+        .collect(),
         expected_previous_cursor: None,
         predecessor_receipt_sha256: Some("7".repeat(64)),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 60_000,
+        expires_at_unix_ms: now + 20_000,
         audit_provenance: format!("ext-002/{scenario}/observation"),
         authorization: ObserverAuthorization {
             key_id: "observer-request-key".into(),
@@ -1230,6 +1236,7 @@ async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join()
     for scenario in [
         "substituted_connector_response",
         "substituted_observer_response",
+        "substituted_observer_binding",
         "substituted_shadow_response",
     ] {
         let Some(store) = test_store().await else {
@@ -1276,6 +1283,71 @@ async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join()
             ("reconciliation_required".into(), "uncertain".into())
         );
     }
+}
+
+#[tokio::test]
+async fn signed_runtime_scope_must_match_the_durable_build_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-durable-scope",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    plan.freeze.action_request.project_id = Uuid::new_v4();
+    plan.freeze.action_request.pipeline_id = Uuid::new_v4();
+    sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
+    assert!(matches!(
+        run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan)).await,
+        Err(SpineError::EffectRuntimeUnavailable)
+    ));
+    assert_eq!(dispatch_count(root.path()), 0);
+}
+
+#[tokio::test]
+async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-short-lease-renewal",
+        1,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_success",
+        5_000,
+    );
+    let mut config = runtime_effect_worker(root.path(), plan);
+    config.lease_seconds = 1;
+    let receipt = run_claim(&store, &claim, &config)
+        .await
+        .expect("renew short lease through connector, observer, and shadow joins");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    assert_eq!(dispatch_count(root.path()), 1);
 }
 
 #[tokio::test]
@@ -1532,7 +1604,7 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
         credential_grant_version: "v1".into(),
         credential_grant_scope: "one-notification".into(),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 60_000,
+        expires_at_unix_ms: now + 20_000,
         audit_provenance: "effect-free-positive-test".into(),
         authorization: RequestAuthorization {
             key_id: "request-key".into(),
@@ -1540,6 +1612,7 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
         },
     };
     sign_action_request(&mut action_request, &request_seed).unwrap();
+    let connector_request_sha256 = action_request_digest(&action_request).unwrap();
     let observation_request = ObservationRequest {
         schema_version: OBSERVER_REQUEST_V1.into(),
         protocol_version: OBSERVER_PROTOCOL_V1.into(),
@@ -1567,11 +1640,16 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
         read_grant_id: "fixture-read".into(),
         read_grant_version: "v1".into(),
         read_grant_scope: "fixture-resource".into(),
-        query: Default::default(),
+        query: [(
+            "connector_request_sha256".to_owned(),
+            connector_request_sha256,
+        )]
+        .into_iter()
+        .collect(),
         expected_previous_cursor: None,
         predecessor_receipt_sha256: Some("7".repeat(64)),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 60_000,
+        expires_at_unix_ms: now + 20_000,
         audit_provenance: "effect-free-positive-test".into(),
         authorization: ObserverAuthorization {
             key_id: "observer-request-key".into(),
@@ -1785,7 +1863,7 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
         credential_grant_version: "v1".into(),
         credential_grant_scope: "one-notification".into(),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 60_000,
+        expires_at_unix_ms: now + 20_000,
         audit_provenance: "effect-free-preflight-test".into(),
         authorization: RequestAuthorization {
             key_id: "request-key".into(),
@@ -1793,6 +1871,7 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
         },
     };
     sign_action_request(&mut action_request, &request_seed).unwrap();
+    let connector_request_sha256 = action_request_digest(&action_request).unwrap();
     let observation_request = ObservationRequest {
         schema_version: OBSERVER_REQUEST_V1.into(),
         protocol_version: OBSERVER_PROTOCOL_V1.into(),
@@ -1820,7 +1899,12 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
         read_grant_id: "fixture-read".into(),
         read_grant_version: "v1".into(),
         read_grant_scope: "fixture-resource".into(),
-        query: Default::default(),
+        query: [(
+            "connector_request_sha256".to_owned(),
+            connector_request_sha256,
+        )]
+        .into_iter()
+        .collect(),
         expected_previous_cursor: None,
         predecessor_receipt_sha256: Some("7".repeat(64)),
         requested_at_unix_ms: now - 1_000,

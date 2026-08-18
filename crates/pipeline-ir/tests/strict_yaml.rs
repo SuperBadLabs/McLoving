@@ -86,6 +86,22 @@ fn connector_intent_rejects_endpoint_and_credential_overrides() {
     }
 }
 
+#[test]
+fn connector_intent_rejects_multi_step_stage_until_sequencing_is_implemented() {
+    let source = CONNECTOR_PIPELINE.replace(
+        "      - connector_intent:\n",
+        "      - process:\n          program: printf\n          args: [before]\n      - connector_intent:\n",
+    );
+    let error = compile_strict_yaml(
+        "fixture://connector-multi-step",
+        &source,
+        ParseLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.path.as_deref(), Some("$.stages[0].steps"));
+    assert!(error.message.contains("exactly one connector intent"));
+}
+
 fn validate_no_authority_material(bytes: &[u8]) {
     let text = String::from_utf8_lossy(bytes);
     for forbidden in ["https://", "bearer-secret", "/bin/sh"] {

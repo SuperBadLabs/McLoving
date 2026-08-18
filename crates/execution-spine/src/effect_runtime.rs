@@ -3,7 +3,9 @@ use mcloving_controller_store::{
     TerminalOutcome,
 };
 use mcloving_destination_observer::{
-    ObservationPhase, ObservationReceipt, observation_receipt_digest, verify_observation_receipt,
+    ObservationPhase, ObservationReceipt, ObservationRequest,
+    content_sha256 as observer_content_sha256, observation_receipt_digest,
+    observation_request_message, verify_observation_receipt,
 };
 use mcloving_external_connector::{
     ActionRequest, IdempotencyClass, OutcomeReceipt, OutcomeStatus, ShadowReplayReceipt,
@@ -247,11 +249,12 @@ pub async fn confirm_effect_observation(
     freeze: &EffectRuntimeFreeze,
     prepared: &PreparedEffect,
     outcome: &OutcomeReceipt,
+    observation_request: &ObservationRequest,
     observation: &ObservationReceipt,
 ) -> Result<(), EffectRuntimeError> {
     verify_observation_receipt(observation, &freeze.observer_receipt_public_key)
         .map_err(|_| EffectRuntimeError::InvalidObservation)?;
-    validate_observation(claim, freeze, outcome, observation)?;
+    validate_observation(claim, freeze, outcome, observation_request, observation)?;
     let receipt = serde_json::to_value(observation)?;
     if !store
         .append_effect_evidence(
@@ -469,6 +472,17 @@ fn validate_freeze(
     now_unix_ms: i64,
 ) -> Result<(), EffectRuntimeError> {
     let request = &freeze.action_request;
+    let timeout_millis = intent
+        .timeout_seconds
+        .checked_mul(1_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(EffectRuntimeError::InvalidBinding("intent timeout"))?;
+    let request_window_millis = request
+        .expires_at_unix_ms
+        .checked_sub(request.requested_at_unix_ms)
+        .ok_or(EffectRuntimeError::InvalidBinding(
+            "request authority window",
+        ))?;
     let fence = u64::try_from(claim.fence)
         .map_err(|_| EffectRuntimeError::InvalidBinding("negative effect fence"))?;
     verify_action_request(request, &freeze.request_authority_public_key)
@@ -482,7 +496,10 @@ fn validate_freeze(
         || request.effect_key != intent.effect_key_template
         || request.idempotency_class != connector_effect_class(intent.effect_class)
         || !public_payload_matches(&intent.public_input_schema, &request.request_payload)
+        || request.requested_at_unix_ms > now_unix_ms
         || request.expires_at_unix_ms <= now_unix_ms
+        || request_window_millis <= 0
+        || request_window_millis > timeout_millis
         || request.expires_at_unix_ms > freeze.grant.expires_at_unix_ms
         || request.requested_at_unix_ms < freeze.grant.issued_at_unix_ms
         || freeze.grant.request_id != request.request_id
@@ -557,25 +574,70 @@ fn validate_observation(
     claim: &ClaimedAttempt,
     freeze: &EffectRuntimeFreeze,
     outcome: &OutcomeReceipt,
+    request: &ObservationRequest,
     observation: &ObservationReceipt,
 ) -> Result<(), EffectRuntimeError> {
     let fence = u64::try_from(claim.fence).map_err(|_| EffectRuntimeError::InvalidObservation)?;
-    if observation.observer_id != freeze.expected_observer_id
+    let request_sha256 = observer_content_sha256(
+        &observation_request_message(request)
+            .map_err(|_| EffectRuntimeError::InvalidObservation)?,
+    );
+    if observation.observation_id != request.observation_id
+        || observation.request_sha256 != request_sha256
+        || observation.observer_id != freeze.expected_observer_id
+        || observation.observer_id != request.observer_id
         || observation.tenant_id != claim.organization_id
+        || observation.tenant_id != request.tenant_id
         || observation.project_id != outcome.project_id
+        || observation.project_id != request.project_id
         || observation.pipeline_id != outcome.pipeline_id
+        || observation.pipeline_id != request.pipeline_id
         || observation.build_id != claim.build_id
+        || observation.build_id != request.build_id
         || observation.attempt_id != claim.attempt_id
+        || observation.attempt_id != request.attempt_id
         || observation.effect_fence != fence
+        || observation.effect_fence != request.effect_fence
+        || observation.phase != request.phase
         || !matches!(
             observation.phase,
             ObservationPhase::PostAction | ObservationPhase::Reconciliation
         )
+        || observation.predecessor_receipt_sha256 != request.predecessor_receipt_sha256
+        || observation.observer_implementation_sha256 != request.expected_implementation_sha256
+        || observation.observer_image_sha256 != request.expected_image_sha256
+        || observation.observer_config_sha256 != request.expected_config_sha256
+        || observation.request_authority_identity != request.request_authority_identity
+        || observation.generation != request.expected_generation
+        || observation.activation_mode != request.activation_mode
+        || observation.previous_generation != request.previous_generation
+        || observation.rollback_from_generation != request.rollback_from_generation
         || observation.endpoint_identity != outcome.endpoint_identity
+        || observation.endpoint_identity != request.endpoint_identity
         || observation.account_identity != outcome.account_identity
+        || observation.account_identity != request.account_identity
         || observation.resource_identity != outcome.resource_identity
+        || observation.resource_identity != request.resource_identity
         || observation.effect_class != outcome.effect_class
+        || observation.effect_class != request.effect_class
+        || observation.read_grant_id != request.read_grant_id
+        || observation.read_grant_version != request.read_grant_version
+        || observation.read_grant_scope != request.read_grant_scope
+        || observation.canonical_query != request.query
+        || request
+            .query
+            .get("connector_request_sha256")
+            .map(String::as_str)
+            != Some(outcome.request_sha256.as_str())
+        || observation
+            .state
+            .get("connector_request_sha256")
+            .and_then(Value::as_str)
+            != Some(outcome.request_sha256.as_str())
+        || observation.destination_observed_at_unix_ms < request.requested_at_unix_ms
         || observation.destination_observed_at_unix_ms > observation.captured_at_unix_ms
+        || observation.captured_at_unix_ms > request.expires_at_unix_ms
+        || observation.publication_deadline_unix_ms != request.expires_at_unix_ms
     {
         return Err(EffectRuntimeError::InvalidObservation);
     }

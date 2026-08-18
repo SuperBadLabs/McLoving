@@ -276,6 +276,7 @@ pub struct NewLogChunk<'a> {
 pub struct AttemptExecution {
     pub build_id: Uuid,
     pub project_id: Uuid,
+    pub pipeline_id: Option<Uuid>,
     pub execution_spec: Value,
     pub cancellation_requested: bool,
 }
@@ -2780,8 +2781,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
-        let row = sqlx::query_as::<_, (Uuid, Uuid, Value, bool)>(
-            "SELECT b.id, b.project_id, n.execution_spec,
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
+            "SELECT b.id, b.project_id, b.pipeline_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
@@ -2806,7 +2807,7 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((build_id, _, _, _)) = row.as_ref()
+        if let Some((build_id, _, _, _, _)) = row.as_ref()
             && let Err(error) =
                 lock_enabled_build_pipeline(&mut tx, organization_id, *build_id).await
         {
@@ -2820,11 +2821,14 @@ impl Store {
         }
         tx.commit().await?;
         Ok(row.map(
-            |(build_id, project_id, execution_spec, cancellation_requested)| AttemptExecution {
-                build_id,
-                project_id,
-                execution_spec,
-                cancellation_requested,
+            |(build_id, project_id, pipeline_id, execution_spec, cancellation_requested)| {
+                AttemptExecution {
+                    build_id,
+                    project_id,
+                    pipeline_id,
+                    execution_spec,
+                    cancellation_requested,
+                }
             },
         ))
     }

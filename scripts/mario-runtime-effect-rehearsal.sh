@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+if [[ "${script_dir}" == "${BASH_SOURCE[0]}" ]]; then
+  script_dir=.
+fi
+repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck disable=SC1091 # resolved from the repository root at runtime
 # shellcheck source=../tools/versions.env
 source "${repo_root}/tools/versions.env"
 
-if [[ "$(hostname -s)" != "mario" ]]; then
-  echo "runtime-effect rehearsal must run on Mario" >&2
-  exit 1
-fi
-for command in podman python3 sha256sum git find chmod install cut sort seq; do
+for command in hostname date mkdir sleep mv podman python3 sha256sum git find chmod install cut sort seq; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command is unavailable: ${command}" >&2
     exit 1
   }
 done
+if [[ "$(hostname -s)" != "mario" ]]; then
+  echo "runtime-effect rehearsal must run on Mario" >&2
+  exit 1
+fi
 if [[ -n "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]]; then
   echo "runtime-effect rehearsal requires a clean exact-head checkout" >&2
   exit 1
@@ -166,7 +170,7 @@ if podman network exists "${network}"; then
   exit 1
 fi
 
-python3 - "${run_dir}/result.json" "${run_id}" "${source_head}" \
+python3 - "${run_dir}/result.pending" "${run_id}" "${source_head}" \
   "${fixture_sha256}" "${test_binary_sha256}" <<'PY'
 import json
 import os
@@ -197,11 +201,29 @@ with open(path, "x", encoding="utf-8") as output:
     output.flush()
     os.fsync(output.fileno())
 PY
-sha256sum "${run_dir}/build.log" "${run_dir}/network.json" \
-  "${run_dir}/postgres.log" "${run_dir}/test.log" "${run_dir}/result.json" \
-  >"${run_dir}/files.sha256"
-chmod 0600 "${run_dir}"/*
+python3 - "${run_dir}" <<'PY'
+import hashlib
+import os
+import sys
 
+run_dir = sys.argv[1]
+names = ["build.log", "network.json", "postgres.log", "test.log", "result.pending"]
+manifest = os.path.join(run_dir, "files.sha256.pending")
+with open(manifest, "x", encoding="utf-8") as output:
+    for name in names:
+        path = os.path.join(run_dir, name)
+        digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        label = "result.json" if name == "result.pending" else name
+        output.write(f"{digest.hexdigest()}  {os.path.join(run_dir, label)}\n")
+    output.flush()
+    os.fsync(output.fileno())
+PY
+chmod 0600 "${run_dir}"/*
+mv "${run_dir}/files.sha256.pending" "${run_dir}/files.sha256"
+mv "${run_dir}/result.pending" "${run_dir}/result.json"
 trap - EXIT
 echo "run_dir=${run_dir}"
 echo "source_head=${source_head}"

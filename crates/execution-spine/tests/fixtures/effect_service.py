@@ -166,6 +166,8 @@ def connector_response(command, openssl, outcome_key, scenario, state_path, ledg
             os.fsync(output.fileno())
         if scenario in ("timeout_after_dispatch", "crash_after_dispatch"):
             time.sleep(5)
+        elif scenario == "slow_success":
+            time.sleep(1.5)
         receipt = outcome_receipt(request, openssl, outcome_key)
         if scenario == "ambiguous_then_reconcile":
             receipt["status"] = "ambiguous"
@@ -248,7 +250,10 @@ def observer_response(command, openssl, observer_key, scenario):
         "destination_response_sha256": hashlib.sha256(b"fixture-observation").hexdigest(),
         "destination_signature_base64": "fixture-destination-signature",
         "destination_attestation_key_id": "fixture-destination-key",
-        "state": {"connector_request_sha256": "joined-by-controller", "effect_observed": True},
+        "state": {
+            "connector_request_sha256": request["query"]["connector_request_sha256"],
+            "effect_observed": True,
+        },
         "retry_count": 0,
         "audit_provenance": "ext-002/fixture/observer",
         "receipt_signing_key_id": "fixture-observer-key",
@@ -257,6 +262,8 @@ def observer_response(command, openssl, observer_key, scenario):
     }
     if scenario == "substituted_observer_response":
         receipt["attempt_id"] = "00000000-0000-0000-0000-000000000000"
+    elif scenario == "substituted_observer_binding":
+        receipt["request_sha256"] = "0" * 64
     sign(
         openssl,
         observer_key,

@@ -862,6 +862,17 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 "stage must contain at least one step",
             ));
         }
+        if stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::ConnectorIntent(_)))
+            && stage.steps.len() != 1
+        {
+            return Err(IrValidationError::new(
+                format!("{path}.steps"),
+                "a connector-intent stage must contain exactly one connector intent",
+            ));
+        }
         total_steps = total_steps.saturating_add(stage.steps.len());
         if total_steps > MAX_STEPS {
             return Err(IrValidationError::new(

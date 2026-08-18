@@ -513,6 +513,19 @@ async fn run_effect_claim(
     {
         return Err(SpineError::StaleAuthority);
     }
+    let lease_guard = EffectLeaseGuard::start(store, claim, config);
+    let result = run_effect_claim_under_lease(store, claim, config, intent, plan).await;
+    lease_guard.finish().await;
+    result
+}
+
+async fn run_effect_claim_under_lease(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    intent: &ConnectorIntentSpec,
+    plan: &EffectExecutionPlan,
+) -> Result<RunReceipt, SpineError> {
     let accepted = store
         .attempt_execution(
             claim.organization_id,
@@ -523,6 +536,14 @@ async fn run_effect_claim(
         )
         .await?
         .ok_or(SpineError::StaleAuthority)?;
+    let pipeline_id = accepted
+        .pipeline_id
+        .ok_or(SpineError::EffectRuntimeUnavailable)?;
+    if plan.freeze.action_request.project_id != accepted.project_id
+        || plan.freeze.action_request.pipeline_id != pipeline_id
+    {
+        return Err(SpineError::EffectRuntimeUnavailable);
+    }
     if accepted.cancellation_requested {
         return finalize_effect_attempt(
             store,
@@ -576,10 +597,11 @@ async fn run_effect_claim(
         )
         .await;
     }
-    validate_observation_request(claim, plan)?;
+    validate_observation_request(claim, accepted.project_id, pipeline_id, plan)?;
+    let connector_service = bounded_connector_service(&plan.connector_service, intent)?;
 
     let outcome = match invoke_connector(
-        &plan.connector_service,
+        &connector_service,
         ConnectorCommand::Execute {
             request: Box::new(plan.freeze.action_request.clone()),
         },
@@ -636,6 +658,7 @@ async fn run_effect_claim(
         &plan.freeze,
         &prepared,
         &outcome,
+        &plan.observation_request,
         &observation,
     )
     .await
@@ -657,7 +680,7 @@ async fn run_effect_claim(
             return Err(SpineError::EffectReconciliationRequired);
         };
         let reconciled = match invoke_connector(
-            &plan.connector_service,
+            &connector_service,
             ConnectorCommand::Reconcile {
                 request: Box::new(ReconcileRequest {
                     schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
@@ -784,10 +807,14 @@ async fn run_effect_claim(
 
 fn validate_observation_request(
     claim: &ClaimedAttempt,
+    project_id: Uuid,
+    pipeline_id: Uuid,
     plan: &EffectExecutionPlan,
 ) -> Result<(), SpineError> {
     let fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
     if plan.observation_request.tenant_id != claim.organization_id
+        || plan.observation_request.project_id != project_id
+        || plan.observation_request.pipeline_id != pipeline_id
         || plan.observation_request.build_id != claim.build_id
         || plan.observation_request.attempt_id != claim.attempt_id
         || plan.observation_request.effect_fence != fence
@@ -800,6 +827,22 @@ fn validate_observation_request(
         return Err(SpineError::EffectRuntimeUnavailable);
     }
     Ok(())
+}
+
+fn bounded_connector_service(
+    service: &PinnedServiceCommand,
+    intent: &ConnectorIntentSpec,
+) -> Result<PinnedServiceCommand, SpineError> {
+    let timeout_millis = intent
+        .timeout_seconds
+        .checked_mul(1_000)
+        .ok_or(SpineError::EffectRuntimeUnavailable)?;
+    let mut bounded = service.clone();
+    bounded.timeout_millis = bounded.timeout_millis.min(timeout_millis);
+    if bounded.timeout_millis == 0 {
+        return Err(SpineError::EffectRuntimeUnavailable);
+    }
+    Ok(bounded)
 }
 
 fn service_may_have_dispatched(error: &EffectServiceError) -> bool {
@@ -876,6 +919,86 @@ fn unix_time_millis() -> Result<i64, SpineError> {
         .map_err(|_| SpineError::FenceOverflow)?
         .as_millis();
     i64::try_from(millis).map_err(|_| SpineError::FenceOverflow)
+}
+
+struct EffectLeaseGuard {
+    shutdown: CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl EffectLeaseGuard {
+    fn start(store: &Store, claim: &ClaimedAttempt, config: &WorkerConfig) -> Self {
+        let shutdown = CancellationToken::new();
+        let renewal_interval = Duration::from_millis(
+            u64::try_from(config.lease_seconds)
+                .unwrap_or(1)
+                .saturating_mul(1_000)
+                .checked_div(3)
+                .unwrap_or(1)
+                .max(1),
+        )
+        .max(config.cancellation_poll);
+        let task = tokio::spawn(effect_lease_poller(
+            store.clone(),
+            claim.clone(),
+            config.agent_id.clone(),
+            renewal_interval,
+            config.lease_seconds,
+            shutdown.clone(),
+        ));
+        Self {
+            shutdown,
+            task: Some(task),
+        }
+    }
+
+    async fn finish(mut self) {
+        self.shutdown.cancel();
+        if let Some(task) = self.task.take() {
+            task.await.ok();
+        }
+    }
+}
+
+impl Drop for EffectLeaseGuard {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+async fn effect_lease_poller(
+    store: Store,
+    claim: ClaimedAttempt,
+    agent_id: String,
+    interval: Duration,
+    lease_seconds: i32,
+    shutdown: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(interval) => {}
+        }
+        match store
+            .renew_attempt_lease(
+                claim.organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                lease_seconds,
+            )
+            .await
+        {
+            // Cancellation is joined by the effect path after dispatch; keep
+            // its lease alive until all independent evidence is durable.
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 async fn cancellation_poller(
@@ -1090,5 +1213,33 @@ mod tests {
             mutated["steps"][0][forbidden] = json!("forbidden");
             assert!(serde_json::from_value::<ExecutionSpec>(mutated).is_err());
         }
+    }
+
+    #[test]
+    fn connector_service_timeout_is_bounded_by_the_pipeline_intent() {
+        let intent = ConnectorIntentSpec {
+            mapping_id: "notification.v1".into(),
+            mapping_digest: format!("sha256:{}", "a".repeat(64)),
+            effect_class: ConnectorEffectClass::ExternallyIdempotent,
+            effect_key_template: "build.notification".into(),
+            public_input_schema: Default::default(),
+            protected_secret_ref_schema: Default::default(),
+            expected_public_result_schema: Default::default(),
+            timeout_seconds: 2,
+            ambiguity_policy: AmbiguityPolicy::ObserveThenReconcile,
+            downstream_control_digest: format!("sha256:{}", "b".repeat(64)),
+        };
+        let service = PinnedServiceCommand {
+            executable: PathBuf::from("/fixture/connector"),
+            executable_sha256: "c".repeat(64),
+            arguments: Vec::new(),
+            timeout_millis: 30_000,
+        };
+        assert_eq!(
+            bounded_connector_service(&service, &intent)
+                .expect("bound service timeout")
+                .timeout_millis,
+            2_000
+        );
     }
 }
