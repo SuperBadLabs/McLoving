@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
 use mcloving_controller_api::{
@@ -9,7 +9,20 @@ use mcloving_controller_store::{
     StoreError, TerminalOutcome,
     authz::{Principal, PrincipalKind, ServiceScope},
 };
-use mcloving_execution_spine::{WorkerConfig, run_claim};
+use mcloving_destination_observer::{
+    ActivationMode as ObserverActivationMode, ObservationPhase, ObservationRequest,
+    PROTOCOL_VERSION as OBSERVER_PROTOCOL_V1, REQUEST_SCHEMA_VERSION as OBSERVER_REQUEST_V1,
+    RequestAuthorization as ObserverAuthorization,
+};
+use mcloving_execution_spine::{
+    EffectExecutionPlan, EffectRuntimeFreeze, FreshOneActionGrant, PinnedServiceCommand,
+    WorkerConfig, run_claim,
+};
+use mcloving_external_connector::{
+    ActionRequest, IdempotencyClass, PROTOCOL_VERSION as CONNECTOR_PROTOCOL_V1,
+    REQUEST_SCHEMA_VERSION as CONNECTOR_REQUEST_V1, RequestAuthorization, public_key_from_seed,
+    sign_action_request,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -933,6 +946,188 @@ async fn process_spawn_failure_is_published_as_terminal_failure() {
             .attempts
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstream_release() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let mapping_digest = format!("sha256:{}", "a".repeat(64));
+    let downstream_digest = format!("sha256:{}", "b".repeat(64));
+    let execution_spec = json!({
+        "version": 2,
+        "steps": [{
+            "kind": "connector_intent",
+            "mapping_id": "notification.v1",
+            "mapping_digest": mapping_digest,
+            "effect_class": "externally_idempotent",
+            "effect_key_template": "build.notification",
+            "public_input_schema": {"message": "string"},
+            "protected_secret_ref_schema": {"token": "string"},
+            "expected_public_result_schema": {"delivery_id": "string"},
+            "timeout_seconds": 30,
+            "ambiguity_policy": "observe_then_reconcile",
+            "downstream_control_digest": downstream_digest,
+        }]
+    });
+    let (organization_id, project_id, admission, claim) =
+        admitted_claim(&store, execution_spec, "effect-plan-preflight", 60).await;
+    let fence = u64::try_from(claim.fence).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let request_seed = [11_u8; 32];
+    let request_key = public_key_from_seed(&request_seed).unwrap();
+    let mut action_request = ActionRequest {
+        schema_version: CONNECTOR_REQUEST_V1.into(),
+        protocol_version: CONNECTOR_PROTOCOL_V1.into(),
+        request_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        effect_key: "build.notification".into(),
+        connector_id: "fixture-connector".into(),
+        expected_implementation_sha256: "1".repeat(64),
+        expected_image_sha256: "2".repeat(64),
+        expected_config_sha256: "3".repeat(64),
+        expected_generation: 1,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        idempotency_class: IdempotencyClass::ExternallyIdempotent,
+        action_name: "notify".into(),
+        action_schema_version: "fixture.notify/v1".into(),
+        request_payload: json!({"message": "hello"}),
+        credential_grant_id: "fixture-grant".into(),
+        credential_grant_version: "v1".into(),
+        credential_grant_scope: "one-notification".into(),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 60_000,
+        audit_provenance: "effect-free-preflight-test".into(),
+        authorization: RequestAuthorization {
+            key_id: "request-key".into(),
+            signature_base64: String::new(),
+        },
+    };
+    sign_action_request(&mut action_request, &request_seed).unwrap();
+    let observation_request = ObservationRequest {
+        schema_version: OBSERVER_REQUEST_V1.into(),
+        protocol_version: OBSERVER_PROTOCOL_V1.into(),
+        observation_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        phase: ObservationPhase::PostAction,
+        observer_id: "fixture-observer".into(),
+        request_authority_identity: "controller".into(),
+        expected_implementation_sha256: "4".repeat(64),
+        expected_image_sha256: "5".repeat(64),
+        expected_config_sha256: "6".repeat(64),
+        expected_generation: 1,
+        activation_mode: ObserverActivationMode::Current,
+        previous_generation: None,
+        rollback_from_generation: None,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        read_grant_id: "fixture-read".into(),
+        read_grant_version: "v1".into(),
+        read_grant_scope: "fixture-resource".into(),
+        query: Default::default(),
+        expected_previous_cursor: None,
+        predecessor_receipt_sha256: Some("7".repeat(64)),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 60_000,
+        audit_provenance: "effect-free-preflight-test".into(),
+        authorization: ObserverAuthorization {
+            key_id: "observer-request-key".into(),
+            signature_base64: "not-reached".into(),
+        },
+    };
+    let unavailable_service = PinnedServiceCommand {
+        executable: std::fs::canonicalize("/bin/false").unwrap(),
+        executable_sha256: "0".repeat(64),
+        timeout_millis: 1_000,
+    };
+    let plan = EffectExecutionPlan {
+        schema_version: "mcloving.controller-effect-plan/v1".into(),
+        freeze: EffectRuntimeFreeze {
+            mapping_id: "notification.v1".into(),
+            mapping_digest,
+            deployment_binding_sha256: "8".repeat(64),
+            runtime_attestation_sha256: "9".repeat(64),
+            credential_mapping_generation: 1,
+            pre_action_observation_sha256: "a".repeat(64),
+            grant: FreshOneActionGrant {
+                grant_sha256: "b".repeat(64),
+                request_id: action_request.request_id,
+                attempt_id: admission.attempt_id,
+                effect_fence: fence,
+                issued_at_unix_ms: now - 2_000,
+                expires_at_unix_ms: now + 60_000,
+                max_actions: 1,
+                consumed_actions: 0,
+            },
+            action_request,
+            request_authority_public_key: request_key,
+            connector_outcome_public_key: public_key_from_seed(&[12_u8; 32]).unwrap(),
+            observer_receipt_public_key: public_key_from_seed(&[13_u8; 32]).unwrap(),
+            shadow_replay_public_key: public_key_from_seed(&[14_u8; 32]).unwrap(),
+            expected_observer_id: "fixture-observer".into(),
+            expected_shadow_identity: "fixture-shadow".into(),
+        },
+        connector_service: unavailable_service.clone(),
+        observer_service: unavailable_service.clone(),
+        shadow_service: unavailable_service,
+        observation_request,
+        audit_provenance: "effect-free-preflight-test".into(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let receipt = run_claim(
+        &store,
+        &claim,
+        &WorkerConfig {
+            agent_id: "agent-regression".into(),
+            session_epoch: 1,
+            workspace_root: root.path().to_owned(),
+            journal_path: root.path().join("agent.db"),
+            cancellation_poll: Duration::from_millis(10),
+            lease_seconds: 60,
+            termination_grace: Duration::from_millis(100),
+            effect_plan: Some(plan),
+        },
+    )
+    .await
+    .expect("pre-dispatch service substitution becomes a terminal failure");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read abandoned effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
 }
 
 async fn admitted_claim(
