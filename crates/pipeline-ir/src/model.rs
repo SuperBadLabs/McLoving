@@ -964,6 +964,14 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                         &format!("{base}.protected_secret_ref_schema"),
                         &intent.protected_secret_ref_schema,
                     )?;
+                    for (name, kind) in &intent.protected_secret_ref_schema {
+                        if *kind != JsonFieldType::String {
+                            return Err(IrValidationError::new(
+                                format!("{base}.protected_secret_ref_schema.{name}"),
+                                "protected secret references must be opaque strings",
+                            ));
+                        }
+                    }
                     validate_field_schema(
                         &format!("{base}.expected_public_result_schema"),
                         &intent.expected_public_result_schema,

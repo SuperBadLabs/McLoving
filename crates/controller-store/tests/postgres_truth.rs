@@ -6031,6 +6031,18 @@ async fn backup_restore_canary_verify() {
     assert_eq!(restored_historical.fence, admission.2 - 1);
     assert_eq!(restored_historical.status, EffectStatus::Uncertain);
     assert_eq!(restored_historical.payload, historical_effect);
+    let public_effects = store
+        .effect_evidence_summaries(organization_id, admission.1)
+        .await
+        .expect("read all restored effect fences");
+    assert_eq!(public_effects.len(), 2);
+    assert_eq!(
+        public_effects
+            .iter()
+            .map(|effect| (effect.fence, effect.effect_key.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(admission.2 - 1, "publish-cache"), (admission.2, "deploy"),]
+    );
     assert!(
         !store
             .checkpoint_effect(

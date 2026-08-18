@@ -21,7 +21,9 @@ Pipeline IR gains a connector-intent step. Its semantic fields are limited to:
 
 - a versioned mapping identifier and mapping digest;
 - a canonical effect class and effect key template;
-- a typed public input schema plus protected secret-reference schema;
+- a typed public input schema plus a closed protected secret-reference schema,
+  whose field names are the required reference taints/names and whose string
+  values are opaque provider references (never secret bytes);
 - the expected public result schema;
 - a timeout and explicit ambiguity policy; and
 - a downstream-control digest.

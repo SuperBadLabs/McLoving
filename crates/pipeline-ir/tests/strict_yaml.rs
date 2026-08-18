@@ -102,6 +102,23 @@ fn connector_intent_rejects_multi_step_stage_until_sequencing_is_implemented() {
     assert!(error.message.contains("exactly one connector intent"));
 }
 
+#[test]
+fn connector_intent_rejects_non_string_protected_references() {
+    let source =
+        CONNECTOR_PIPELINE.replace("            token: string", "            token: object");
+    let error = compile_strict_yaml(
+        "fixture://connector-protected-reference-type",
+        &source,
+        ParseLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.path.as_deref(),
+        Some("$.stages[0].steps[0].connector_intent.protected_secret_ref_schema.token")
+    );
+    assert!(error.message.contains("opaque strings"));
+}
+
 fn validate_no_authority_material(bytes: &[u8]) {
     let text = String::from_utf8_lossy(bytes);
     for forbidden in ["https://", "bearer-secret", "/bin/sh"] {

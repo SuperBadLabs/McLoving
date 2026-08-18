@@ -135,10 +135,17 @@ def outcome_receipt(request, openssl, outcome_key, evidence_sequence=1):
         "status": "succeeded",
         "status_code": "fixture_succeeded",
         "public_values": {"delivery_id": "fixture-delivery-1"},
-        "protected_secret_refs": [],
+        "protected_secret_refs": [
+            {
+                "provider_identity": "fixture-secret-provider",
+                "reference": "opaque/token/1",
+                "version": "1",
+                "taint": "token",
+            }
+        ],
         "external_ids": {"delivery": "fixture-delivery-1"},
-        "downstream_control_digest": "sha256:" + "b" * 64,
-        "later_intents_digest": "sha256:" + "c" * 64,
+        "downstream_control_digest": "b" * 64,
+        "later_intents_digest": "c" * 64,
         "destination_response_sha256": None,
         "destination_signature_base64": None,
         "destination_attestation_key_id": None,

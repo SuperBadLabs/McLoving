@@ -8,9 +8,9 @@ use mcloving_destination_observer::{
     observation_request_message, verify_observation_receipt,
 };
 use mcloving_external_connector::{
-    ActionRequest, IdempotencyClass, OutcomeReceipt, OutcomeStatus, ShadowReplayReceipt,
-    action_request_digest, content_sha256, outcome_receipt_digest, verify_action_request,
-    verify_outcome_receipt, verify_shadow_receipt,
+    ActionRequest, IdempotencyClass, OutcomeReceipt, OutcomeStatus, ProtectedSecretRef,
+    ShadowReplayReceipt, action_request_digest, content_sha256, outcome_receipt_digest,
+    verify_action_request, verify_outcome_receipt, verify_shadow_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -577,11 +577,18 @@ fn validate_outcome(
         || outcome.credential_grant_id != request.credential_grant_id
         || outcome.credential_grant_version != request.credential_grant_version
         || outcome.credential_grant_scope != request.credential_grant_scope
-        || outcome.downstream_control_digest != intent.downstream_control_digest
+        || !sha256_reference_matches(
+            &intent.downstream_control_digest,
+            &outcome.downstream_control_digest,
+        )
         || outcome.attempt_count != 1
         || !public_values_match(
             &intent.expected_public_result_schema,
             &outcome.public_values,
+        )
+        || !protected_secret_refs_match(
+            &intent.protected_secret_ref_schema,
+            &outcome.protected_secret_refs,
         )
     {
         return Err(EffectRuntimeError::InvalidOutcome);
@@ -738,6 +745,45 @@ fn public_payload_matches(
         })
 }
 
+/// Pipeline IR uses an algorithm-qualified content reference while the EXT-001
+/// receipt protocol carries the raw digest. Compare their canonical digest
+/// components without weakening either wire contract.
+fn sha256_reference_matches(reference: &str, digest: &str) -> bool {
+    reference
+        .strip_prefix("sha256:")
+        .is_some_and(|expected| is_sha256(expected) && expected == digest && is_sha256(digest))
+}
+
+/// A protected-reference schema is a closed map from its semantic taint/name
+/// to the opaque provider reference. Secret bytes never enter this projection.
+/// Duplicate taints, missing references, extra references, and non-string
+/// declarations all fail closed.
+fn protected_secret_refs_match(
+    schema: &std::collections::BTreeMap<String, JsonFieldType>,
+    refs: &[ProtectedSecretRef],
+) -> bool {
+    if schema.len() != refs.len() {
+        return false;
+    }
+    let mut values = std::collections::BTreeMap::new();
+    for secret in refs {
+        if secret.provider_identity.is_empty()
+            || secret.reference.is_empty()
+            || secret.version.is_empty()
+            || secret.taint.is_empty()
+            || values
+                .insert(
+                    secret.taint.clone(),
+                    Value::String(secret.reference.clone()),
+                )
+                .is_some()
+        {
+            return false;
+        }
+    }
+    public_values_match(schema, &values)
+}
+
 fn json_kind_matches(kind: JsonFieldType, value: &Value) -> bool {
     match kind {
         JsonFieldType::Array => value.is_array(),
@@ -758,7 +804,14 @@ fn is_sha256(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_distinct_role_keys;
+    use std::collections::BTreeMap;
+
+    use mcloving_external_connector::ProtectedSecretRef;
+
+    use super::{
+        JsonFieldType, protected_secret_refs_match, sha256_reference_matches,
+        valid_distinct_role_keys,
+    };
 
     #[test]
     fn effect_role_keys_are_structurally_valid_and_pairwise_distinct() {
@@ -778,5 +831,46 @@ mod tests {
             &observer,
             &shadow,
         ]));
+    }
+
+    #[test]
+    fn pipeline_digest_reference_matches_raw_connector_digest_only() {
+        let digest = "b".repeat(64);
+        assert!(sha256_reference_matches(
+            &format!("sha256:{digest}"),
+            &digest
+        ));
+        assert!(!sha256_reference_matches(&digest, &digest));
+        assert!(!sha256_reference_matches(
+            &format!("sha256:{}", "a".repeat(64)),
+            &digest
+        ));
+    }
+
+    #[test]
+    fn protected_secret_reference_schema_is_closed_and_typed() {
+        let schema = BTreeMap::from([("token".to_owned(), JsonFieldType::String)]);
+        let token = ProtectedSecretRef {
+            provider_identity: "fixture-provider".to_owned(),
+            reference: "opaque/token/7".to_owned(),
+            version: "7".to_owned(),
+            taint: "token".to_owned(),
+        };
+        assert!(protected_secret_refs_match(
+            &schema,
+            std::slice::from_ref(&token)
+        ));
+        assert!(!protected_secret_refs_match(&schema, &[]));
+        assert!(!protected_secret_refs_match(
+            &schema,
+            &[ProtectedSecretRef {
+                taint: "other".to_owned(),
+                ..token.clone()
+            }]
+        ));
+        assert!(!protected_secret_refs_match(
+            &BTreeMap::from([("token".to_owned(), JsonFieldType::Object)]),
+            &[token]
+        ));
     }
 }

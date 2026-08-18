@@ -2874,6 +2874,7 @@ pub struct BuildResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeEffectEvidenceResponse {
+    pub fence: i64,
     pub effect_key: String,
     pub effect_class: String,
     pub status: String,
@@ -4858,11 +4859,12 @@ async fn status(
         .ok_or_else(not_found)?;
     let effects = state
         .store
-        .effect_evidence_summaries(organization_id, snapshot.attempt_id, snapshot.fence)
+        .effect_evidence_summaries(organization_id, snapshot.attempt_id)
         .await
         .map_err(internal)?
         .into_iter()
         .map(|effect| RuntimeEffectEvidenceResponse {
+            fence: effect.fence,
             effect_key: effect.effect_key,
             effect_class: effect.effect_class,
             status: effect.status,

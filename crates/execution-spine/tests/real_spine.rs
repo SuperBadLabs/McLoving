@@ -1831,11 +1831,12 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
     .expect("read complete effect join");
     assert_eq!(joined, ("confirmed".into(), 3));
     let summaries = store
-        .effect_evidence_summaries(organization_id, admission.attempt_id, claim.fence)
+        .effect_evidence_summaries(organization_id, admission.attempt_id)
         .await
         .expect("read redacted public effect evidence");
     assert_eq!(summaries.len(), 1);
     let summary = &summaries[0];
+    assert_eq!(summary.fence, claim.fence);
     assert_eq!(summary.effect_key, "build.notification");
     assert_eq!(summary.status, "confirmed");
     assert!(summary.payload_digest.iter().any(|byte| *byte != 0));
@@ -1855,6 +1856,7 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
         .expect("read redacted effect evidence through HTTP");
     assert_eq!(status.effects.len(), 1);
     let effect = &status.effects[0];
+    assert_eq!(effect.fence, claim.fence);
     assert_eq!(effect.effect_key, "build.notification");
     assert_eq!(effect.status, "confirmed");
     assert_eq!(effect.payload_sha256.len(), 64);

@@ -351,6 +351,7 @@ pub struct EffectEvidence {
 /// content digests, never the prepared payload or signed receipt bodies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectEvidenceSummary {
+    pub fence: i64,
     pub effect_key: String,
     pub effect_class: String,
     pub status: String,
@@ -3416,14 +3417,16 @@ impl Store {
         Ok(evidence)
     }
 
-    /// Loads the bounded redacted effect state for an exact attempt fence.
+    /// Loads the bounded redacted effect state across every fence of an exact
+    /// attempt. Historical restore fences remain operator-visible because they
+    /// can still block terminal reconciliation.
     pub async fn effect_evidence_summaries(
         &self,
         organization_id: Uuid,
         attempt_id: Uuid,
-        fence: i64,
     ) -> Result<Vec<EffectEvidenceSummary>, StoreError> {
         type SummaryRow = (
+            i64,
             String,
             String,
             String,
@@ -3435,17 +3438,16 @@ impl Store {
         );
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_as::<_, SummaryRow>(
-            "SELECT effect_key, effect_class, status, payload_digest,
+            "SELECT fence, effect_key, effect_class, status, payload_digest,
                     outcome_receipt_digest, reconciliation_receipt_digest,
                     observation_receipt_digest, shadow_replay_receipt_digest
              FROM attempt_effects
-             WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3
-             ORDER BY effect_key
+             WHERE organization_id = $1 AND attempt_id = $2
+             ORDER BY fence, effect_key
              LIMIT 1025",
         )
         .bind(organization_id)
         .bind(attempt_id)
-        .bind(fence)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -3457,6 +3459,7 @@ impl Store {
         rows.into_iter()
             .map(
                 |(
+                    fence,
                     effect_key,
                     effect_class,
                     status,
@@ -3467,6 +3470,7 @@ impl Store {
                     shadow_replay_receipt_digest,
                 )| {
                     Ok(EffectEvidenceSummary {
+                        fence,
                         effect_key,
                         effect_class,
                         status,
