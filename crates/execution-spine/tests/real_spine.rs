@@ -1446,7 +1446,21 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(expired_effect_routed, "runtime effect lease did not expire");
+    if !expired_effect_routed {
+        let state: (String, Option<String>, String, String) = sqlx::query_as(
+            "SELECT a.status, a.lease_expires_at::text, clock_timestamp()::text, e.status
+             FROM attempts AS a
+             JOIN attempt_effects AS e
+               ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .fetch_one(restarted.pool())
+        .await
+        .expect("inspect non-expiring runtime effect lease");
+        panic!("runtime effect lease did not expire: {state:?}");
+    }
     let state: (String, String) = sqlx::query_as(
         "SELECT a.status, e.status
          FROM attempts AS a
