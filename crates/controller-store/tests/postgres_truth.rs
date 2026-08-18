@@ -1572,6 +1572,165 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
 }
 
 #[tokio::test]
+async fn missing_and_legacy_build_cancellation_remain_no_ops() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "legacy-cancellation",
+        )
+        .await
+        .expect("create legacy cancellation tenant");
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, Uuid::new_v4())
+            .await
+            .expect("missing cancellation target remains a no-op")
+    );
+
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "legacy-cancellation-binding".into(),
+            pipeline_digest: [0x81; 32],
+            node_key: "legacy-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit legacy cancellation fixture");
+    sqlx::query(
+        "UPDATE builds SET pipeline_id=NULL, pipeline_revision=NULL,
+                           pipeline_operational_generation=NULL,
+                           pipeline_revision_digest=NULL
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(store.pool())
+    .await
+    .expect("remove the post-v27 operational binding");
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("legacy cancellation target remains a no-op")
+    );
+}
+
+#[tokio::test]
+async fn execution_reads_cancellation_after_the_pipeline_lock() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "post-lock-cancellation",
+        )
+        .await
+        .expect("create post-lock cancellation tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "post-lock-cancellation".into(),
+            pipeline_digest: [0x82; 32],
+            node_key: "post-lock-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit post-lock cancellation build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "post-lock-scheduler".into(),
+            agent_id: "post-lock-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim post-lock attempt")
+        .expect("post-lock attempt is claimable");
+
+    let mut cancellation = store.pool().begin().await.expect("begin cancellation race");
+    sqlx::query(
+        "SELECT d.pipeline_id
+         FROM pipeline_definitions AS d
+         WHERE d.organization_id=$1 AND d.pipeline_id=$2
+         FOR UPDATE OF d",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(&mut *cancellation)
+    .await
+    .expect("lock pipeline before cancellation publication");
+    sqlx::query(
+        "UPDATE builds SET cancellation_requested_at=clock_timestamp()
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(&mut *cancellation)
+    .await
+    .expect("stage cancellation behind the pipeline lock");
+
+    let execution_store = store.clone();
+    let execution_claim = claim.clone();
+    let execution = tokio::spawn(async move {
+        execution_store
+            .attempt_execution(
+                execution_claim.organization_id,
+                execution_claim.attempt_id,
+                execution_claim.fence,
+                execution_claim.restore_epoch,
+                &execution_claim.agent_id,
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancellation
+        .commit()
+        .await
+        .expect("commit the cancellation before execution acquires the pipeline lock");
+    let loaded = execution
+        .await
+        .expect("join post-lock execution read")
+        .expect("load post-lock execution")
+        .expect("exact attempt remains executable");
+    assert!(
+        loaded.cancellation_requested,
+        "the authoritative cancellation read must occur after the pipeline lock"
+    );
+}
+
+#[tokio::test]
 async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

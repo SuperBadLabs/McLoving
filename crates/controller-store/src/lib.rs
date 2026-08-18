@@ -2181,6 +2181,23 @@ impl Store {
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
             .await?;
+        let target = sqlx::query_as::<_, (Option<Uuid>, Option<i64>)>(
+            "SELECT pipeline_id, pipeline_operational_generation
+             FROM builds
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND id = $3
+               AND status IN ('queued', 'running')",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((Some(_), Some(_))) = target else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
         // Lease renewal acquires the pipeline-definition row before it updates
         // the attempt/build graph. Use the same order here so cancellation
         // cannot hold the build graph while waiting for that pipeline row.
@@ -2786,7 +2803,7 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
-        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
+        let mut row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
             "SELECT b.id, b.project_id, b.pipeline_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
@@ -2823,6 +2840,22 @@ impl Store {
                 }
                 other => Err(other),
             };
+        }
+        if let Some((build_id, _, _, _, cancellation_requested)) = row.as_mut() {
+            let current_cancellation = sqlx::query_scalar::<_, bool>(
+                "SELECT cancellation_requested_at IS NOT NULL
+                 FROM builds
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(*build_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(current_cancellation) = current_cancellation else {
+                tx.rollback().await?;
+                return Ok(None);
+            };
+            *cancellation_requested = current_cancellation;
         }
         tx.commit().await?;
         Ok(row.map(
