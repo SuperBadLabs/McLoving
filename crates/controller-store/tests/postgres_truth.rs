@@ -1790,6 +1790,10 @@ async fn execution_revalidates_lease_after_the_pipeline_lock() {
     .fetch_one(&mut *authority_loss)
     .await
     .expect("lock pipeline before lease expiry");
+    let authority_loss_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *authority_loss)
+        .await
+        .expect("read lease-expiry transaction backend PID");
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at=clock_timestamp() - interval '1 second'
@@ -1814,7 +1818,27 @@ async fn execution_revalidates_lease_after_the_pipeline_lock() {
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut execution_reached_pipeline_lock = false;
+    for _ in 0..100 {
+        execution_reached_pipeline_lock = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid))
+             )",
+        )
+        .bind(authority_loss_backend_pid)
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect execution pipeline-lock waiter");
+        if execution_reached_pipeline_lock {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        execution_reached_pipeline_lock,
+        "execution must complete its initial authority read and wait on the held pipeline lock"
+    );
     authority_loss
         .commit()
         .await
