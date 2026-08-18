@@ -81,22 +81,25 @@ accepted intent blocks dispatch and quarantines unresolved work.
 
 ## Current implementation boundary
 
-The active EXT-002 implementation now includes Pipeline IR v1.3 connector
-intents, execution-spec v2, immutable PostgreSQL outcome/observation/
-reconciliation/shadow receipts, the controller-owned fenced state machine, and
-digest-pinned out-of-process connector, observer, and shadow invocations. A
-real-PostgreSQL integration proof uses three distinct Ed25519 receipt roles and
-holds the shadow reply open: while the connector outcome and independent
-observation are durable, the attempt remains `running`; terminal success is
-published only after the signed shadow receipt is durable. A separate
-substituted-executable proof records `abandoned` with zero receipts and a
-visible failed terminal without dispatch.
+Exact implementation head
+`b87609857226fb7a44d124a2f1002f75f4bd22c8` includes Pipeline IR v1.3
+connector intents, execution-spec v2, deployment-backed exact mapping
+admission, immutable PostgreSQL outcome/observation/reconciliation/shadow
+receipts, redacted public evidence digests, the controller-owned fenced state
+machine, and digest-pinned out-of-process connector, observer, and shadow
+invocations. Real-PostgreSQL proofs use three distinct Ed25519 receipt roles,
+hold terminal publication until the signed shadow receipt is durable, reject a
+substituted executable before dispatch, and freeze every post-dispatch timeout,
+substituted signed response, crash, lease-loss, cancellation, retry, and
+reconciliation ambiguity without a duplicate fixture effect.
 
-This is implementation evidence, not ticket closure. Deployment-backed
-unknown/floating mapping denial, redacted API state and evidence-digest reads,
-the complete lease/crash/timeout/duplicate/reconciliation matrix, exact-head
-review and protected CI, and the effect-free Mario rehearsal remain required
-before EXT-002 may become `DONE`.
+The exact-head effect-free Mario rehearsal passed all 14 execution-spine tests
+on an internal-only runtime network with real PostgreSQL and all production,
+canary, and cutover authority flags false. Its owner-only result receipt SHA-256
+is `44ad8eb55386a38dfbe42a62407fd198b87aac53c9eca709f8a387bb0a81d8c7`.
+`docs/evidence/EXT-002_SECURITY_REVIEW.md` records the detailed implementation
+and rehearsal evidence. Exact-head review, protected CI, merge, and
+protected-main verification remain required before EXT-002 may become `DONE`.
 
 ## Required evidence
 
