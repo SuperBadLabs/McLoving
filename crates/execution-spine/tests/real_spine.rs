@@ -1432,15 +1432,21 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
     assert_eq!(dispatch_count(root.path()), 1);
     execution.abort();
     let _ = execution.await;
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     drop(store);
     let restarted = test_store().await.expect("reconnect controller store");
-    assert!(
-        restarted
+    let mut expired_effect_routed = false;
+    for _ in 0..40 {
+        if restarted
             .requeue_one_expired(organization_id)
             .await
             .expect("route expired runtime effect")
-    );
+        {
+            expired_effect_routed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(expired_effect_routed, "runtime effect lease did not expire");
     let state: (String, String) = sqlx::query_as(
         "SELECT a.status, e.status
          FROM attempts AS a

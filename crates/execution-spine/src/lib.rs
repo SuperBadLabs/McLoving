@@ -513,10 +513,18 @@ async fn run_effect_claim(
     {
         return Err(SpineError::StaleAuthority);
     }
-    let lease_guard = EffectLeaseGuard::start(store, claim, config).await?;
-    let result = run_effect_claim_under_lease(store, claim, config, intent, plan).await;
-    lease_guard.finish().await;
-    result
+    renew_effect_lease(store, claim, config).await?;
+    let renewal_interval = effect_renewal_interval(config);
+    let effect = run_effect_claim_under_lease(store, claim, config, intent, plan);
+    tokio::pin!(effect);
+    loop {
+        tokio::select! {
+            result = &mut effect => return result,
+            () = tokio::time::sleep(renewal_interval) => {
+                renew_effect_lease(store, claim, config).await?;
+            }
+        }
+    }
 }
 
 async fn run_effect_claim_under_lease(
@@ -921,102 +929,40 @@ fn unix_time_millis() -> Result<i64, SpineError> {
     i64::try_from(millis).map_err(|_| SpineError::FenceOverflow)
 }
 
-struct EffectLeaseGuard {
-    shutdown: CancellationToken,
-    task: Option<tokio::task::JoinHandle<()>>,
+fn effect_renewal_interval(config: &WorkerConfig) -> Duration {
+    Duration::from_millis(
+        u64::try_from(config.lease_seconds)
+            .unwrap_or(1)
+            .saturating_mul(1_000)
+            .checked_div(3)
+            .unwrap_or(1)
+            .max(1),
+    )
+    .max(config.cancellation_poll)
 }
 
-impl EffectLeaseGuard {
-    async fn start(
-        store: &Store,
-        claim: &ClaimedAttempt,
-        config: &WorkerConfig,
-    ) -> Result<Self, SpineError> {
-        if store
-            .renew_attempt_lease(
-                claim.organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                &config.agent_id,
-                config.lease_seconds,
-            )
-            .await?
-            .is_none()
-        {
-            return Err(SpineError::StaleAuthority);
-        }
-        let shutdown = CancellationToken::new();
-        let renewal_interval = Duration::from_millis(
-            u64::try_from(config.lease_seconds)
-                .unwrap_or(1)
-                .saturating_mul(1_000)
-                .checked_div(3)
-                .unwrap_or(1)
-                .max(1),
-        )
-        .max(config.cancellation_poll);
-        let task = tokio::spawn(effect_lease_poller(
-            store.clone(),
-            claim.clone(),
-            config.agent_id.clone(),
-            renewal_interval,
+async fn renew_effect_lease(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+) -> Result<(), SpineError> {
+    if store
+        .renew_attempt_lease(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &config.agent_id,
             config.lease_seconds,
-            shutdown.clone(),
-        ));
-        Ok(Self {
-            shutdown,
-            task: Some(task),
-        })
+        )
+        .await?
+        .is_none()
+    {
+        return Err(SpineError::StaleAuthority);
     }
-
-    async fn finish(mut self) {
-        self.shutdown.cancel();
-        if let Some(task) = self.task.take() {
-            task.await.ok();
-        }
-    }
-}
-
-impl Drop for EffectLeaseGuard {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
-async fn effect_lease_poller(
-    store: Store,
-    claim: ClaimedAttempt,
-    agent_id: String,
-    interval: Duration,
-    lease_seconds: i32,
-    shutdown: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(interval) => {}
-        }
-        match store
-            .renew_attempt_lease(
-                claim.organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                &agent_id,
-                lease_seconds,
-            )
-            .await
-        {
-            // Cancellation is joined by the effect path after dispatch; keep
-            // its lease alive until all independent evidence is durable.
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => return,
-        }
-    }
+    // A cancellation request is joined after dispatch; renewal retains the
+    // fence until the independent outcome, observation, and shadow are durable.
+    Ok(())
 }
 
 async fn cancellation_poller(
