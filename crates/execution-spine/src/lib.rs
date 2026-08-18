@@ -28,8 +28,8 @@ use mcloving_agent_runtime::{
 use mcloving_controller_store::{ClaimedAttempt, NewLogChunk, Store, StoreError, TerminalOutcome};
 use mcloving_destination_observer::{ObservationPhase, ObservationRequest};
 use mcloving_external_connector::{
-    ConnectorCommand, OutcomeStatus, RECONCILE_REQUEST_SCHEMA_VERSION, ReconcileRequest,
-    SHADOW_REPLAY_SCHEMA_VERSION, ShadowReplayRequest, outcome_receipt_digest,
+    ActionRequest, ConnectorCommand, OutcomeStatus, RECONCILE_REQUEST_SCHEMA_VERSION,
+    ReconcileRequest, SHADOW_REPLAY_SCHEMA_VERSION, ShadowReplayRequest, outcome_receipt_digest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -576,13 +576,34 @@ async fn run_effect_claim_under_lease(
         return Err(SpineError::StaleAuthority);
     }
 
+    let connector_service = bounded_connector_service(&plan.connector_service, intent)?;
+    let preflight_validity_ms = connector_service
+        .timeout_millis
+        .checked_add(plan.observer_service.timeout_millis)
+        .ok_or(SpineError::EffectRuntimeUnavailable)?;
+    let prepare_now = unix_time_millis()?;
+    if !action_request_covers_execution_window(
+        &plan.freeze.action_request,
+        prepare_now,
+        preflight_validity_ms,
+    ) {
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Failed,
+            json!({"reason": "effect_action_request_preflight_failed"}),
+        )
+        .await;
+    }
+
     let prepared = prepare_effect(
         store,
         claim,
         &config.agent_id,
         intent,
         &plan.freeze,
-        unix_time_millis()?,
+        prepare_now,
     )
     .await?;
     let frozen = store
@@ -617,7 +638,6 @@ async fn run_effect_claim_under_lease(
         )
         .await;
     }
-    let connector_service = bounded_connector_service(&plan.connector_service, intent)?;
     let services = match preflight_effect_services(
         &connector_service,
         &plan.observer_service,
@@ -675,6 +695,21 @@ async fn run_effect_claim_under_lease(
             config,
             TerminalOutcome::Aborted,
             json!({"reason": "cancelled_during_effect_preflight"}),
+        )
+        .await;
+    }
+    if !action_request_covers_execution_window(
+        &plan.freeze.action_request,
+        unix_time_millis()?,
+        connector_service.timeout_millis,
+    ) {
+        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Failed,
+            json!({"reason": "effect_action_request_preflight_failed"}),
         )
         .await;
     }
@@ -922,6 +957,17 @@ fn bounded_connector_service(
         return Err(SpineError::EffectRuntimeUnavailable);
     }
     Ok(bounded)
+}
+
+fn action_request_covers_execution_window(
+    request: &ActionRequest,
+    now_unix_ms: i64,
+    required_validity_ms: u64,
+) -> bool {
+    i64::try_from(required_validity_ms)
+        .ok()
+        .and_then(|required| now_unix_ms.checked_add(required))
+        .is_some_and(|deadline| deadline <= request.expires_at_unix_ms)
 }
 
 fn service_may_have_dispatched(error: &EffectServiceError) -> bool {

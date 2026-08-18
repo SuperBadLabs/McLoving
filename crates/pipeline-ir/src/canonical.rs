@@ -470,10 +470,10 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                             "empty connector effect key template",
                         ));
                     }
-                    for description in [
-                        "public input",
-                        "protected secret reference",
-                        "public result",
+                    for (description, strings_only) in [
+                        ("public input", false),
+                        ("protected secret reference", true),
+                        ("public result", false),
                     ] {
                         let fields = reader.count(MAX_PARAMETERS, description)?;
                         let mut previous = None;
@@ -485,7 +485,8 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                                     format!("invalid {description} field name"),
                                 ));
                             }
-                            if !matches!(reader.u8()?, 1..=6) {
+                            let field_type = reader.u8()?;
+                            if !matches!(field_type, 1..=6) || (strings_only && field_type != 6) {
                                 return Err(CanonicalError::new(
                                     reader.offset.saturating_sub(1),
                                     format!("invalid {description} field type"),
@@ -830,5 +831,44 @@ stages:
         let error = validate_canonical_bytes(&bytes)
             .expect_err("canonical multi-step connector stage must fail");
         assert!(error.message.contains("exactly one step"));
+    }
+
+    #[test]
+    fn independent_validator_rejects_non_string_protected_references() {
+        let mut pipeline = compile_strict_yaml(
+            "fixture://canonical-protected-reference",
+            r#"
+version: 1
+name: canonical-protected-reference
+stages:
+  - id: notify
+    name: Notify
+    steps:
+      - connector_intent:
+          mapping_id: notification.v1
+          mapping_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          effect_class: externally_idempotent
+          effect_key_template: build.notification
+          public_input_schema: {message: string}
+          protected_secret_ref_schema: {token: string}
+          expected_public_result_schema: {delivery_id: string}
+          timeout_seconds: 30
+          ambiguity_policy: observe_then_reconcile
+          downstream_control_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+"#,
+            ParseLimits::default(),
+        )
+        .expect("compile protected reference");
+        let Step::ConnectorIntent(intent) = &mut pipeline.stages[0].steps[0] else {
+            panic!("expected connector intent");
+        };
+        intent
+            .protected_secret_ref_schema
+            .insert("token".to_owned(), JsonFieldType::Object);
+        let bytes = encode_pipeline(&pipeline);
+
+        let error = validate_canonical_bytes(&bytes)
+            .expect_err("canonical non-string protected reference must fail");
+        assert!(error.message.contains("protected secret reference"));
     }
 }

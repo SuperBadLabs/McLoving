@@ -715,7 +715,7 @@ fn runtime_effect_plan(
         credential_grant_version: "v1".into(),
         credential_grant_scope: "one-notification".into(),
         requested_at_unix_ms: now - 1_000,
-        expires_at_unix_ms: now + 20_000,
+        expires_at_unix_ms: now + 29_000,
         audit_provenance: format!("ext-002/{scenario}/request"),
         authorization: RequestAuthorization {
             key_id: "request-key".into(),
@@ -1376,7 +1376,7 @@ async fn observer_predecessor_must_match_the_frozen_pre_action_receipt_before_di
 }
 
 #[tokio::test]
-async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
+async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -1384,6 +1384,7 @@ async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
     for case in [
         "bad_signature",
         "expired",
+        "insufficient_action_validity",
         "insufficient_validity",
         "wrong_protocol",
         "wrong_binding",
@@ -1406,6 +1407,18 @@ async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
             5_000,
         );
         match case {
+            "insufficient_action_validity" => {
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap();
+                plan.freeze.action_request.requested_at_unix_ms = now - 1_000;
+                plan.freeze.action_request.expires_at_unix_ms = now + 1_000;
+                sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
+            }
             "bad_signature" => {
                 plan.observation_request.authorization.signature_base64 = "AAAA".into();
             }
@@ -1449,6 +1462,19 @@ async fn signed_observation_request_must_be_fully_admissible_before_dispatch() {
             .expect("invalid observation request fails as a terminal preflight error");
         assert_eq!(receipt.outcome, TerminalOutcome::Failed, "case={case}");
         assert_eq!(dispatch_count(root.path()), 0, "case={case}");
+        if case == "insufficient_action_validity" {
+            let effect_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM attempt_effects
+                 WHERE organization_id = $1 AND attempt_id = $2",
+            )
+            .bind(organization_id)
+            .bind(admission.attempt_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("count action-authority effects");
+            assert_eq!(effect_count, 0, "case={case}");
+            continue;
+        }
         let effect: (String, i64) = sqlx::query_as(
             "SELECT status,
                     ((outcome_receipt IS NOT NULL)::int
