@@ -606,7 +606,17 @@ async fn run_effect_claim_under_lease(
         )
         .await;
     }
-    validate_observation_request(claim, accepted.project_id, pipeline_id, plan)?;
+    if validate_observation_request(claim, accepted.project_id, pipeline_id, plan).is_err() {
+        abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
+        return finalize_effect_attempt(
+            store,
+            claim,
+            config,
+            TerminalOutcome::Failed,
+            json!({"reason": "effect_observation_request_preflight_failed"}),
+        )
+        .await;
+    }
     let connector_service = bounded_connector_service(&plan.connector_service, intent)?;
     let services = match preflight_effect_services(
         &connector_service,
@@ -843,6 +853,11 @@ fn validate_observation_request(
         || plan.observation_request.attempt_id != claim.attempt_id
         || plan.observation_request.effect_fence != fence
         || plan.observation_request.observer_id != plan.freeze.expected_observer_id
+        || plan
+            .observation_request
+            .predecessor_receipt_sha256
+            .as_deref()
+            != Some(plan.freeze.pre_action_observation_sha256.as_str())
         || !matches!(
             plan.observation_request.phase,
             ObservationPhase::PostAction | ObservationPhase::Reconciliation

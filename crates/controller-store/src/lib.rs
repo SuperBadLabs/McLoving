@@ -3174,7 +3174,11 @@ impl Store {
         kind: EffectEvidenceKind,
         receipt: &Value,
     ) -> Result<bool, StoreError> {
-        if effect_key.is_empty() || effect_key.len() > 256 {
+        if agent_id.is_empty()
+            || agent_id.len() > 256
+            || effect_key.is_empty()
+            || effect_key.len() > 256
+        {
             return Ok(false);
         }
         let receipt_bytes = serde_json::to_vec(receipt)
@@ -3183,21 +3187,31 @@ impl Store {
         let (receipt_column, digest_column) = kind.columns();
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
-        let authority = sqlx::query_scalar::<_, Uuid>(
-            "SELECT n.build_id
+        let authority = sqlx::query_as::<_, (Uuid, bool)>(
+            "SELECT n.build_id, a.status = 'reconciliation_required'
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id AND n.organization_id = a.organization_id
              CROSS JOIN controller_metadata AS m
              WHERE a.organization_id = $1
                AND a.id = $2
-               AND a.fence = $3
                AND a.restore_epoch = $4
-               AND a.lease_owner = $5
-               AND a.lease_expires_at > clock_timestamp()
-               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                AND m.singleton
-               AND a.restore_epoch = m.restore_epoch
+               AND (
+                   (
+                       a.fence = $3
+                       AND a.lease_owner = $5
+                       AND a.lease_expires_at > clock_timestamp()
+                       AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+                       AND a.restore_epoch = m.restore_epoch
+                   )
+                   OR (
+                       a.status = 'reconciliation_required'
+                       AND a.lease_expires_at IS NULL
+                       AND a.restore_epoch <= m.restore_epoch
+                       AND $3 <= a.fence
+                   )
+               )
              FOR UPDATE OF a",
         )
         .bind(organization_id)
@@ -3207,11 +3221,14 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(build_id) = authority else {
+        let Some((build_id, reconciling)) = authority else {
             tx.rollback().await?;
             return Ok(false);
         };
-        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+        if !reconciling
+            && let Err(error) =
+                lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
             tx.rollback().await?;
             return match error {
                 StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {

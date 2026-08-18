@@ -753,7 +753,7 @@ fn runtime_effect_plan(
         .into_iter()
         .collect(),
         expected_previous_cursor: None,
-        predecessor_receipt_sha256: Some("7".repeat(64)),
+        predecessor_receipt_sha256: Some("a".repeat(64)),
         requested_at_unix_ms: now - 1_000,
         expires_at_unix_ms: now + 20_000,
         audit_provenance: format!("ext-002/{scenario}/observation"),
@@ -1319,6 +1319,51 @@ async fn signed_runtime_scope_must_match_the_durable_build_before_dispatch() {
 }
 
 #[tokio::test]
+async fn observer_predecessor_must_match_the_frozen_pre_action_receipt_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-observer-predecessor",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    plan.observation_request.predecessor_receipt_sha256 = Some("f".repeat(64));
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("invalid observer predecessor fails as a terminal preflight error");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read predecessor-preflight effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
+}
+
+#[tokio::test]
 async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1668,7 +1713,7 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
         .into_iter()
         .collect(),
         expected_previous_cursor: None,
-        predecessor_receipt_sha256: Some("7".repeat(64)),
+        predecessor_receipt_sha256: Some("a".repeat(64)),
         requested_at_unix_ms: now - 1_000,
         expires_at_unix_ms: now + 20_000,
         audit_provenance: "effect-free-positive-test".into(),
@@ -1927,7 +1972,7 @@ async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstrea
         .into_iter()
         .collect(),
         expected_previous_cursor: None,
-        predecessor_receipt_sha256: Some("7".repeat(64)),
+        predecessor_receipt_sha256: Some("a".repeat(64)),
         requested_at_unix_ms: now - 1_000,
         expires_at_unix_ms: now + 60_000,
         audit_provenance: "effect-free-preflight-test".into(),

@@ -622,6 +622,8 @@ fn validate_observation(
             observation.phase,
             ObservationPhase::PostAction | ObservationPhase::Reconciliation
         )
+        || request.predecessor_receipt_sha256.as_deref()
+            != Some(freeze.pre_action_observation_sha256.as_str())
         || observation.predecessor_receipt_sha256 != request.predecessor_receipt_sha256
         || observation.observer_implementation_sha256 != request.expected_implementation_sha256
         || observation.observer_image_sha256 != request.expected_image_sha256

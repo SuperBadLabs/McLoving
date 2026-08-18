@@ -4597,6 +4597,206 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
 }
 
 #[tokio::test]
+async fn reconciliation_can_complete_a_partial_runtime_effect_join_without_a_lease() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "effect-reconciliation-evidence",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "effect-reconciliation-evidence".into(),
+            pipeline_digest: [73; 32],
+            node_key: "effect".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit effect build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "effect-reconciliation-scheduler".into(),
+            agent_id: "effect-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim effect build")
+        .expect("effect build exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+            )
+            .await
+            .expect("accept effect build")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "request_sha256": "a".repeat(64),
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare effect")
+    );
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Uncertain,
+                &payload,
+            )
+            .await
+            .expect("freeze uncertain effect")
+    );
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                TerminalOutcome::Failed,
+                json!({"reason": "post-dispatch join interrupted"}),
+            )
+            .await
+            .expect("route incomplete effect to reconciliation")
+    );
+    let outcome = json!({"status": "succeeded", "signature_base64": "outcome"});
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch + 1,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome,
+            )
+            .await
+            .expect("reject evidence for a substituted restore epoch")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome,
+            )
+            .await
+            .expect("append recovered outcome without a live lease")
+    );
+    let observation = json!({"phase": "reconciliation", "signature_base64": "observation"});
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::Observation,
+                &observation,
+            )
+            .await
+            .expect("append recovered observation without a live lease")
+    );
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("confirm recovered effect")
+    );
+    let shadow = json!({"denied_authority": true, "signature_base64": "shadow"});
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::ShadowReplay,
+                &shadow,
+            )
+            .await
+            .expect("append recovered shadow receipt without a live lease")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "effect-operator",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "all recovered receipts verified"}),
+            )
+            .await
+            .expect("finalize the complete recovered join")
+    );
+}
+
+#[tokio::test]
 async fn retry_history_is_immutable_idempotent_and_bounded() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
