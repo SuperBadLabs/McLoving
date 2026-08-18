@@ -1,6 +1,6 @@
 # Runtime effect integration v1
 
-Status: EXT-002 design and execution gate; no production authority
+Status: EXT-002 implementation active; no production authority
 
 ## Gap this ticket closes
 
@@ -78,6 +78,25 @@ implementation/image/configuration digest, request key, result key, observer
 binding, and credential-mapping generation. Startup rejects partial or ambient
 configuration. Per-action freeze checks the live values again; drift after an
 accepted intent blocks dispatch and quarantines unresolved work.
+
+## Current implementation boundary
+
+The active EXT-002 implementation now includes Pipeline IR v1.3 connector
+intents, execution-spec v2, immutable PostgreSQL outcome/observation/
+reconciliation/shadow receipts, the controller-owned fenced state machine, and
+digest-pinned out-of-process connector, observer, and shadow invocations. A
+real-PostgreSQL integration proof uses three distinct Ed25519 receipt roles and
+holds the shadow reply open: while the connector outcome and independent
+observation are durable, the attempt remains `running`; terminal success is
+published only after the signed shadow receipt is durable. A separate
+substituted-executable proof records `abandoned` with zero receipts and a
+visible failed terminal without dispatch.
+
+This is implementation evidence, not ticket closure. Deployment-backed
+unknown/floating mapping denial, redacted API state and evidence-digest reads,
+the complete lease/crash/timeout/duplicate/reconciliation matrix, exact-head
+review and protected CI, and the effect-free Mario rehearsal remain required
+before EXT-002 may become `DONE`.
 
 ## Required evidence
 
