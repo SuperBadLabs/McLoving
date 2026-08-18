@@ -1575,6 +1575,7 @@ dependencies = [
  "mcloving-controller-store",
  "mcloving-destination-observer",
  "mcloving-external-connector",
+ "nix",
  "reqwest",
  "serde",
  "serde_json",

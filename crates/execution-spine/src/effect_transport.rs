@@ -1,5 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
+
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd as _;
 
 use mcloving_destination_observer::{ObservationReceipt, ObservationRequest, ObserverCommand};
 use mcloving_external_connector::{
@@ -99,7 +102,7 @@ where
     T: Serialize,
     R: DeserializeOwned,
 {
-    validate_service(service).await?;
+    let executable = validate_service(service).await?;
     let mut request_bytes =
         serde_json::to_vec(request).map_err(|_| EffectServiceError::InvalidResponse)?;
     if request_bytes.len() >= MAX_SERVICE_FRAME_BYTES {
@@ -107,7 +110,7 @@ where
     }
     request_bytes.push(b'\n');
 
-    let mut child = Command::new(&service.executable);
+    let mut child = Command::new(executable.program());
     child
         .args(&service.arguments)
         .env_clear()
@@ -118,6 +121,7 @@ where
     let mut child = child
         .spawn()
         .map_err(|_| EffectServiceError::ServiceFailed)?;
+    drop(executable);
     let mut stdin = child
         .stdin
         .take()
@@ -156,7 +160,31 @@ where
     serde_json::from_value(value).map_err(|_| EffectServiceError::InvalidResponse)
 }
 
-async fn validate_service(service: &PinnedServiceCommand) -> Result<(), EffectServiceError> {
+#[cfg(target_os = "linux")]
+struct ValidatedServiceExecutable {
+    file: std::fs::File,
+}
+
+#[cfg(target_os = "linux")]
+impl ValidatedServiceExecutable {
+    fn program(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct ValidatedServiceExecutable;
+
+#[cfg(not(target_os = "linux"))]
+impl ValidatedServiceExecutable {
+    fn program(&self) -> PathBuf {
+        unreachable!("effect services fail closed outside the pinned Linux profile")
+    }
+}
+
+async fn validate_service(
+    service: &PinnedServiceCommand,
+) -> Result<ValidatedServiceExecutable, EffectServiceError> {
     if service.timeout_millis == 0
         || !service.executable.is_absolute()
         || !is_sha256(&service.executable_sha256)
@@ -165,9 +193,25 @@ async fn validate_service(service: &PinnedServiceCommand) -> Result<(), EffectSe
     {
         return Err(EffectServiceError::InvalidBinding);
     }
-    let metadata = tokio::fs::symlink_metadata(&service.executable)
+
+    #[cfg(not(target_os = "linux"))]
+    return Err(EffectServiceError::InvalidBinding);
+
+    #[cfg(target_os = "linux")]
+    let descriptor = nix::fcntl::open(
+        &service.executable,
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    let mut file = tokio::fs::File::from_std(std::fs::File::from(descriptor));
+    #[cfg(target_os = "linux")]
+    let metadata = file
+        .metadata()
         .await
         .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() == 0
@@ -175,23 +219,33 @@ async fn validate_service(service: &PinnedServiceCommand) -> Result<(), EffectSe
     {
         return Err(EffectServiceError::ExecutableUnavailable);
     }
+    #[cfg(target_os = "linux")]
     let canonical = tokio::fs::canonicalize(&service.executable)
         .await
         .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
     if canonical != service.executable {
         return Err(EffectServiceError::InvalidBinding);
     }
-    let digest = digest_file(&service.executable).await?;
+    #[cfg(target_os = "linux")]
+    let digest = digest_file(&mut file).await?;
+    #[cfg(target_os = "linux")]
     if digest != service.executable_sha256 {
         return Err(EffectServiceError::ExecutableSubstituted);
     }
-    Ok(())
+    #[cfg(target_os = "linux")]
+    let file = file.into_std().await;
+    #[cfg(target_os = "linux")]
+    nix::fcntl::fcntl(
+        &file,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+    #[cfg(target_os = "linux")]
+    return Ok(ValidatedServiceExecutable { file });
 }
 
-async fn digest_file(path: &Path) -> Result<String, EffectServiceError> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| EffectServiceError::ExecutableUnavailable)?;
+async fn digest_file(file: &mut tokio::fs::File) -> Result<String, EffectServiceError> {
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -236,5 +290,54 @@ mod tests {
         for invalid in [b"".as_slice(), b"{}\n{}", b"{}\r\n"] {
             assert!(one_json_line(invalid).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn verified_executable_inode_survives_path_replacement() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary executable root");
+        let service_path = root.path().join("service");
+        let replacement_path = root.path().join("replacement");
+        let printf = if std::path::Path::new("/usr/bin/printf").is_file() {
+            "/usr/bin/printf"
+        } else {
+            "/bin/printf"
+        };
+        let false_program = if std::path::Path::new("/usr/bin/false").is_file() {
+            "/usr/bin/false"
+        } else {
+            "/bin/false"
+        };
+        std::fs::copy(printf, &service_path).expect("copy original executable");
+        std::fs::set_permissions(&service_path, std::fs::Permissions::from_mode(0o700))
+            .expect("set executable mode");
+        let executable_sha256 =
+            Sha256::digest(std::fs::read(&service_path).expect("read original executable"))
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        let service = PinnedServiceCommand {
+            executable: service_path.clone(),
+            executable_sha256,
+            arguments: Vec::new(),
+            timeout_millis: 1_000,
+        };
+        let verified = validate_service(&service)
+            .await
+            .expect("verify and retain executable inode");
+
+        std::fs::copy(false_program, &replacement_path).expect("copy substituted executable");
+        std::fs::set_permissions(&replacement_path, std::fs::Permissions::from_mode(0o700))
+            .expect("set replacement mode");
+        std::fs::rename(&replacement_path, &service_path).expect("replace executable path");
+
+        let output = std::process::Command::new(verified.program())
+            .arg("verified-inode")
+            .output()
+            .expect("execute retained inode");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"verified-inode");
     }
 }

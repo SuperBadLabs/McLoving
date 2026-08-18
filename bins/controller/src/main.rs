@@ -52,6 +52,30 @@ fn validate_artifact_agent_token(api_token: &str, artifact_agent_token: &str) ->
     Ok(())
 }
 
+fn validate_effect_mapping_configuration(
+    executable_mapping: Option<(&str, &str)>,
+    catalog: Option<&ConnectorMappingCatalog>,
+) -> Result<()> {
+    match (executable_mapping, catalog) {
+        (Some((mapping_id, mapping_digest)), Some(catalog))
+            if catalog.mappings.len() == 1
+                && catalog.contains_exact(mapping_id, mapping_digest) =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(_)) => {
+            bail!("effect mapping catalog must contain exactly the executable runtime mapping")
+        }
+        (Some(_), None) => {
+            bail!("MCLOVING_EFFECT_MAPPING_CATALOG is required with an effect runtime plan")
+        }
+        (None, Some(_)) => {
+            bail!("effect mapping catalog cannot advertise a mapping without an executable plan")
+        }
+        (None, None) => Ok(()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let migration_database_url = std::env::var("MCLOVING_MIGRATION_DATABASE_URL")
@@ -85,17 +109,15 @@ async fn main() -> Result<()> {
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
     let connector_mapping_catalog = connector_mapping_catalog_from_environment()?;
-    match (&worker.config.effect_plan, &connector_mapping_catalog) {
-        (Some(plan), Some(catalog))
-            if catalog.contains_exact(&plan.freeze.mapping_id, &plan.freeze.mapping_digest) => {}
-        (Some(_), Some(_)) => {
-            bail!("effect runtime plan is not admitted by the exact connector mapping catalog")
-        }
-        (Some(_), None) => {
-            bail!("MCLOVING_EFFECT_MAPPING_CATALOG is required with an effect runtime plan")
-        }
-        (None, _) => {}
-    }
+    validate_effect_mapping_configuration(
+        worker.config.effect_plan.as_ref().map(|plan| {
+            (
+                plan.freeze.mapping_id.as_str(),
+                plan.freeze.mapping_digest.as_str(),
+            )
+        }),
+        connector_mapping_catalog.as_ref(),
+    )?;
     let oidc = oidc_environment(worker.organization_id)?;
     let object_root = PathBuf::from(
         std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
@@ -1647,6 +1669,23 @@ where
 mod tests {
     use super::*;
 
+    fn effect_catalog(mappings: Vec<(&str, &str)>) -> ConnectorMappingCatalog {
+        ConnectorMappingCatalog {
+            schema_version: mcloving_controller_api::CONNECTOR_MAPPING_CATALOG_V1.to_owned(),
+            profile: "private-linux-x86_64".to_owned(),
+            generation: 1,
+            mappings: mappings
+                .into_iter()
+                .map(|(mapping_id, mapping_digest)| {
+                    mcloving_controller_api::ConnectorMappingRecord {
+                        mapping_id: mapping_id.to_owned(),
+                        mapping_digest: mapping_digest.to_owned(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn artifact_agent_token_is_validated_before_bootstrap() {
         let api_token = "a".repeat(32);
@@ -1659,6 +1698,38 @@ mod tests {
         );
         assert!(validate_artifact_agent_token(&api_token, &api_token).is_err());
         assert!(validate_artifact_agent_token(&api_token, &"b".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn advertised_effect_mappings_exactly_match_the_embedded_worker() {
+        let first_digest = format!("sha256:{}", "a".repeat(64));
+        let second_digest = format!("sha256:{}", "b".repeat(64));
+        let exact = effect_catalog(vec![("notification.v1", &first_digest)]);
+        assert!(
+            validate_effect_mapping_configuration(
+                Some(("notification.v1", &first_digest)),
+                Some(&exact),
+            )
+            .is_ok()
+        );
+
+        let extra = effect_catalog(vec![
+            ("notification.v1", &first_digest),
+            ("deployment.v1", &second_digest),
+        ]);
+        assert!(
+            validate_effect_mapping_configuration(
+                Some(("notification.v1", &first_digest)),
+                Some(&extra),
+            )
+            .is_err()
+        );
+        assert!(validate_effect_mapping_configuration(None, Some(&exact)).is_err());
+        assert!(
+            validate_effect_mapping_configuration(Some(("notification.v1", &first_digest)), None,)
+                .is_err()
+        );
+        assert!(validate_effect_mapping_configuration(None, None).is_ok());
     }
 
     #[test]
