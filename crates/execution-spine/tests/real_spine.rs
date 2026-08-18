@@ -1136,8 +1136,13 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
         termination_grace: Duration::from_millis(100),
         effect_plan: Some(plan),
     };
-    let before_shadow = async {
-        for _ in 0..500 {
+    let mut execution = Box::pin(run_claim(&store, &claim, &config));
+    let before_shadow = loop {
+        tokio::select! {
+            result = &mut execution => panic!(
+                "effect execution terminated before the shadow join checkpoint: {result:?}"
+            ),
+            () = tokio::time::sleep(Duration::from_millis(10)) => {
             let state: Option<(String, i64)> = sqlx::query_as(
                 "SELECT a.status,
                         ((e.outcome_receipt IS NOT NULL)::int
@@ -1155,15 +1160,13 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
             .await
             .expect("observe effect join before shadow");
             if state.as_ref().is_some_and(|(_, evidence)| *evidence == 2) {
-                return state.unwrap();
+                    break state.unwrap();
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("outcome and observation never became durably visible before shadow replay");
     };
-    let (receipt, before_shadow) = tokio::join!(run_claim(&store, &claim, &config), before_shadow);
     assert_eq!(before_shadow, ("running".into(), 2));
-    let receipt = receipt.expect("signed effect join completes");
+    let receipt = execution.await.expect("signed effect join completes");
     assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
     let joined: (String, i64) = sqlx::query_as(
         "SELECT status,
