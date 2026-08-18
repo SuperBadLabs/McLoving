@@ -346,6 +346,20 @@ pub struct EffectEvidence {
     pub receipt_digest: [u8; 32],
 }
 
+/// Redacted public projection of one effect join. It contains only state and
+/// content digests, never the prepared payload or signed receipt bodies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectEvidenceSummary {
+    pub effect_key: String,
+    pub effect_class: String,
+    pub status: String,
+    pub payload_digest: [u8; 32],
+    pub outcome_receipt_digest: Option<[u8; 32]>,
+    pub reconciliation_receipt_digest: Option<[u8; 32]>,
+    pub observation_receipt_digest: Option<[u8; 32]>,
+    pub shadow_replay_receipt_digest: Option<[u8; 32]>,
+}
+
 impl EffectStatus {
     fn as_str(self) -> &'static str {
         match self {
@@ -3381,6 +3395,79 @@ impl Store {
         Ok(evidence)
     }
 
+    /// Loads the bounded redacted effect state for an exact attempt fence.
+    pub async fn effect_evidence_summaries(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<Vec<EffectEvidenceSummary>, StoreError> {
+        type SummaryRow = (
+            String,
+            String,
+            String,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        );
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, SummaryRow>(
+            "SELECT effect_key, effect_class, status, payload_digest,
+                    outcome_receipt_digest, reconciliation_receipt_digest,
+                    observation_receipt_digest, shadow_replay_receipt_digest
+             FROM attempt_effects
+             WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3
+             ORDER BY effect_key
+             LIMIT 1025",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        if rows.len() > 1_024 {
+            return Err(StoreError::InvalidEffectPayload(
+                "effect evidence summary exceeds the public bound".to_owned(),
+            ));
+        }
+        rows.into_iter()
+            .map(
+                |(
+                    effect_key,
+                    effect_class,
+                    status,
+                    payload_digest,
+                    outcome_receipt_digest,
+                    reconciliation_receipt_digest,
+                    observation_receipt_digest,
+                    shadow_replay_receipt_digest,
+                )| {
+                    Ok(EffectEvidenceSummary {
+                        effect_key,
+                        effect_class,
+                        status,
+                        payload_digest: stored_effect_digest(payload_digest)?,
+                        outcome_receipt_digest: optional_stored_effect_digest(
+                            outcome_receipt_digest,
+                        )?,
+                        reconciliation_receipt_digest: optional_stored_effect_digest(
+                            reconciliation_receipt_digest,
+                        )?,
+                        observation_receipt_digest: optional_stored_effect_digest(
+                            observation_receipt_digest,
+                        )?,
+                        shadow_replay_receipt_digest: optional_stored_effect_digest(
+                            shadow_replay_receipt_digest,
+                        )?,
+                    })
+                },
+            )
+            .collect()
+    }
+
     /// Confirms one fenced uncertain effect without restoring execution authority.
     ///
     /// Restore activation and lease expiry leave the attempt fenced and move
@@ -6095,6 +6182,16 @@ fn push_effect_evidence(
             "stored effect evidence is incomplete".to_owned(),
         )),
     }
+}
+
+fn stored_effect_digest(digest: Vec<u8>) -> Result<[u8; 32], StoreError> {
+    digest.try_into().map_err(|_| {
+        StoreError::InvalidEffectPayload("stored effect digest is not 32 bytes".to_owned())
+    })
+}
+
+fn optional_stored_effect_digest(digest: Option<Vec<u8>>) -> Result<Option<[u8; 32]>, StoreError> {
+    digest.map(stored_effect_digest).transpose()
 }
 
 fn recoverable_finalization_status(status: &str) -> bool {

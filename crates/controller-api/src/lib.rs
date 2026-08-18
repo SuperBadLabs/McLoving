@@ -2869,6 +2869,19 @@ pub struct BuildResponse {
     pub lease_owner: Option<String>,
     pub cancellation_requested: bool,
     pub terminal_summary: Option<Value>,
+    pub effects: Vec<RuntimeEffectEvidenceResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeEffectEvidenceResponse {
+    pub effect_key: String,
+    pub effect_class: String,
+    pub status: String,
+    pub payload_sha256: String,
+    pub outcome_receipt_sha256: Option<String>,
+    pub reconciliation_receipt_sha256: Option<String>,
+    pub observation_receipt_sha256: Option<String>,
+    pub shadow_replay_receipt_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -4843,6 +4856,29 @@ async fn status(
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
+    let effects = state
+        .store
+        .effect_evidence_summaries(organization_id, snapshot.attempt_id, snapshot.fence)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|effect| RuntimeEffectEvidenceResponse {
+            effect_key: effect.effect_key,
+            effect_class: effect.effect_class,
+            status: effect.status,
+            payload_sha256: hex(&effect.payload_digest),
+            outcome_receipt_sha256: effect.outcome_receipt_digest.map(|digest| hex(&digest)),
+            reconciliation_receipt_sha256: effect
+                .reconciliation_receipt_digest
+                .map(|digest| hex(&digest)),
+            observation_receipt_sha256: effect
+                .observation_receipt_digest
+                .map(|digest| hex(&digest)),
+            shadow_replay_receipt_sha256: effect
+                .shadow_replay_receipt_digest
+                .map(|digest| hex(&digest)),
+        })
+        .collect();
     Ok(Json(BuildResponse {
         build_id: snapshot.build_id,
         node_id: snapshot.node_id,
@@ -4853,6 +4889,7 @@ async fn status(
         lease_owner: snapshot.lease_owner,
         cancellation_requested: snapshot.cancellation_requested,
         terminal_summary: snapshot.terminal_summary,
+        effects,
     }))
 }
 

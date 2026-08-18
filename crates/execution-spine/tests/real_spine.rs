@@ -1200,6 +1200,39 @@ async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
     .await
     .expect("read complete effect join");
     assert_eq!(joined, ("confirmed".into(), 3));
+    let summaries = store
+        .effect_evidence_summaries(organization_id, admission.attempt_id, claim.fence)
+        .await
+        .expect("read redacted public effect evidence");
+    assert_eq!(summaries.len(), 1);
+    let summary = &summaries[0];
+    assert_eq!(summary.effect_key, "build.notification");
+    assert_eq!(summary.status, "confirmed");
+    assert!(summary.payload_digest.iter().any(|byte| *byte != 0));
+    assert!(summary.outcome_receipt_digest.is_some());
+    assert!(summary.reconciliation_receipt_digest.is_none());
+    assert!(summary.observation_receipt_digest.is_some());
+    assert!(summary.shadow_replay_receipt_digest.is_some());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind API");
+    let address = listener.local_addr().expect("read API address");
+    let server = tokio::spawn(
+        axum::serve(listener, router(api_state(store.clone(), organization_id))).into_future(),
+    );
+    let status = Client::new(&format!("http://{address}"), TOKEN)
+        .status(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read redacted effect evidence through HTTP");
+    assert_eq!(status.effects.len(), 1);
+    let effect = &status.effects[0];
+    assert_eq!(effect.effect_key, "build.notification");
+    assert_eq!(effect.status, "confirmed");
+    assert_eq!(effect.payload_sha256.len(), 64);
+    assert!(effect.outcome_receipt_sha256.is_some());
+    assert!(effect.reconciliation_receipt_sha256.is_none());
+    assert!(effect.observation_receipt_sha256.is_some());
+    assert!(effect.shadow_replay_receipt_sha256.is_some());
+    server.abort();
 }
 
 #[tokio::test]
