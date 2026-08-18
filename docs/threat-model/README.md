@@ -272,6 +272,31 @@ acceptance run directly exercises their applicable authentication, persistence,
 execution, supply-chain, audit, and operational-state surfaces without waiving
 their production residual risks.
 
+### EXT-002 Mario runtime-effect review
+
+Reviewed: 2026-08-18
+
+The bundle-backed rehearsal at exact head
+`6f737080cf7546e1982fd45c2283663d941f4448` exercises TM-051's complete
+17-test real-PostgreSQL effect spine on a fresh internal-only network. The
+connector, independent observer, and deny-authority shadow fixture remain
+process-isolated with pairwise-distinct signing roles. Exact source, fixture,
+and test-binary digests are retained owner-only, every manifest entry was
+independently recomputed, and teardown left neither the exact database
+container nor network. Result receipt SHA-256
+`733f870961474d0be581d9aba46b244a0fc767b4c680bd4aac96c115d39163ac`
+records zero production endpoint, credential, effect, canary, or cutover
+authority.
+
+The preceding truthful `complete:false` receipt exposed a host-harness race in
+which PostgreSQL's temporary initialization server could satisfy
+`pg_isready` immediately before its intentional restart. The corrected gate
+also requires the pinned container's PID 1 to be the final `postgres` server,
+so evidence publication cannot treat temporary initialization readiness as
+runtime readiness. This correction changes no product effect authority. The
+first production action remains separately gated by complete `CANARY-001`
+inputs and a fresh explicit one-action owner grant.
+
 ## Data-flow rules
 
 - Compatibility workers receive source and metadata, never execution secrets.

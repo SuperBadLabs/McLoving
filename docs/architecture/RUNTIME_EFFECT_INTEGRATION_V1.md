@@ -90,8 +90,8 @@ accepted intent blocks dispatch and quarantines unresolved work.
 
 ## Current implementation boundary
 
-Exact implementation head
-`edc392524a5c229c3e5d2a1462b14d45d4611f27` includes Pipeline IR v1.3
+Exact implementation and rehearsal head
+`6f737080cf7546e1982fd45c2283663d941f4448` includes Pipeline IR v1.3
 connector intents, execution-spec v2, deployment-backed exact mapping
 admission, immutable PostgreSQL outcome/observation/reconciliation/shadow
 receipts, redacted public evidence digests, the controller-owned fenced state
@@ -114,16 +114,20 @@ references. Public build status includes redacted effects from every fence of
 the exact attempt and retains each fence identity, so historical restore
 uncertainty cannot become invisible while blocking terminal reconciliation.
 
-The retained earlier-candidate effect-free Mario rehearsal passed all 14 then-
-current execution-spine tests on an internal-only runtime network with real
-PostgreSQL and all production, canary, and cutover authority flags false. Its
-owner-only result receipt SHA-256 is
-`44ad8eb55386a38dfbe42a62407fd198b87aac53c9eca709f8a387bb0a81d8c7`.
-It is not exact-head evidence for `edc3925`; a fresh 17-test effect-free Mario
-rehearsal remains required.
-`docs/evidence/EXT-002_SECURITY_REVIEW.md` records the detailed implementation
-and rehearsal evidence. Exact-head review, protected CI, merge, and
-protected-main verification remain required before EXT-002 may become `DONE`.
+The bundle-backed Mario rehearsal at `6f73708` passed all 17 execution-spine
+tests on an internal-only runtime network with real PostgreSQL and all
+production, canary, and cutover authority flags false. The harness requires the
+pinned database container's PID 1 to be the final `postgres` server as well as
+ready, preventing the temporary initialization server from satisfying the
+gate immediately before its intentional restart. The owner-only result receipt
+SHA-256 is
+`733f870961474d0be581d9aba46b244a0fc767b4c680bd4aac96c115d39163ac`;
+the checksum-file SHA-256 is
+`c170cdbaae81aea781f6c46721e64c30ef2ee6e966c6f5f7293bb72b829470d7`.
+`docs/evidence/EXT-002_SECURITY_REVIEW.md` records the detailed implementation,
+failed pre-test diagnostic, and successful exact-head rehearsal evidence.
+Exact-head review, protected CI, merge, and protected-main verification remain
+required before EXT-002 may become `DONE`.
 
 ## Required evidence
 
