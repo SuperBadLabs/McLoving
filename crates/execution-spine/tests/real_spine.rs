@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
@@ -590,6 +591,38 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn write_test_pkcs8(path: &Path, seed: &[u8; 32]) {
+    let mut encoded = vec![
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    encoded.extend_from_slice(seed);
+    std::fs::write(path, encoded).expect("write test-only Ed25519 PKCS#8 key");
+}
+
+fn pinned_effect_fixture(root: &Path) -> PinnedServiceCommand {
+    let fixture = std::fs::canonicalize(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/effect_service.py"),
+    )
+    .expect("canonical effect fixture");
+    let openssl = std::fs::canonicalize("/usr/bin/openssl").expect("canonical openssl");
+    let outcome_key = root.join("outcome-key.pkcs8");
+    let observer_key = root.join("observer-key.pkcs8");
+    let shadow_key = root.join("shadow-key.pkcs8");
+    write_test_pkcs8(&outcome_key, &[12_u8; 32]);
+    write_test_pkcs8(&observer_key, &[13_u8; 32]);
+    write_test_pkcs8(&shadow_key, &[14_u8; 32]);
+    let executable_sha256 = hex(&Sha256::digest(
+        std::fs::read(&fixture).expect("read effect fixture"),
+    ));
+    PinnedServiceCommand {
+        executable: fixture,
+        executable_sha256,
+        arguments: vec![openssl, outcome_key, observer_key, shadow_key],
+        timeout_millis: 5_000,
+    }
+}
+
 #[tokio::test]
 async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     let Some(store) = test_store().await else {
@@ -946,6 +979,206 @@ async fn process_spawn_failure_is_published_as_terminal_failure() {
             .attempts
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let mapping_digest = format!("sha256:{}", "a".repeat(64));
+    let downstream_digest = format!("sha256:{}", "b".repeat(64));
+    let execution_spec = json!({
+        "version": 2,
+        "steps": [{
+            "kind": "connector_intent",
+            "mapping_id": "notification.v1",
+            "mapping_digest": mapping_digest,
+            "effect_class": "externally_idempotent",
+            "effect_key_template": "build.notification",
+            "public_input_schema": {"message": "string"},
+            "protected_secret_ref_schema": {"token": "string"},
+            "expected_public_result_schema": {"delivery_id": "string"},
+            "timeout_seconds": 30,
+            "ambiguity_policy": "observe_then_reconcile",
+            "downstream_control_digest": downstream_digest,
+        }]
+    });
+    let (organization_id, project_id, admission, claim) =
+        admitted_claim(&store, execution_spec, "effect-plan-positive", 60).await;
+    let fence = u64::try_from(claim.fence).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let request_seed = [11_u8; 32];
+    let request_key = public_key_from_seed(&request_seed).unwrap();
+    let mut action_request = ActionRequest {
+        schema_version: CONNECTOR_REQUEST_V1.into(),
+        protocol_version: CONNECTOR_PROTOCOL_V1.into(),
+        request_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        effect_key: "build.notification".into(),
+        connector_id: "fixture-connector".into(),
+        expected_implementation_sha256: "1".repeat(64),
+        expected_image_sha256: "2".repeat(64),
+        expected_config_sha256: "3".repeat(64),
+        expected_generation: 1,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        idempotency_class: IdempotencyClass::ExternallyIdempotent,
+        action_name: "notify".into(),
+        action_schema_version: "fixture.notify/v1".into(),
+        request_payload: json!({"message": "hello"}),
+        credential_grant_id: "fixture-grant".into(),
+        credential_grant_version: "v1".into(),
+        credential_grant_scope: "one-notification".into(),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 60_000,
+        audit_provenance: "effect-free-positive-test".into(),
+        authorization: RequestAuthorization {
+            key_id: "request-key".into(),
+            signature_base64: String::new(),
+        },
+    };
+    sign_action_request(&mut action_request, &request_seed).unwrap();
+    let observation_request = ObservationRequest {
+        schema_version: OBSERVER_REQUEST_V1.into(),
+        protocol_version: OBSERVER_PROTOCOL_V1.into(),
+        observation_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        phase: ObservationPhase::PostAction,
+        observer_id: "fixture-observer".into(),
+        request_authority_identity: "controller".into(),
+        expected_implementation_sha256: "4".repeat(64),
+        expected_image_sha256: "5".repeat(64),
+        expected_config_sha256: "6".repeat(64),
+        expected_generation: 1,
+        activation_mode: ObserverActivationMode::Current,
+        previous_generation: None,
+        rollback_from_generation: None,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        read_grant_id: "fixture-read".into(),
+        read_grant_version: "v1".into(),
+        read_grant_scope: "fixture-resource".into(),
+        query: Default::default(),
+        expected_previous_cursor: None,
+        predecessor_receipt_sha256: Some("7".repeat(64)),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 60_000,
+        audit_provenance: "effect-free-positive-test".into(),
+        authorization: ObserverAuthorization {
+            key_id: "observer-request-key".into(),
+            signature_base64: "fixture-request-signature".into(),
+        },
+    };
+    let root = tempfile::tempdir().unwrap();
+    let service = pinned_effect_fixture(root.path());
+    let plan = EffectExecutionPlan {
+        schema_version: "mcloving.controller-effect-plan/v1".into(),
+        freeze: EffectRuntimeFreeze {
+            mapping_id: "notification.v1".into(),
+            mapping_digest,
+            deployment_binding_sha256: "8".repeat(64),
+            runtime_attestation_sha256: "9".repeat(64),
+            credential_mapping_generation: 1,
+            pre_action_observation_sha256: "a".repeat(64),
+            grant: FreshOneActionGrant {
+                grant_sha256: "b".repeat(64),
+                request_id: action_request.request_id,
+                attempt_id: admission.attempt_id,
+                effect_fence: fence,
+                issued_at_unix_ms: now - 2_000,
+                expires_at_unix_ms: now + 60_000,
+                max_actions: 1,
+                consumed_actions: 0,
+            },
+            action_request,
+            request_authority_public_key: request_key,
+            connector_outcome_public_key: public_key_from_seed(&[12_u8; 32]).unwrap(),
+            observer_receipt_public_key: public_key_from_seed(&[13_u8; 32]).unwrap(),
+            shadow_replay_public_key: public_key_from_seed(&[14_u8; 32]).unwrap(),
+            expected_observer_id: "fixture-observer".into(),
+            expected_shadow_identity: "fixture-shadow".into(),
+        },
+        connector_service: service.clone(),
+        observer_service: service.clone(),
+        shadow_service: service,
+        observation_request,
+        audit_provenance: "effect-free-positive-test".into(),
+    };
+    let config = WorkerConfig {
+        agent_id: "agent-regression".into(),
+        session_epoch: 1,
+        workspace_root: root.path().join("workspace"),
+        journal_path: root.path().join("agent.db"),
+        cancellation_poll: Duration::from_millis(10),
+        lease_seconds: 60,
+        termination_grace: Duration::from_millis(100),
+        effect_plan: Some(plan),
+    };
+    let before_shadow = async {
+        for _ in 0..500 {
+            let state: Option<(String, i64)> = sqlx::query_as(
+                "SELECT a.status,
+                        ((e.outcome_receipt IS NOT NULL)::int
+                         + (e.observation_receipt IS NOT NULL)::int
+                         + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+                 FROM attempts AS a
+                 JOIN attempt_effects AS e
+                   ON e.organization_id = a.organization_id
+                  AND e.attempt_id = a.id
+                 WHERE a.organization_id = $1 AND a.id = $2",
+            )
+            .bind(organization_id)
+            .bind(admission.attempt_id)
+            .fetch_optional(store.pool())
+            .await
+            .expect("observe effect join before shadow");
+            if state.as_ref().is_some_and(|(_, evidence)| *evidence == 2) {
+                return state.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("outcome and observation never became durably visible before shadow replay");
+    };
+    let (receipt, before_shadow) = tokio::join!(run_claim(&store, &claim, &config), before_shadow);
+    assert_eq!(before_shadow, ("running".into(), 2));
+    let receipt = receipt.expect("signed effect join completes");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    let joined: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read complete effect join");
+    assert_eq!(joined, ("confirmed".into(), 3));
 }
 
 #[tokio::test]
