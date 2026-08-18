@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091 # resolved from the repository root at runtime
 # shellcheck source=../tools/versions.env
 source "${repo_root}/tools/versions.env"
 
