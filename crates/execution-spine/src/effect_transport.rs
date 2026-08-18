@@ -114,7 +114,8 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    let mut child = child
         .spawn()
         .map_err(|_| EffectServiceError::ServiceFailed)?;
     let mut stdin = child
