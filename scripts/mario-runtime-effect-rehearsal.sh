@@ -131,15 +131,21 @@ podman run --detach --rm \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
   --env POSTGRES_DB=mcloving \
   "${MCLOVING_POSTGRES_IMAGE}" >/dev/null
+
+postgres_final_ready() {
+  podman exec "${postgres}" sh -c \
+    'read -r process_name < /proc/1/comm && [ "${process_name}" = postgres ]' \
+    >/dev/null 2>&1 &&
+    podman exec "${postgres}" pg_isready \
+      --username mcloving --dbname mcloving >/dev/null 2>&1
+}
 for _ in $(seq 1 120); do
-  if podman exec "${postgres}" pg_isready \
-    --username mcloving --dbname mcloving >/dev/null 2>&1; then
+  if postgres_final_ready; then
     break
   fi
   sleep 0.25
 done
-podman exec "${postgres}" pg_isready \
-  --username mcloving --dbname mcloving >/dev/null
+postgres_final_ready
 
 podman run --rm \
   --network "${network}" \
