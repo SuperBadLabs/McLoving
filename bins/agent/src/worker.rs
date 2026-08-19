@@ -143,6 +143,16 @@ fn record_lease_loss(loss_reason: &OnceLock<&'static str>, cause: &'static str) 
     }
 }
 
+/// Maps the controller's named refusal cause onto the agent's fixed cause
+/// vocabulary so the durable result agrees with the recorded controller
+/// event; an empty or unknown cause stays the generic rejection.
+fn renewal_rejection_cause(cause: &str) -> &'static str {
+    match cause {
+        "agent_session_stale" => "renewal_session_stale",
+        _ => "renewal_rejected",
+    }
+}
+
 /// Classifies a renewal RPC rejection status: a stale-session fencing
 /// rejection is named as such rather than as a transport failure.
 fn renewal_status_cause(status: &tonic::Status) -> &'static str {
@@ -1220,7 +1230,10 @@ async fn renew_lease(
             }
         }
         if !receipt.accepted {
-            record_lease_loss(&loss_reason, "renewal_rejected");
+            record_lease_loss(
+                &loss_reason,
+                renewal_rejection_cause(&receipt.rejection_cause),
+            );
             execution_cancellation.cancel();
             authority_lost.cancel();
             return Err(AgentError::StaleAuthority);

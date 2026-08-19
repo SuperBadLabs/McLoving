@@ -26,9 +26,9 @@ use mcloving_controller_api::{
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, NewLogChunk,
-    NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
-    StoreError, TerminalOutcome, authz::ServiceScope,
+    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, LeaseRenewalDisposition,
+    NewLogChunk, NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization,
+    Store, StoreError, TerminalOutcome, authz::ServiceScope,
 };
 use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -1040,9 +1040,10 @@ impl AgentControl for ControllerAgentService {
                 session_epoch: authority.session_epoch,
                 accepted: false,
                 cancellation_requested: false,
+                rejection_cause: String::new(),
             }));
         }
-        let cancellation_requested = self
+        let disposition = self
             .store
             .renew_attempt_lease_in_session(
                 context.organization_id,
@@ -1055,11 +1056,29 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
-        Ok(Response::new(WorkLeaseReceipt {
-            session_epoch: authority.session_epoch,
-            accepted: cancellation_requested.is_some(),
-            cancellation_requested: cancellation_requested.unwrap_or(false),
-        }))
+        let receipt = match disposition {
+            LeaseRenewalDisposition::Renewed {
+                cancellation_requested,
+            } => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                cancellation_requested,
+                rejection_cause: String::new(),
+            },
+            LeaseRenewalDisposition::TerminalNoOp => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                cancellation_requested: false,
+                rejection_cause: String::new(),
+            },
+            LeaseRenewalDisposition::Rejected { cause } => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                cancellation_requested: false,
+                rejection_cause: cause.to_owned(),
+            },
+        };
+        Ok(Response::new(receipt))
     }
 
     async fn publish_log(

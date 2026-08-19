@@ -32,6 +32,19 @@ pub struct ClaimedAttempt {
     pub agent_id: String,
 }
 
+/// Outcome of one fenced lease-renewal request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LeaseRenewalDisposition {
+    /// The lease was extended under current authority.
+    Renewed { cancellation_requested: bool },
+    /// The attempt is already terminal; an exact replay's renewal is an
+    /// acknowledged no-op that extends nothing.
+    TerminalNoOp,
+    /// The renewal was refused; the cause matches the recorded
+    /// `attempt.lease_renewal_rejected` event.
+    Rejected { cause: &'static str },
+}
+
 /// Stable explanation when the scheduler cannot claim work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WaitReason {
@@ -401,16 +414,26 @@ impl Store {
         agent_id: &str,
         lease_seconds: i32,
     ) -> Result<Option<bool>, StoreError> {
-        self.renew_attempt_lease_with_session(
-            organization_id,
-            attempt_id,
-            fence,
-            restore_epoch,
-            agent_id,
-            None,
-            lease_seconds,
+        Ok(
+            match self
+                .renew_attempt_lease_with_session(
+                    organization_id,
+                    attempt_id,
+                    fence,
+                    restore_epoch,
+                    agent_id,
+                    None,
+                    lease_seconds,
+                )
+                .await?
+            {
+                LeaseRenewalDisposition::Renewed {
+                    cancellation_requested,
+                } => Some(cancellation_requested),
+                LeaseRenewalDisposition::TerminalNoOp => Some(false),
+                LeaseRenewalDisposition::Rejected { .. } => None,
+            },
         )
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -423,7 +446,7 @@ impl Store {
         agent_id: &str,
         session_epoch: u64,
         lease_seconds: i32,
-    ) -> Result<Option<bool>, StoreError> {
+    ) -> Result<LeaseRenewalDisposition, StoreError> {
         self.renew_attempt_lease_with_session(
             organization_id,
             attempt_id,
@@ -446,9 +469,11 @@ impl Store {
         agent_id: &str,
         session_epoch: Option<u64>,
         lease_seconds: i32,
-    ) -> Result<Option<bool>, StoreError> {
+    ) -> Result<LeaseRenewalDisposition, StoreError> {
         if lease_seconds <= 0 {
-            return Ok(None);
+            return Ok(LeaseRenewalDisposition::Rejected {
+                cause: "invalid_lease_window",
+            });
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         if let Some(session_epoch) = session_epoch
@@ -464,7 +489,9 @@ impl Store {
             )
             .await?;
             tx.commit().await?;
-            return Ok(None);
+            return Ok(LeaseRenewalDisposition::Rejected {
+                cause: "agent_session_stale",
+            });
         }
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
             .bind(RESTORE_FENCE_LOCK_KEY)
@@ -496,7 +523,9 @@ impl Store {
             tx.rollback().await?;
             return match error {
                 StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
-                    Ok(Some(true))
+                    Ok(LeaseRenewalDisposition::Renewed {
+                        cancellation_requested: true,
+                    })
                 }
                 other => Err(other),
             };
@@ -532,9 +561,11 @@ impl Store {
         .bind(f64::from(lease_seconds))
         .fetch_optional(&mut *tx)
         .await?;
-        if cancellation_requested.is_some() {
+        if let Some(cancellation_requested) = cancellation_requested {
             tx.commit().await?;
-            return Ok(cancellation_requested);
+            return Ok(LeaseRenewalDisposition::Renewed {
+                cancellation_requested,
+            });
         }
         // A response-loss replay can observe an already-terminal attempt.
         // Its exact terminal publication is idempotent and needs no renewed
@@ -560,19 +591,23 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if terminal.is_none() {
-            record_lease_renewal_rejection(
-                &mut tx,
-                organization_id,
-                attempt_id,
-                fence,
-                agent_id,
-                "lease_not_current",
-            )
-            .await?;
+        if terminal.is_some() {
+            tx.commit().await?;
+            return Ok(LeaseRenewalDisposition::TerminalNoOp);
         }
+        record_lease_renewal_rejection(
+            &mut tx,
+            organization_id,
+            attempt_id,
+            fence,
+            agent_id,
+            "lease_not_current",
+        )
+        .await?;
         tx.commit().await?;
-        Ok(terminal.map(|_| false))
+        Ok(LeaseRenewalDisposition::Rejected {
+            cause: "lease_not_current",
+        })
     }
 
     /// Resolves one expired active lease without changing its fence.
@@ -979,7 +1014,12 @@ impl Store {
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4",
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )",
         )
         .bind(organization_id)
         .bind(attempt_id)

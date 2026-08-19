@@ -68,7 +68,7 @@ pub use product::{
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
     PipelineWrite, TestReportView,
 };
-pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
+pub use scheduler::{ClaimRequest, ClaimedAttempt, LeaseRenewalDisposition, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
 pub use state_transfer::{ScmCheckoutEvidenceRef, StateTransferReceipt};
 pub use test_results::{
