@@ -3261,6 +3261,15 @@ impl Store {
             .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
         let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Cancellation and claim transactions serialize on the per-org
+        // scheduler advisory lock before touching any pipeline or attempt
+        // row. Taking the same lock first here removes the inverse
+        // attempt-then-pipeline lock cycle with `request_cancellation_as`,
+        // which locks the pipeline definition before the attempt graph.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let build_id = sqlx::query_scalar::<_, Uuid>(
             "SELECT n.build_id
