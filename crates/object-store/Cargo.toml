@@ -10,6 +10,7 @@ sha2 = "0.10.9"
 thiserror = "2.0.17"
 
 [dev-dependencies]
+sha2 = "0.10.9"
 tempfile = "3.27.0"
 
 [lints]
