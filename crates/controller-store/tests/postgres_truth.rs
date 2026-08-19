@@ -1594,13 +1594,14 @@ async fn outbox_reaper_bounds_retention_and_respects_tenancy() {
     .expect("age outbox rows past the retention horizon");
     assert_eq!(aged.rows_affected(), 3);
 
-    let now_unix_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("wall clock is after the Unix epoch")
-            .as_millis(),
+    // Both sides of the age comparison must share one clock source; the
+    // aged rows were stamped by Postgres, so "now" comes from Postgres too.
+    let now_unix_ms = sqlx::query_scalar::<_, i64>(
+        "SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint",
     )
-    .expect("wall clock fits in 64 bits");
+    .fetch_one(store.pool())
+    .await
+    .expect("read database clock");
     let before = store
         .outbox_backlog(organization_a)
         .await
@@ -1720,6 +1721,7 @@ async fn outbox_reaper_bounds_retention_and_respects_tenancy() {
             unpublished_count: 0,
             oldest_unpublished_created_at_unix_ms: None,
             total_count: 0,
+            protected_count: 0,
         }
     );
 }

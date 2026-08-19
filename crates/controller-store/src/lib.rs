@@ -290,9 +290,12 @@ pub struct PublishedOutbox {
 /// Aggregate outbox accumulation for one tenant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutboxBacklog {
+    /// Unpublished rows that the retention reaper may eventually delete.
     pub unpublished_count: i64,
     pub oldest_unpublished_created_at_unix_ms: Option<i64>,
     pub total_count: i64,
+    /// Rows the reaper never deletes (`state_transfer.imported` proof rows).
+    pub protected_count: i64,
 }
 
 /// Idempotency classification for a durable external effect.
@@ -2998,8 +3001,10 @@ impl Store {
                    AND created_at < clock_timestamp() - make_interval(hours => $2)
                  ORDER BY id
                  LIMIT $3
+                 FOR UPDATE SKIP LOCKED
              ) AS expired
-             WHERE o.id = expired.id",
+             WHERE o.id = expired.id
+               AND o.organization_id = $1",
         )
         .bind(organization_id)
         .bind(older_than_hours)
@@ -3016,25 +3021,37 @@ impl Store {
     /// steady state; this read exists to make that accumulation observable.
     pub async fn outbox_backlog(&self, organization_id: Uuid) -> Result<OutboxBacklog, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let (unpublished_count, oldest_unpublished_created_at_unix_ms, total_count) =
-            sqlx::query_as::<_, (i64, Option<i64>, i64)>(
-                "SELECT
-                     count(*) FILTER (WHERE published_at IS NULL),
+        let (
+            unpublished_count,
+            oldest_unpublished_created_at_unix_ms,
+            total_count,
+            protected_count,
+        ) = sqlx::query_as::<_, (i64, Option<i64>, i64, i64)>(
+            "SELECT
+                     count(*) FILTER (
+                         WHERE published_at IS NULL
+                           AND topic <> 'state_transfer.imported'
+                     ),
                      (extract(
-                          epoch FROM min(created_at) FILTER (WHERE published_at IS NULL)
+                          epoch FROM min(created_at) FILTER (
+                              WHERE published_at IS NULL
+                                AND topic <> 'state_transfer.imported'
+                          )
                       ) * 1000)::bigint,
-                     count(*)
+                     count(*),
+                     count(*) FILTER (WHERE topic = 'state_transfer.imported')
                  FROM outbox
                  WHERE organization_id = $1",
-            )
-            .bind(organization_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(OutboxBacklog {
             unpublished_count,
             oldest_unpublished_created_at_unix_ms,
             total_count,
+            protected_count,
         })
     }
 

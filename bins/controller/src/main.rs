@@ -1577,9 +1577,10 @@ async fn run_outbox_reaper(
         match store.outbox_backlog(organization_id).await {
             Ok(backlog) if backlog.unpublished_count > 0 => {
                 eprintln!(
-                    "outbox backlog: {} unpublished of {} rows (no consumer is shipped; rows \
+                    "outbox backlog: {} unpublished reapable rows of {} total ({} protected \
+                     proof rows are never reaped; no consumer is shipped; reapable rows \
                      expire after {retention_hours}h)",
-                    backlog.unpublished_count, backlog.total_count
+                    backlog.unpublished_count, backlog.total_count, backlog.protected_count
                 );
             }
             Ok(_) => {}
