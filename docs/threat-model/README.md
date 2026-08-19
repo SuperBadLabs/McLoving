@@ -276,9 +276,13 @@ their production residual risks.
 
 Reviewed: 2026-08-18
 
-The bundle-backed rehearsal at exact head
+The bundle-backed rehearsal at head
 `6f737080cf7546e1982fd45c2283663d941f4448` exercises TM-051's complete
-17-test real-PostgreSQL effect spine on a fresh internal-only network. The
+real-PostgreSQL effect spine — 17 tests at that head — on a fresh
+internal-only network. The branch has since advanced past `6f73708` with,
+among other changes, the independent-review fixes; the owner-only rehearsal
+was not re-run at the final head, whose grown 24-test real-spine suite passed
+the complete local pinned-container PostgreSQL gate instead. The
 connector, independent observer, and deny-authority shadow fixture remain
 process-isolated with pairwise-distinct signing roles. Exact source, fixture,
 and test-binary digests are retained owner-only, every manifest entry was

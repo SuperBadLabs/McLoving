@@ -90,7 +90,7 @@ accepted intent blocks dispatch and quarantines unresolved work.
 
 ## Current implementation boundary
 
-Exact implementation and rehearsal head
+Rehearsal head
 `6f737080cf7546e1982fd45c2283663d941f4448` includes Pipeline IR v1.3
 connector intents, execution-spec v2, deployment-backed exact mapping
 admission, immutable PostgreSQL outcome/observation/reconciliation/shadow
@@ -115,8 +115,15 @@ the exact attempt and retains each fence identity, so historical restore
 uncertainty cannot become invisible while blocking terminal reconciliation.
 
 The bundle-backed Mario rehearsal at `6f73708` passed all 17 execution-spine
-tests on an internal-only runtime network with real PostgreSQL and all
-production, canary, and cutover authority flags false. The harness requires the
+tests that existed at that head on an internal-only runtime network with real
+PostgreSQL and all production, canary, and cutover authority flags false. The
+branch has since advanced past `6f73708`, most recently with the
+independent-review fixes, so that rehearsal predates the final head and its
+owner-only digests remain historical statements tied to `6f73708`; the
+owner-only Mario rehearsal has not been re-run at the final head. The final
+head instead passed the complete local pinned-container PostgreSQL gate
+(`./scripts/test-controller-postgres.sh`), whose execution-spine suite has
+since grown to 24 real-spine tests. The harness requires the
 pinned database container's PID 1 to be the final `postgres` server as well as
 ready, preventing the temporary initialization server from satisfying the
 gate immediately before its intentional restart. The owner-only result receipt

@@ -26,8 +26,11 @@ grant to a new fence.
 
 ## Exact implementation evidence
 
-- Exact implementation and Mario-rehearsal head:
-  `6f737080cf7546e1982fd45c2283663d941f4448`.
+- Mario-rehearsal head:
+  `6f737080cf7546e1982fd45c2283663d941f4448`. The branch has since advanced
+  past this head — most recently with the independent-review fixes — so the
+  rehearsal and its owner-only digests are historical statements tied to
+  `6f73708`; the owner-only rehearsal has not been re-run at the final head.
 - Core runtime implementation head
   `edc392524a5c229c3e5d2a1462b14d45d4611f27` supplies the product behavior.
   Closure head `6f73708` also makes the Mario harness wait for the pinned
@@ -38,9 +41,14 @@ grant to a new fence.
   digest, a duplicate catalog entry, a substituted catalog file, partial
   configuration, and plan/catalog drift at validation, planning, persistence,
   build admission, and shipped-controller startup.
-- The real-PostgreSQL harness passed 43 controller-store tests and 17
-  execution-spine tests, plus the deployable controller, admitted differential,
-  and shipped mTLS agent tests. The runtime cases cover successful and
+- At the rehearsal head the real-PostgreSQL harness passed the 43
+  controller-store tests and 17 execution-spine tests that existed there, plus
+  the deployable controller, admitted differential, and shipped mTLS agent
+  tests. The suites have since grown: at the final head the same local
+  pinned-container gate passed with 48 passing controller-store
+  `postgres_truth` tests (50 total; the two backup-restore canary tests remain
+  ignored there and run only through their dedicated script) and 24 passing
+  execution-spine `real_spine` tests. The runtime cases cover successful and
   ambiguous/reconciled outcomes, pre-dispatch executable substitution,
   post-dispatch timeout, signed connector/observer/shadow response
   substitution, cancellation after dispatch, crash after dispatch, lease loss,
@@ -111,7 +119,7 @@ pinned image's intentional transition to the final server. Cleanup removed the
 exact disposable container and internal network; no test or effect ran.
 
 An unchanged Bash-traced retry at `200ed5f` completed all 17 tests and localized
-that host-harness race. It is retained as diagnostic evidence only. Closure
+that host-harness race. It is retained as diagnostic evidence only. Rehearsal
 head `6f737080cf7546e1982fd45c2283663d941f4448` requires both final PID 1
 `postgres` identity and readiness, and its fresh bundle-backed Mario run passed:
 
@@ -132,6 +140,14 @@ checkout, and confirmed the internal network and exact PostgreSQL container
 were absent after cleanup. The directory is mode `0700`; every retained file is
 mode `0600`. Production endpoint, credential, effect, canary, and cutover
 authority are all explicitly false.
+
+Commits made after `6f73708`, including the independent-review fixes, are
+covered only by the local pinned-container PostgreSQL gate
+(`./scripts/test-controller-postgres.sh`), which passed in full at the final
+head with the grown suites: 48 passing `postgres_truth` tests (50 total, two
+ignored backup-restore canary tests) and 24 passing `real_spine` tests.
+No new owner-only rehearsal, digest, or run identifier is claimed for the
+final head.
 
 ## Remaining closure gates
 
