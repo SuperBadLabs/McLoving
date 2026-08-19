@@ -85,8 +85,6 @@ pub enum AgentError {
     InvalidAssignment(String),
     #[error("execution specification is invalid: {0}")]
     InvalidSpec(#[from] serde_json::Error),
-    #[error("execution specification is unsupported")]
-    UnsupportedSpec,
     #[error("agent execution failed: {0}")]
     Execution(#[from] ExecutionError),
     #[error("controller selected an unsupported protocol minor")]

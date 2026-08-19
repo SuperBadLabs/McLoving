@@ -101,6 +101,22 @@ struct ValidatedAssignment {
     process: ProcessSpec,
 }
 
+/// The digest-verified payload permanently determines whether an assignment is
+/// runnable. An unsupported specification is therefore never an error to retry:
+/// it must be accepted and finalized as a named terminal failure, or the
+/// controller reschedules it forever while the build reports progress.
+enum AssignmentDisposition {
+    Runnable(Box<ValidatedAssignment>),
+    Unsupported(UnsupportedAssignment),
+}
+
+struct UnsupportedAssignment {
+    authority: WorkAuthority,
+    workspace: PathBuf,
+    payload_digest: [u8; 32],
+    detail: String,
+}
+
 struct ProcesslessCompletion<'a> {
     authority: &'a WorkAuthority,
     workspace: &'a Path,
@@ -164,8 +180,14 @@ pub(super) async fn poll_and_run_one(
     let Some(assignment) = offer.assignment else {
         return Ok(());
     };
-    let assignment = validate_assignment(config, session_epoch, assignment)?;
-    run_assignment(config, client, session_epoch, assignment, stop).await
+    match validate_assignment(config, session_epoch, assignment)? {
+        AssignmentDisposition::Runnable(assignment) => {
+            run_assignment(config, client, session_epoch, *assignment, stop).await
+        }
+        AssignmentDisposition::Unsupported(refusal) => {
+            refuse_unsupported_assignment(config, client, session_epoch, refusal, stop).await
+        }
+    }
 }
 
 pub(super) async fn recover_finalizations(
@@ -410,7 +432,7 @@ fn validate_assignment(
     config: &AgentConfig,
     session_epoch: u64,
     assignment: WorkAssignment,
-) -> Result<ValidatedAssignment, AgentError> {
+) -> Result<AssignmentDisposition, AgentError> {
     let organization = parse_uuid("organization_id", &assignment.organization_id)?;
     let configured_organization =
         parse_uuid("configured organization_id", &config.organization_id)?;
@@ -433,46 +455,169 @@ fn validate_assignment(
             "execution payload digest does not match".to_owned(),
         ));
     }
-    let spec: ExecutionSpec = serde_json::from_slice(&assignment.execution_spec_json)?;
-    if spec.version != 1 || spec.steps.len() != 1 || spec.steps[0].kind != "process" {
-        return Err(AgentError::UnsupportedSpec);
-    }
-    if !matches!(
-        spec.steps[0].timeout_seconds,
-        None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
-    ) {
-        return Err(AgentError::InvalidAssignment(format!(
-            "process timeout must be between 1 and {MAX_EXECUTION_TIMEOUT_SECONDS} seconds"
-        )));
-    }
-    let credential_targets = &spec.steps[0].credentials;
-    if credential_targets.len() > 8
-        || !credential_targets_are_valid(&spec.steps[0].env, credential_targets)
-    {
-        return Err(AgentError::InvalidAssignment(
-            "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
-        ));
-    }
     let workspace = PathBuf::from(format!(
         "{}/{}/{}",
         assignment.organization_id, assignment.attempt_id, assignment.fence_token
     ));
-    Ok(ValidatedAssignment {
-        authority: WorkAuthority {
-            agent_id: config.agent_id.clone(),
-            session_epoch,
-            organization_id: assignment.organization_id,
-            attempt_id: assignment.attempt_id,
-            fence_token: assignment.fence_token,
+    let authority = WorkAuthority {
+        agent_id: config.agent_id.clone(),
+        session_epoch,
+        organization_id: assignment.organization_id,
+        attempt_id: assignment.attempt_id,
+        fence_token: assignment.fence_token,
+    };
+    Ok(
+        match supported_process_spec(&assignment.execution_spec_json) {
+            Ok(process) => AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                authority,
+                workspace,
+                payload_digest,
+                process,
+            })),
+            Err(detail) => AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                authority,
+                workspace,
+                payload_digest,
+                detail,
+            }),
         },
-        workspace,
-        payload_digest,
-        process: spec
-            .steps
-            .into_iter()
-            .next()
-            .ok_or(AgentError::UnsupportedSpec)?,
-    })
+    )
+}
+
+/// Classifies the digest-verified execution payload against the only contract
+/// this agent can execute: version 1 with exactly one bounded process step.
+/// Every refusal returned here is permanent for this payload.
+fn supported_process_spec(execution_spec_json: &[u8]) -> Result<ProcessSpec, String> {
+    let spec: ExecutionSpec = match serde_json::from_slice(execution_spec_json) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return Err(format!(
+                "execution spec does not deserialize as a version-1 process spec: {error}"
+            ));
+        }
+    };
+    if spec.version != 1 {
+        return Err(format!(
+            "execution spec version {} is not supported (expected 1)",
+            spec.version
+        ));
+    }
+    let mut steps = spec.steps;
+    if steps.len() != 1 {
+        return Err(format!(
+            "execution spec declares {} steps (expected exactly 1 process step)",
+            steps.len()
+        ));
+    }
+    let Some(process) = steps.pop() else {
+        return Err("execution spec declares 0 steps (expected exactly 1 process step)".to_owned());
+    };
+    if process.kind != "process" {
+        return Err(format!(
+            "execution spec step kind {:?} is not supported (expected \"process\")",
+            process.kind
+        ));
+    }
+    if !matches!(
+        process.timeout_seconds,
+        None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
+    ) {
+        return Err(format!(
+            "process timeout must be between 1 and {MAX_EXECUTION_TIMEOUT_SECONDS} seconds"
+        ));
+    }
+    if process.credentials.len() > 8
+        || !credential_targets_are_valid(&process.env, &process.credentials)
+    {
+        return Err(
+            "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
+        );
+    }
+    Ok(process)
+}
+
+/// Terminal fail-closed path for a permanently unsupported assignment: accept
+/// the fenced work so the controller stops offering it, then finalize the
+/// attempt as failed with a named reason. Without this, a validate-escaping
+/// spec is refused, rescheduled, and refused again while the build reports
+/// `running` forever.
+async fn refuse_unsupported_assignment(
+    config: &AgentConfig,
+    client: &mut AgentControlClient<Channel>,
+    session_epoch: u64,
+    refusal: UnsupportedAssignment,
+    stop: CancellationToken,
+) -> Result<(), AgentError> {
+    let mut journal = Journal::open(&config.journal_path)?;
+    journal.accept(&Acceptance {
+        organization_id: refusal.authority.organization_id.clone(),
+        attempt_id: refusal.authority.attempt_id.clone(),
+        fence_token: refusal.authority.fence_token,
+        session_epoch,
+        payload_digest: refusal.payload_digest,
+        workspace: refusal.workspace.clone(),
+    })?;
+    let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
+    require_work_receipt(
+        lease_window_rpc(lease_window, client.accept_work(refusal.authority.clone())).await?,
+        session_epoch,
+    )?;
+    let lease_started_at = tokio::time::Instant::now();
+    let lease = lease_deadline_rpc(
+        lease_started_at + lease_rpc_budget(lease_window),
+        client.renew_work_lease(WorkLeaseRenewal {
+            authority: Some(refusal.authority.clone()),
+            lease_seconds: config.lease_seconds,
+        }),
+    )
+    .await?;
+    ensure_session(lease.session_epoch, session_epoch)?;
+    if !lease.accepted {
+        return Err(AgentError::StaleAuthority);
+    }
+    let lease_stop = CancellationToken::new();
+    // No process will ever spawn for this refusal, so execution cancellation
+    // starts already-cancelled exactly like the pre-spawn cancellation path.
+    let execution_cancellation = CancellationToken::new();
+    execution_cancellation.cancel();
+    let authority_lost = CancellationToken::new();
+    let lease_task = tokio::spawn(renew_lease(
+        client.clone(),
+        refusal.authority.clone(),
+        LeaseRenewalControl {
+            lease_seconds: config.lease_seconds,
+            renewal_interval: config.lease_renewal_interval,
+            lease_started_at,
+            lease_window,
+            execution_cancellation,
+            authority_lost: authority_lost.clone(),
+            stop: lease_stop.clone(),
+        },
+    ));
+    let completion_result = finalize_without_process(
+        config,
+        client,
+        &mut journal,
+        ProcesslessCompletion {
+            authority: &refusal.authority,
+            workspace: &refusal.workspace,
+            session_epoch,
+            outcome: WorkOutcome::Failed,
+            reason: format!("unsupported_execution_spec: {}", refusal.detail),
+        },
+        AuthorityRpcControl {
+            authority_lost: &authority_lost,
+            stop: &stop,
+            lease_window,
+        },
+    )
+    .await;
+    lease_stop.cancel();
+    let lease_result = lease_task
+        .await
+        .map_err(|error| AgentError::InvalidAssignment(format!("lease task failed: {error}")))?;
+    completion_result?;
+    lease_result
 }
 
 fn parse_uuid(name: &str, value: &str) -> Result<Uuid, AgentError> {
@@ -2312,10 +2457,28 @@ mod tests {
         ));
     }
 
+    fn runnable(disposition: AssignmentDisposition) -> ValidatedAssignment {
+        match disposition {
+            AssignmentDisposition::Runnable(assignment) => *assignment,
+            AssignmentDisposition::Unsupported(refusal) => {
+                panic!("assignment must be runnable, refused: {}", refusal.detail)
+            }
+        }
+    }
+
+    fn unsupported(disposition: AssignmentDisposition) -> UnsupportedAssignment {
+        match disposition {
+            AssignmentDisposition::Unsupported(refusal) => refusal,
+            AssignmentDisposition::Runnable(_) => {
+                panic!("assignment must be refused as unsupported")
+            }
+        }
+    }
+
     #[test]
     fn assignment_is_tenant_bound_and_digest_checked() {
         let spec = br#"{"version":1,"steps":[{"kind":"process","program":"true"}]}"#;
-        let validated = validate_assignment(&config(), 4, assignment(spec)).unwrap();
+        let validated = runnable(validate_assignment(&config(), 4, assignment(spec)).unwrap());
         assert_eq!(validated.authority.session_epoch, 4);
         assert_eq!(
             validated.workspace,
@@ -2333,16 +2496,14 @@ mod tests {
         assert!(validate_assignment(&config(), 4, wrong_digest).is_err());
 
         let unbounded_timeout = br#"{"version":1,"steps":[{"kind":"process","program":"true","timeout_seconds":18446744073709551615}]}"#;
-        assert!(matches!(
-            validate_assignment(&config(), 4, assignment(unbounded_timeout)),
-            Err(AgentError::InvalidAssignment(_))
-        ));
+        let refusal =
+            unsupported(validate_assignment(&config(), 4, assignment(unbounded_timeout)).unwrap());
+        assert!(refusal.detail.contains("process timeout"));
         let zero_timeout =
             br#"{"version":1,"steps":[{"kind":"process","program":"true","timeout_seconds":0}]}"#;
-        assert!(matches!(
-            validate_assignment(&config(), 4, assignment(zero_timeout)),
-            Err(AgentError::InvalidAssignment(_))
-        ));
+        let refusal =
+            unsupported(validate_assignment(&config(), 4, assignment(zero_timeout)).unwrap());
+        assert!(refusal.detail.contains("process timeout"));
     }
 
     #[test]
@@ -2428,43 +2589,67 @@ mod tests {
     fn execution_spec_is_fail_closed() {
         let multiple =
             br#"{"version":1,"steps":[{"kind":"process","program":"one"},{"kind":"process","program":"two"}]}"#;
-        assert!(matches!(
-            validate_assignment(&config(), 1, assignment(multiple)),
-            Err(AgentError::UnsupportedSpec)
-        ));
+        let refusal = unsupported(validate_assignment(&config(), 1, assignment(multiple)).unwrap());
+        assert_eq!(
+            refusal.detail,
+            "execution spec declares 2 steps (expected exactly 1 process step)"
+        );
         let wrong_kind = br#"{"version":1,"steps":[{"kind":"shell","program":"no"}]}"#;
-        assert!(matches!(
-            validate_assignment(&config(), 1, assignment(wrong_kind)),
-            Err(AgentError::UnsupportedSpec)
-        ));
+        let refusal =
+            unsupported(validate_assignment(&config(), 1, assignment(wrong_kind)).unwrap());
+        assert_eq!(
+            refusal.detail,
+            "execution spec step kind \"shell\" is not supported (expected \"process\")"
+        );
+        let wrong_version = br#"{"version":2,"steps":[{"kind":"process","program":"no"}]}"#;
+        let refusal =
+            unsupported(validate_assignment(&config(), 1, assignment(wrong_version)).unwrap());
+        assert_eq!(
+            refusal.detail,
+            "execution spec version 2 is not supported (expected 1)"
+        );
 
         let windows_cmd = br#"{"version":1,"steps":[{"kind":"process","mode":"windows_cmd","program":"build.cmd"}]}"#;
         assert!(matches!(
-            validate_assignment(&config(), 1, assignment(windows_cmd))
-                .expect("accept explicit cmd mode")
-                .process
-                .mode,
+            runnable(
+                validate_assignment(&config(), 1, assignment(windows_cmd))
+                    .expect("accept explicit cmd mode")
+            )
+            .process
+            .mode,
             ProcessMode::WindowsCmd
         ));
         let powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"powershell","program":"build.ps1"}]}"#;
         assert!(matches!(
-            validate_assignment(&config(), 1, assignment(powershell))
-                .expect("accept explicit PowerShell mode")
-                .process
-                .mode,
+            runnable(
+                validate_assignment(&config(), 1, assignment(powershell))
+                    .expect("accept explicit PowerShell mode")
+            )
+            .process
+            .mode,
             ProcessMode::PowerShell
         ));
         let legacy_powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"power_shell","program":"build.ps1"}]}"#;
         assert!(matches!(
-            validate_assignment(&config(), 1, assignment(legacy_powershell))
-                .expect("accept the protocol v1.0 PowerShell spelling")
-                .process
-                .mode,
+            runnable(
+                validate_assignment(&config(), 1, assignment(legacy_powershell))
+                    .expect("accept the protocol v1.0 PowerShell spelling")
+            )
+            .process
+            .mode,
             ProcessMode::PowerShell
         ));
         let unknown_mode =
             br#"{"version":1,"steps":[{"kind":"process","mode":"shell","program":"build.ps1"}]}"#;
-        assert!(validate_assignment(&config(), 1, assignment(unknown_mode)).is_err());
+        let refusal =
+            unsupported(validate_assignment(&config(), 1, assignment(unknown_mode)).unwrap());
+        assert!(
+            refusal
+                .detail
+                .starts_with("execution spec does not deserialize"),
+            "unknown execution modes must remain fail-closed: {}",
+            refusal.detail
+        );
     }
 
     #[test]

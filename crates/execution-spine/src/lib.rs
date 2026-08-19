@@ -77,8 +77,6 @@ pub enum SpineError {
     InvalidSpec(#[from] serde_json::Error),
     #[error("controller rejected the current fenced authority")]
     StaleAuthority,
-    #[error("execution specification must contain exactly one process step")]
-    UnsupportedSpec,
     #[error("numeric value cannot be represented by the durable protocol")]
     FenceOverflow,
     #[error("lease duration must be positive and exceed the cancellation poll interval")]
@@ -116,6 +114,44 @@ enum ProcessMode {
     PowerShell,
 }
 
+/// Classifies an admitted execution specification against the only contract
+/// this spine can execute: version 1 with exactly one process step. A refusal
+/// is a permanent property of the digest-bound payload, so callers must
+/// finalize the attempt as failed instead of surfacing a retryable error.
+fn supported_process_spec(value: serde_json::Value) -> Result<ProcessSpec, String> {
+    let spec: ExecutionSpec = match serde_json::from_value(value) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return Err(format!(
+                "execution spec does not deserialize as a version-1 process spec: {error}"
+            ));
+        }
+    };
+    if spec.version != 1 {
+        return Err(format!(
+            "execution spec version {} is not supported (expected 1)",
+            spec.version
+        ));
+    }
+    let mut steps = spec.steps;
+    if steps.len() != 1 {
+        return Err(format!(
+            "execution spec declares {} steps (expected exactly 1 process step)",
+            steps.len()
+        ));
+    }
+    let Some(process) = steps.pop() else {
+        return Err("execution spec declares 0 steps (expected exactly 1 process step)".to_owned());
+    };
+    if process.kind != "process" {
+        return Err(format!(
+            "execution spec step kind {:?} is not supported (expected \"process\")",
+            process.kind
+        ));
+    }
+    Ok(process)
+}
+
 fn journal_authority_token(restore_epoch: i64, fence: i64) -> Result<u64, SpineError> {
     let restore_epoch = u32::try_from(restore_epoch).map_err(|_| SpineError::FenceOverflow)?;
     let fence = u32::try_from(fence).map_err(|_| SpineError::FenceOverflow)?;
@@ -146,11 +182,10 @@ pub async fn run_claim(
         .ok_or(SpineError::StaleAuthority)?;
     let payload_digest: [u8; 32] =
         Sha256::digest(serde_json::to_vec(&execution.execution_spec)?).into();
-    let spec: ExecutionSpec = serde_json::from_value(execution.execution_spec)?;
-    if spec.version != 1 || spec.steps.len() != 1 || spec.steps[0].kind != "process" {
-        return Err(SpineError::UnsupportedSpec);
-    }
-    let process = &spec.steps[0];
+    // A refusal here is permanent: the digest-bound payload can never become
+    // runnable, so the attempt must still be accepted and finalized as failed
+    // below instead of erroring into an infinite reschedule loop.
+    let supported_process = supported_process_spec(execution.execution_spec);
     let database_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
     let journal_fence = journal_authority_token(claim.restore_epoch, claim.fence)?;
     let organization = claim.organization_id.to_string();
@@ -205,6 +240,23 @@ pub async fn run_claim(
         )
         .await;
     }
+    let process = match supported_process {
+        Ok(process) => process,
+        Err(detail) => {
+            return finalize_without_process(
+                store,
+                claim,
+                config,
+                &mut journal,
+                &organization,
+                &attempt,
+                journal_fence,
+                TerminalOutcome::Failed,
+                &format!("unsupported_execution_spec: {detail}"),
+            )
+            .await;
+        }
+    };
     if !store
         .mark_attempt_running(
             claim.organization_id,
