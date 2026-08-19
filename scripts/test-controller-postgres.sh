@@ -56,6 +56,7 @@ podman run --rm \
    cargo test --locked -p mcloving-controller-store --test external_read_consumers &&
    cargo test --locked -p mcloving-controller-store --test external_admin_clients &&
    cargo test --locked -p mcloving-controller-api --test oidc_flow &&
+   cargo test --locked -p mcloving-controller-api --test unsupported_spec_gate &&
    cargo test --locked -p mcloving-execution-spine --test real_spine &&
    cargo test --locked -p mcloving-controller --test deployable_runtime &&
    cargo test --locked -p mcloving-controller --test diff_001 &&
