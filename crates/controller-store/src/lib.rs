@@ -2963,13 +2963,23 @@ impl Store {
         session_epoch: Option<u64>,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        acquire_restore_fence_shared(&mut tx).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
             tx.rollback().await?;
             return Ok(false);
         }
+        // Same canonical order as `claim_next`: agent-session check, per-org
+        // scheduler advisory lock, shared restore fence, then row locks. The
+        // advisory lock serializes this transition with
+        // `request_cancellation_as`, which locks the pipeline definition
+        // before the attempt/node graph — the inverse of the row-lock order
+        // taken below.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
