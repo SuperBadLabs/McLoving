@@ -1261,11 +1261,19 @@ async fn post_dispatch_timeout_freezes_retry_and_dispatches_exactly_once() {
 
 #[tokio::test]
 async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join() {
-    for scenario in [
-        "substituted_connector_response",
-        "substituted_observer_response",
-        "substituted_observer_binding",
-        "substituted_shadow_response",
+    // Each substituted response must be refused at its own join: a connector
+    // receipt rejection persists no evidence, an observer rejection persists
+    // only the validated outcome, and a shadow rejection persists both prior
+    // receipts.
+    for (scenario, persisted_receipts) in [
+        ("substituted_connector_response", 0_i64),
+        ("substituted_outcome_project", 0),
+        ("substituted_outcome_pipeline", 0),
+        ("substituted_outcome_generation", 0),
+        ("substituted_outcome_request_payload", 0),
+        ("substituted_observer_response", 1),
+        ("substituted_observer_binding", 1),
+        ("substituted_shadow_response", 2),
     ] {
         let Some(store) = test_store().await else {
             eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1294,8 +1302,12 @@ async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join()
             Err(SpineError::EffectReconciliationRequired)
         ));
         assert_eq!(dispatch_count(root.path()), 1, "scenario {scenario}");
-        let state: (String, String) = sqlx::query_as(
-            "SELECT a.status, e.status
+        let state: (String, String, i64) = sqlx::query_as(
+            "SELECT a.status, e.status,
+                    ((e.outcome_receipt IS NOT NULL)::int
+                     + (e.reconciliation_receipt IS NOT NULL)::int
+                     + (e.observation_receipt IS NOT NULL)::int
+                     + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
              FROM attempts AS a
              JOIN attempt_effects AS e
                ON e.organization_id = a.organization_id AND e.attempt_id = a.id
@@ -1308,7 +1320,12 @@ async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join()
         .expect("read response-substitution state");
         assert_eq!(
             state,
-            ("reconciliation_required".into(), "uncertain".into())
+            (
+                "reconciliation_required".into(),
+                "uncertain".into(),
+                persisted_receipts
+            ),
+            "scenario {scenario}"
         );
     }
 }

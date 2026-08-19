@@ -9,7 +9,7 @@ use mcloving_destination_observer::{
 use mcloving_external_connector::{
     ActionRequest, IdempotencyClass, OutcomeReceipt, OutcomeStatus, ProtectedSecretRef,
     ShadowReplayReceipt, action_request_digest, content_sha256, outcome_receipt_digest,
-    verify_action_request, verify_outcome_receipt, verify_shadow_receipt,
+    request_payload_digest, verify_action_request, verify_outcome_receipt, verify_shadow_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -610,9 +610,13 @@ fn validate_outcome(
 ) -> Result<(), EffectRuntimeError> {
     let request = &freeze.action_request;
     let fence = u64::try_from(claim.fence).map_err(|_| EffectRuntimeError::InvalidOutcome)?;
+    let request_payload_sha256 = request_payload_digest(&request.request_payload)
+        .map_err(|_| EffectRuntimeError::InvalidOutcome)?;
     if outcome.request_id != request.request_id
         || outcome.request_sha256 != prepared.request_sha256
         || outcome.tenant_id != claim.organization_id
+        || outcome.project_id != request.project_id
+        || outcome.pipeline_id != request.pipeline_id
         || outcome.build_id != claim.build_id
         || outcome.attempt_id != claim.attempt_id
         || outcome.effect_fence != fence
@@ -621,6 +625,7 @@ fn validate_outcome(
         || outcome.connector_implementation_sha256 != request.expected_implementation_sha256
         || outcome.connector_image_sha256 != request.expected_image_sha256
         || outcome.connector_config_sha256 != request.expected_config_sha256
+        || outcome.generation != request.expected_generation
         || outcome.endpoint_identity != request.endpoint_identity
         || outcome.account_identity != request.account_identity
         || outcome.resource_identity != request.resource_identity
@@ -631,6 +636,7 @@ fn validate_outcome(
         || outcome.credential_grant_id != request.credential_grant_id
         || outcome.credential_grant_version != request.credential_grant_version
         || outcome.credential_grant_scope != request.credential_grant_scope
+        || outcome.request_payload_sha256 != request_payload_sha256
         || !sha256_reference_matches(
             &intent.downstream_control_digest,
             &outcome.downstream_control_digest,

@@ -205,7 +205,9 @@ def outcome_receipt(request, openssl, outcome_key, evidence_sequence=1):
         "credential_grant_id": request["credential_grant_id"],
         "credential_grant_version": request["credential_grant_version"],
         "credential_grant_scope": request["credential_grant_scope"],
-        "request_payload_sha256": hashlib.sha256(compact(request["request_payload"])).hexdigest(),
+        "request_payload_sha256": hashlib.sha256(
+            connector_frame(b"mcloving-external-request-payload-v1", request["request_payload"])
+        ).hexdigest(),
         "status": "succeeded",
         "status_code": "fixture_succeeded",
         "public_values": {"delivery_id": "fixture-delivery-1"},
@@ -256,6 +258,14 @@ def connector_response(command, openssl, outcome_key, scenario, state_path, ledg
             receipt["ambiguous_requires_observation"] = True
         elif scenario == "substituted_connector_response":
             receipt["attempt_id"] = "00000000-0000-0000-0000-000000000000"
+        elif scenario == "substituted_outcome_project":
+            receipt["project_id"] = "00000000-0000-0000-0000-000000000000"
+        elif scenario == "substituted_outcome_pipeline":
+            receipt["pipeline_id"] = "00000000-0000-0000-0000-000000000000"
+        elif scenario == "substituted_outcome_generation":
+            receipt["generation"] = request["expected_generation"] + 1
+        elif scenario == "substituted_outcome_request_payload":
+            receipt["request_payload_sha256"] = "e" * 64
     elif operation == "reconcile":
         if scenario != "ambiguous_then_reconcile":
             raise ValueError("unexpected reconciliation command")
