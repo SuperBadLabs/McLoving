@@ -746,6 +746,35 @@ async fn request_preflight_verifies_authority_time_and_deployment_without_destin
         Err(ObserverError::ExpiredRequest)
     );
 
+    // The read grant must cover the requested window even when the signed
+    // request itself expires late enough; otherwise the post-action
+    // observation would fail with expired_grant only after dispatch.
+    let grant_state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(grant_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut grant_config = rig.config.clone();
+    grant_config.state_dir = grant_state.path().to_path_buf();
+    grant_config.read_grant_expires_unix_ms = NOW + 500;
+    let grant_observer = rig.observer_for_config(grant_config).unwrap();
+    let mut grant_limited = rig.request(ObservationPhase::PreAction);
+    grant_limited.expected_config_sha256 = grant_observer.config_sha256().to_owned();
+    let grant_limited = rig.prepare(grant_limited);
+    assert_eq!(
+        grant_observer.preflight_request_for_duration_at(&grant_limited, NOW, 1_000),
+        Err(ObserverError::ExpiredGrant),
+        "preflight must refuse a window the read grant cannot cover"
+    );
+    assert_eq!(
+        grant_observer
+            .preflight_request_for_duration_at(&grant_limited, NOW, 400)
+            .unwrap(),
+        observation_request_digest(&grant_limited).unwrap(),
+        "a window inside both the request and grant lifetimes is approved"
+    );
+
     let mut invalid_signature = request.clone();
     invalid_signature.authorization.signature_base64 = "AAAA".to_owned();
     assert_eq!(

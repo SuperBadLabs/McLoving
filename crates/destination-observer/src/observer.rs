@@ -275,6 +275,14 @@ impl DestinationObserver {
         if request.expires_at_unix_ms < required_valid_until {
             return Err(ObserverError::ExpiredRequest);
         }
+        // The read grant is this observer's own authority to observe the
+        // destination. Approving a window the grant cannot cover would let
+        // the controller dispatch and only then fail the post-action
+        // observation with `expired_grant`; deny before any reservation so
+        // the controller sees a definitive pre-dispatch rejection instead.
+        if self.config.read_grant_expires_unix_ms < required_valid_until {
+            return Err(ObserverError::ExpiredGrant);
+        }
         let request_sha256 = observation_request_digest(request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(request))?;
         let destination_scope_sha256 = canonical_digest(
