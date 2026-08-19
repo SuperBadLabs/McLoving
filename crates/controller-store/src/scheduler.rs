@@ -479,6 +479,12 @@ impl Store {
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
+            // The rejection event must serialize against restore activation,
+            // which holds this fence exclusively while it rewrites authority.
+            sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+                .bind(RESTORE_FENCE_LOCK_KEY)
+                .execute(&mut *tx)
+                .await?;
             record_lease_renewal_rejection(
                 &mut tx,
                 organization_id,
@@ -1006,6 +1012,13 @@ impl Store {
         cause: &str,
     ) -> Result<(), StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Evaluate authority and append under the shared restore fence so the
+        // event cannot land after restore activation invalidates the lease it
+        // describes.
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let build = sqlx::query_scalar::<_, Uuid>(
             "SELECT n.build_id
              FROM attempts AS a
