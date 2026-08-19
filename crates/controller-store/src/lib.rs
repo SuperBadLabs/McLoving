@@ -3396,6 +3396,15 @@ impl Store {
         let receipt_digest: [u8; 32] = Sha256::digest(receipt_bytes).into();
         let (receipt_column, digest_column) = kind.columns();
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Same canonical order as the claim, cancellation, and dispatch-commit
+        // paths: the per-org scheduler advisory lock precedes the shared
+        // restore fence and every row lock, so evidence persistence cannot
+        // form an inverse attempt-then-pipeline lock cycle with
+        // `request_cancellation_as`.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let authority = sqlx::query_as::<_, (Uuid, bool)>(
             "SELECT n.build_id, a.status = 'reconciliation_required'
