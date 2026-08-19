@@ -127,6 +127,12 @@ def verify_observation_request(
     now = int(time.time() * 1000)
     if verified.returncode != 0:
         raise ValueError("invalid observation request signature")
+    if "lenient_verify_window" in scenario:
+        # Simulate an observer whose Verify approval stops guaranteeing the
+        # remaining connector-plus-observer window (for example the window
+        # closes right after Verify returns). The runtime must not rely on
+        # this approval at its final dispatch decision.
+        required_validity_ms = 0
     if (
         request["schema_version"] != "mcloving.destination-observation-request/v1"
         or request["protocol_version"] != "mcloving.destination-observer/v1"

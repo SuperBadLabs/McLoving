@@ -1640,6 +1640,81 @@ async fn exhausted_effect_timeout_budget_is_terminal_before_dispatch() {
 }
 
 #[tokio::test]
+async fn expired_observer_join_window_is_terminal_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-observer-window-expired",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "lenient_verify_window",
+        5_000,
+    );
+    // The observation request no longer covers the connector-plus-observer
+    // window, while the lenient fixture observer still approves Verify. The
+    // runtime's own final dispatch decision must refuse to invoke the
+    // connector rather than dispatch an action whose post-action observation
+    // can no longer be covered.
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    plan.observation_request.expires_at_unix_ms = now + 2_000;
+    sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+    let config = runtime_effect_worker(root.path(), plan);
+
+    let receipt = run_claim(&store, &claim, &config)
+        .await
+        .expect("expired observer join window is terminal before dispatch");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(
+        dispatch_count(root.path()),
+        0,
+        "the connector must never be invoked once the observer join window is gone"
+    );
+    assert_eq!(preflight_count(root.path()), 1);
+    assert_eq!(reservation_release_count(root.path()), 1);
+    let effect: (String, bool) = sqlx::query_as(
+        "SELECT status, dispatch_committed_at IS NOT NULL
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the refused-dispatch effect");
+    assert_eq!(effect, ("abandoned".into(), false));
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT terminal_summary FROM attempts WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the terminal summary");
+    assert_eq!(
+        summary["reason"], "effect_observation_request_preflight_failed",
+        "unexpected terminal summary: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

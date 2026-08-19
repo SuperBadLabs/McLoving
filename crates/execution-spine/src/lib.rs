@@ -893,6 +893,31 @@ async fn run_effect_claim_under_lease(
         )
         .await;
     }
+    // The observer approved `Verify` for the full connector-plus-observer
+    // window as of that call; waiting on the renewal gate or the authority
+    // query can outlive that approval. Revalidate the observation request for
+    // the complete remaining connector and observer window at the final
+    // dispatch decision so a non-idempotent action can never be dispatched
+    // once the post-action observation is no longer coverable.
+    if !observation_request_covers_execution_window(
+        &plan.observation_request,
+        dispatch_now,
+        preflight_validity_ms,
+    ) {
+        return finalize_reserved_pre_dispatch_exit(
+            store,
+            claim,
+            config,
+            &prepared,
+            &services,
+            &plan.observation_request,
+            (
+                TerminalOutcome::Failed,
+                json!({"reason": "effect_observation_request_preflight_failed"}),
+            ),
+        )
+        .await;
+    }
 
     // Reserve the local commit state before the durable checkpoint. Holding the
     // renewal gate prevents a renewal failure from racing this transition.
@@ -1319,10 +1344,34 @@ fn action_request_covers_execution_window(
     now_unix_ms: i64,
     required_validity_ms: u64,
 ) -> bool {
+    validity_window_covers(
+        request.expires_at_unix_ms,
+        now_unix_ms,
+        required_validity_ms,
+    )
+}
+
+fn observation_request_covers_execution_window(
+    request: &ObservationRequest,
+    now_unix_ms: i64,
+    required_validity_ms: u64,
+) -> bool {
+    validity_window_covers(
+        request.expires_at_unix_ms,
+        now_unix_ms,
+        required_validity_ms,
+    )
+}
+
+fn validity_window_covers(
+    expires_at_unix_ms: i64,
+    now_unix_ms: i64,
+    required_validity_ms: u64,
+) -> bool {
     i64::try_from(required_validity_ms)
         .ok()
         .and_then(|required| now_unix_ms.checked_add(required))
-        .is_some_and(|deadline| deadline <= request.expires_at_unix_ms)
+        .is_some_and(|deadline| deadline <= expires_at_unix_ms)
 }
 
 async fn route_effect_reconciliation(
