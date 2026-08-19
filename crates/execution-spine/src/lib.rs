@@ -925,6 +925,36 @@ async fn run_effect_claim_under_lease(
     // process is paused before the invocation below. The exact fenced lease
     // and immutable prepared payload are checked in the same store transaction.
     if let Err(error) = commit_effect_dispatch(store, claim, &config.agent_id, &prepared).await {
+        // The durable commit refuses a fresh dispatch once cancellation has
+        // committed. Distinguish that acknowledged refusal from genuine
+        // authority loss so the cancelled attempt is published as aborted
+        // instead of stranding in `cancelling`.
+        if matches!(error, EffectRuntimeError::StaleAuthority)
+            && let Ok(Some(execution)) = store
+                .attempt_execution(
+                    claim.organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &config.agent_id,
+                )
+                .await
+            && execution.cancellation_requested
+        {
+            return finalize_reserved_pre_dispatch_exit(
+                store,
+                claim,
+                config,
+                &prepared,
+                &services,
+                &plan.observation_request,
+                (
+                    TerminalOutcome::Aborted,
+                    json!({"reason": "cancelled_before_effect_dispatch"}),
+                ),
+            )
+            .await;
+        }
         let released = services
             .release_observer_request(plan.observation_request.clone())
             .await

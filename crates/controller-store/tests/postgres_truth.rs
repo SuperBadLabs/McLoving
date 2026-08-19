@@ -4873,6 +4873,292 @@ async fn dispatch_committed_effect_can_never_become_undispatched_cleanup() {
 }
 
 #[tokio::test]
+async fn committed_cancellation_rejects_a_fresh_dispatch_commit() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dispatch-cancellation-race",
+        )
+        .await
+        .expect("create dispatch-cancellation tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "dispatch-cancellation-race".into(),
+            pipeline_digest: [0x86; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit dispatch-cancellation build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "dispatch-cancellation-scheduler".into(),
+            agent_id: "dispatch-cancellation-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim dispatch-cancellation attempt")
+        .expect("dispatch-cancellation attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept dispatch-cancellation offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare dispatch-cancellation effect")
+    );
+    // Cancellation commits after the worker's final pre-dispatch check but
+    // before the durable dispatch transaction. The commit predicate must see
+    // the committed `cancelling` state and refuse to invoke the connector.
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("commit cancellation before the durable dispatch")
+    );
+    assert!(
+        !store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("dispatch commit after committed cancellation must refuse"),
+        "a fresh dispatch commit must not accept a cancelled attempt"
+    );
+    let (status, dispatch_committed) = sqlx::query_as::<_, (String, bool)>(
+        "SELECT status, dispatch_committed_at IS NOT NULL FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("read the refused dispatch effect");
+    assert_eq!(status, "prepared");
+    assert!(
+        !dispatch_committed,
+        "the refused commit must leave no durable dispatch marker"
+    );
+    // The cancelling lease owner still closes the undispatched intent cleanly.
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Abandoned,
+                &payload,
+            )
+            .await
+            .expect("abandon the cancelled undispatched effect")
+    );
+}
+
+#[tokio::test]
+async fn cancellation_after_dispatch_commit_keeps_the_idempotent_replay() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dispatch-cancellation-replay",
+        )
+        .await
+        .expect("create dispatch-replay tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "dispatch-cancellation-replay".into(),
+            pipeline_digest: [0x87; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit dispatch-replay build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "dispatch-replay-scheduler".into(),
+            agent_id: "dispatch-replay-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim dispatch-replay attempt")
+        .expect("dispatch-replay attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept dispatch-replay offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare dispatch-replay effect")
+    );
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("durably commit the dispatch before cancellation")
+    );
+    let committed_at = sqlx::query_scalar::<_, String>(
+        "SELECT dispatch_committed_at::text FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("read the durable dispatch marker");
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("commit cancellation after the durable dispatch")
+    );
+    // A worker retrying the lost commit acknowledgement replays idempotently
+    // even while the attempt is cancelling; the marker never moves.
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("idempotent replay of the committed dispatch while cancelling")
+    );
+    let replayed_at = sqlx::query_scalar::<_, String>(
+        "SELECT dispatch_committed_at::text FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("re-read the durable dispatch marker");
+    assert_eq!(
+        committed_at, replayed_at,
+        "the idempotent replay must not move the dispatch marker"
+    );
+}
+
+#[tokio::test]
 async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

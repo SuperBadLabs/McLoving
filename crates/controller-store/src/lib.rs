@@ -3299,11 +3299,16 @@ impl Store {
                 other => Err(other),
             };
         }
+        // A fresh dispatch commit is refused once cancellation has committed:
+        // the attempt must not be `cancelling` and neither the build nor the
+        // node may carry a cancellation timestamp. `cancelling` remains
+        // acceptable only for the idempotent replay of an already-committed
+        // dispatch, which writes nothing new.
         let committed = sqlx::query_scalar::<_, bool>(
             "UPDATE attempt_effects AS e
              SET dispatch_committed_at = COALESCE(e.dispatch_committed_at, clock_timestamp()),
                  updated_at = clock_timestamp()
-             FROM attempts AS a, controller_metadata AS m
+             FROM attempts AS a, nodes AS n, builds AS b, controller_metadata AS m
              WHERE e.organization_id = $1
                AND e.attempt_id = $2
                AND e.fence = $3
@@ -3322,6 +3327,18 @@ impl Store {
                AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND n.organization_id = a.organization_id
+               AND n.id = a.node_id
+               AND b.organization_id = n.organization_id
+               AND b.id = n.build_id
+               AND (
+                   e.dispatch_committed_at IS NOT NULL
+                   OR (
+                       a.status IN ('accepted', 'running', 'finalizing')
+                       AND b.cancellation_requested_at IS NULL
+                       AND n.cancellation_requested_at IS NULL
+                   )
+               )
                AND m.singleton
                AND a.restore_epoch = m.restore_epoch
              RETURNING true",
