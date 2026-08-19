@@ -29,6 +29,26 @@ stages:
           timeout_seconds: 10
 "#;
 
+/// Both shipped-binary tests run this catalog update concurrently, and
+/// PostgreSQL surfaces the race as `tuple concurrently updated`; retry until
+/// one writer wins.
+async fn enable_runtime_login(pool: &sqlx::PgPool) {
+    for _ in 0..50 {
+        if sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+            .execute(pool)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+        .execute(pool)
+        .await
+        .expect("enable test-only runtime login");
+}
+
 async fn admit_bound_test_build(
     store: &Store,
     mut input: NewBuild,
@@ -89,10 +109,7 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .expect("connect migration role");
     let store = Store::new(pool.clone());
     store.migrate().await.expect("install schema");
-    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
-        .execute(&pool)
-        .await
-        .expect("enable test-only runtime login");
+    enable_runtime_login(&pool).await;
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     store
@@ -522,10 +539,7 @@ async fn unsupported_execution_spec_is_finalized_failed_within_one_lease_term() 
         .expect("connect migration role");
     let store = Store::new(pool.clone());
     store.migrate().await.expect("install schema");
-    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
-        .execute(&pool)
-        .await
-        .expect("enable test-only runtime login");
+    enable_runtime_login(&pool).await;
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     store
