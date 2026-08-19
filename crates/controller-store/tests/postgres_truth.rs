@@ -7,7 +7,7 @@ use mcloving_controller_store::{
     ComponentWrite, DagAdmission, DagDependency, DagNodeKind, DependencyCondition, EffectClass,
     EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
     NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
-    ObjectStatus, PipelinePutOutcome, PipelineRecord, PipelineWrite,
+    ObjectStatus, OutboxBacklog, PipelinePutOutcome, PipelineRecord, PipelineWrite,
     ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
     TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
@@ -888,6 +888,49 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     .await
     .expect("count state-transfer audit records");
     assert_eq!(audit_count, 3);
+
+    // Bounded outbox retention must never consume state-transfer proof rows:
+    // the reaper excludes the 'state_transfer.imported' topic regardless of
+    // age, and the receipt flow replays exactly afterwards.
+    sqlx::query(
+        "UPDATE outbox
+         SET created_at = clock_timestamp() - interval '8760 hours'
+         WHERE organization_id = $1 AND topic = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect("age state-transfer outbox rows far past any retention horizon");
+    assert_eq!(
+        store
+            .reap_outbox(organization_id, 1, 1_000)
+            .await
+            .expect("reap with an aggressive one-hour horizon"),
+        0
+    );
+    let retained_outbox: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count retained state-transfer outbox records");
+    assert_eq!(retained_outbox, 3);
+    let replay_after_reap = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("state-transfer receipt replays exactly after the reaper runs");
+    assert!(!replay_after_reap.created);
+    assert_eq!(replay_after_reap.id, first.id);
 }
 
 fn transfer_digest(byte: u8) -> [u8; 32] {
@@ -1498,6 +1541,208 @@ async fn admission_is_atomic_and_idempotent() {
     .await
     .expect("count durable records");
     assert_eq!(counts, (1, 1, 1, 1, 1));
+}
+
+#[tokio::test]
+async fn outbox_reaper_bounds_retention_and_respects_tenancy() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_a = Uuid::new_v4();
+    let project_a = Uuid::new_v4();
+    store
+        .create_project(
+            organization_a,
+            &format!("org-{organization_a}"),
+            project_a,
+            "reaper-a",
+        )
+        .await
+        .expect("create reaper tenant A");
+    let organization_b = Uuid::new_v4();
+    let project_b = Uuid::new_v4();
+    store
+        .create_project(
+            organization_b,
+            &format!("org-{organization_b}"),
+            project_b,
+            "reaper-b",
+        )
+        .await
+        .expect("create reaper tenant B");
+    for (organization_id, project_id, key) in [
+        (organization_a, project_a, "reap-old-1"),
+        (organization_a, project_a, "reap-old-2"),
+        (organization_a, project_a, "reap-young"),
+        (organization_b, project_b, "reap-neighbor"),
+    ] {
+        store
+            .admit_test_build(&NewBuild {
+                organization_id,
+                project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
+                idempotency_key: key.into(),
+                pipeline_digest: [11; 32],
+                node_key: "stage-1".into(),
+                required_capabilities: vec!["linux".into()],
+                required_trust_pool: "trusted".into(),
+                priority: 10,
+                execution_spec: json!({}),
+            })
+            .await
+            .expect("admit outbox-producing build");
+    }
+
+    // Age tenant B's row and tenant A's two oldest rows past a 168-hour
+    // horizon. The admin test role stands in for elapsed wall-clock time.
+    let aged = sqlx::query(
+        "UPDATE outbox
+         SET created_at = clock_timestamp() - interval '240 hours'
+         WHERE organization_id = $2
+            OR id IN (
+                SELECT id FROM outbox WHERE organization_id = $1 ORDER BY id LIMIT 2
+            )",
+    )
+    .bind(organization_a)
+    .bind(organization_b)
+    .execute(store.pool())
+    .await
+    .expect("age outbox rows past the retention horizon");
+    assert_eq!(aged.rows_affected(), 3);
+
+    // Both sides of the age comparison must share one clock source; the
+    // aged rows were stamped by Postgres, so "now" comes from Postgres too.
+    let now_unix_ms = sqlx::query_scalar::<_, i64>(
+        "SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read database clock");
+    let before = store
+        .outbox_backlog(organization_a)
+        .await
+        .expect("read backlog before reap");
+    assert_eq!(before.unpublished_count, 3);
+    assert_eq!(before.total_count, 3);
+    let oldest = before
+        .oldest_unpublished_created_at_unix_ms
+        .expect("aged rows expose an oldest unpublished timestamp");
+    assert!(oldest < now_unix_ms - 239 * 3_600 * 1_000);
+
+    // Out-of-range inputs reap nothing, mirroring publish_outbox bounds.
+    for (older_than_hours, limit) in [(0, 512), (168, 0), (168, 1_001), (u32::MAX, 512)] {
+        assert_eq!(
+            store
+                .reap_outbox(organization_a, older_than_hours, limit)
+                .await
+                .expect("out-of-range reap input is a bounded no-op"),
+            0
+        );
+    }
+
+    // The RLS-constrained runtime role reaps only its own tenant, oldest
+    // first, in bounded batches, and repeating the reap is a no-op.
+    let runtime_store = unprivileged_store(&store).await;
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 1)
+            .await
+            .expect("reap first bounded batch"),
+        1
+    );
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 512)
+            .await
+            .expect("reap remaining expired rows"),
+        1
+    );
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 512)
+            .await
+            .expect("repeat reap is a no-op"),
+        0
+    );
+
+    // Tenant B's row is past the horizon but belongs to another tenant.
+    let neighbor_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox WHERE organization_id = $1")
+            .bind(organization_b)
+            .fetch_one(store.pool())
+            .await
+            .expect("count neighbor outbox rows");
+    assert_eq!(neighbor_rows, 1);
+
+    let after = store
+        .outbox_backlog(organization_a)
+        .await
+        .expect("read backlog after reap");
+    assert_eq!(after.unpublished_count, 1);
+    assert_eq!(after.total_count, 1);
+    assert!(
+        after
+            .oldest_unpublished_created_at_unix_ms
+            .expect("the young row remains unpublished")
+            > now_unix_ms - 3_600 * 1_000
+    );
+
+    // The surviving young row still publishes exactly once.
+    let published = store
+        .publish_outbox(organization_a, 10)
+        .await
+        .expect("publish surviving outbox rows");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].topic, "build.admitted");
+    assert!(
+        store
+            .publish_outbox(organization_a, 10)
+            .await
+            .expect("republish returns nothing")
+            .is_empty()
+    );
+    let drained = store
+        .outbox_backlog(organization_a)
+        .await
+        .expect("read backlog after publish");
+    assert_eq!(drained.unpublished_count, 0);
+    assert_eq!(drained.total_count, 1);
+    assert_eq!(drained.oldest_unpublished_created_at_unix_ms, None);
+
+    // Retention applies to published rows too: publication never exempts a
+    // row from the horizon, because outbox rows are delivery staging while
+    // build_events and audit_events remain the durable records.
+    sqlx::query(
+        "UPDATE outbox
+         SET created_at = clock_timestamp() - interval '240 hours'
+         WHERE organization_id = $1",
+    )
+    .bind(organization_a)
+    .execute(store.pool())
+    .await
+    .expect("age the published row past the retention horizon");
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 512)
+            .await
+            .expect("reap the aged published row"),
+        1
+    );
+    assert_eq!(
+        store
+            .outbox_backlog(organization_a)
+            .await
+            .expect("read emptied backlog"),
+        OutboxBacklog {
+            unpublished_count: 0,
+            oldest_unpublished_created_at_unix_ms: None,
+            total_count: 0,
+            protected_count: 0,
+        }
+    );
 }
 
 #[tokio::test]
