@@ -1522,6 +1522,77 @@ async fn observer_predecessor_must_match_the_frozen_pre_action_receipt_before_di
 }
 
 #[tokio::test]
+async fn observer_request_must_bind_the_frozen_action_before_verification() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-observer-binding",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    // The signed observation request targets a different destination and a
+    // different connector request digest than the frozen action. Observer
+    // Verify would still approve it (the observer checks only its own
+    // deployment binding), so the runtime must refuse before verification
+    // reserves the mismatched observation and before any dispatch.
+    plan.observation_request.endpoint_identity = "other-endpoint".into();
+    plan.observation_request
+        .query
+        .insert("connector_request_sha256".to_owned(), "0".repeat(64));
+    sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("mismatched observer binding fails as a terminal preflight error");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        preflight_count(root.path()),
+        0,
+        "the mismatched observation request must never reach observer Verify"
+    );
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read observer-binding preflight effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT terminal_summary FROM attempts WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the observer-binding terminal summary");
+    assert_eq!(
+        summary["reason"], "effect_observation_request_preflight_failed",
+        "unexpected terminal summary: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

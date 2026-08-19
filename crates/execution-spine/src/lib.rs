@@ -723,7 +723,15 @@ async fn run_effect_claim_under_lease(
         )
         .await;
     }
-    if validate_observation_request(claim, accepted.project_id, pipeline_id, plan).is_err() {
+    if validate_observation_request(
+        claim,
+        accepted.project_id,
+        pipeline_id,
+        plan,
+        &prepared.request_sha256,
+    )
+    .is_err()
+    {
         abandon_prepared_effect(store, claim, &config.agent_id, &prepared).await?;
         return finalize_effect_attempt(
             store,
@@ -1203,8 +1211,16 @@ fn validate_observation_request(
     project_id: Uuid,
     pipeline_id: Uuid,
     plan: &EffectExecutionPlan,
+    request_sha256: &str,
 ) -> Result<(), SpineError> {
     let fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
+    // Bind the observation request to the frozen action before verification
+    // and dispatch: a request aimed at another destination, effect class, or
+    // connector request digest would pass observer Verify (the observer only
+    // checks its own deployment binding), reserve the mismatched observation,
+    // and fail the cross-binding join only after a potentially non-idempotent
+    // dispatch. Refusing here keeps the exit on the reserved pre-dispatch
+    // path instead of reconciliation.
     if plan.observation_request.tenant_id != claim.organization_id
         || plan.observation_request.project_id != project_id
         || plan.observation_request.pipeline_id != pipeline_id
@@ -1212,6 +1228,18 @@ fn validate_observation_request(
         || plan.observation_request.attempt_id != claim.attempt_id
         || plan.observation_request.effect_fence != fence
         || plan.observation_request.observer_id != plan.freeze.expected_observer_id
+        || plan.observation_request.endpoint_identity
+            != plan.freeze.action_request.endpoint_identity
+        || plan.observation_request.account_identity != plan.freeze.action_request.account_identity
+        || plan.observation_request.resource_identity
+            != plan.freeze.action_request.resource_identity
+        || plan.observation_request.effect_class != plan.freeze.action_request.effect_class
+        || plan
+            .observation_request
+            .query
+            .get("connector_request_sha256")
+            .map(String::as_str)
+            != Some(request_sha256)
         || plan
             .observation_request
             .predecessor_receipt_sha256
