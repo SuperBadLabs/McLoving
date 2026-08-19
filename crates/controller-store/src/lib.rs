@@ -3198,6 +3198,15 @@ impl Store {
             .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
         let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Same canonical order as the claim, cancellation, dispatch-commit,
+        // and evidence-append paths: the per-org scheduler advisory lock
+        // precedes the shared restore fence and every row lock, so a status
+        // checkpoint cannot form an inverse attempt-then-pipeline lock cycle
+        // with `request_cancellation_as`.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let attempt_authority = sqlx::query_as::<_, (i64, Uuid)>(
             "SELECT a.restore_epoch, n.build_id
