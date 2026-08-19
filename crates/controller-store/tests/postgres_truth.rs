@@ -1552,6 +1552,44 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
         after_terminal_attempt, 1,
         "a terminal attempt without a live lease must not accrete rejection events"
     );
+    // The in-transaction path carries the same binding. A renewal that passed
+    // the request boundary's non-locking authority check can serialize only
+    // after the attempt terminalized; its stale-session refusal must stay a
+    // receipt, not a second published fact contradicting the terminal no-op
+    // the live-session renewal above recorded for this very attempt.
+    assert_eq!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                30,
+            )
+            .await
+            .expect("stale-session renewal against a terminal attempt"),
+        LeaseRenewalDisposition::Rejected {
+            cause: "agent_session_stale"
+        }
+    );
+    let after_terminal_stale_session = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after the terminal stale-session renewal");
+    assert_eq!(
+        after_terminal_stale_session, 1,
+        "a stale-session refusal must not append against a terminalized attempt"
+    );
 }
 
 #[tokio::test]

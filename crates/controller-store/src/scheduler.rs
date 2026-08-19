@@ -1065,6 +1065,17 @@ impl Store {
 /// Names a refused lease renewal in the build's event stream so authority
 /// loss under a running step is controller-visible truth, never only a later
 /// silent expiry or an agent-side surprise.
+///
+/// Callers reach this after a non-locking authority check at the request
+/// boundary, so the described authority can have lapsed before this
+/// transaction serialized. The lookup therefore re-derives the build under the
+/// caller's already-held shared restore fence and appends only while the named
+/// attempt still sits at this exact fence, owned by this agent, non-terminal,
+/// and under the live restore epoch. A terminalized attempt is deliberately
+/// silent here: the renewal path treats that same attempt as a terminal no-op,
+/// and one refusal must not be published as two contradicting facts. Lease
+/// expiry is not part of the predicate, because an expired lease is precisely
+/// the refusal this event exists to name.
 async fn record_lease_renewal_rejection(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
@@ -1079,10 +1090,18 @@ async fn record_lease_renewal_rejection(
          JOIN nodes AS n
            ON n.id = a.node_id AND n.organization_id = a.organization_id
          WHERE a.organization_id = $1
-           AND a.id = $2",
+           AND a.id = $2
+           AND a.fence = $3
+           AND a.lease_owner = $4
+           AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+           AND a.restore_epoch = (
+               SELECT restore_epoch FROM controller_metadata WHERE singleton
+           )",
     )
     .bind(organization_id)
     .bind(attempt_id)
+    .bind(fence)
+    .bind(agent_id)
     .fetch_optional(&mut **tx)
     .await?;
     let Some(build_id) = build else {
