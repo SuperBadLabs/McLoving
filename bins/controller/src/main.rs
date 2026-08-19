@@ -536,8 +536,13 @@ impl RenewalRejectionWindow {
         if self.count == 0 {
             return false;
         }
-        let ordinal = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
-        ordinal > self.after && ordinal <= self.after + self.count
+        // Saturating arithmetic keeps a misconfigured window from panicking a
+        // debug controller; a saturated window simply rejects to the end.
+        let ordinal = self
+            .counter
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        ordinal > self.after && ordinal <= self.after.saturating_add(self.count)
     }
 }
 
@@ -980,7 +985,35 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context = match authorize_work_authority(&self.store, &identity, &authority).await {
+            Ok(context) => context,
+            Err(status) => {
+                // A session-epoch conflict rejects the renewal here, before the
+                // store's renewal path runs, so the named controller-side event
+                // must be recorded at this boundary or the motivating collision
+                // stays invisible. Best effort under the authenticated tenant;
+                // the original rejection is returned unchanged.
+                if status.code() == tonic::Code::FailedPrecondition
+                    && status.message().contains("stale agent session epoch")
+                    && let Ok(organization_id) =
+                        authenticated_organization(&identity, &authority.organization_id)
+                    && let Ok(attempt_id) = authority.attempt_id.parse()
+                {
+                    let (_, fence) = decode_authority_token(authority.fence_token);
+                    let _ = self
+                        .store
+                        .record_lease_renewal_rejection(
+                            organization_id,
+                            attempt_id,
+                            fence,
+                            &authority.agent_id,
+                            "agent_session_stale",
+                        )
+                        .await;
+                }
+                return Err(status);
+            }
+        };
         let lease_seconds = i32::try_from(request.lease_seconds)
             .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
         if !(5..=300).contains(&lease_seconds) {

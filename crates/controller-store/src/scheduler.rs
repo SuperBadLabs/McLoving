@@ -954,6 +954,34 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Records a named renewal rejection outside the renewal transaction, for
+    /// callers that refuse authority before the store's renewal path runs
+    /// (the session-epoch gate in the agent-control handler). Best effort:
+    /// an attempt with no build appends nothing.
+    pub async fn record_lease_renewal_rejection(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+        cause: &str,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        record_lease_renewal_rejection(
+            &mut tx,
+            organization_id,
+            attempt_id,
+            fence,
+            agent_id,
+            cause,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
 /// Names a refused lease renewal in the build's event stream so authority
 /// loss under a running step is controller-visible truth, never only a later
 /// silent expiry or an agent-side surprise.
