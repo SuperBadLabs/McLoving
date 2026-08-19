@@ -58,7 +58,9 @@ pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorization";
 pub const MAX_DISCOVERY_SCAN_BODY_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
-const DEFAULT_PLATFORM: &str = "linux";
+// The scheduling capability vocabulary (docs/architecture/CAPABILITY_VOCABULARY_V1.md)
+// defines the closed platform set and the default; spell both through it.
+const DEFAULT_PLATFORM: &str = mcloving_domain::capability::DEFAULT_PLATFORM;
 const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 const MAX_DISCOVERY_SCAN_OBSERVATIONS: usize = 4096;
 
@@ -1256,7 +1258,7 @@ fn openapi_document() -> Value {
                         },
                         "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
                         "parameters": parameter_values_schema(),
-                        "platform": {"type": "string", "enum": ["linux", "windows"]},
+                        "platform": {"type": "string", "enum": mcloving_domain::capability::SUPPORTED_PLATFORMS},
                         "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
                     },
                     "additionalProperties": false
@@ -1608,7 +1610,7 @@ fn trigger_delivery_schema() -> Value {
             "payload_sha256": digest.clone(),
             "canonical_payload": {"type": "object"},
             "parameters": {"type": "object"},
-            "requested_platform": {"type": "string", "enum": ["linux", "windows"]},
+            "requested_platform": {"type": "string", "enum": mcloving_domain::capability::SUPPORTED_PLATFORMS},
             "requested_trust_pool": {"type": "string", "minLength": 1, "maxLength": 128},
             "event_time_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
             "accepted_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
@@ -4210,7 +4212,7 @@ fn submission_platform(headers: &HeaderMap) -> Result<String, ApiError> {
         Some(value) => value.to_str().map_err(|_| invalid_platform())?,
         None => DEFAULT_PLATFORM,
     };
-    if !matches!(value, "linux" | "windows") {
+    if !mcloving_domain::capability::is_supported_platform(value) {
         return Err(invalid_platform());
     }
     Ok(value.to_owned())
@@ -5625,6 +5627,29 @@ impl Client {
     pub fn with_artifact_agent_token(mut self, bearer_token: &str) -> Self {
         self.artifact_agent_token = Some(bearer_token.to_owned());
         self
+    }
+
+    /// Submits a build without naming a platform or trust pool, so the
+    /// controller applies the documented defaults (`platform:linux`,
+    /// `trusted-linux`).
+    pub async fn submit_pipeline_with_defaults(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+        idempotency_key: &str,
+        request: &PipelineBuildRequest,
+    ) -> Result<AdmissionResponse, ClientError> {
+        self.send(
+            self.inner
+                .post(format!(
+                    "{}/pipelines/{pipeline_id}/builds",
+                    self.project_url(organization_id, project_id)
+                ))
+                .header(IDEMPOTENCY_HEADER, idempotency_key)
+                .json(request),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]

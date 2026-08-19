@@ -134,7 +134,12 @@ configured organization. It requires separate
 migration pool is closed before the API and worker start, and the runtime role
 must be the RLS-constrained `mcloving_tenant`. Worker identity, organization,
 capabilities, lease/poll intervals, session epoch, workspace root, and SQLite
-journal path are explicit required environment settings. A remote agent
+journal path are explicit required environment settings.
+`MCLOVING_AGENT_CAPABILITIES` must satisfy the sealed capability vocabulary
+(`CAPABILITY_VOCABULARY_V1.md`): it declares `platform:linux` or
+`platform:windows` (plus optional exact tokens), or exactly the sentinel
+`disabled` to run without an embedded claimer; anything else fails startup
+with a named `EmbeddedWorkerCapabilityError`. A remote agent
 transport and multi-organization scheduler remain later work.
 
 OIDC is disabled only when every `MCLOVING_OIDC_*` variable is absent. A

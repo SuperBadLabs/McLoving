@@ -956,7 +956,7 @@ const fn platform_feature() -> &'static str {
 fn session_capabilities() -> Vec<String> {
     vec![
         std::env::consts::OS.to_owned(),
-        format!("platform:{}", std::env::consts::OS),
+        mcloving_domain::capability::platform_capability(std::env::consts::OS),
         std::env::consts::ARCH.to_owned(),
     ]
 }
