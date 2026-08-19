@@ -1319,8 +1319,16 @@ async fn finalize_reserved_pre_dispatch_exit(
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
+    // Most callers reach here holding the dispatch renewal gate, so no lease
+    // maintenance can run while the observer release is retried above. A slow
+    // release can therefore outlive the lease and leave this checkpoint with
+    // no live authority. Take the stale-authority fallback for both release
+    // outcomes: the live checkpoint alone would leave the effect `prepared`,
+    // and once expiry rewrites it to ordinary `uncertain` the release-expiry
+    // abandonment transition can no longer claim it.
     if !released {
-        mark_effect_release_pending(store, claim, &config.agent_id, prepared).await?;
+        persist_undispatched_release_disposition(store, claim, &config.agent_id, prepared, false)
+            .await?;
         let published = store
             .finalize_attempt(
                 claim.organization_id,
@@ -1346,7 +1354,8 @@ async fn finalize_reserved_pre_dispatch_exit(
         }
         return Err(SpineError::EffectReconciliationRequired);
     }
-    abandon_prepared_effect(store, claim, &config.agent_id, prepared).await?;
+    persist_undispatched_release_disposition(store, claim, &config.agent_id, prepared, true)
+        .await?;
     if let Some(summary) = summary.as_object_mut() {
         summary.insert(
             "observer_reservation_release".to_owned(),

@@ -497,8 +497,13 @@ pub async fn finalize_effect_shadow_join_as(
             ));
         }
     };
-    if !store
-        .finalize_attempt(
+    // The caller's cancellation observation was read in an earlier
+    // transaction, so cancellation can commit between that read and this
+    // publication and leave the override empty for an attempt the controller
+    // has already moved to `cancelling`. Derive the terminal under the
+    // publishing row lock instead, and report what was actually published.
+    let published = store
+        .finalize_attempt_cancellation_aware(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
@@ -513,11 +518,8 @@ pub async fn finalize_effect_shadow_join_as(
                 "shadow_replay_joined": true,
             }),
         )
-        .await?
-    {
-        return Err(EffectRuntimeError::StaleAuthority);
-    }
-    Ok(terminal)
+        .await?;
+    published.ok_or(EffectRuntimeError::StaleAuthority)
 }
 
 fn validate_freeze(

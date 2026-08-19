@@ -5999,6 +5999,44 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
+        Ok(self
+            .finalize_attempt_with_session(
+                organization_id,
+                attempt_id,
+                fence,
+                restore_epoch,
+                agent_id,
+                None,
+                outcome,
+                summary,
+                false,
+            )
+            .await?
+            .is_some())
+    }
+
+    /// Publishes a terminal outcome whose cancellation decision must be atomic
+    /// with the publication itself.
+    ///
+    /// A caller that reads cancellation in one transaction and publishes in
+    /// another can have cancellation commit in between: both cancellation
+    /// writers move a live attempt to `cancelling` under its row lock, yet
+    /// `finalize_attempt` accepts that status and would publish the caller's
+    /// now-stale non-aborted choice. This entry point instead derives the
+    /// terminal under the same row lock it publishes with, so a committed
+    /// cancellation always wins. Returns the outcome actually published, which
+    /// the caller must report in place of the one it requested.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_attempt_cancellation_aware(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<Option<TerminalOutcome>, StoreError> {
         self.finalize_attempt_with_session(
             organization_id,
             attempt_id,
@@ -6008,6 +6046,7 @@ impl Store {
             None,
             outcome,
             summary,
+            true,
         )
         .await
     }
@@ -6024,17 +6063,20 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
-        self.finalize_attempt_with_session(
-            organization_id,
-            attempt_id,
-            fence,
-            restore_epoch,
-            agent_id,
-            Some(session_epoch),
-            outcome,
-            summary,
-        )
-        .await
+        Ok(self
+            .finalize_attempt_with_session(
+                organization_id,
+                attempt_id,
+                fence,
+                restore_epoch,
+                agent_id,
+                Some(session_epoch),
+                outcome,
+                summary,
+                false,
+            )
+            .await?
+            .is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6048,14 +6090,15 @@ impl Store {
         session_epoch: Option<u64>,
         outcome: TerminalOutcome,
         summary: Value,
-    ) -> Result<bool, StoreError> {
+        cancellation_aborts: bool,
+    ) -> Result<Option<TerminalOutcome>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
         }
         let existing = sqlx::query_as::<_, (String, Option<Value>)>(
             "SELECT a.status, a.terminal_summary
@@ -6080,17 +6123,28 @@ impl Store {
         if let Some((status, terminal_summary)) = existing
             && matches!(status.as_str(), "succeeded" | "failed" | "aborted")
         {
-            let identical =
-                status == outcome.as_str() && terminal_summary.as_ref() == Some(&summary);
+            // A cancellation-aware publication may already have substituted
+            // `aborted` for this exact request. Its retry names the outcome it
+            // asked for, so accept that substitution as the same publication
+            // rather than reporting authority loss.
+            let substituted = cancellation_aborts && status == TerminalOutcome::Aborted.as_str();
+            let identical = (status == outcome.as_str() || substituted)
+                && terminal_summary.as_ref() == Some(&summary);
             if identical {
                 tx.commit().await?;
             } else {
                 tx.rollback().await?;
             }
-            return Ok(identical);
+            return Ok(identical.then_some(if substituted {
+                TerminalOutcome::Aborted
+            } else {
+                outcome
+            }));
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "SELECT n.id, n.build_id
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
+            "SELECT n.id, n.build_id,
+                    a.status = 'cancelling'
+                    OR n.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -6117,9 +6171,20 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let Some((node_id, build_id)) = authority else {
+        let Some((node_id, build_id, cancelling)) = authority else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
+        };
+        // Both cancellation writers move a live attempt to `cancelling` under
+        // its row lock, and the DAG writer additionally stamps the node. The
+        // lock above therefore serializes this derivation against them: a
+        // cancellation is either already visible here or waits for this
+        // publication, so the choice can no longer go stale between reading it
+        // and publishing it.
+        let outcome = if cancellation_aborts && cancelling {
+            TerminalOutcome::Aborted
+        } else {
+            outcome
         };
 
         let uncertain_effects = sqlx::query_scalar::<_, i64>(
@@ -6182,7 +6247,7 @@ impl Store {
             )
             .await?;
             tx.commit().await?;
-            return Ok(false);
+            return Ok(None);
         }
 
         let incomplete_runtime_effects = sqlx::query_scalar::<_, i64>(
@@ -6217,7 +6282,7 @@ impl Store {
         .await?;
         if incomplete_runtime_effects > 0 {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
         }
 
         sqlx::query(
@@ -6279,7 +6344,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(outcome))
     }
 
     pub(crate) async fn tenant_transaction(

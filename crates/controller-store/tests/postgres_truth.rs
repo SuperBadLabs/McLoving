@@ -2828,6 +2828,177 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
 }
 
 #[tokio::test]
+async fn cancellation_aware_publication_derives_the_terminal_under_its_own_lock() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "cancellation-aware-publication",
+        )
+        .await
+        .expect("create tenant");
+    let claim_leased_attempt = async |key: &'static str| {
+        let admission = store
+            .admit_test_build(&NewBuild {
+                organization_id,
+                project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
+                idempotency_key: key.into(),
+                pipeline_digest: [0xAB; 32],
+                node_key: "stage-1".into(),
+                required_capabilities: vec!["linux".into()],
+                required_trust_pool: "trusted".into(),
+                priority: 0,
+                execution_spec: json!({}),
+            })
+            .await
+            .expect("admit build");
+        let claim = store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-a".into(),
+                agent_id: "agent-a".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim query")
+            .expect("claim exists");
+        assert!(
+            store
+                .accept_offer(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "agent-a",
+                )
+                .await
+                .expect("accept offer")
+        );
+        (admission, claim)
+    };
+    let summary = json!({"observation_joined": true});
+
+    // A cancellation that commits after the caller read execution state must
+    // still win: the publishing transaction re-derives the terminal under the
+    // attempt row lock the cancellation writer also takes.
+    let (cancelled_build, cancelled) = claim_leased_attempt("cancellation-aware-cancelled").await;
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, cancelled_build.build_id)
+            .await
+            .expect("request cancellation after the caller's execution read")
+    );
+    assert_eq!(
+        store
+            .finalize_attempt_cancellation_aware(
+                organization_id,
+                cancelled.attempt_id,
+                cancelled.fence,
+                cancelled.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary.clone(),
+            )
+            .await
+            .expect("publish under a committed cancellation"),
+        Some(TerminalOutcome::Aborted),
+        "a committed cancellation must override the caller's stale terminal"
+    );
+    let cancelled_snapshot = store
+        .build_snapshot(organization_id, project_id, cancelled_build.build_id)
+        .await
+        .expect("read cancelled snapshot")
+        .expect("build exists");
+    assert_eq!(cancelled_snapshot.attempt_status, "aborted");
+    // The agent retries naming the outcome it originally asked for; the
+    // substitution must read as the same publication, not authority loss.
+    assert_eq!(
+        store
+            .finalize_attempt_cancellation_aware(
+                organization_id,
+                cancelled.attempt_id,
+                cancelled.fence,
+                cancelled.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary.clone(),
+            )
+            .await
+            .expect("replay the substituted publication"),
+        Some(TerminalOutcome::Aborted)
+    );
+
+    // Without a cancellation the caller's own terminal is published unchanged.
+    let (plain_build, plain) = claim_leased_attempt("cancellation-aware-uncancelled").await;
+    assert_eq!(
+        store
+            .finalize_attempt_cancellation_aware(
+                organization_id,
+                plain.attempt_id,
+                plain.fence,
+                plain.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary.clone(),
+            )
+            .await
+            .expect("publish without a cancellation"),
+        Some(TerminalOutcome::Succeeded)
+    );
+    let plain_snapshot = store
+        .build_snapshot(organization_id, project_id, plain_build.build_id)
+        .await
+        .expect("read uncancelled snapshot")
+        .expect("build exists");
+    assert_eq!(plain_snapshot.attempt_status, "succeeded");
+
+    // The contrast that motivates the aware entry point: the ordinary
+    // publication accepts a `cancelling` attempt and takes the caller's word,
+    // so a caller whose cancellation read predates the commit publishes the
+    // wrong terminal.
+    let (unaware_build, unaware) = claim_leased_attempt("cancellation-aware-contrast").await;
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, unaware_build.build_id)
+            .await
+            .expect("request cancellation before the unaware publication")
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                unaware.attempt_id,
+                unaware.fence,
+                unaware.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary,
+            )
+            .await
+            .expect("publish through the unaware path")
+    );
+    let unaware_snapshot = store
+        .build_snapshot(organization_id, project_id, unaware_build.build_id)
+        .await
+        .expect("read unaware snapshot")
+        .expect("build exists");
+    assert_eq!(unaware_snapshot.attempt_status, "succeeded");
+}
+
+#[tokio::test]
 async fn cancellation_targets_the_latest_retry_attempt() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
