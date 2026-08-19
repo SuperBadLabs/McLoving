@@ -1401,6 +1401,82 @@ async fn signed_runtime_scope_must_match_the_durable_build_before_dispatch() {
 }
 
 #[tokio::test]
+async fn mismatched_one_action_plan_binding_is_terminal_without_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-plan-binding",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    // Same project and pipeline, but the frozen one-action grant belongs to a
+    // different build, attempt, fence, and effect key. The claim gate must
+    // terminalize the mismatch instead of leaving a checkpoint-free running
+    // attempt whose lease expiry would requeue it for the same losing race.
+    plan.freeze.action_request.build_id = Uuid::new_v4();
+    plan.freeze.action_request.attempt_id = Uuid::new_v4();
+    plan.freeze.action_request.effect_fence += 7;
+    plan.freeze.action_request.effect_key = "build.other-notification".into();
+    sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("plan binding mismatch is durably terminalized before dispatch");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(preflight_count(root.path()), 0);
+    let effect_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attempt_effects WHERE organization_id=$1 AND attempt_id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count plan-mismatch effects");
+    assert_eq!(effect_count, 0);
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT terminal_summary FROM attempts WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the plan-mismatch terminal summary");
+    assert_eq!(
+        summary["reason"], "effect_plan_scope_mismatch",
+        "unexpected terminal summary: {summary}"
+    );
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at=NOW() - INTERVAL '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("force the mismatch lease timestamp behind the requeue boundary");
+    assert!(
+        !store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("terminal plan mismatch must not requeue")
+    );
+}
+
+#[tokio::test]
 async fn observer_predecessor_must_match_the_frozen_pre_action_receipt_before_dispatch() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

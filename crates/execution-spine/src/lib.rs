@@ -589,8 +589,20 @@ async fn run_effect_claim_under_lease(
     let pipeline_id = accepted
         .pipeline_id
         .ok_or(SpineError::EffectRuntimeUnavailable)?;
-    if plan.freeze.action_request.project_id != accepted.project_id
+    // Compare the complete frozen one-action binding, not just the execution
+    // scope. A plan bound to another build, attempt, fence, or effect key
+    // would only be rejected later by `validate_freeze`, whose error
+    // propagates without a terminal publication; the checkpoint-free attempt
+    // would then requeue on lease expiry and the mismatch could win the queue
+    // repeatedly. Terminalize the mismatch here instead.
+    let claim_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
+    if plan.freeze.action_request.tenant_id != claim.organization_id
+        || plan.freeze.action_request.project_id != accepted.project_id
         || plan.freeze.action_request.pipeline_id != pipeline_id
+        || plan.freeze.action_request.build_id != claim.build_id
+        || plan.freeze.action_request.attempt_id != claim.attempt_id
+        || plan.freeze.action_request.effect_fence != claim_fence
+        || plan.freeze.action_request.effect_key != intent.effect_key_template
     {
         return finalize_effect_attempt(
             store,
