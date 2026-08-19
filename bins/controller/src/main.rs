@@ -95,6 +95,12 @@ async fn main() -> Result<()> {
         "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
         24 * 60 * 60,
     )?);
+    let outbox_retention_hours = u32::try_from(bounded_u64_environment_at_most(
+        "MCLOVING_OUTBOX_RETENTION_HOURS",
+        DEFAULT_OUTBOX_RETENTION_HOURS,
+        MAX_OUTBOX_RETENTION_HOURS,
+    )?)
+    .context("MCLOVING_OUTBOX_RETENTION_HOURS must fit in 32 bits")?;
     if max_total_bytes < max_object_bytes {
         bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
     }
@@ -223,6 +229,12 @@ async fn main() -> Result<()> {
     let agent_server = run_agent_control_server(store.clone(), agent_control);
     tokio::pin!(server);
     tokio::pin!(agent_server);
+    let outbox_reaper_loop = run_outbox_reaper(
+        store.clone(),
+        worker.organization_id,
+        outbox_retention_hours,
+    );
+    tokio::pin!(outbox_reaper_loop);
     let worker_loop = run_embedded_worker(store, worker);
     tokio::pin!(worker_loop);
     let trigger_retry_loop =
@@ -233,6 +245,7 @@ async fn main() -> Result<()> {
         result = &mut agent_server => result,
         result = &mut worker_loop => result,
         result = &mut trigger_retry_loop => result,
+        result = &mut outbox_reaper_loop => result,
     }
 }
 
@@ -1519,6 +1532,61 @@ async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Res
                 tokio::time::sleep(RETRY_POLL_INTERVAL).await;
             }
         }
+    }
+}
+
+/// Default outbox retention horizon: seven days.
+const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
+/// Upper retention bound: ten years, which also keeps the horizon within the
+/// 32-bit range the store accepts.
+const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
+
+/// Bounds outbox accumulation. No outbox consumer is currently shipped, so
+/// rows are delivery staging that would otherwise grow forever; the durable
+/// records are `build_events` and `audit_events`. Each pass deletes one
+/// bounded batch past the retention horizon and reports any remaining
+/// unpublished backlog.
+async fn run_outbox_reaper(
+    store: Store,
+    organization_id: Uuid,
+    retention_hours: u32,
+) -> Result<()> {
+    const REAP_BATCH_LIMIT: u32 = 512;
+    const REAP_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+    loop {
+        match store
+            .reap_outbox(organization_id, retention_hours, REAP_BATCH_LIMIT)
+            .await
+        {
+            Ok(0) => {}
+            Ok(reaped) => {
+                eprintln!(
+                    "outbox reaper deleted {reaped} rows past the {retention_hours}h retention \
+                     horizon"
+                );
+                if reaped == u64::from(REAP_BATCH_LIMIT) {
+                    continue;
+                }
+            }
+            Err(error) => {
+                eprintln!("outbox reap failed: {error}");
+                tokio::time::sleep(REAP_POLL_INTERVAL).await;
+                continue;
+            }
+        }
+        match store.outbox_backlog(organization_id).await {
+            Ok(backlog) if backlog.unpublished_count > 0 => {
+                eprintln!(
+                    "outbox backlog: {} unpublished reapable rows of {} total ({} protected \
+                     proof rows are never reaped; no consumer is shipped; reapable rows \
+                     expire after {retention_hours}h)",
+                    backlog.unpublished_count, backlog.total_count, backlog.protected_count
+                );
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("outbox backlog scan failed: {error}"),
+        }
+        tokio::time::sleep(REAP_POLL_INTERVAL).await;
     }
 }
 

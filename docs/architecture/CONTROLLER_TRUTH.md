@@ -7,7 +7,9 @@ Status: implemented through batch W3-A.
 PostgreSQL is authoritative. Build admission commits the build, first node,
 first attempt, durable event, and outbox message in one transaction. A
 project-scoped idempotency key returns the original identifiers and does not
-emit duplicate durable records.
+emit duplicate durable records. Outbox rows are delivery staging under
+bounded retention (ADR 0005 amendment); build and audit events are the
+durable records.
 
 Terminal publication is accepted only for the current attempt fence and
 restore epoch, its exact lease owner, an accepted/running state, and an
