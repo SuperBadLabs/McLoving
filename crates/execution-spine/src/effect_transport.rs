@@ -237,6 +237,7 @@ fn observer_verify_rejection_is_definitive(code: &str) -> bool {
             | "oversized_request"
             | "unauthorized_request"
             | "binding_mismatch"
+            | "confidentiality_denied"
             | "expired_request"
             | "expired_grant"
             | "runtime_fenced"
@@ -616,6 +617,7 @@ mod tests {
             "malformed_request",
             "unauthorized_request",
             "binding_mismatch",
+            "confidentiality_denied",
             "expired_request",
             "capacity_exceeded",
         ] {
