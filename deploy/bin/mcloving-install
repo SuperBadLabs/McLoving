@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Install the McLoving single-host deployment lane for a rootless service
+# user. Digest verification is mandatory and fail-closed: nothing is copied
+# before every binary's sha256 matches the release manifest or an
+# operator-supplied checksums file.
+#
+# usage: mcloving-install --release-dir DIR (--manifest FILE | --checksums FILE)
+#                         [--home DIR] [--no-systemd]
+#
+# Layout under HOME (default: $HOME):
+#   .local/libexec/mcloving/releases/<id>/   verified binaries
+#   .local/libexec/mcloving/current          symlink to the active release
+#   .local/libexec/mcloving/previous         symlink to the rollback release
+#   .local/libexec/mcloving/helpers/         operational scripts
+#   .config/systemd/user/                    service units
+#   .config/containers/systemd/              podman quadlet units
+#   .config/mcloving/                        environment contracts (from
+#                                            examples; never overwritten)
+set -euo pipefail
+
+deploy_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "${deploy_root}/bin/mcloving-deploy-lib.sh"
+
+release_dir=""
+manifest=""
+checksums=""
+home_dir="${HOME}"
+no_systemd="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --release-dir) release_dir="${2:?}"; shift 2 ;;
+    --manifest) manifest="${2:?}"; shift 2 ;;
+    --checksums) checksums="${2:?}"; shift 2 ;;
+    --home) home_dir="${2:?}"; shift 2 ;;
+    --no-systemd) no_systemd="1"; shift ;;
+    *) deploy_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "${release_dir}" ]] || deploy_fail "--release-dir is required"
+[[ -d "${home_dir}" ]] || deploy_fail "--home ${home_dir} does not exist"
+
+verify_release_dir "${release_dir}" "${manifest}" "${checksums}"
+id="$(release_id "${release_dir}")"
+
+libexec_root="${home_dir}/.local/libexec/mcloving"
+config_root="${home_dir}/.config/mcloving"
+unit_root="${home_dir}/.config/systemd/user"
+quadlet_root="${home_dir}/.config/containers/systemd"
+
+mkdir -p "${libexec_root}/helpers" "${config_root}/pki" "${unit_root}" "${quadlet_root}"
+chmod 0700 "${config_root}" "${config_root}/pki"
+
+target="$(stage_release "${libexec_root}" "${release_dir}" "${id}")"
+echo "staged release ${id} at ${target}"
+
+if [[ -L "${libexec_root}/current" ]]; then
+  old_target="$(readlink "${libexec_root}/current")"
+  if [[ "${old_target}" != "releases/${id}" ]]; then
+    point_symlink "${libexec_root}/previous" "${old_target}"
+    echo "previous release preserved: ${old_target}"
+  fi
+fi
+point_symlink "${libexec_root}/current" "releases/${id}"
+echo "current release: releases/${id}"
+
+for helper in mcloving-env-guard mcloving-health mcloving-db-init \
+  mcloving-deployed-digests mcloving-unit-command; do
+  install -m 0755 "${deploy_root}/bin/${helper}" "${libexec_root}/helpers/${helper}"
+done
+install -m 0644 "${deploy_root}/bin/mcloving-deploy-lib.sh" \
+  "${libexec_root}/helpers/mcloving-deploy-lib.sh"
+
+for unit in mcloving-db-init.service mcloving-controller.service mcloving-agent.service; do
+  install -m 0644 "${deploy_root}/systemd/${unit}" "${unit_root}/${unit}"
+done
+for quadlet in mcloving-postgres.container mcloving-postgres-data.volume; do
+  install -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
+done
+
+for contract in postgres db-init controller agent; do
+  if [[ ! -f "${config_root}/${contract}.env" ]]; then
+    install -m 0600 "${deploy_root}/env/${contract}.env.example" \
+      "${config_root}/${contract}.env"
+    echo "installed placeholder contract ${config_root}/${contract}.env (edit before starting)"
+  fi
+done
+
+if [[ "${no_systemd}" == "0" ]]; then
+  systemctl --user daemon-reload
+  echo "systemd user units reloaded"
+else
+  echo "skipping systemctl --user daemon-reload (--no-systemd)"
+fi
+
+cat <<NEXT
+install complete (release ${id})
+next steps:
+  1. edit the four contracts under ${config_root}/ (mcloving-env-guard
+     blocks startup while placeholders remain)
+  2. place mTLS material under ${config_root}/pki/ and enroll the agent in
+     ${config_root}/agent-identity-bindings.txt
+  3. systemctl --user enable --now mcloving-postgres mcloving-db-init \\
+       mcloving-controller mcloving-agent
+NEXT

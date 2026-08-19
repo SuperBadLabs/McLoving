@@ -1,0 +1,35 @@
+# McLoving PostgreSQL quadlet unit (rootless podman).
+#
+# Install to ~/.config/containers/systemd/ for the mcloving service user.
+# The quadlet generator turns this file into mcloving-postgres.service.
+#
+# The image digest below is pinned to MCLOVING_POSTGRES_IMAGE in
+# tools/versions.env. deploy/test-deployment.sh fails if the two drift.
+
+[Unit]
+Description=McLoving PostgreSQL (digest-pinned foundation image)
+
+[Container]
+Image=docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+ContainerName=mcloving-postgres
+EnvironmentFile=%h/.config/mcloving/postgres.env
+Volume=mcloving-postgres-data.volume:/var/lib/postgresql/data
+PublishPort=127.0.0.1:5432:5432
+HealthCmd=pg_isready --username mcloving --dbname mcloving
+HealthInterval=5s
+HealthTimeout=3s
+HealthRetries=12
+HealthStartPeriod=10s
+# The unit reports "started" only once the health check passes, so
+# After=mcloving-postgres.service means "after PostgreSQL is healthy".
+Notify=healthy
+
+[Service]
+# A missing environment file must stop the unit, not start it half-configured.
+ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard postgres %h/.config/mcloving/postgres.env
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

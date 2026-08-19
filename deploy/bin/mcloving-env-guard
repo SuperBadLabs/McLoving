@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Fail-closed environment-contract guard, run as ExecStartPre of every
+# McLoving unit. A unit must refuse to start half-configured: any missing,
+# empty, or placeholder (__SET_ME…__) variable aborts startup, as do
+# contract violations the binaries would only reject after side effects.
+set -euo pipefail
+
+usage() {
+  echo "usage: mcloving-env-guard {postgres|db-init|controller|agent} ENV_FILE" >&2
+  exit 64
+}
+
+[[ $# -eq 2 ]] || usage
+service="$1"
+env_file="$2"
+
+if [[ ! -f "${env_file}" ]]; then
+  echo "mcloving-env-guard: environment file ${env_file} does not exist" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "${env_file}"
+set +a
+
+fail() {
+  echo "mcloving-env-guard[${service}]: $1" >&2
+  exit 1
+}
+
+require() {
+  local name value
+  for name in "$@"; do
+    value="${!name-}"
+    if [[ -z "${value}" ]]; then
+      fail "required variable ${name} is unset or empty in ${env_file}"
+    fi
+    if [[ "${value}" == *__SET_ME* ]]; then
+      fail "variable ${name} still carries a __SET_ME…__ placeholder in ${env_file}"
+    fi
+  done
+}
+
+require_uuid() {
+  local name value
+  for name in "$@"; do
+    value="${!name-}"
+    if [[ ! "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+      fail "variable ${name} must be a UUID, got ${value:-<empty>}"
+    fi
+  done
+}
+
+require_readable_file() {
+  local name value
+  for name in "$@"; do
+    value="${!name-}"
+    if [[ ! -r "${value}" ]]; then
+      fail "variable ${name} must name a readable file; ${value:-<empty>} is not"
+    fi
+  done
+}
+
+require_min_bytes() {
+  local name="$1" minimum="$2" value
+  value="${!name-}"
+  if [[ "${#value}" -lt "${minimum}" ]]; then
+    fail "variable ${name} must contain at least ${minimum} bytes"
+  fi
+}
+
+case "${service}" in
+  postgres)
+    require POSTGRES_USER POSTGRES_DB POSTGRES_PASSWORD
+    ;;
+  db-init)
+    require MCLOVING_MIGRATION_DATABASE_URL MCLOVING_TENANT_PASSWORD \
+      MCLOVING_ORGANIZATION_ID MCLOVING_ORGANIZATION_SLUG \
+      MCLOVING_PROJECT_ID MCLOVING_PROJECT_SLUG \
+      MCLOVING_POSTGRES_CONTAINER MCLOVING_POSTGRES_SUPERUSER \
+      MCLOVING_POSTGRES_DB
+    require_uuid MCLOVING_ORGANIZATION_ID MCLOVING_PROJECT_ID
+    ;;
+  controller)
+    require MCLOVING_MIGRATION_DATABASE_URL MCLOVING_DATABASE_URL \
+      MCLOVING_API_TOKEN MCLOVING_ARTIFACT_AGENT_TOKEN \
+      MCLOVING_LISTEN MCLOVING_OBJECT_ROOT \
+      MCLOVING_ORGANIZATION_ID MCLOVING_AGENT_ID \
+      MCLOVING_AGENT_CAPABILITIES MCLOVING_AGENT_TRUST_POOL \
+      MCLOVING_LEASE_SECONDS MCLOVING_POLL_MILLISECONDS \
+      MCLOVING_CANCELLATION_POLL_MILLISECONDS \
+      MCLOVING_TERMINATION_GRACE_MILLISECONDS MCLOVING_SESSION_EPOCH \
+      MCLOVING_WORKSPACE_ROOT MCLOVING_AGENT_JOURNAL \
+      MCLOVING_AGENT_LISTEN MCLOVING_AGENT_SERVER_CERT_PATH \
+      MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
+      MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    require_uuid MCLOVING_ORGANIZATION_ID
+    require_min_bytes MCLOVING_API_TOKEN 32
+    require_min_bytes MCLOVING_ARTIFACT_AGENT_TOKEN 32
+    if [[ "${MCLOVING_API_TOKEN}" == "${MCLOVING_ARTIFACT_AGENT_TOKEN}" ]]; then
+      fail "MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct"
+    fi
+    if [[ "${MCLOVING_MIGRATION_DATABASE_URL}" == "${MCLOVING_DATABASE_URL}" ]]; then
+      fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must use distinct roles"
+    fi
+    require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
+      MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
+      MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    ;;
+  agent)
+    require MCLOVING_AGENT_ID MCLOVING_AGENT_TRUST_POOL \
+      MCLOVING_AGENT_ORGANIZATION_ID MCLOVING_CONTROLLER_URI \
+      MCLOVING_CONTROLLER_DNS_NAME MCLOVING_CONTROLLER_CA_PATH \
+      MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH \
+      MCLOVING_AGENT_JOURNAL_PATH MCLOVING_AGENT_WORKSPACE_ROOT
+    require_uuid MCLOVING_AGENT_ORGANIZATION_ID
+    require_readable_file MCLOVING_CONTROLLER_CA_PATH \
+      MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
+    # The agent refuses to spawn work into a missing workspace root; require
+    # it up front so the unit fails at start, not at first assignment.
+    if [[ ! -d "${MCLOVING_AGENT_WORKSPACE_ROOT}" ]]; then
+      fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${MCLOVING_AGENT_WORKSPACE_ROOT}"
+    fi
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+echo "mcloving-env-guard[${service}]: contract satisfied (${env_file})"

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Health verification for deployed McLoving services.
+#
+#   mcloving-health controller ENV_FILE   # public API answers /openapi.json
+#   mcloving-health agent ENV_FILE        # journal opens, integrity ok
+#
+# The controller check retries within a bound so it can serve as
+# ExecStartPost (startup gate); a controller that never answers fails the
+# unit. The agent liveness check reads the journal, which is safe while the
+# agent runs; the stronger `mcloving-agent probe` takes the journal instance
+# lock and therefore only runs while the agent service is stopped (the unit
+# runs it as ExecStartPre).
+set -euo pipefail
+
+usage() {
+  echo "usage: mcloving-health {controller|agent} ENV_FILE" >&2
+  exit 64
+}
+
+[[ $# -eq 2 ]] || usage
+service="$1"
+env_file="$2"
+
+if [[ ! -f "${env_file}" ]]; then
+  echo "mcloving-health: environment file ${env_file} does not exist" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "${env_file}"
+set +a
+
+libexec_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "${service}" in
+  controller)
+    listen="${MCLOVING_LISTEN:?MCLOVING_LISTEN is required}"
+    for _ in $(seq 1 120); do
+      if curl --silent --show-error --fail --max-time 3 \
+        "http://${listen}/openapi.json" >/dev/null 2>&1; then
+        echo "mcloving-health[controller]: public API answers on ${listen}"
+        exit 0
+      fi
+      sleep 0.5
+    done
+    echo "mcloving-health[controller]: public API on ${listen} did not answer within bound" >&2
+    exit 1
+    ;;
+  agent)
+    journal="${MCLOVING_AGENT_JOURNAL_PATH:?MCLOVING_AGENT_JOURNAL_PATH is required}"
+    "${libexec_root}/current/mcloving-agent" journal-check "${journal}"
+    echo "mcloving-health[agent]: journal at ${journal} is healthy"
+    ;;
+  *)
+    usage
+    ;;
+esac

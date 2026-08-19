@@ -1,0 +1,21 @@
+# McLoving database bootstrap: schema migration plus tenant/organization
+# provisioning. Runs after PostgreSQL is healthy and before the controller.
+#
+# Install to ~/.config/systemd/user/ for the mcloving service user.
+
+[Unit]
+Description=McLoving database bootstrap (migrate, tenant role, organization)
+Requires=mcloving-postgres.service
+After=mcloving-postgres.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# EnvironmentFile without "-" fails the unit when the contract file is absent.
+EnvironmentFile=%h/.config/mcloving/db-init.env
+ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard db-init %h/.config/mcloving/db-init.env
+ExecStart=%h/.local/libexec/mcloving/helpers/mcloving-db-init
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

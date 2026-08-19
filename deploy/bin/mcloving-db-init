@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# One-shot database bootstrap for the McLoving deployment lane.
+#
+# Order of operations (each step fail-closed and idempotent):
+#   1. wait until PostgreSQL answers pg_isready inside the pinned container
+#   2. apply schema migrations with the migration role
+#      (mcloving-identity-admin migrate)
+#   3. enable LOGIN with a password on the constrained mcloving_tenant role
+#      created NOLOGIN by migration 0002, preserving every other restriction
+#   4. ensure the configured organization/project pair exists
+#
+# Environment contract: deploy/env/db-init.env.example (validated by
+# mcloving-env-guard before this script runs, and re-checked here).
+set -euo pipefail
+
+: "${MCLOVING_MIGRATION_DATABASE_URL:?MCLOVING_MIGRATION_DATABASE_URL is required}"
+: "${MCLOVING_TENANT_PASSWORD:?MCLOVING_TENANT_PASSWORD is required}"
+: "${MCLOVING_ORGANIZATION_ID:?MCLOVING_ORGANIZATION_ID is required}"
+: "${MCLOVING_ORGANIZATION_SLUG:?MCLOVING_ORGANIZATION_SLUG is required}"
+: "${MCLOVING_PROJECT_ID:?MCLOVING_PROJECT_ID is required}"
+: "${MCLOVING_PROJECT_SLUG:?MCLOVING_PROJECT_SLUG is required}"
+: "${MCLOVING_POSTGRES_CONTAINER:?MCLOVING_POSTGRES_CONTAINER is required}"
+: "${MCLOVING_POSTGRES_SUPERUSER:?MCLOVING_POSTGRES_SUPERUSER is required}"
+: "${MCLOVING_POSTGRES_DB:?MCLOVING_POSTGRES_DB is required}"
+
+for id in "${MCLOVING_ORGANIZATION_ID}" "${MCLOVING_PROJECT_ID}"; do
+  if [[ ! "${id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "mcloving-db-init: ${id} is not a UUID" >&2
+    exit 1
+  fi
+done
+
+libexec_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+identity_admin="${libexec_root}/current/mcloving-identity-admin"
+if [[ ! -x "${identity_admin}" ]]; then
+  echo "mcloving-db-init: ${identity_admin} is missing; run mcloving-install first" >&2
+  exit 1
+fi
+
+psql_in_container() {
+  podman exec --interactive "${MCLOVING_POSTGRES_CONTAINER}" \
+    psql --username "${MCLOVING_POSTGRES_SUPERUSER}" \
+    --dbname "${MCLOVING_POSTGRES_DB}" \
+    --set ON_ERROR_STOP=1 --no-psqlrc --quiet "$@"
+}
+
+ready() {
+  podman exec "${MCLOVING_POSTGRES_CONTAINER}" pg_isready \
+    --username "${MCLOVING_POSTGRES_SUPERUSER}" \
+    --dbname "${MCLOVING_POSTGRES_DB}" >/dev/null 2>&1
+}
+
+echo "mcloving-db-init: waiting for PostgreSQL in ${MCLOVING_POSTGRES_CONTAINER}"
+for _ in $(seq 1 120); do
+  if ready; then
+    sleep 0.5
+    if ready; then
+      break
+    fi
+  fi
+  sleep 0.5
+done
+if ! ready; then
+  echo "mcloving-db-init: PostgreSQL did not become ready within bound" >&2
+  exit 1
+fi
+
+echo "mcloving-db-init: applying schema migrations with the migration role"
+"${identity_admin}" migrate
+
+echo "mcloving-db-init: enabling constrained runtime login for mcloving_tenant"
+# SQL string literal with doubled single quotes; standard_conforming_strings
+# is on by default, so no other character is special inside the literal.
+escaped_password="${MCLOVING_TENANT_PASSWORD//\'/\'\'}"
+printf 'ALTER ROLE mcloving_tenant LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '\''%s'\'';\n' \
+  "${escaped_password}" | psql_in_container --file -
+
+organization_exists="$(printf "SELECT count(*) FROM organizations WHERE id = '%s';\n" \
+  "${MCLOVING_ORGANIZATION_ID}" | psql_in_container --tuples-only --no-align --file -)"
+project_exists="$(printf "SELECT count(*) FROM projects WHERE id = '%s' AND organization_id = '%s';\n" \
+  "${MCLOVING_PROJECT_ID}" "${MCLOVING_ORGANIZATION_ID}" \
+  | psql_in_container --tuples-only --no-align --file -)"
+
+if [[ "${organization_exists}" == "0" ]]; then
+  echo "mcloving-db-init: provisioning organization ${MCLOVING_ORGANIZATION_SLUG} and project ${MCLOVING_PROJECT_SLUG}"
+  "${identity_admin}" create-project \
+    --organization "${MCLOVING_ORGANIZATION_ID}" \
+    --organization-slug "${MCLOVING_ORGANIZATION_SLUG}" \
+    --project "${MCLOVING_PROJECT_ID}" \
+    --project-slug "${MCLOVING_PROJECT_SLUG}"
+elif [[ "${project_exists}" == "0" ]]; then
+  # create-project inserts organization and project together and is not
+  # partially reentrant; adding a project to an existing organization is an
+  # operator decision, not something this bootstrap may improvise.
+  echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} exists but project ${MCLOVING_PROJECT_ID} does not; provision the project explicitly" >&2
+  exit 1
+else
+  echo "mcloving-db-init: organization and project already provisioned"
+fi
+
+echo "mcloving-db-init: bootstrap complete"

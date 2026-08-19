@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Roll the deployed McLoving binaries back to the previous release set.
+#
+# usage: mcloving-rollback [--home DIR] [--no-systemd]
+#
+# Swaps the current/previous symlinks (the previous release's binaries were
+# digest-verified when they were installed and remain on disk unmodified),
+# restarts services in dependency order, and requires the same health gates
+# as an upgrade.
+set -euo pipefail
+
+deploy_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "${deploy_root}/bin/mcloving-deploy-lib.sh"
+
+home_dir="${HOME}"
+no_systemd="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --home) home_dir="${2:?}"; shift 2 ;;
+    --no-systemd) no_systemd="1"; shift ;;
+    *) deploy_fail "unknown argument: $1" ;;
+  esac
+done
+
+libexec_root="${home_dir}/.local/libexec/mcloving"
+config_root="${home_dir}/.config/mcloving"
+[[ -L "${libexec_root}/current" ]] || deploy_fail "no installed release; nothing to roll back"
+[[ -L "${libexec_root}/previous" ]] || deploy_fail "no previous release recorded; cannot roll back"
+
+current_target="$(readlink "${libexec_root}/current")"
+previous_target="$(readlink "${libexec_root}/previous")"
+[[ "${current_target}" != "${previous_target}" ]] \
+  || deploy_fail "current and previous point at the same release"
+for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+  [[ -x "${libexec_root}/${previous_target}/${binary}" ]] \
+    || deploy_fail "previous release is missing ${binary}; refusing to roll back"
+done
+
+echo "rolling back ${current_target} -> ${previous_target}"
+service_control "${no_systemd}" stop mcloving-agent.service
+service_control "${no_systemd}" stop mcloving-controller.service
+
+point_symlink "${libexec_root}/current" "${previous_target}"
+point_symlink "${libexec_root}/previous" "${current_target}"
+echo "current release: ${previous_target} (previous: ${current_target})"
+
+if [[ "${no_systemd}" == "1" ]]; then
+  echo "binaries swapped; service restart and health checks skipped (--no-systemd)"
+  exit 0
+fi
+
+service_control "${no_systemd}" start mcloving-controller.service
+"${libexec_root}/helpers/mcloving-health" controller "${config_root}/controller.env"
+service_control "${no_systemd}" start mcloving-agent.service
+"${libexec_root}/helpers/mcloving-health" agent "${config_root}/agent.env"
+echo "rollback to ${previous_target} complete and healthy"

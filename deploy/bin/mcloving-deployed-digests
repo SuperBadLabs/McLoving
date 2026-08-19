@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Re-read every deployed McLoving implementation identity as one canonical,
+# deterministic JSON document. A future authoritative-cutover freeze
+# (CUTOVER-001) consumes this output to detect drift: two invocations over
+# an unchanged deployment produce byte-identical documents (no timestamps,
+# sorted keys, sorted paths, home-relative paths).
+#
+# usage: mcloving-deployed-digests [--home DIR]
+#
+# Covered identities:
+#   releases/*        sha256 + size of every staged binary set
+#   current/previous  active and rollback release symlink targets
+#   units             sha256 of every installed mcloving-* unit/quadlet file
+#   config            sha256 of every file under ~/.config/mcloving
+#                     (environment contracts, identity bindings, PKI); the
+#                     hash commits to secret-bearing files without revealing
+#                     them
+set -euo pipefail
+
+home_dir="${HOME}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --home) home_dir="${2:?}"; shift 2 ;;
+    *) echo "usage: mcloving-deployed-digests [--home DIR]" >&2; exit 64 ;;
+  esac
+done
+
+if [[ ! -d "${home_dir}/.local/libexec/mcloving" ]]; then
+  echo "mcloving-deployed-digests: no deployment under ${home_dir}" >&2
+  exit 1
+fi
+
+python3 - "${home_dir}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+libexec = home / ".local/libexec/mcloving"
+config = home / ".config/mcloving"
+unit_dirs = (
+    home / ".config/systemd/user",
+    home / ".config/containers/systemd",
+)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_record(path: Path, root: Path) -> dict:
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "sha256": sha256_file(path),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def walk(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    return sorted(
+        path for path in root.rglob("*") if path.is_file() and not path.is_symlink()
+    )
+
+
+document = {
+    "schema": "mcloving.deployed-digests/v1",
+    "releases": [
+        file_record(path, home)
+        for path in walk(libexec / "releases")
+    ],
+    "helpers": [
+        file_record(path, home)
+        for path in walk(libexec / "helpers")
+    ],
+    "current_release": (
+        (libexec / "current").readlink().as_posix()
+        if (libexec / "current").is_symlink()
+        else None
+    ),
+    "previous_release": (
+        (libexec / "previous").readlink().as_posix()
+        if (libexec / "previous").is_symlink()
+        else None
+    ),
+    "units": [
+        file_record(path, home)
+        for unit_dir in unit_dirs
+        for path in walk(unit_dir)
+        if path.name.startswith("mcloving-")
+    ],
+    "environment_contracts": [
+        file_record(path, home)
+        for path in walk(config)
+    ],
+}
+
+sys.stdout.write(
+    json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+)
+PY

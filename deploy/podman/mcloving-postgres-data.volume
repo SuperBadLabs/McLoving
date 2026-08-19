@@ -1,0 +1,8 @@
+# Named volume for the McLoving PostgreSQL data directory.
+# Install to ~/.config/containers/systemd/ next to mcloving-postgres.container.
+
+[Volume]
+VolumeName=mcloving-postgres-data
+
+[Install]
+WantedBy=default.target

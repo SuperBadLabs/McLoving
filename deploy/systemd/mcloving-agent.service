@@ -1,0 +1,34 @@
+# McLoving Linux agent: outbound-only mTLS worker.
+#
+# Install to ~/.config/systemd/user/ for the mcloving service user.
+
+[Unit]
+Description=McLoving agent (outbound-only mTLS worker)
+# Ordering only: the agent is outbound-only and reconnects on its own, so a
+# controller restart must not tear the agent down.
+Wants=mcloving-controller.service
+After=mcloving-controller.service
+
+[Service]
+Type=exec
+# EnvironmentFile without "-" fails the unit when the contract file is absent.
+EnvironmentFile=%h/.config/mcloving/agent.env
+# Fail fast on unset or placeholder variables before the binary starts.
+ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard agent %h/.config/mcloving/agent.env
+# `probe` opens one authenticated session, replays any durable finalization,
+# and exits. It proves the mTLS identity, controller reachability, and journal
+# health before the long-running service starts. It must run while the
+# foreground service is NOT running: both take the journal instance lock.
+ExecStartPre=%h/.local/libexec/mcloving/current/mcloving-agent probe
+ExecStart=%h/.local/libexec/mcloving/current/mcloving-agent foreground
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=120
+# Named state directories: %h/.local/state/mcloving-agent holds the agent
+# journal, and the nested workspace directory must exist before the agent
+# accepts work (the spawn path refuses a missing workspace root).
+StateDirectory=mcloving-agent mcloving-agent/workspace
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
