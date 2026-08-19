@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use mcloving_controller_api::{ApiState, OidcClientConfig, router};
+use mcloving_controller_api::{ApiState, InsecureLoopbackPolicy, OidcClientConfig, router};
 use mcloving_controller_store::{
     IdentityProviderWrite, NewHumanIdentity, NewServiceCredential, NewServiceIdentity, Store,
     authz::ServiceScope,
@@ -171,7 +171,7 @@ async fn oidc_app(
                 request_timeout: Duration::from_secs(2),
                 clock_skew: Duration::from_secs(5),
                 max_jwks_bytes: 64 * 1024,
-                allow_insecure_loopback_for_tests: true,
+                insecure_loopback: InsecureLoopbackPolicy::allow_for_tests(),
             })
             .expect("configure contained OIDC client"),
     )

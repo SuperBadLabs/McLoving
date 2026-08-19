@@ -21,8 +21,9 @@ use mcloving_agent_protocol::{
     WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
-    ApiState, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
-    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
+    ApiState, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
+    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
+    OidcClientConfig, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -236,9 +237,31 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Environment lookup threaded through configuration parsing so tests can
+/// prove parsing properties against a fully synthetic hostile environment.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
+fn process_environment(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name)
+}
+
+fn environment_string(env: EnvLookup, name: &str) -> Result<Option<String>> {
+    match env(name) {
+        None => Ok(None),
+        Some(value) => value
+            .into_string()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("{name} must contain valid Unicode")),
+    }
+}
+
 fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
-    match std::env::var(name) {
-        Ok(value) => {
+    bounded_u64_from(&process_environment, name, default)
+}
+
+fn bounded_u64_from(env: EnvLookup, name: &str, default: u64) -> Result<u64> {
+    match environment_string(env, name)? {
+        Some(value) => {
             let parsed = value
                 .parse::<u64>()
                 .with_context(|| format!("{name} must be an unsigned integer"))?;
@@ -247,13 +270,12 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
             }
             Ok(parsed)
         }
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(error) => Err(error).with_context(|| format!("read {name}")),
+        None => Ok(default),
     }
 }
 
-fn bounded_u64_environment_at_most(name: &str, default: u64, maximum: u64) -> Result<u64> {
-    let value = bounded_u64_environment(name, default)?;
+fn bounded_u64_from_at_most(env: EnvLookup, name: &str, default: u64, maximum: u64) -> Result<u64> {
+    let value = bounded_u64_from(env, name, default)?;
     bounded_u64_at_most(name, value, maximum)
 }
 
@@ -270,11 +292,15 @@ struct OidcEnvironment {
 }
 
 fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
-    let provider_id = match std::env::var("MCLOVING_OIDC_PROVIDER_ID") {
-        Ok(value) => value
+    oidc_environment_from(organization_id, &process_environment)
+}
+
+fn oidc_environment_from(organization_id: Uuid, env: EnvLookup) -> Result<Option<OidcEnvironment>> {
+    let provider_id = match environment_string(env, "MCLOVING_OIDC_PROVIDER_ID")? {
+        Some(value) => value
             .parse::<Uuid>()
             .context("MCLOVING_OIDC_PROVIDER_ID must be a UUID")?,
-        Err(std::env::VarError::NotPresent) => {
+        None => {
             const OIDC_ENVIRONMENT: &[&str] = &[
                 "MCLOVING_OIDC_ISSUER",
                 "MCLOVING_OIDC_AUDIENCE",
@@ -294,60 +320,57 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
                 "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
                 "MCLOVING_OIDC_MAX_JWKS_BYTES",
             ];
-            if let Some(name) = OIDC_ENVIRONMENT
-                .iter()
-                .find(|name| std::env::var_os(name).is_some())
-            {
+            if let Some(name) = OIDC_ENVIRONMENT.iter().find(|name| env(name).is_some()) {
                 bail!("{name} requires MCLOVING_OIDC_PROVIDER_ID");
             }
             return Ok(None);
         }
-        Err(error) => return Err(error).context("read MCLOVING_OIDC_PROVIDER_ID"),
     };
-    let issuer = required("MCLOVING_OIDC_ISSUER")?;
-    let audience = required("MCLOVING_OIDC_AUDIENCE")?;
-    let authorization_endpoint = required("MCLOVING_OIDC_AUTHORIZATION_ENDPOINT")?;
-    let token_endpoint = required("MCLOVING_OIDC_TOKEN_ENDPOINT")?;
-    let jwks_uri = required("MCLOVING_OIDC_JWKS_URI")?;
-    let client_id = required("MCLOVING_OIDC_CLIENT_ID")?;
-    let client_secret = match std::env::var("MCLOVING_OIDC_CLIENT_SECRET") {
-        Ok(secret) => Some(secret),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(error).context("read MCLOVING_OIDC_CLIENT_SECRET"),
-    };
-    let group_claim = required("MCLOVING_OIDC_GROUP_CLAIM")?;
+    let issuer = required_from(env, "MCLOVING_OIDC_ISSUER")?;
+    let audience = required_from(env, "MCLOVING_OIDC_AUDIENCE")?;
+    let authorization_endpoint = required_from(env, "MCLOVING_OIDC_AUTHORIZATION_ENDPOINT")?;
+    let token_endpoint = required_from(env, "MCLOVING_OIDC_TOKEN_ENDPOINT")?;
+    let jwks_uri = required_from(env, "MCLOVING_OIDC_JWKS_URI")?;
+    let client_id = required_from(env, "MCLOVING_OIDC_CLIENT_ID")?;
+    let client_secret = environment_string(env, "MCLOVING_OIDC_CLIENT_SECRET")?;
+    let group_claim = required_from(env, "MCLOVING_OIDC_GROUP_CLAIM")?;
     let configuration_generation =
-        bounded_u64_environment("MCLOVING_OIDC_CONFIGURATION_GENERATION", 1)?;
-    let jwks_generation = bounded_u64_environment("MCLOVING_OIDC_JWKS_GENERATION", 1)?;
-    let jwks_digest = parse_sha256_environment("MCLOVING_OIDC_JWKS_SHA256")?;
-    let allowed_redirect_uris = required("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS")?
+        bounded_u64_from(env, "MCLOVING_OIDC_CONFIGURATION_GENERATION", 1)?;
+    let jwks_generation = bounded_u64_from(env, "MCLOVING_OIDC_JWKS_GENERATION", 1)?;
+    let jwks_digest = parse_sha256_from(env, "MCLOVING_OIDC_JWKS_SHA256")?;
+    let allowed_redirect_uris = required_from(env, "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS")?
         .split(',')
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     if allowed_redirect_uris.iter().any(|uri| uri.trim() != uri) {
         bail!("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS entries must be canonical");
     }
-    let session_ttl_seconds = bounded_u64_environment_at_most(
+    let session_ttl_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_SESSION_TTL_SECONDS",
         15 * 60,
         MAX_OIDC_SESSION_TTL_SECONDS,
     )?;
-    let refresh_ttl_seconds = bounded_u64_environment_at_most(
+    let refresh_ttl_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
         8 * 60 * 60,
         MAX_OIDC_REFRESH_TTL_SECONDS,
     )?;
-    let request_timeout_seconds = bounded_u64_environment_at_most(
+    let request_timeout_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
         10,
         MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
     )?;
-    let clock_skew_seconds = bounded_u64_environment_at_most(
+    let clock_skew_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
         60,
         MAX_OIDC_CLOCK_SKEW_SECONDS,
     )?;
-    let max_jwks_bytes = usize::try_from(bounded_u64_environment_at_most(
+    let max_jwks_bytes = usize::try_from(bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_MAX_JWKS_BYTES",
         256 * 1024,
         MAX_OIDC_JWKS_BYTES as u64,
@@ -405,7 +428,7 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
         request_timeout: Duration::from_secs(request_timeout_seconds),
         clock_skew: Duration::from_secs(clock_skew_seconds),
         max_jwks_bytes,
-        allow_insecure_loopback_for_tests: false,
+        insecure_loopback: InsecureLoopbackPolicy::DENY,
     };
     client
         .validate_with_provider(&provider)
@@ -455,8 +478,8 @@ fn hash_oidc_configuration_field(hash: &mut Sha256, value: &[u8]) {
     hash.update(value);
 }
 
-fn parse_sha256_environment(name: &str) -> Result<[u8; 32]> {
-    let value = required(name)?;
+fn parse_sha256_from(env: EnvLookup, name: &str) -> Result<[u8; 32]> {
+    let value = required_from(env, name)?;
     if value.len() != 64 {
         bail!("{name} must contain exactly 64 lowercase hexadecimal characters");
     }
@@ -1523,7 +1546,11 @@ async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Res
 }
 
 fn required(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("{name} is required"))
+    required_from(&process_environment, name)
+}
+
+fn required_from(env: EnvLookup, name: &str) -> Result<String> {
+    environment_string(env, name)?.with_context(|| format!("{name} is required"))
 }
 
 fn parse_positive<T>(name: &str) -> Result<T>
@@ -1543,6 +1570,134 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A complete, valid OIDC environment whose every URL is HTTPS.
+    fn valid_oidc_environment() -> BTreeMap<&'static str, &'static str> {
+        BTreeMap::from([
+            (
+                "MCLOVING_OIDC_PROVIDER_ID",
+                "9e9c4c05-95cf-4a4b-8e0d-3f2d55e2a501",
+            ),
+            ("MCLOVING_OIDC_ISSUER", "https://identity.example.test"),
+            ("MCLOVING_OIDC_AUDIENCE", "mcloving"),
+            (
+                "MCLOVING_OIDC_AUTHORIZATION_ENDPOINT",
+                "https://identity.example.test/authorize",
+            ),
+            (
+                "MCLOVING_OIDC_TOKEN_ENDPOINT",
+                "https://identity.example.test/token",
+            ),
+            (
+                "MCLOVING_OIDC_JWKS_URI",
+                "https://identity.example.test/jwks",
+            ),
+            ("MCLOVING_OIDC_CLIENT_ID", "mcloving-controller"),
+            ("MCLOVING_OIDC_CLIENT_SECRET", "contained-client-secret"),
+            ("MCLOVING_OIDC_GROUP_CLAIM", "groups"),
+            ("MCLOVING_OIDC_CONFIGURATION_GENERATION", "2"),
+            ("MCLOVING_OIDC_JWKS_GENERATION", "3"),
+            (
+                "MCLOVING_OIDC_JWKS_SHA256",
+                "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
+            ),
+            (
+                "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS",
+                "https://controller.example.test/oidc/callback",
+            ),
+            ("MCLOVING_OIDC_SESSION_TTL_SECONDS", "900"),
+            ("MCLOVING_OIDC_REFRESH_TTL_SECONDS", "28800"),
+            ("MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS", "10"),
+            ("MCLOVING_OIDC_CLOCK_SKEW_SECONDS", "60"),
+            ("MCLOVING_OIDC_MAX_JWKS_BYTES", "262144"),
+        ])
+    }
+
+    /// Every plausible spelling of an insecure-loopback opt-in, set to every
+    /// truthy value an operator might reach for. None of these names exist:
+    /// the deployed configuration surface has no input mapped to the policy.
+    fn hostile_flag_battery() -> Vec<(String, &'static str)> {
+        let names = [
+            "MCLOVING_OIDC_ALLOW_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_OIDC_ALLOW_INSECURE_LOOPBACK",
+            "MCLOVING_OIDC_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_OIDC_INSECURE_LOOPBACK",
+            "MCLOVING_OIDC_INSECURE",
+            "MCLOVING_OIDC_ALLOW_HTTP",
+            "MCLOVING_OIDC_ALLOW_INSECURE",
+            "MCLOVING_OIDC_DISABLE_TLS",
+            "MCLOVING_OIDC_DISABLE_TLS_VALIDATION",
+            "MCLOVING_OIDC_LOOPBACK_FOR_TESTS",
+            "MCLOVING_OIDC_TEST_MODE",
+            "MCLOVING_OIDC_DEV_MODE",
+            "MCLOVING_ALLOW_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_ALLOW_INSECURE_LOOPBACK",
+            "MCLOVING_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_TEST_MODE",
+        ];
+        let values = ["1", "true", "TRUE", "yes", "on"];
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ((*name).to_owned(), values[index % values.len()]))
+            .collect()
+    }
+
+    #[test]
+    fn hostile_environment_cannot_enable_insecure_loopback() {
+        let mut variables = valid_oidc_environment()
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect::<BTreeMap<_, _>>();
+        variables.extend(hostile_flag_battery());
+        let lookup = |name: &str| variables.get(name).map(std::ffi::OsString::from);
+
+        let oidc = oidc_environment_from(Uuid::new_v4(), &lookup)
+            .expect("hostile extras must not break parsing")
+            .expect("OIDC must be configured");
+        assert_eq!(oidc.client.insecure_loopback, InsecureLoopbackPolicy::DENY);
+        assert!(!oidc.client.insecure_loopback.is_allowed());
+        // The digest binds the deny policy, so a permissive client could not
+        // even validate against the provider generation this digest names.
+        assert_eq!(
+            oidc.provider.configuration_digest,
+            oidc.client.configuration_digest
+        );
+    }
+
+    #[test]
+    fn loopback_http_oidc_configuration_is_rejected_not_downgraded() {
+        for (name, value) in [
+            ("MCLOVING_OIDC_ISSUER", "http://127.0.0.1:8080"),
+            (
+                "MCLOVING_OIDC_TOKEN_ENDPOINT",
+                "http://localhost:8080/token",
+            ),
+            (
+                "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS",
+                "http://127.0.0.1:8080/oidc/callback",
+            ),
+        ] {
+            let mut variables = valid_oidc_environment()
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect::<BTreeMap<_, _>>();
+            variables.extend(hostile_flag_battery());
+            variables.insert(name.to_owned(), value);
+            let lookup = |name: &str| variables.get(name).map(std::ffi::OsString::from);
+
+            // The config type carries the client secret and deliberately has
+            // no Debug implementation, so unwrap the error arm by hand.
+            let error = match oidc_environment_from(Uuid::new_v4(), &lookup) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("plain-HTTP loopback must fail closed for {name}"),
+            };
+            assert_eq!(
+                error, "validate complete OIDC runtime client before persistence",
+                "unexpected rejection for {name}"
+            );
+        }
+    }
 
     #[test]
     fn artifact_agent_token_is_validated_before_bootstrap() {
