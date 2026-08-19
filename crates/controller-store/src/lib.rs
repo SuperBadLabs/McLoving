@@ -172,6 +172,9 @@ pub const EFFECT_RELEASE_PENDING_V31: &str =
 /// Durable dispatch commitment before an external connector can be invoked.
 pub const EFFECT_DISPATCH_COMMIT_V32: &str =
     include_str!("../migrations/0032_effect_dispatch_commit.sql");
+/// A dispatch-committed effect can never be release_pending or abandoned.
+pub const EFFECT_DISPATCH_COMMIT_GUARD_V33: &str =
+    include_str!("../migrations/0033_effect_dispatch_commit_guard.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -1285,6 +1288,7 @@ impl Store {
         apply_migration(&mut tx, 30, EFFECT_EVIDENCE_V30).await?;
         apply_migration(&mut tx, 31, EFFECT_RELEASE_PENDING_V31).await?;
         apply_migration(&mut tx, 32, EFFECT_DISPATCH_COMMIT_V32).await?;
+        apply_migration(&mut tx, 33, EFFECT_DISPATCH_COMMIT_GUARD_V33).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3750,6 +3754,10 @@ impl Store {
     /// rejected while the same fence/epoch/owner still has an executable lease
     /// on the enabled admitted pipeline generation. This lets a stale worker
     /// preserve cleanup truth without restoring execution authority.
+    ///
+    /// A durably dispatch-committed effect is never "undispatched": even when
+    /// the commit acknowledgement was lost before the worker observed it, this
+    /// transition refuses the row so reconciliation stays mandatory.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_undispatched_release_after_authority_loss(
         &self,
@@ -3802,6 +3810,7 @@ impl Store {
                AND e.reconciliation_receipt IS NULL
                AND e.observation_receipt IS NULL
                AND e.shadow_replay_receipt IS NULL
+               AND e.dispatch_committed_at IS NULL
                AND e.payload ->> 'schema_version' =
                    'mcloving.controller-effect-prepared/v1'
                AND a.organization_id = e.organization_id
@@ -3857,7 +3866,8 @@ impl Store {
     /// This transition is intentionally unavailable to ordinary `uncertain`
     /// effects: a connector timeout with no receipt may still have dispatched.
     /// Only the dedicated `release_pending` state, an exact immutable payload,
-    /// zero effect receipts, and a lease-less reconciliation attempt qualify.
+    /// zero effect receipts, no durable dispatch commitment, and a lease-less
+    /// reconciliation attempt qualify.
     #[allow(clippy::too_many_arguments)]
     pub async fn abandon_expired_release_pending_effect(
         &self,
@@ -3895,6 +3905,7 @@ impl Store {
                AND e.reconciliation_receipt IS NULL
                AND e.observation_receipt IS NULL
                AND e.shadow_replay_receipt IS NULL
+               AND e.dispatch_committed_at IS NULL
                AND e.payload ->> 'schema_version' =
                    'mcloving.controller-effect-prepared/v1'
                AND jsonb_typeof(

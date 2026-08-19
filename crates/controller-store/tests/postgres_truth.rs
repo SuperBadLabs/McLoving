@@ -4604,6 +4604,275 @@ async fn expired_undispatched_reservation_can_be_abandoned_and_closed() {
 }
 
 #[tokio::test]
+async fn dispatch_committed_effect_can_never_become_undispatched_cleanup() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dispatch-commit-guard",
+        )
+        .await
+        .expect("create dispatch-commit tenant");
+    let _admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "dispatch-commit-guard".into(),
+            pipeline_digest: [0x85; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit dispatch-commit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "dispatch-commit-scheduler".into(),
+            agent_id: "dispatch-commit-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim dispatch-commit attempt")
+        .expect("dispatch-commit attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept dispatch-commit offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare dispatch-commit effect")
+    );
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("durably commit dispatch")
+    );
+    // The commit acknowledgement is now lost to the worker and its lease
+    // expires before any cleanup disposition could be persisted.
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire dispatch-commit lease");
+    for released in [false, true] {
+        assert!(
+            !store
+                .record_undispatched_release_after_authority_loss(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    &payload,
+                    released,
+                )
+                .await
+                .expect("stale worker cleanup must refuse a dispatch-committed effect"),
+            "released={released}"
+        );
+    }
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("read guarded effect status");
+    assert_eq!(status, "prepared");
+    for hostile_status in ["release_pending", "abandoned"] {
+        let violation = sqlx::query(
+            "UPDATE attempt_effects SET status = $5
+             WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+        )
+        .bind(organization_id)
+        .bind(claim.attempt_id)
+        .bind(claim.fence)
+        .bind("deploy")
+        .bind(hostile_status)
+        .execute(store.pool())
+        .await
+        .expect_err("hostile direct status update must violate the dispatch-commit constraint");
+        assert!(
+            violation
+                .to_string()
+                .contains("attempt_effects_dispatch_commit_release_check"),
+            "unexpected violation for {hostile_status}: {violation}"
+        );
+    }
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route committed dispatch to reconciliation")
+    );
+    for released in [false, true] {
+        assert!(
+            !store
+                .record_undispatched_release_after_authority_loss(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    &payload,
+                    released,
+                )
+                .await
+                .expect("reconciliation keeps refusing dispatch-committed cleanup"),
+            "released={released}"
+        );
+    }
+    // Simulate a hostile or pre-constraint legacy row so the API predicate is
+    // proven independently of the CHECK constraint: drop the constraint, force
+    // the impossible state, and verify both APIs still refuse the row.
+    sqlx::query(
+        "ALTER TABLE attempt_effects
+         DROP CONSTRAINT attempt_effects_dispatch_commit_release_check",
+    )
+    .execute(store.pool())
+    .await
+    .expect("temporarily drop the dispatch-commit constraint");
+    sqlx::query(
+        "UPDATE attempt_effects SET status = 'release_pending'
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .execute(store.pool())
+    .await
+    .expect("force the legacy hostile release_pending state");
+    assert!(
+        !store
+            .abandon_expired_release_pending_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("expired-reservation abandonment must refuse a dispatch-committed row")
+    );
+    assert!(
+        !store
+            .record_undispatched_release_after_authority_loss(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+                true,
+            )
+            .await
+            .expect("authority-loss cleanup must refuse a dispatch-committed row")
+    );
+    sqlx::query(
+        "UPDATE attempt_effects SET status = 'uncertain'
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .execute(store.pool())
+    .await
+    .expect("restore the reconcilable state");
+    sqlx::query(
+        "ALTER TABLE attempt_effects
+         ADD CONSTRAINT attempt_effects_dispatch_commit_release_check CHECK (
+             dispatch_committed_at IS NULL
+             OR status NOT IN ('release_pending', 'abandoned')
+         )",
+    )
+    .execute(store.pool())
+    .await
+    .expect("restore the dispatch-commit constraint");
+    // The dispatched effect remains reconcilable as dispatched truth.
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("confirm the dispatch-committed effect")
+    );
+}
+
+#[tokio::test]
 async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
