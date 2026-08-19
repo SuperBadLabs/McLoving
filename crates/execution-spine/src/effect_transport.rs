@@ -269,6 +269,13 @@ struct ValidatedObserverSession {
     stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
     timeout_millis: u64,
+    /// Set when a request/response exchange no longer proves frame alignment:
+    /// a timeout, an I/O failure, or an overlong line may leave a stale or
+    /// partial frame in the pipe, so a later command could consume the
+    /// previous command's response. A poisoned session refuses every further
+    /// invocation; it is never respawned because the observer's authority
+    /// rests on inputs loaded by the verified process instance.
+    poisoned: bool,
 }
 
 impl ValidatedObserverSession {
@@ -291,6 +298,7 @@ impl ValidatedObserverSession {
             stdin,
             stdout,
             timeout_millis,
+            poisoned: false,
         })
     }
 
@@ -299,19 +307,24 @@ impl ValidatedObserverSession {
         T: Serialize,
         R: DeserializeOwned,
     {
+        if self.poisoned {
+            return Err(EffectServiceError::ServiceFailed);
+        }
         let mut request_bytes =
             serde_json::to_vec(request).map_err(|_| EffectServiceError::InvalidResponse)?;
         if request_bytes.len() >= MAX_SERVICE_FRAME_BYTES {
             return Err(EffectServiceError::RequestTooLarge);
         }
         request_bytes.push(b'\n');
+        let stdin = &mut self.stdin;
+        let stdout = &mut self.stdout;
         let exchange = async {
-            self.stdin.write_all(&request_bytes).await?;
-            self.stdin.flush().await?;
+            stdin.write_all(&request_bytes).await?;
+            stdin.flush().await?;
             let mut response = Vec::new();
             loop {
                 let mut byte = [0_u8; 1];
-                let read = self.stdout.read(&mut byte).await?;
+                let read = stdout.read(&mut byte).await?;
                 if read == 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
@@ -325,13 +338,25 @@ impl ValidatedObserverSession {
             }
             Ok::<_, std::io::Error>(response)
         };
-        let response = tokio::time::timeout(
+        let response = match tokio::time::timeout(
             std::time::Duration::from_millis(self.timeout_millis),
             exchange,
         )
         .await
-        .map_err(|_| EffectServiceError::AmbiguousTimeout)??;
+        {
+            Err(_elapsed) => {
+                self.poisoned = true;
+                return Err(EffectServiceError::AmbiguousTimeout);
+            }
+            Ok(Err(error)) => {
+                self.poisoned = true;
+                return Err(error.into());
+            }
+            Ok(Ok(response)) => response,
+        };
         if response.len() > MAX_SERVICE_FRAME_BYTES {
+            // The remainder of the overlong line was never consumed.
+            self.poisoned = true;
             return Err(EffectServiceError::ResponseTooLarge);
         }
         let response = one_json_line(&response)?;
@@ -658,6 +683,52 @@ mod tests {
             .expect("execute retained inode");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"verified-inode");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn desynchronized_observer_session_is_poisoned_and_never_reused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary observer root");
+        let service_path = root.path().join("laggy-observer");
+        std::fs::write(
+            &service_path,
+            b"#!/bin/sh\nIFS= read -r request || exit 2\nsleep 1\nprintf '{\"stale\":true}\\n'\nwhile IFS= read -r request; do\n  printf '{\"fresh\":true}\\n'\ndone\n",
+        )
+        .expect("write laggy observer fixture");
+        std::fs::set_permissions(&service_path, std::fs::Permissions::from_mode(0o700))
+            .expect("make laggy observer executable");
+        let executable_sha256 =
+            Sha256::digest(std::fs::read(&service_path).expect("read laggy observer"))
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        let binding = validate_service_command(&PinnedServiceCommand {
+            executable: service_path,
+            executable_sha256,
+            arguments: Vec::new(),
+            timeout_millis: 200,
+        })
+        .await
+        .expect("seal laggy observer fixture");
+        let mut observer = ValidatedObserverSession::spawn(binding).expect("start observer once");
+        let first = observer
+            .invoke::<_, Value>(&serde_json::json!({"operation": "verify"}))
+            .await;
+        assert!(matches!(first, Err(EffectServiceError::AmbiguousTimeout)));
+
+        // Wait until the fixture's stale first response is sitting in the
+        // pipe: an unpoisoned session would now consume it as the answer to
+        // the next command.
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let second = observer
+            .invoke::<_, Value>(&serde_json::json!({"operation": "observe"}))
+            .await;
+        assert!(
+            matches!(second, Err(EffectServiceError::ServiceFailed)),
+            "a desynchronized session must refuse reuse instead of reading the stale frame"
+        );
     }
 
     #[cfg(target_os = "linux")]
