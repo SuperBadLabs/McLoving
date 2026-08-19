@@ -1480,6 +1480,45 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
         rejection_events, 1,
         "the stale-session renewal denial must be named in the event stream"
     );
+    // The out-of-transaction recording wrapper binds to durable lease truth:
+    // a caller naming an attempt it does not lease, or a stale fence, appends
+    // nothing, so a stale-session agent cannot forge rejection events.
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            "an-agent-that-does-not-hold-this-lease",
+            "agent_session_stale",
+        )
+        .await
+        .expect("foreign-agent recording attempt returns without error");
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence + 41,
+            &agent_id,
+            "agent_session_stale",
+        )
+        .await
+        .expect("stale-fence recording attempt returns without error");
+    let after_forgery_attempts = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after forgery attempts");
+    assert_eq!(
+        after_forgery_attempts, 1,
+        "unverified callers must not inject rejection events"
+    );
 }
 
 #[tokio::test]

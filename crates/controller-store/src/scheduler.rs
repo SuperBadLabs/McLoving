@@ -957,8 +957,11 @@ impl Store {
 impl Store {
     /// Records a named renewal rejection outside the renewal transaction, for
     /// callers that refuse authority before the store's renewal path runs
-    /// (the session-epoch gate in the agent-control handler). Best effort:
-    /// an attempt with no build appends nothing.
+    /// (the session-epoch gate in the agent-control handler). The event binds
+    /// only to durable truth: it is appended solely when the named attempt at
+    /// this exact fence is currently leased by the reporting agent, so a
+    /// stale-session caller cannot inject a false event against another
+    /// agent's attempt or an arbitrary fence. Best effort otherwise.
     pub async fn record_lease_renewal_rejection(
         &self,
         organization_id: Uuid,
@@ -968,13 +971,37 @@ impl Store {
         cause: &str,
     ) -> Result<(), StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        record_lease_renewal_rejection(
+        let build = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = build else {
+            tx.rollback().await?;
+            return Ok(());
+        };
+        append_event_and_outbox(
             &mut tx,
             organization_id,
-            attempt_id,
-            fence,
-            agent_id,
-            cause,
+            build_id,
+            "attempt.lease_renewal_rejected",
+            json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "agent_id": agent_id,
+                "cause": cause,
+            }),
         )
         .await?;
         tx.commit().await?;

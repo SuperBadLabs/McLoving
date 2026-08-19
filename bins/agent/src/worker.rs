@@ -130,11 +130,29 @@ struct LeaseRenewalControl {
     loss_reason: Arc<OnceLock<&'static str>>,
 }
 
+/// Marker for an execution cancelled by the controller's own request; it is
+/// never reported as lease loss.
+const CONTROLLER_CANCELLATION_TRIGGER: &str = "controller_cancellation";
+
 /// Names the exact renewal failure before it cancels a running execution, so
-/// authority loss during a step is never a silent cancellation.
+/// authority loss during a step is never a silent cancellation. First trigger
+/// wins: a cancellation already in progress keeps its cause.
 fn record_lease_loss(loss_reason: &OnceLock<&'static str>, cause: &'static str) {
-    let _ = loss_reason.set(cause);
-    eprintln!("lease_lost_during_execution: {cause}; cancelling the running step");
+    if loss_reason.set(cause).is_ok() {
+        eprintln!("lease_lost_during_execution: {cause}; cancelling the running step");
+    }
+}
+
+/// Classifies a renewal RPC rejection status: a stale-session fencing
+/// rejection is named as such rather than as a transport failure.
+fn renewal_status_cause(status: &tonic::Status) -> &'static str {
+    if status.code() == tonic::Code::FailedPrecondition
+        && status.message().contains("stale agent session epoch")
+    {
+        "renewal_session_stale"
+    } else {
+        "renewal_transport_failure"
+    }
 }
 
 struct PublicationContext<'a> {
@@ -809,6 +827,7 @@ async fn run_assignment(
         let lease_loss = (outcome.termination == Termination::Cancelled)
             .then(|| lease_loss_reason.get())
             .flatten()
+            .filter(|cause| **cause != CONTROLLER_CANCELLATION_TRIGGER)
             .map(|cause| format!("lease_lost_during_execution:{cause}"));
         let result = write_result(
             &config.workspace_root,
@@ -1185,7 +1204,7 @@ async fn renew_lease(
             }
             Ok(Ok(response)) => response.into_inner(),
             Ok(Err(error)) => {
-                record_lease_loss(&loss_reason, "renewal_transport_failure");
+                record_lease_loss(&loss_reason, renewal_status_cause(&error));
                 execution_cancellation.cancel();
                 authority_lost.cancel();
                 return Err(error.into());
@@ -1207,6 +1226,10 @@ async fn renew_lease(
             return Err(AgentError::StaleAuthority);
         }
         if receipt.cancellation_requested {
+            // The controller's cancellation is the terminating trigger; claim
+            // the slot so a renewal failure observed while the process is
+            // already being terminated cannot relabel the cause as lease loss.
+            let _ = loss_reason.set(CONTROLLER_CANCELLATION_TRIGGER);
             execution_cancellation.cancel();
         }
         lease_started_at = tokio::time::Instant::now();
