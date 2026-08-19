@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
@@ -17,8 +17,8 @@ use mcloving_agent_protocol::wire::{
     WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
-    ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
-    WORK_DELIVERY_FEATURE, negotiate,
+    ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, ProtocolRange,
+    RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
@@ -491,10 +491,81 @@ fn unix_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
+/// Sliding-window record of committed session-epoch advances per agent
+/// identity.
+///
+/// One healthy executor advances its epoch once per service session. Two
+/// executors misconfigured with a single agent identity fight a session-epoch
+/// war: each reconnect fences the other, so the stored epoch advances every
+/// few seconds. Rejections issued while that churn is high name the suspected
+/// identity collision instead of only reporting a bare stale epoch.
+#[derive(Debug, Default)]
+struct SessionEpochChurn {
+    advances_by_agent: Mutex<BTreeMap<String, VecDeque<Instant>>>,
+}
+
+const SESSION_CHURN_WINDOW: Duration = Duration::from_secs(60);
+const SESSION_CHURN_COLLISION_THRESHOLD: usize = 3;
+const MAX_TRACKED_SESSION_ADVANCES: usize = 32;
+
+impl SessionEpochChurn {
+    fn record_advance(&self, agent_id: &str) {
+        let mut advances_by_agent = self
+            .advances_by_agent
+            .lock()
+            .expect("session churn lock is never poisoned");
+        let advances = advances_by_agent.entry(agent_id.to_owned()).or_default();
+        let now = Instant::now();
+        advances.push_back(now);
+        while advances.len() > MAX_TRACKED_SESSION_ADVANCES
+            || advances
+                .front()
+                .is_some_and(|advance| now.duration_since(*advance) > SESSION_CHURN_WINDOW)
+        {
+            advances.pop_front();
+        }
+    }
+
+    /// Names the suspected collision when this identity's stored epoch has
+    /// advanced repeatedly within the sliding window.
+    fn suspected_collision(&self, agent_id: &str) -> Option<String> {
+        let advances_by_agent = self
+            .advances_by_agent
+            .lock()
+            .expect("session churn lock is never poisoned");
+        let now = Instant::now();
+        let advances = advances_by_agent
+            .get(agent_id)?
+            .iter()
+            .filter(|advance| now.duration_since(**advance) <= SESSION_CHURN_WINDOW)
+            .count();
+        if advances < SESSION_CHURN_COLLISION_THRESHOLD {
+            return None;
+        }
+        Some(format!(
+            "agent identity collision suspected for {agent_id}: session epoch advanced \
+             {advances} times in {} seconds; a second executor may be sharing this \
+             agent identity",
+            SESSION_CHURN_WINDOW.as_secs()
+        ))
+    }
+}
+
+/// Builds the fail-closed stale-epoch rejection, naming the suspected
+/// identity collision when the stored epoch is churning.
+fn stale_session_status(churn: &SessionEpochChurn, agent_id: &str) -> Status {
+    if let Some(collision) = churn.suspected_collision(agent_id) {
+        eprintln!("agent-control: {collision}");
+        return Status::failed_precondition(format!("stale agent session epoch; {collision}"));
+    }
+    Status::failed_precondition("stale agent session epoch")
+}
+
 #[derive(Clone)]
 struct ControllerAgentService {
     store: Store,
     identities: Arc<AgentIdentityBindings>,
+    session_churn: Arc<SessionEpochChurn>,
     #[cfg(debug_assertions)]
     drop_start_response_once: Arc<AtomicBool>,
 }
@@ -545,8 +616,26 @@ impl AgentControl for ControllerAgentService {
             .await
             .map_err(internal_store_error)?
         {
-            return Err(Status::failed_precondition("stale agent session epoch"));
+            let mut status = stale_session_status(&self.session_churn, &request.agent_id);
+            // The rejection itself carries the stored epoch so a lagging
+            // journal (for example after a documented journal replacement)
+            // can reserve past this floor in one step instead of brute
+            // forcing the epoch space one retry at a time. The fence itself
+            // is not weakened: this offer stays rejected.
+            if let Some(stored_epoch) = self
+                .store
+                .agent_session_epoch(&request.agent_id)
+                .await
+                .map_err(internal_store_error)?
+                && let Ok(value) = stored_epoch.to_string().parse()
+            {
+                status
+                    .metadata_mut()
+                    .insert(CURRENT_SESSION_EPOCH_METADATA, value);
+            }
+            return Err(status);
         }
+        self.session_churn.record_advance(&request.agent_id);
         Ok(Response::new(OpenSessionResponse {
             session_epoch: request.session_epoch,
             protocol_minor: u32::from(negotiated.minor),
@@ -581,7 +670,7 @@ impl AgentControl for ControllerAgentService {
             .await
             .map_err(internal_store_error)?
         {
-            return Err(Status::failed_precondition("stale agent session epoch"));
+            return Err(stale_session_status(&self.session_churn, &request.agent_id));
         }
         let mut retained = BTreeSet::new();
         let mut cancelled = BTreeSet::new();
@@ -705,7 +794,7 @@ impl AgentControl for ControllerAgentService {
             .await
             .map_err(internal_store_error)?
         {
-            return Err(Status::failed_precondition("stale agent session epoch"));
+            return Err(stale_session_status(&self.session_churn, &request.agent_id));
         }
         let organization_id = authenticated_organization(identity, &request.organization_id)?;
         let attempt_id = request
@@ -751,6 +840,17 @@ impl AgentControl for ControllerAgentService {
                 AgentCancellationDisposition::ReconciliationRequired => {
                     CancellationDisposition::ReconciliationRequired as i32
                 }
+                AgentCancellationDisposition::DischargeRecovered => {
+                    eprintln!(
+                        "agent-control: authorized discharge of recovered attempt {}/{} \
+                         fence {} reported by agent {}: fenced authority is disowned",
+                        request.organization_id,
+                        request.attempt_id,
+                        request.fence_token,
+                        request.agent_id,
+                    );
+                    CancellationDisposition::DischargeRecovered as i32
+                }
             },
         }))
     }
@@ -760,6 +860,7 @@ impl AgentControl for ControllerAgentService {
         let request = request.into_inner();
         authorize_work_session(
             &self.store,
+            &self.session_churn,
             &identity,
             &request.agent_id,
             request.session_epoch,
@@ -778,7 +879,7 @@ impl AgentControl for ControllerAgentService {
             .agent_session_capabilities(&request.agent_id, request.session_epoch)
             .await
             .map_err(internal_store_error)?
-            .ok_or_else(|| Status::failed_precondition("stale agent session epoch"))?;
+            .ok_or_else(|| stale_session_status(&self.session_churn, &request.agent_id))?;
         self.store
             .requeue_one_expired(identity.organization_id)
             .await
@@ -839,7 +940,9 @@ impl AgentControl for ControllerAgentService {
     ) -> Result<Response<WorkReceipt>, Status> {
         let identity = self.identities.authenticate(&request)?.clone();
         let authority = request.into_inner();
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let accepted = self
             .store
             .accept_offer_in_session(
@@ -864,7 +967,9 @@ impl AgentControl for ControllerAgentService {
     ) -> Result<Response<WorkReceipt>, Status> {
         let identity = self.identities.authenticate(&request)?.clone();
         let authority = request.into_inner();
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let accepted = self
             .store
             .mark_attempt_running_in_session(
@@ -898,7 +1003,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let deliveries = self
             .store
             .redeem_credential_grants(
@@ -938,7 +1045,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let lease_seconds = i32::try_from(request.lease_seconds)
             .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
         if !(5..=300).contains(&lease_seconds) {
@@ -975,7 +1084,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         if !matches!(request.stream.as_str(), "stdout" | "stderr")
             || request.content.len() > 1_048_576
         {
@@ -1017,7 +1128,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         if request.summary_json.len() > 65_536 {
             return Err(Status::invalid_argument("terminal summary exceeds 64 KiB"));
         }
@@ -1062,6 +1175,7 @@ struct WorkContext {
 
 async fn authorize_work_session(
     store: &Store,
+    session_churn: &SessionEpochChurn,
     identity: &AgentIdentity,
     agent_id: &str,
     session_epoch: u64,
@@ -1079,18 +1193,20 @@ async fn authorize_work_session(
         .await
         .map_err(internal_store_error)?
     {
-        return Err(Status::failed_precondition("stale agent session epoch"));
+        return Err(stale_session_status(session_churn, agent_id));
     }
     Ok(())
 }
 
 async fn authorize_work_authority(
     store: &Store,
+    session_churn: &SessionEpochChurn,
     identity: &AgentIdentity,
     authority: &WorkAuthority,
 ) -> Result<WorkContext, Status> {
     authorize_work_session(
         store,
+        session_churn,
         identity,
         &authority.agent_id,
         authority.session_epoch,
@@ -1274,6 +1390,7 @@ async fn run_agent_control_server(
     let service = ControllerAgentService {
         store,
         identities: Arc::new(environment.identities),
+        session_churn: Arc::new(SessionEpochChurn::default()),
         #[cfg(debug_assertions)]
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
     };
@@ -1556,6 +1673,50 @@ mod tests {
         );
         assert!(validate_artifact_agent_token(&api_token, &api_token).is_err());
         assert!(validate_artifact_agent_token(&api_token, &"b".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn repeated_session_epoch_churn_names_a_suspected_identity_collision() {
+        let churn = SessionEpochChurn::default();
+        churn.record_advance("windows-1");
+        churn.record_advance("windows-1");
+        assert_eq!(churn.suspected_collision("windows-1"), None);
+        assert_eq!(churn.suspected_collision("other-agent"), None);
+        let quiet = stale_session_status(&churn, "windows-1");
+        assert_eq!(quiet.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(quiet.message(), "stale agent session epoch");
+
+        churn.record_advance("windows-1");
+        let collision = churn
+            .suspected_collision("windows-1")
+            .expect("threshold advances within the window name the collision");
+        assert_eq!(
+            collision,
+            "agent identity collision suspected for windows-1: session epoch advanced \
+             3 times in 60 seconds; a second executor may be sharing this agent identity"
+        );
+        let named = stale_session_status(&churn, "windows-1");
+        assert_eq!(named.code(), tonic::Code::FailedPrecondition);
+        assert!(named.message().contains("stale agent session epoch"));
+        assert!(
+            named
+                .message()
+                .contains("agent identity collision suspected for windows-1")
+        );
+        assert_eq!(churn.suspected_collision("other-agent"), None);
+    }
+
+    #[test]
+    fn tracked_session_advances_are_bounded() {
+        let churn = SessionEpochChurn::default();
+        for _ in 0..(MAX_TRACKED_SESSION_ADVANCES + 10) {
+            churn.record_advance("windows-1");
+        }
+        let advances = churn
+            .advances_by_agent
+            .lock()
+            .expect("session churn lock is never poisoned");
+        assert!(advances.get("windows-1").unwrap().len() <= MAX_TRACKED_SESSION_ADVANCES);
     }
 
     #[test]

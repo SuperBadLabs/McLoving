@@ -21,22 +21,22 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mcloving_controller_store::{
-    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
-    ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
-    DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind, DiscoveryChild,
-    DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent, DiscoveryParentKind,
-    DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite, DiscoveryScanOutcome,
-    DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite, ForkTrustStrategy,
-    MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode, NewEnvironmentApproval,
-    NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy, PipelineOperationalStateRecord,
-    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
-    PipelinePutOutcome, PipelineRecord, PipelineTrigger, PipelineTriggerState,
-    PipelineTriggerWrite, PipelineWrite, PullRequestDiscoveryStrategy, RetryDecision, Store,
-    StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
-    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
-    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
-    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
-    TriggerScheduleSlot, WaitReason,
+    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, CancellationDecision,
+    ComponentCursor, ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite,
+    CredentialGrantView, DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind,
+    DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent,
+    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
+    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite,
+    ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
+    NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy,
+    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite,
+    PullRequestDiscoveryStrategy, RetryDecision, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
+    TestReportView, TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
+    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
+    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -2822,6 +2822,9 @@ pub struct LogPage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancellationResponse {
     pub accepted: bool,
+    /// Names why a refusal happened; absent when the request was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -5169,12 +5172,54 @@ async fn cancel(
         Action::BuildCancel,
     )
     .await?;
-    let accepted = state
+    let decision = state
         .store
-        .request_cancellation_as(organization_id, project_id, build_id, &principal.subject)
+        .request_cancellation_decision_as(organization_id, project_id, build_id, &principal.subject)
         .await
         .map_err(internal)?;
-    Ok(Json(CancellationResponse { accepted }))
+    match decision {
+        CancellationDecision::Accepted => Ok(Json(CancellationResponse {
+            accepted: true,
+            reason: None,
+        })),
+        CancellationDecision::AlreadyRequested => Ok(Json(CancellationResponse {
+            accepted: false,
+            reason: Some("cancellation was already requested for this build".to_owned()),
+        })),
+        CancellationDecision::NotCancellable { build_status } => {
+            Err(cancellation_refusal(build_id, build_status))
+        }
+    }
+}
+
+/// Names the exact reason a build cannot be cancelled. A build parked in
+/// `reconciliation_required` in particular is refused with its state and the
+/// operator resolution path rather than a bare conflict.
+fn cancellation_refusal(build_id: Uuid, build_status: Option<String>) -> ApiError {
+    match build_status.as_deref() {
+        Some("reconciliation_required") => ApiError::new(
+            StatusCode::CONFLICT,
+            "build_reconciliation_required",
+            format!(
+                "build {build_id} is parked in reconciliation_required: a recovered agent \
+                 attempt is awaiting operator reconciliation, and cancellation cannot \
+                 discharge it; confirm the attempt's uncertain effects and then retry the \
+                 attempt or finalize the reconciliation, after which the owning agent \
+                 discharges its recovered journal record and resumes polling (see \
+                 docs/architecture/AGENT_RUNTIME.md, \"Recovered-attempt discharge\")"
+            ),
+        ),
+        Some(status) => ApiError::new(
+            StatusCode::CONFLICT,
+            "build_not_cancellable",
+            format!("build {build_id} is {status} and can no longer be cancelled"),
+        ),
+        None => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "build_not_found",
+            format!("build {build_id} was not found in this project"),
+        ),
+    }
 }
 
 async fn retry_attempt(
@@ -6224,6 +6269,31 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn cancellation_refusals_name_their_exact_reason() {
+        let build_id = Uuid::from_u128(0x1234);
+
+        let parked = cancellation_refusal(build_id, Some("reconciliation_required".to_owned()));
+        assert_eq!(parked.status, StatusCode::CONFLICT);
+        assert_eq!(parked.code, "build_reconciliation_required");
+        assert!(parked.message.contains("reconciliation_required"));
+        assert!(
+            parked
+                .message
+                .contains("recovered agent attempt is awaiting operator reconciliation")
+        );
+        assert!(parked.message.contains("AGENT_RUNTIME.md"));
+
+        let terminal = cancellation_refusal(build_id, Some("succeeded".to_owned()));
+        assert_eq!(terminal.status, StatusCode::CONFLICT);
+        assert_eq!(terminal.code, "build_not_cancellable");
+        assert!(terminal.message.contains("succeeded"));
+
+        let missing = cancellation_refusal(build_id, None);
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(missing.code, "build_not_found");
     }
 
     #[tokio::test]

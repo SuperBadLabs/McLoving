@@ -183,6 +183,25 @@ pub enum AgentCancellationDisposition {
     Completed,
     RetireStale,
     ReconciliationRequired,
+    /// Explicit fenced confirmation that a reported recovered attempt's
+    /// authority is disowned (requeued, terminal, superseded by an operator
+    /// retry, or unknown). Returned only for a
+    /// [`AgentCancellationOutcome::ReconciliationRequired`] report made under
+    /// the exact current agent session; it authorizes the agent to retire the
+    /// recovered journal attempt while keeping its terminal evidence.
+    DischargeRecovered,
+}
+
+/// Durable outcome of one build-cancellation request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CancellationDecision {
+    Accepted,
+    AlreadyRequested,
+    /// The build is not in a cancellable state. `build_status` is `None` when
+    /// the build does not exist in this project.
+    NotCancellable {
+        build_status: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1268,6 +1287,23 @@ impl Store {
         Ok(row.is_some())
     }
 
+    /// Reads the durably stored session epoch for one agent identity, if any.
+    ///
+    /// A rejected `open_agent_session` uses this floor to tell the enrolling
+    /// agent how far its journal must advance, so a replaced journal can catch
+    /// up in one reservation instead of brute-forcing the epoch space.
+    pub async fn agent_session_epoch(&self, agent_id: &str) -> Result<Option<u64>, StoreError> {
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT session_epoch FROM agent_sessions WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        stored
+            .map(|epoch| u64::try_from(epoch).map_err(|_| StoreError::InvalidAgentSession))
+            .transpose()
+    }
+
     pub async fn authorize_agent_session(
         &self,
         agent_id: &str,
@@ -1690,10 +1726,46 @@ impl Store {
         let Some((node_id, build_id, status, terminal_summary, owner_cancelled, dag_mode)) =
             authority
         else {
+            // The exact current session reported a recovered attempt whose
+            // fenced authority no longer exists here: the attempt was
+            // requeued under a newer fence, finished under other authority,
+            // survived a restore-epoch advance, or is unknown to this
+            // controller. That explicit determination — never local agent
+            // suspicion — is what authorizes discharging the recovered
+            // journal record.
+            if outcome == AgentCancellationOutcome::ReconciliationRequired {
+                Self::record_recovered_discharge(
+                    &mut tx,
+                    organization_id,
+                    attempt_id,
+                    fence,
+                    agent_id,
+                    "fenced_authority_disowned",
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(AgentCancellationDisposition::DischargeRecovered);
+            }
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         };
         if status == "aborted" {
+            if outcome == AgentCancellationOutcome::ReconciliationRequired {
+                // This exact fence is already terminal in controller truth; a
+                // parked recovered journal record can never act again and is
+                // authorized to retire with its evidence.
+                Self::record_recovered_discharge(
+                    &mut tx,
+                    organization_id,
+                    attempt_id,
+                    fence,
+                    agent_id,
+                    "attempt_already_terminal",
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(AgentCancellationDisposition::DischargeRecovered);
+            }
             tx.commit().await?;
             return Ok(
                 if matches!(
@@ -1710,6 +1782,35 @@ impl Store {
             );
         }
         if status == "reconciliation_required" {
+            if outcome == AgentCancellationOutcome::ReconciliationRequired {
+                let superseded = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                         SELECT 1
+                         FROM attempts
+                         WHERE organization_id = $1 AND retry_of = $2
+                     )",
+                )
+                .bind(organization_id)
+                .bind(attempt_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if superseded {
+                    // An explicit operator retry created a successor attempt,
+                    // so this fence is disowned even though its own row is
+                    // still parked in reconciliation.
+                    Self::record_recovered_discharge(
+                        &mut tx,
+                        organization_id,
+                        attempt_id,
+                        fence,
+                        agent_id,
+                        "operator_retry_superseded",
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(AgentCancellationDisposition::DischargeRecovered);
+                }
+            }
             tx.commit().await?;
             return Ok(AgentCancellationDisposition::ReconciliationRequired);
         }
@@ -2125,19 +2226,40 @@ impl Store {
         build_id: Uuid,
         actor_subject: &str,
     ) -> Result<bool, StoreError> {
+        Ok(matches!(
+            self.request_cancellation_decision_as(
+                organization_id,
+                project_id,
+                build_id,
+                actor_subject
+            )
+            .await?,
+            CancellationDecision::Accepted
+        ))
+    }
+
+    /// Requests durable build cancellation and names the refusal when the
+    /// build cannot be cancelled, so a `reconciliation_required` build is
+    /// refused with its exact state instead of a bare conflict.
+    pub async fn request_cancellation_decision_as(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        actor_subject: &str,
+    ) -> Result<CancellationDecision, StoreError> {
         validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
             .await?;
-        let dag_mode = sqlx::query_scalar::<_, bool>(
-            "SELECT dag_mode
+        let current = sqlx::query_as::<_, (String, bool, bool)>(
+            "SELECT status, dag_mode, cancellation_requested_at IS NOT NULL
              FROM builds
              WHERE organization_id = $1
                AND project_id = $2
                AND id = $3
-               AND status IN ('queued', 'running')
              FOR UPDATE",
         )
         .bind(organization_id)
@@ -2145,10 +2267,26 @@ impl Store {
         .bind(build_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if dag_mode == Some(true) {
+        let Some((current_status, dag_mode, cancellation_already_requested)) = current else {
+            tx.rollback().await?;
+            return Ok(CancellationDecision::NotCancellable { build_status: None });
+        };
+        if !matches!(current_status.as_str(), "queued" | "running") {
+            tx.rollback().await?;
+            return Ok(CancellationDecision::NotCancellable {
+                build_status: Some(current_status),
+            });
+        }
+        if dag_mode {
             if !dag::cancel_dag_build(&mut tx, organization_id, build_id).await? {
                 tx.rollback().await?;
-                return Ok(false);
+                return Ok(if cancellation_already_requested {
+                    CancellationDecision::AlreadyRequested
+                } else {
+                    CancellationDecision::NotCancellable {
+                        build_status: Some(current_status),
+                    }
+                });
             }
             append_event_and_outbox_as(
                 &mut tx,
@@ -2162,7 +2300,7 @@ impl Store {
             )
             .await?;
             tx.commit().await?;
-            return Ok(true);
+            return Ok(CancellationDecision::Accepted);
         }
         let attempt = sqlx::query_as::<_, (Uuid, Uuid, String, bool)>(
             "SELECT a.id, n.id, b.status,
@@ -2189,11 +2327,13 @@ impl Store {
         .await?;
         let Some((attempt_id, node_id, build_status, already_requested)) = attempt else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(CancellationDecision::NotCancellable {
+                build_status: Some(current_status),
+            });
         };
         if already_requested {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(CancellationDecision::AlreadyRequested);
         }
 
         if build_status == "queued" {
@@ -2271,7 +2411,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(CancellationDecision::Accepted)
     }
 
     /// Reads current-fence committed log chunks in global commit order.
@@ -5307,6 +5447,73 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         Ok(tx)
+    }
+
+    /// Durably records the fenced authorization for an agent to discharge one
+    /// recovered `reconciliation_required` journal attempt.
+    ///
+    /// The build event is appended once per exact (attempt, fence, agent)
+    /// discharge, so response-loss replay of the same completion does not emit
+    /// a second event. When the attempt is unknown to this controller there is
+    /// no identifiable build; the agent-control log line then carries the
+    /// controller-side record.
+    async fn record_recovered_discharge(
+        tx: &mut Transaction<'_, Postgres>,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let build = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(build_id) = build else {
+            return Ok(());
+        };
+        let already_recorded = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM build_events
+                 WHERE organization_id = $1
+                   AND build_id = $2
+                   AND kind = 'attempt.recovered_discharge_authorized'
+                   AND payload ->> 'attempt_id' = $3::text
+                   AND (payload ->> 'fence')::bigint = $4
+                   AND payload ->> 'agent_id' = $5
+             )",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if already_recorded {
+            return Ok(());
+        }
+        append_event_and_outbox(
+            tx,
+            organization_id,
+            build_id,
+            "attempt.recovered_discharge_authorized",
+            json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "agent_id": agent_id,
+                "reason": reason,
+            }),
+        )
+        .await
     }
 
     pub(crate) async fn lock_agent_session(
