@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use unicode_normalization::UnicodeNormalization as _;
 use url::Url;
 use uuid::Uuid;
@@ -40,6 +40,7 @@ const MAX_CONFIGURED_DEPTH: u32 = 1_000_000;
 const MAX_CONFIGURED_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const MAX_LOCAL_PUBLICATION_MS: u64 = 2 * 60 * 1_000;
 const TRANSPORT_QUOTA_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const TRANSPORT_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_TRANSPORT_QUOTA_SCAN_RESTARTS: usize = 3;
 const TRANSPORT_QUOTA_EXHAUSTED: &[u8] = b"No space left on device";
 const COORDINATION_LOCK_FILE: &str = ".coordination-v1.lock";
@@ -52,6 +53,8 @@ const MAX_RESOLVER_OUTPUT_BYTES: usize = 4 * 1_024;
 const MAX_RESOLVER_STDERR_BYTES: usize = 4 * 1_024;
 const MAX_RESOLVER_ADDRESSES: usize = 32;
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const TRANSPORT_NAMESPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
@@ -618,6 +621,7 @@ pub struct SourceAcquirer {
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
+    transport_namespace: OnceCell<bool>,
     admission: Mutex<()>,
 }
 
@@ -768,6 +772,7 @@ impl SourceAcquirer {
             credential_path,
             signing_key,
             secret_marker_matcher,
+            transport_namespace: OnceCell::new(),
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -802,7 +807,10 @@ impl SourceAcquirer {
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
         }
-        let _transport_lock = lock_output_root(&self.config.transport_root).await?;
+        let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
+        let _transport_lock =
+            lock_output_root_until(&self.config.transport_root, publication_deadline_unix_ms)
+                .await?;
         validate_transport_filesystem(
             &self.config.transport_root,
             &self.config.output_root,
@@ -810,7 +818,6 @@ impl SourceAcquirer {
         )?;
         ensure_clean_transport_root(&self.config.transport_root).await?;
         self.verify_runtime_authority(true).await?;
-        let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         self.store_claim(
             request.acquisition_id,
             &AcquisitionClaim {
@@ -1665,7 +1672,8 @@ impl SourceAcquirer {
         let requires_kernel_transport_deadline = credential_bearing
             && repository_url
                 .and_then(|value| Url::parse(value).ok())
-                .is_some_and(|value| matches!(value.scheme(), "http" | "https"));
+                .is_some_and(|value| matches!(value.scheme(), "http" | "https"))
+            && self.kernel_transport_namespace_usable().await;
         #[cfg(not(unix))]
         let requires_kernel_transport_deadline = false;
         let command_executable = if requires_kernel_transport_deadline {
@@ -1953,6 +1961,115 @@ impl SourceAcquirer {
             });
         }
         Ok(stdout)
+    }
+
+    // Hosts that restrict unprivileged user namespaces (Ubuntu's
+    // kernel.apparmor_restrict_unprivileged_userns confines the namespace under
+    // the `unprivileged_userns` profile, whose exec rules never match the
+    // sealed memfd-backed executables because they are disconnected paths) can
+    // create the transport namespace but cannot execute anything inside it.
+    // Probe the launcher end to end once; when the namespaced transport cannot
+    // run, fall back to the direct spawn, which keeps the credential deadline
+    // timers, endpoint pinning, and process-group termination.
+    async fn kernel_transport_namespace_usable(&self) -> bool {
+        *self
+            .transport_namespace
+            .get_or_init(|| async {
+                let usable = self.probe_kernel_transport_namespace().await;
+                #[cfg(target_os = "linux")]
+                if !usable {
+                    // A dropped hardening layer must never be silent: name the
+                    // downgrade once so operators can see which deadline
+                    // enforcement this host actually runs.
+                    eprintln!(
+                        "transport_namespace_unusable: the kernel transport namespace \
+                         cannot execute the sealed launcher on this host; \
+                         credential-bearing transports fall back to the direct \
+                         launcher with userspace deadline enforcement"
+                    );
+                }
+                usable
+            })
+            .await
+    }
+
+    async fn probe_kernel_transport_namespace(&self) -> bool {
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(anchor) = ClockId::CLOCK_MONOTONIC.now() else {
+                return false;
+            };
+            let Ok(timeout_ns) = i64::try_from(TRANSPORT_NAMESPACE_PROBE_TIMEOUT.as_nanos()) else {
+                return false;
+            };
+            let Some(deadline_ns) = anchor.num_nanoseconds().checked_add(timeout_ns) else {
+                return false;
+            };
+            let Some(deadline) =
+                tokio::time::Instant::now().checked_add(TRANSPORT_NAMESPACE_PROBE_TIMEOUT)
+            else {
+                return false;
+            };
+            let mut command = Command::new(&self.askpass_executable.invocation_path);
+            command
+                .env_clear()
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .env("PATH", &self.git_exec_directory.invocation_path)
+                .env("HOME", "/nonexistent")
+                .env("LD_BIND_NOW", "1")
+                .env("LD_LIBRARY_PATH", &self.runtime_directory.invocation_path)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_EXEC_PATH", &self.git_exec_directory.invocation_path)
+                .env(TRANSPORT_LAUNCHER_MODE_ENV, "1")
+                .env(
+                    TRANSPORT_EXECUTABLE_ENV,
+                    &self.git_executable.invocation_path,
+                )
+                .env(CREDENTIAL_MONOTONIC_DEADLINE_ENV, deadline_ns.to_string())
+                .arg("--version")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            command.process_group(0);
+            let Ok(mut child) = command.spawn() else {
+                return false;
+            };
+            let process_group_id = child.id().and_then(|id| i32::try_from(id).ok());
+            if admit_transport_namespace(&mut child, deadline, process_group_id)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            let Some(stdout) = child.stdout.take() else {
+                let _ = terminate_child(&mut child, process_group_id).await;
+                return false;
+            };
+            let stdout_task = tokio::spawn(read_bounded(stdout, MAX_BINDING_TEXT_BYTES));
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            let status = match tokio::time::timeout(remaining, child.wait()).await {
+                Ok(Ok(status)) => status,
+                _ => {
+                    let _ = terminate_child(&mut child, process_group_id).await;
+                    stdout_task.abort();
+                    let _ = stdout_task.await;
+                    return false;
+                }
+            };
+            matches!(
+                stdout_task.await,
+                Ok(Ok(version)) if status.success() && version.starts_with(b"git version ")
+            )
+        }
     }
 
     async fn resolve_network_endpoint(
@@ -3810,22 +3927,9 @@ async fn lock_output_root(root: &Path) -> Result<OutputRootLock, SourceError> {
     #[cfg(unix)]
     {
         use nix::fcntl::{Flock, FlockArg};
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
-        let path = root.join(COORDINATION_LOCK_FILE);
+        let file = open_coordination_lock_file(root).await?;
         tokio::task::spawn_blocking(move || {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .mode(0o600)
-                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
-                .open(path)
-                .map_err(|_| SourceError::StateUnavailable)?;
-            let metadata = file.metadata().map_err(|_| SourceError::StateUnavailable)?;
-            if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-                return Err(SourceError::StateUnavailable);
-            }
             Flock::lock(file, FlockArg::LockExclusive).map_err(|_| SourceError::StateUnavailable)
         })
         .await
@@ -3836,6 +3940,68 @@ async fn lock_output_root(root: &Path) -> Result<OutputRootLock, SourceError> {
         let _ = root;
         Err(SourceError::InvalidConfig)
     }
+}
+
+// The transport root is shared by every acquirer bound to the same transport
+// filesystem, so this lock queues behind other acquisitions; a deadline-bound
+// request must not outwait its own expiry in that queue.
+async fn lock_output_root_until(
+    root: &Path,
+    deadline_unix_ms: i64,
+) -> Result<OutputRootLock, SourceError> {
+    loop {
+        if let Some(lock) = try_lock_output_root(root).await? {
+            return Ok(lock);
+        }
+        if now_unix_ms()? >= deadline_unix_ms {
+            return Err(SourceError::ExpiredRequest);
+        }
+        tokio::time::sleep(TRANSPORT_LOCK_POLL_INTERVAL).await;
+    }
+}
+
+async fn try_lock_output_root(root: &Path) -> Result<Option<OutputRootLock>, SourceError> {
+    #[cfg(unix)]
+    {
+        use nix::errno::Errno;
+        use nix::fcntl::{Flock, FlockArg};
+
+        let file = open_coordination_lock_file(root).await?;
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(Some(lock)),
+            Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+            Err(_) => Err(SourceError::StateUnavailable),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err(SourceError::InvalidConfig)
+    }
+}
+
+#[cfg(unix)]
+async fn open_coordination_lock_file(root: &Path) -> Result<std::fs::File, SourceError> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let path = root.join(COORDINATION_LOCK_FILE);
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let metadata = file.metadata().map_err(|_| SourceError::StateUnavailable)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(SourceError::StateUnavailable);
+        }
+        Ok(file)
+    })
+    .await
+    .map_err(|_| SourceError::StateUnavailable)?
 }
 
 async fn ensure_private_output_root(root: &Path) -> Result<(), SourceError> {
