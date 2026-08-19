@@ -2241,6 +2241,24 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
 
 #[tokio::test]
 async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
+    // The lease must be short enough that the fixture's `slow_success` dispatch
+    // outlives it, otherwise nothing forces a renewal and the test proves
+    // nothing. But the renewal tick is derived as lease/3, so an aggressively
+    // short lease also leaves very little slack for any single renewal to land.
+    // At the original 1s lease that slack was ~667ms, and one renewal delayed
+    // past it under host load lost the fence and failed the run with
+    // StaleAuthority. A 3s lease against a 4.5s dispatch holds the same 1:1.5
+    // ratio, so a renewal is still mandatory before the connector even answers
+    // and more are required across the observer and shadow joins, while
+    // widening per-tick slack to ~2s: two fully starved ticks still keep the
+    // fence.
+    const LEASE_SECONDS: i32 = 3;
+    // Per-service-call budget. It has to clear the 4.5s dispatch with room to
+    // spare, and stay under half the action request's ~29s remaining authority,
+    // because the connector budget is that authority minus the observer timeout
+    // and preflight then demands `connector + observer` of continuous validity.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 10_000;
+
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -2249,7 +2267,7 @@ async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
         &store,
         runtime_effect_spec(),
         "effect-short-lease-renewal",
-        1,
+        LEASE_SECONDS,
     )
     .await;
     let root = tempfile::tempdir().unwrap();
@@ -2260,10 +2278,10 @@ async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
         &admission,
         &claim,
         "slow_success",
-        5_000,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let mut config = runtime_effect_worker(root.path(), plan);
-    config.lease_seconds = 1;
+    config.lease_seconds = LEASE_SECONDS;
     let receipt = run_claim(&store, &claim, &config)
         .await
         .expect("renew short lease through connector, observer, and shadow joins");

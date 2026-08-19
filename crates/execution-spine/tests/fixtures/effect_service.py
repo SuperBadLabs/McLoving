@@ -256,7 +256,12 @@ def connector_response(command, openssl, outcome_key, scenario, state_path, ledg
         if scenario in ("timeout_after_dispatch", "crash_after_dispatch"):
             time.sleep(5)
         elif scenario == "slow_success":
-            time.sleep(1.5)
+            # Held past one lease window on purpose: the dispatch has to outlive
+            # the caller's lease so the run only succeeds when the fence is
+            # renewed underneath it. Kept at 1.5x the 3s lease that
+            # effect_path_renews_a_short_lease_until_all_joins_are_durable
+            # configures, so change the two together.
+            time.sleep(4.5)
         receipt = outcome_receipt(request, openssl, outcome_key)
         if scenario == "ambiguous_then_reconcile":
             receipt["status"] = "ambiguous"
