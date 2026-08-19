@@ -287,6 +287,14 @@ pub struct PublishedOutbox {
     pub payload: Value,
 }
 
+/// Aggregate outbox accumulation for one tenant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutboxBacklog {
+    pub unpublished_count: i64,
+    pub oldest_unpublished_created_at_unix_ms: Option<i64>,
+    pub total_count: i64,
+}
+
 /// Idempotency classification for a durable external effect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectClass {
@@ -2953,6 +2961,81 @@ impl Store {
                 payload,
             })
             .collect())
+    }
+
+    /// Deletes a bounded batch of outbox rows older than the retention
+    /// horizon, oldest first, and returns how many rows were removed.
+    ///
+    /// Outbox rows are disposable delivery staging: `build_events` and
+    /// `audit_events` remain the durable records, so retention applies to
+    /// published and unpublished rows alike. Rows with topic
+    /// `state_transfer.imported` are never reaped, as defense-in-depth around
+    /// the deferred receipt-completeness fence in migration 0017. Out-of-range
+    /// inputs reap nothing, mirroring `publish_outbox`. The scan has no
+    /// dedicated index: the oldest-first walk follows the primary key, and
+    /// bounded retention itself keeps the table small enough that the walk
+    /// stays cheap.
+    pub async fn reap_outbox(
+        &self,
+        organization_id: Uuid,
+        older_than_hours: u32,
+        limit: u32,
+    ) -> Result<u64, StoreError> {
+        let Ok(older_than_hours) = i32::try_from(older_than_hours) else {
+            return Ok(0);
+        };
+        if older_than_hours == 0 || !(1..=1_000).contains(&limit) {
+            return Ok(0);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let reaped = sqlx::query(
+            "DELETE FROM outbox AS o
+             USING (
+                 SELECT id
+                 FROM outbox
+                 WHERE organization_id = $1
+                   AND topic <> 'state_transfer.imported'
+                   AND created_at < clock_timestamp() - make_interval(hours => $2)
+                 ORDER BY id
+                 LIMIT $3
+             ) AS expired
+             WHERE o.id = expired.id",
+        )
+        .bind(organization_id)
+        .bind(older_than_hours)
+        .bind(i64::from(limit))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(reaped.rows_affected())
+    }
+
+    /// Reports outbox accumulation for one tenant.
+    ///
+    /// No consumer is currently shipped, so unpublished rows are the expected
+    /// steady state; this read exists to make that accumulation observable.
+    pub async fn outbox_backlog(&self, organization_id: Uuid) -> Result<OutboxBacklog, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let (unpublished_count, oldest_unpublished_created_at_unix_ms, total_count) =
+            sqlx::query_as::<_, (i64, Option<i64>, i64)>(
+                "SELECT
+                     count(*) FILTER (WHERE published_at IS NULL),
+                     (extract(
+                          epoch FROM min(created_at) FILTER (WHERE published_at IS NULL)
+                      ) * 1000)::bigint,
+                     count(*)
+                 FROM outbox
+                 WHERE organization_id = $1",
+            )
+            .bind(organization_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(OutboxBacklog {
+            unpublished_count,
+            oldest_unpublished_created_at_unix_ms,
+            total_count,
+        })
     }
 
     /// Records a monotonic effect checkpoint for an exact fenced attempt.
