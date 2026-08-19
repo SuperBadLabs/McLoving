@@ -1560,10 +1560,7 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("mcloving.scheduler.{organization_id}"))
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let status = sqlx::query_scalar::<_, String>(
             "SELECT a.status
@@ -1644,11 +1641,12 @@ impl Store {
             outcome,
         } = completion;
         let mut tx = self.tenant_transaction(organization_id).await?;
-        acquire_restore_fence_shared(&mut tx).await?;
         if !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await? {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         }
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>, bool, bool)>(
             "SELECT n.id, n.build_id, a.status, a.terminal_summary,
                     b.cancellation_requested_at IS NOT NULL, b.dag_mode
@@ -2127,10 +2125,8 @@ impl Store {
     ) -> Result<bool, StoreError> {
         validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("mcloving.scheduler.{organization_id}"))
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let dag_mode = sqlx::query_scalar::<_, bool>(
             "SELECT dag_mode
              FROM builds
@@ -2833,13 +2829,14 @@ impl Store {
         session_epoch: Option<u64>,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        acquire_restore_fence_shared(&mut tx).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
             tx.rollback().await?;
             return Ok(false);
         }
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -3190,6 +3187,7 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.retry.{attempt_id}"))
@@ -3388,6 +3386,7 @@ impl Store {
         }
         validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.retry.{attempt_id}"))
@@ -5100,13 +5099,14 @@ impl Store {
         summary: Value,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        acquire_restore_fence_shared(&mut tx).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
             tx.rollback().await?;
             return Ok(false);
         }
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let existing = sqlx::query_as::<_, (String, Option<Value>)>(
             "SELECT a.status, a.terminal_summary
              FROM attempts AS a
@@ -5676,7 +5676,30 @@ async fn terminalize_dead_lettered_reconciliation(
     Ok(())
 }
 
-async fn acquire_restore_fence_shared(
+/// Serializes every transaction that locks rows across builds, nodes, and
+/// attempts for one organization.
+///
+/// Postgres acquires the row locks of a single statement in plan order and
+/// gives multi-statement transactions no ordering guarantee at all, so two
+/// build/node/attempt writers can otherwise lock the same rows in inverse
+/// order and deadlock. Mutual exclusion on this advisory lock is what makes
+/// their row-lock order irrelevant. Acquire it after the agent-session check
+/// and before the restore fence, path-specific advisory locks, and the first
+/// row lock. Transactions that lock rows of at most one of these tables
+/// (lease renewal, log append, effect checkpoint) stay outside this domain
+/// so the hot agent heartbeat paths are not serialized per organization.
+pub(crate) async fn acquire_org_scheduler_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.scheduler.{organization_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn acquire_restore_fence_shared(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
