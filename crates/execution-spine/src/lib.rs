@@ -118,6 +118,8 @@ pub enum SpineError {
     UnsupportedSpec,
     #[error("connector intent requires a configured controller-owned effect runtime")]
     EffectRuntimeUnavailable,
+    #[error("controller effect invariant violated: {0}")]
+    EffectInvariantViolated(&'static str),
     #[error("effect runtime failed: {0}")]
     EffectRuntime(#[from] EffectRuntimeError),
     #[error("effect service failed: {0}")]
@@ -1239,7 +1241,13 @@ async fn finalize_reserved_pre_dispatch_exit(
             )
             .await?;
         if published {
-            return Err(SpineError::EffectRuntimeUnavailable);
+            // Not an inversion: this effect was just durably marked
+            // release_pending, so the store must refuse terminal publication
+            // and route the attempt to reconciliation instead. A published
+            // terminal here means the controller store broke that guarantee.
+            return Err(SpineError::EffectInvariantViolated(
+                "the store published a terminal outcome for an attempt holding a release_pending effect",
+            ));
         }
         return Err(SpineError::EffectReconciliationRequired);
     }
@@ -1307,7 +1315,13 @@ async fn route_effect_reconciliation(
         )
         .await?;
     if published {
-        return Err(SpineError::EffectRuntimeUnavailable);
+        // Not an inversion: this effect was just durably marked uncertain, so
+        // the store must refuse terminal publication and route the attempt to
+        // reconciliation instead. A published terminal here means the
+        // controller store broke that guarantee.
+        return Err(SpineError::EffectInvariantViolated(
+            "the store published a terminal outcome for an attempt holding an uncertain effect",
+        ));
     }
     Ok(())
 }
