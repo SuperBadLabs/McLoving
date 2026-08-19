@@ -497,6 +497,48 @@ struct ControllerAgentService {
     identities: Arc<AgentIdentityBindings>,
     #[cfg(debug_assertions)]
     drop_start_response_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    reject_renewal_window: Arc<RenewalRejectionWindow>,
+}
+
+/// Test-only fault injection: refuse the renewals numbered `after + 1` through
+/// `after + count` (1-indexed across the process) so a gate can prove that a
+/// running step loses its lease deliberately rather than by outrunning it.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct RenewalRejectionWindow {
+    counter: std::sync::atomic::AtomicU32,
+    after: u32,
+    count: u32,
+}
+
+#[cfg(debug_assertions)]
+impl RenewalRejectionWindow {
+    fn from_environment() -> Self {
+        let Some(value) = std::env::var_os("MCLOVING_TEST_REJECT_RENEWALS") else {
+            return Self::default();
+        };
+        let value = value.to_string_lossy();
+        let (after, count) = value
+            .split_once(',')
+            .and_then(|(after, count)| {
+                Some((after.trim().parse().ok()?, count.trim().parse().ok()?))
+            })
+            .expect("MCLOVING_TEST_REJECT_RENEWALS must be 'after,count'");
+        Self {
+            counter: std::sync::atomic::AtomicU32::new(0),
+            after,
+            count,
+        }
+    }
+
+    fn rejects_this_renewal(&self) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        let ordinal = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        ordinal > self.after && ordinal <= self.after + self.count
+    }
 }
 
 #[tonic::async_trait]
@@ -946,6 +988,14 @@ impl AgentControl for ControllerAgentService {
                 "lease_seconds must be between 5 and 300",
             ));
         }
+        #[cfg(debug_assertions)]
+        if self.reject_renewal_window.rejects_this_renewal() {
+            return Ok(Response::new(WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                cancellation_requested: false,
+            }));
+        }
         let cancellation_requested = self
             .store
             .renew_attempt_lease_in_session(
@@ -1276,6 +1326,8 @@ async fn run_agent_control_server(
         identities: Arc::new(environment.identities),
         #[cfg(debug_assertions)]
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
+        #[cfg(debug_assertions)]
+        reject_renewal_window: Arc::new(RenewalRejectionWindow::from_environment()),
     };
     Server::builder()
         .tls_config(tls)

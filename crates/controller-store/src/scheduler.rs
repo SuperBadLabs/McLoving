@@ -454,7 +454,16 @@ impl Store {
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
-            tx.rollback().await?;
+            record_lease_renewal_rejection(
+                &mut tx,
+                organization_id,
+                attempt_id,
+                fence,
+                agent_id,
+                "agent_session_stale",
+            )
+            .await?;
+            tx.commit().await?;
             return Ok(None);
         }
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
@@ -551,6 +560,17 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
+        if terminal.is_none() {
+            record_lease_renewal_rejection(
+                &mut tx,
+                organization_id,
+                attempt_id,
+                fence,
+                agent_id,
+                "lease_not_current",
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(terminal.map(|_| false))
     }
@@ -932,4 +952,45 @@ impl Store {
         tx.commit().await?;
         Ok(WaitReason::CapabilityMismatch { required, missing })
     }
+}
+
+/// Names a refused lease renewal in the build's event stream so authority
+/// loss under a running step is controller-visible truth, never only a later
+/// silent expiry or an agent-side surprise.
+async fn record_lease_renewal_rejection(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    fence: i64,
+    agent_id: &str,
+    cause: &str,
+) -> Result<(), StoreError> {
+    let build = sqlx::query_scalar::<_, Uuid>(
+        "SELECT n.build_id
+         FROM attempts AS a
+         JOIN nodes AS n
+           ON n.id = a.node_id AND n.organization_id = a.organization_id
+         WHERE a.organization_id = $1
+           AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(attempt_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(build_id) = build else {
+        return Ok(());
+    };
+    append_event_and_outbox(
+        tx,
+        organization_id,
+        build_id,
+        "attempt.lease_renewal_rejected",
+        json!({
+            "attempt_id": attempt_id,
+            "fence": fence,
+            "agent_id": agent_id,
+            "cause": cause,
+        }),
+    )
+    .await
 }

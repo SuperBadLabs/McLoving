@@ -1418,6 +1418,25 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             .expect("terminal replay renewal is an idempotent no-op"),
         Some(false)
     );
+    // A refused renewal is controller-visible named truth; the terminal-replay
+    // no-op above must not add one.
+    let rejection_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'
+           AND payload ->> 'cause' = 'agent_session_stale'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count renewal rejection events");
+    assert_eq!(
+        rejection_events, 1,
+        "the stale-session renewal denial must be named in the event stream"
+    );
 }
 
 #[tokio::test]
