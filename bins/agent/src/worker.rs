@@ -6,6 +6,7 @@ use std::future::Future;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
@@ -142,6 +143,42 @@ struct LeaseRenewalControl {
     execution_cancellation: CancellationToken,
     authority_lost: CancellationToken,
     stop: CancellationToken,
+    loss_reason: Arc<OnceLock<&'static str>>,
+}
+
+/// Marker for an execution cancelled by the controller's own request; it is
+/// never reported as lease loss.
+const CONTROLLER_CANCELLATION_TRIGGER: &str = "controller_cancellation";
+
+/// Names the exact renewal failure before it cancels a running execution, so
+/// authority loss during a step is never a silent cancellation. First trigger
+/// wins: a cancellation already in progress keeps its cause.
+fn record_lease_loss(loss_reason: &OnceLock<&'static str>, cause: &'static str) {
+    if loss_reason.set(cause).is_ok() {
+        eprintln!("lease_lost_during_execution: {cause}; cancelling the running step");
+    }
+}
+
+/// Maps the controller's named refusal cause onto the agent's fixed cause
+/// vocabulary so the durable result agrees with the recorded controller
+/// event; an empty or unknown cause stays the generic rejection.
+fn renewal_rejection_cause(cause: &str) -> &'static str {
+    match cause {
+        "agent_session_stale" => "renewal_session_stale",
+        _ => "renewal_rejected",
+    }
+}
+
+/// Classifies a renewal RPC rejection status: a stale-session fencing
+/// rejection is named as such rather than as a transport failure.
+fn renewal_status_cause(status: &tonic::Status) -> &'static str {
+    if status.code() == tonic::Code::FailedPrecondition
+        && status.message().contains("stale agent session epoch")
+    {
+        "renewal_session_stale"
+    } else {
+        "renewal_transport_failure"
+    }
 }
 
 struct PublicationContext<'a> {
@@ -244,6 +281,7 @@ pub(super) async fn recover_finalizations(
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
+                loss_reason: Arc::new(OnceLock::new()),
             },
         ));
         let replay_result = replay_finalization(
@@ -684,6 +722,7 @@ async fn run_assignment(
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
+                loss_reason: Arc::new(OnceLock::new()),
             },
         ));
         let completion_result = finalize_without_process(
@@ -714,6 +753,7 @@ async fn run_assignment(
     let execution_cancellation = stop.child_token();
     let authority_lost = CancellationToken::new();
     let lease_stop = CancellationToken::new();
+    let lease_loss_reason = Arc::new(OnceLock::new());
     let lease_task = tokio::spawn(renew_lease(
         client.clone(),
         assignment.authority.clone(),
@@ -725,6 +765,7 @@ async fn run_assignment(
             execution_cancellation: execution_cancellation.clone(),
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
+            loss_reason: lease_loss_reason.clone(),
         },
     ));
     let process = assignment.process;
@@ -936,6 +977,13 @@ async fn run_assignment(
             Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
             Termination::Exited => WorkOutcome::Failed,
         };
+        // A cancellation forced by lease loss is named in the durable result so
+        // the replayed terminal summary records why the step was cut short.
+        let lease_loss = (outcome.termination == Termination::Cancelled)
+            .then(|| lease_loss_reason.get())
+            .flatten()
+            .filter(|cause| **cause != CONTROLLER_CANCELLATION_TRIGGER)
+            .map(|cause| format!("lease_lost_during_execution:{cause}"));
         let result = write_result(
             &config.workspace_root,
             &assignment.workspace,
@@ -943,7 +991,7 @@ async fn run_assignment(
                 outcome: terminal,
                 exit_code: outcome.exit_code,
                 termination: termination_name(outcome.termination),
-                reason: None,
+                reason: lease_loss.as_deref(),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
             },
@@ -1282,6 +1330,7 @@ async fn renew_lease(
         execution_cancellation,
         authority_lost,
         stop,
+        loss_reason,
     } = control;
     let mut lease_started_at = lease_started_at;
     let mut lease_window = lease_window;
@@ -1303,12 +1352,14 @@ async fn renew_lease(
         };
         let receipt = match renewal {
             Err(_) => {
+                record_lease_loss(&loss_reason, "renewal_timeout");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
                 return Err(AgentError::LeaseRenewalTimeout);
             }
             Ok(Ok(response)) => response.into_inner(),
             Ok(Err(error)) => {
+                record_lease_loss(&loss_reason, renewal_status_cause(&error));
                 execution_cancellation.cancel();
                 authority_lost.cancel();
                 return Err(error.into());
@@ -1317,17 +1368,26 @@ async fn renew_lease(
         match ensure_session(receipt.session_epoch, authority.session_epoch) {
             Ok(()) => {}
             Err(error) => {
+                record_lease_loss(&loss_reason, "renewal_session_stale");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
                 return Err(error);
             }
         }
         if !receipt.accepted {
+            record_lease_loss(
+                &loss_reason,
+                renewal_rejection_cause(&receipt.rejection_cause),
+            );
             execution_cancellation.cancel();
             authority_lost.cancel();
             return Err(AgentError::StaleAuthority);
         }
         if receipt.cancellation_requested {
+            // The controller's cancellation is the terminating trigger; claim
+            // the slot so a renewal failure observed while the process is
+            // already being terminated cannot relabel the cause as lease loss.
+            let _ = loss_reason.set(CONTROLLER_CANCELLATION_TRIGGER);
             execution_cancellation.cancel();
         }
         lease_started_at = tokio::time::Instant::now();
