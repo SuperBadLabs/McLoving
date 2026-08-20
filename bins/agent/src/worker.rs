@@ -630,6 +630,10 @@ async fn refuse_unsupported_assignment(
             execution_cancellation,
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
+            // A refusal spawns no process, so lease loss can cancel no step
+            // and nothing reads this back. Its own cell, like every other
+            // processless path.
+            loss_reason: Arc::new(OnceLock::new()),
         },
     ));
     let completion_result = finalize_without_process(
