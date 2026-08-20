@@ -62,4 +62,6 @@ podman run --rm \
    cargo test --locked -p mcloving-controller --test capability_vocabulary &&
    cargo build --locked -p mcloving-controller &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
-     cargo test --locked -p mcloving-agent --test remote_work'
+     cargo test --locked -p mcloving-agent --test remote_work &&
+   MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
+     cargo test --locked -p mcloving-agent --test long_step_lease'
