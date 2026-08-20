@@ -474,12 +474,13 @@ impl Store {
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
-            // The rejection event must serialize against restore activation,
-            // which holds this fence exclusively while it rewrites authority.
-            sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-                .bind(RESTORE_FENCE_LOCK_KEY)
-                .execute(&mut *tx)
-                .await?;
+            // Naming the refusal appends to build_events and the outbox, so
+            // this branch is a multi-table writer like the renewal below it and
+            // takes the same canonical order. The shared restore fence
+            // additionally makes the event serialize against restore
+            // activation, which holds it exclusively while rewriting authority.
+            acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+            acquire_restore_fence_shared(&mut tx).await?;
             record_lease_renewal_rejection(
                 &mut tx,
                 organization_id,
@@ -1004,13 +1005,12 @@ impl Store {
         cause: &str,
     ) -> Result<(), StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        // Evaluate authority and append under the shared restore fence so the
-        // event cannot land after restore activation invalidates the lease it
-        // describes.
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        // Appending the event touches attempts, nodes, build_events, and the
+        // outbox, so this is a multi-table write and takes the canonical order.
+        // The shared restore fence additionally keeps the event from landing
+        // after restore activation invalidates the lease it describes.
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let build = sqlx::query_scalar::<_, Uuid>(
             "SELECT n.build_id
              FROM attempts AS a
