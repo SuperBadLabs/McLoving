@@ -5785,9 +5785,17 @@ async fn terminalize_dead_lettered_reconciliation(
 /// order and deadlock. Mutual exclusion on this advisory lock is what makes
 /// their row-lock order irrelevant. Acquire it after the agent-session check
 /// and before the restore fence, path-specific advisory locks, and the first
-/// row lock. Transactions that lock rows of at most one of these tables
-/// (lease renewal, log append, effect checkpoint) stay outside this domain
-/// so the hot agent heartbeat paths are not serialized per organization.
+/// row lock.
+///
+/// Only a transaction that locks rows of at most one of these tables may stay
+/// outside this domain — today, log append and effect checkpoint — so the hot
+/// agent heartbeat paths are not serialized per organization. Membership is
+/// decided by what a path locks now, never by what it was written to do. Lease
+/// renewal is the cautionary case: it was exempt as a single-table writer until
+/// the operational fence gave it a pipeline row lock ahead of the attempt
+/// update, and the stale exemption then deadlocked it against DAG advance and
+/// cancellation. Renewal and its rejection-event paths are inside this domain
+/// now. Before exempting a new path, confirm it still touches one table.
 pub(crate) async fn acquire_org_scheduler_lock(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
