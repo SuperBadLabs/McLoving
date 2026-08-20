@@ -26,9 +26,9 @@ use mcloving_controller_api::{
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, NewLogChunk,
-    NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
-    StoreError, TerminalOutcome, authz::ServiceScope,
+    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, LeaseRenewalDisposition,
+    NewLogChunk, NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization,
+    Store, StoreError, TerminalOutcome, authz::ServiceScope,
 };
 use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -95,6 +95,12 @@ async fn main() -> Result<()> {
         "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
         24 * 60 * 60,
     )?);
+    let outbox_retention_hours = u32::try_from(bounded_u64_environment_at_most(
+        "MCLOVING_OUTBOX_RETENTION_HOURS",
+        DEFAULT_OUTBOX_RETENTION_HOURS,
+        MAX_OUTBOX_RETENTION_HOURS,
+    )?)
+    .context("MCLOVING_OUTBOX_RETENTION_HOURS must fit in 32 bits")?;
     if max_total_bytes < max_object_bytes {
         bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
     }
@@ -223,6 +229,12 @@ async fn main() -> Result<()> {
     let agent_server = run_agent_control_server(store.clone(), agent_control);
     tokio::pin!(server);
     tokio::pin!(agent_server);
+    let outbox_reaper_loop = run_outbox_reaper(
+        store.clone(),
+        worker.organization_id,
+        outbox_retention_hours,
+    );
+    tokio::pin!(outbox_reaper_loop);
     let worker_loop = run_embedded_worker(store, worker);
     tokio::pin!(worker_loop);
     let trigger_retry_loop =
@@ -233,6 +245,7 @@ async fn main() -> Result<()> {
         result = &mut agent_server => result,
         result = &mut worker_loop => result,
         result = &mut trigger_retry_loop => result,
+        result = &mut outbox_reaper_loop => result,
     }
 }
 
@@ -497,6 +510,53 @@ struct ControllerAgentService {
     identities: Arc<AgentIdentityBindings>,
     #[cfg(debug_assertions)]
     drop_start_response_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    reject_renewal_window: Arc<RenewalRejectionWindow>,
+}
+
+/// Test-only fault injection: refuse the renewals numbered `after + 1` through
+/// `after + count` (1-indexed across the process) so a gate can prove that a
+/// running step loses its lease deliberately rather than by outrunning it.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct RenewalRejectionWindow {
+    counter: std::sync::atomic::AtomicU32,
+    after: u32,
+    count: u32,
+}
+
+#[cfg(debug_assertions)]
+impl RenewalRejectionWindow {
+    fn from_environment() -> Self {
+        let Some(value) = std::env::var_os("MCLOVING_TEST_REJECT_RENEWALS") else {
+            return Self::default();
+        };
+        let value = value.to_string_lossy();
+        let (after, count) = value
+            .split_once(',')
+            .and_then(|(after, count)| {
+                Some((after.trim().parse().ok()?, count.trim().parse().ok()?))
+            })
+            .expect("MCLOVING_TEST_REJECT_RENEWALS must be 'after,count'");
+        Self {
+            counter: std::sync::atomic::AtomicU32::new(0),
+            after,
+            count,
+        }
+    }
+
+    fn rejects_this_renewal(&self) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        // Saturating arithmetic keeps a misconfigured window from panicking a
+        // debug controller; a saturated window simply rejects to the end.
+        let ordinal = self
+            .counter
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        ordinal > self.after && ordinal <= self.after.saturating_add(self.count)
+    }
 }
 
 #[tonic::async_trait]
@@ -938,7 +998,35 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context = match authorize_work_authority(&self.store, &identity, &authority).await {
+            Ok(context) => context,
+            Err(status) => {
+                // A session-epoch conflict rejects the renewal here, before the
+                // store's renewal path runs, so the named controller-side event
+                // must be recorded at this boundary or the motivating collision
+                // stays invisible. Best effort under the authenticated tenant;
+                // the original rejection is returned unchanged.
+                if status.code() == tonic::Code::FailedPrecondition
+                    && status.message().contains("stale agent session epoch")
+                    && let Ok(organization_id) =
+                        authenticated_organization(&identity, &authority.organization_id)
+                    && let Ok(attempt_id) = authority.attempt_id.parse()
+                {
+                    let (_, fence) = decode_authority_token(authority.fence_token);
+                    let _ = self
+                        .store
+                        .record_lease_renewal_rejection(
+                            organization_id,
+                            attempt_id,
+                            fence,
+                            &authority.agent_id,
+                            "agent_session_stale",
+                        )
+                        .await;
+                }
+                return Err(status);
+            }
+        };
         let lease_seconds = i32::try_from(request.lease_seconds)
             .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
         if !(5..=300).contains(&lease_seconds) {
@@ -946,7 +1034,16 @@ impl AgentControl for ControllerAgentService {
                 "lease_seconds must be between 5 and 300",
             ));
         }
-        let cancellation_requested = self
+        #[cfg(debug_assertions)]
+        if self.reject_renewal_window.rejects_this_renewal() {
+            return Ok(Response::new(WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                cancellation_requested: false,
+                rejection_cause: String::new(),
+            }));
+        }
+        let disposition = self
             .store
             .renew_attempt_lease_in_session(
                 context.organization_id,
@@ -959,11 +1056,29 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
-        Ok(Response::new(WorkLeaseReceipt {
-            session_epoch: authority.session_epoch,
-            accepted: cancellation_requested.is_some(),
-            cancellation_requested: cancellation_requested.unwrap_or(false),
-        }))
+        let receipt = match disposition {
+            LeaseRenewalDisposition::Renewed {
+                cancellation_requested,
+            } => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                cancellation_requested,
+                rejection_cause: String::new(),
+            },
+            LeaseRenewalDisposition::TerminalNoOp => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                cancellation_requested: false,
+                rejection_cause: String::new(),
+            },
+            LeaseRenewalDisposition::Rejected { cause } => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                cancellation_requested: false,
+                rejection_cause: cause.to_owned(),
+            },
+        };
+        Ok(Response::new(receipt))
     }
 
     async fn publish_log(
@@ -1276,6 +1391,8 @@ async fn run_agent_control_server(
         identities: Arc::new(environment.identities),
         #[cfg(debug_assertions)]
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
+        #[cfg(debug_assertions)]
+        reject_renewal_window: Arc::new(RenewalRejectionWindow::from_environment()),
     };
     Server::builder()
         .tls_config(tls)
@@ -1519,6 +1636,61 @@ async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Res
                 tokio::time::sleep(RETRY_POLL_INTERVAL).await;
             }
         }
+    }
+}
+
+/// Default outbox retention horizon: seven days.
+const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
+/// Upper retention bound: ten years, which also keeps the horizon within the
+/// 32-bit range the store accepts.
+const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
+
+/// Bounds outbox accumulation. No outbox consumer is currently shipped, so
+/// rows are delivery staging that would otherwise grow forever; the durable
+/// records are `build_events` and `audit_events`. Each pass deletes one
+/// bounded batch past the retention horizon and reports any remaining
+/// unpublished backlog.
+async fn run_outbox_reaper(
+    store: Store,
+    organization_id: Uuid,
+    retention_hours: u32,
+) -> Result<()> {
+    const REAP_BATCH_LIMIT: u32 = 512;
+    const REAP_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+    loop {
+        match store
+            .reap_outbox(organization_id, retention_hours, REAP_BATCH_LIMIT)
+            .await
+        {
+            Ok(0) => {}
+            Ok(reaped) => {
+                eprintln!(
+                    "outbox reaper deleted {reaped} rows past the {retention_hours}h retention \
+                     horizon"
+                );
+                if reaped == u64::from(REAP_BATCH_LIMIT) {
+                    continue;
+                }
+            }
+            Err(error) => {
+                eprintln!("outbox reap failed: {error}");
+                tokio::time::sleep(REAP_POLL_INTERVAL).await;
+                continue;
+            }
+        }
+        match store.outbox_backlog(organization_id).await {
+            Ok(backlog) if backlog.unpublished_count > 0 => {
+                eprintln!(
+                    "outbox backlog: {} unpublished reapable rows of {} total ({} protected \
+                     proof rows are never reaped; no consumer is shipped; reapable rows \
+                     expire after {retention_hours}h)",
+                    backlog.unpublished_count, backlog.total_count, backlog.protected_count
+                );
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("outbox backlog scan failed: {error}"),
+        }
+        tokio::time::sleep(REAP_POLL_INTERVAL).await;
     }
 }
 
