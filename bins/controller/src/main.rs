@@ -272,6 +272,10 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
     bounded_u64_from(&process_environment, name, default)
 }
 
+fn bounded_u64_environment_at_most(name: &str, default: u64, maximum: u64) -> Result<u64> {
+    bounded_u64_from_at_most(&process_environment, name, default, maximum)
+}
+
 fn bounded_u64_from(env: EnvLookup, name: &str, default: u64) -> Result<u64> {
     match environment_string(env, name)? {
         Some(value) => {
