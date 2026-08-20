@@ -17,7 +17,7 @@ use mcloving_destination_observer::{
 };
 use mcloving_execution_spine::{
     EffectExecutionPlan, EffectRuntimeFreeze, FreshOneActionGrant, PinnedServiceCommand,
-    SpineError, WorkerConfig, run_claim,
+    SpineError, WorkerConfig, preflight_worker, run_claim,
 };
 use mcloving_external_connector::{
     ActionRequest, IdempotencyClass, PROTOCOL_VERSION as CONNECTOR_PROTOCOL_V1,
@@ -1273,6 +1273,10 @@ async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join()
         ("substituted_outcome_request_payload", 0),
         ("substituted_observer_response", 1),
         ("substituted_observer_binding", 1),
+        // Not a substitution but the same disposition: an observation whose
+        // publication deadline was already spent when it was captured must not
+        // be joined against expired read authority.
+        ("stale_publication_deadline", 1),
         ("substituted_shadow_response", 2),
     ] {
         let Some(store) = test_store().await else {
@@ -1327,6 +1331,102 @@ async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join()
             ),
             "scenario {scenario}"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_publication_deadline_inside_the_request_window_still_joins() {
+    // The shipped observer publishes the earliest of its freshness limit, the
+    // request expiry, and the read-grant expiry. A read grant that outlives the
+    // verified connector-plus-observer window but expires before the request
+    // does therefore yields a deadline strictly inside the window — a valid
+    // signed receipt that must join, not route an already-performed action to
+    // reconciliation.
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-tight-publication-deadline",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "tight_publication_deadline",
+        5_000,
+    );
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("a deadline bounded by the request must still join");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    assert_eq!(dispatch_count(root.path()), 1);
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read tight-deadline effect state");
+    assert_eq!(state, ("succeeded".into(), "confirmed".into(), 3));
+}
+
+#[tokio::test]
+async fn a_malformed_effect_plan_is_refused_before_any_work_is_claimed() {
+    // A deployment-owned plan this worker cannot execute is a permanent error
+    // for every connector-intent build it matches. Caught only at run time it
+    // would return before `accept_offer`, letting the offered lease expire into
+    // `requeue_one_expired` and repeat forever, so startup must refuse it.
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) =
+        admitted_claim(&store, runtime_effect_spec(), "effect-malformed-plan", 60).await;
+    let root = tempfile::tempdir().unwrap();
+    let template = runtime_effect_worker(
+        root.path(),
+        runtime_effect_plan(
+            root.path(),
+            organization_id,
+            project_id,
+            &admission,
+            &claim,
+            "success",
+            5_000,
+        ),
+    );
+    preflight_worker(&template)
+        .await
+        .expect("a well-formed plan preflights");
+    for mutate in [
+        (|plan: &mut EffectExecutionPlan| {
+            plan.schema_version = "mcloving.controller-effect-plan/v2".into();
+        }) as fn(&mut EffectExecutionPlan),
+        |plan: &mut EffectExecutionPlan| plan.audit_provenance.clear(),
+    ] {
+        let mut config = template.clone();
+        mutate(config.effect_plan.as_mut().expect("plan is configured"));
+        assert!(matches!(
+            preflight_worker(&config).await,
+            Err(SpineError::EffectRuntimeUnavailable)
+        ));
     }
 }
 

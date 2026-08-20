@@ -78,9 +78,30 @@ pub struct RunReceipt {
     pub stderr_sha256: [u8; 32],
 }
 
+/// The exact schema this worker knows how to execute a deployment-owned
+/// effect plan under.
+const EFFECT_PLAN_SCHEMA_VERSION: &str = "mcloving.controller-effect-plan/v1";
+
+/// Refuses a deployment-owned effect plan this worker cannot execute.
+///
+/// A malformed plan is a permanent error for every connector-intent build the
+/// worker matches, and the runtime check fires after the claim: the offered
+/// lease then expires, `requeue_one_expired` returns the work, and the next
+/// claim reaches the identical failure forever. Judging the plan at startup
+/// keeps a misconfigured deployment from claiming work it can only abandon.
+fn validate_effect_plan(plan: &EffectExecutionPlan) -> Result<(), SpineError> {
+    if plan.schema_version != EFFECT_PLAN_SCHEMA_VERSION || plan.audit_provenance.is_empty() {
+        return Err(SpineError::EffectRuntimeUnavailable);
+    }
+    Ok(())
+}
+
 /// Proves that the embedded worker can use its durable local resources before
 /// the controller rotates any externally visible credentials.
 pub async fn preflight_worker(config: &WorkerConfig) -> Result<(), SpineError> {
+    if let Some(plan) = &config.effect_plan {
+        validate_effect_plan(plan)?;
+    }
     fs::create_dir_all(&config.workspace_root).await?;
     let workspace_guard = WorkspaceRootGuard::open(&config.workspace_root)?;
     workspace_guard.ensure_original(&config.workspace_root)?;
@@ -502,11 +523,9 @@ async fn run_effect_claim(
     intent: &ConnectorIntentSpec,
     plan: &EffectExecutionPlan,
 ) -> Result<RunReceipt, SpineError> {
-    if plan.schema_version != "mcloving.controller-effect-plan/v1"
-        || plan.audit_provenance.is_empty()
-    {
-        return Err(SpineError::EffectRuntimeUnavailable);
-    }
+    // Startup already refused a plan this worker cannot execute. Repeating the
+    // judgement here keeps the two from drifting apart.
+    validate_effect_plan(plan)?;
     if !store
         .accept_offer(
             claim.organization_id,
@@ -1056,6 +1075,16 @@ async fn run_effect_claim_under_lease(
             return Err(SpineError::EffectReconciliationRequired);
         }
     };
+    // The observer's publication deadline is judged against the clock at the
+    // moment of the join, not against the request window alone.
+    let observed_now = match unix_time_millis() {
+        Ok(now) => now,
+        Err(_) => {
+            route_effect_reconciliation(store, claim, config, &prepared, "observer_outcome")
+                .await?;
+            return Err(SpineError::EffectReconciliationRequired);
+        }
+    };
     if confirm_effect_observation(
         store,
         claim,
@@ -1065,6 +1094,7 @@ async fn run_effect_claim_under_lease(
         &outcome,
         &plan.observation_request,
         &observation,
+        observed_now,
     )
     .await
     .is_err()

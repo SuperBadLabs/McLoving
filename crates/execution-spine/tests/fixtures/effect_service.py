@@ -366,6 +366,15 @@ def observer_response(command, openssl, observer_key, scenario):
         receipt["attempt_id"] = "00000000-0000-0000-0000-000000000000"
     elif scenario == "substituted_observer_binding":
         receipt["request_sha256"] = "0" * 64
+    elif scenario == "tight_publication_deadline":
+        # What the shipped observer emits whenever its freshness limit or the
+        # read grant expires before the request does: a deadline strictly
+        # inside the request window, still ahead of the join.
+        receipt["publication_deadline_unix_ms"] = request["expires_at_unix_ms"] - 1000
+    elif scenario == "stale_publication_deadline":
+        # A deadline already spent when the observation was captured. The join
+        # must refuse it rather than publish against expired read authority.
+        receipt["publication_deadline_unix_ms"] = now - 1
     sign(
         openssl,
         observer_key,

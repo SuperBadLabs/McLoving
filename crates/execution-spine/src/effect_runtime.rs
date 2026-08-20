@@ -306,10 +306,18 @@ pub async fn confirm_effect_observation(
     outcome: &OutcomeReceipt,
     observation_request: &ObservationRequest,
     observation: &ObservationReceipt,
+    now_unix_ms: i64,
 ) -> Result<(), EffectRuntimeError> {
     verify_observation_receipt(observation, &freeze.observer_receipt_public_key)
         .map_err(|_| EffectRuntimeError::InvalidObservation)?;
-    validate_observation(claim, freeze, outcome, observation_request, observation)?;
+    validate_observation(
+        claim,
+        freeze,
+        outcome,
+        observation_request,
+        observation,
+        now_unix_ms,
+    )?;
     let receipt = serde_json::to_value(observation)?;
     if !store
         .append_effect_evidence(
@@ -664,6 +672,7 @@ fn validate_observation(
     outcome: &OutcomeReceipt,
     request: &ObservationRequest,
     observation: &ObservationReceipt,
+    now_unix_ms: i64,
 ) -> Result<(), EffectRuntimeError> {
     let fence = u64::try_from(claim.fence).map_err(|_| EffectRuntimeError::InvalidObservation)?;
     let request_sha256 =
@@ -725,7 +734,17 @@ fn validate_observation(
         || observation.destination_observed_at_unix_ms < request.requested_at_unix_ms
         || observation.destination_observed_at_unix_ms > observation.captured_at_unix_ms
         || observation.captured_at_unix_ms > request.expires_at_unix_ms
-        || observation.publication_deadline_unix_ms != request.expires_at_unix_ms
+        // The observer publishes the earliest of its own freshness limit, the
+        // request expiry, and the read-grant expiry, so a deadline tighter than
+        // the request is a normal, valid receipt. Demanding equality rejected
+        // those after the connector had already acted and sent an otherwise
+        // sound effect to reconciliation. Require instead that the deadline
+        // claims no more authority than the request grants, was not already
+        // spent when the observation was captured, and has not passed by the
+        // time this join is evaluated.
+        || observation.publication_deadline_unix_ms > request.expires_at_unix_ms
+        || observation.publication_deadline_unix_ms < observation.captured_at_unix_ms
+        || observation.publication_deadline_unix_ms < now_unix_ms
     {
         return Err(EffectRuntimeError::InvalidObservation);
     }
