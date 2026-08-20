@@ -26,9 +26,9 @@ use mcloving_controller_api::{
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, NewLogChunk,
-    NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
-    StoreError, TerminalOutcome, authz::ServiceScope,
+    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, LeaseRenewalDisposition,
+    NewLogChunk, NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization,
+    Store, StoreError, TerminalOutcome, authz::ServiceScope,
 };
 use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -510,6 +510,53 @@ struct ControllerAgentService {
     identities: Arc<AgentIdentityBindings>,
     #[cfg(debug_assertions)]
     drop_start_response_once: Arc<AtomicBool>,
+    #[cfg(debug_assertions)]
+    reject_renewal_window: Arc<RenewalRejectionWindow>,
+}
+
+/// Test-only fault injection: refuse the renewals numbered `after + 1` through
+/// `after + count` (1-indexed across the process) so a gate can prove that a
+/// running step loses its lease deliberately rather than by outrunning it.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct RenewalRejectionWindow {
+    counter: std::sync::atomic::AtomicU32,
+    after: u32,
+    count: u32,
+}
+
+#[cfg(debug_assertions)]
+impl RenewalRejectionWindow {
+    fn from_environment() -> Self {
+        let Some(value) = std::env::var_os("MCLOVING_TEST_REJECT_RENEWALS") else {
+            return Self::default();
+        };
+        let value = value.to_string_lossy();
+        let (after, count) = value
+            .split_once(',')
+            .and_then(|(after, count)| {
+                Some((after.trim().parse().ok()?, count.trim().parse().ok()?))
+            })
+            .expect("MCLOVING_TEST_REJECT_RENEWALS must be 'after,count'");
+        Self {
+            counter: std::sync::atomic::AtomicU32::new(0),
+            after,
+            count,
+        }
+    }
+
+    fn rejects_this_renewal(&self) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        // Saturating arithmetic keeps a misconfigured window from panicking a
+        // debug controller; a saturated window simply rejects to the end.
+        let ordinal = self
+            .counter
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        ordinal > self.after && ordinal <= self.after.saturating_add(self.count)
+    }
 }
 
 #[tonic::async_trait]
@@ -951,7 +998,35 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context = match authorize_work_authority(&self.store, &identity, &authority).await {
+            Ok(context) => context,
+            Err(status) => {
+                // A session-epoch conflict rejects the renewal here, before the
+                // store's renewal path runs, so the named controller-side event
+                // must be recorded at this boundary or the motivating collision
+                // stays invisible. Best effort under the authenticated tenant;
+                // the original rejection is returned unchanged.
+                if status.code() == tonic::Code::FailedPrecondition
+                    && status.message().contains("stale agent session epoch")
+                    && let Ok(organization_id) =
+                        authenticated_organization(&identity, &authority.organization_id)
+                    && let Ok(attempt_id) = authority.attempt_id.parse()
+                {
+                    let (_, fence) = decode_authority_token(authority.fence_token);
+                    let _ = self
+                        .store
+                        .record_lease_renewal_rejection(
+                            organization_id,
+                            attempt_id,
+                            fence,
+                            &authority.agent_id,
+                            "agent_session_stale",
+                        )
+                        .await;
+                }
+                return Err(status);
+            }
+        };
         let lease_seconds = i32::try_from(request.lease_seconds)
             .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
         if !(5..=300).contains(&lease_seconds) {
@@ -959,7 +1034,16 @@ impl AgentControl for ControllerAgentService {
                 "lease_seconds must be between 5 and 300",
             ));
         }
-        let cancellation_requested = self
+        #[cfg(debug_assertions)]
+        if self.reject_renewal_window.rejects_this_renewal() {
+            return Ok(Response::new(WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                cancellation_requested: false,
+                rejection_cause: String::new(),
+            }));
+        }
+        let disposition = self
             .store
             .renew_attempt_lease_in_session(
                 context.organization_id,
@@ -972,11 +1056,29 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
-        Ok(Response::new(WorkLeaseReceipt {
-            session_epoch: authority.session_epoch,
-            accepted: cancellation_requested.is_some(),
-            cancellation_requested: cancellation_requested.unwrap_or(false),
-        }))
+        let receipt = match disposition {
+            LeaseRenewalDisposition::Renewed {
+                cancellation_requested,
+            } => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                cancellation_requested,
+                rejection_cause: String::new(),
+            },
+            LeaseRenewalDisposition::TerminalNoOp => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                cancellation_requested: false,
+                rejection_cause: String::new(),
+            },
+            LeaseRenewalDisposition::Rejected { cause } => WorkLeaseReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                cancellation_requested: false,
+                rejection_cause: cause.to_owned(),
+            },
+        };
+        Ok(Response::new(receipt))
     }
 
     async fn publish_log(
@@ -1289,6 +1391,8 @@ async fn run_agent_control_server(
         identities: Arc::new(environment.identities),
         #[cfg(debug_assertions)]
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
+        #[cfg(debug_assertions)]
+        reject_renewal_window: Arc::new(RenewalRejectionWindow::from_environment()),
     };
     Server::builder()
         .tls_config(tls)

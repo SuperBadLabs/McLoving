@@ -5,11 +5,11 @@ use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, BuildAdmission, ClaimRequest, ComponentPutOutcome,
     ComponentWrite, DagAdmission, DagDependency, DagNodeKind, DependencyCondition, EffectClass,
-    EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
-    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
-    ObjectStatus, OutboxBacklog, PipelinePutOutcome, PipelineRecord, PipelineWrite,
-    ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
-    TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
+    EffectStatus, JunitLimits, LeaseRenewalDisposition, MAX_OBJECT_RETENTION_SECONDS,
+    NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval,
+    NewLogChunk, ObjectKind, ObjectStatus, OutboxBacklog, PipelinePutOutcome, PipelineRecord,
+    PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
+    TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use mcloving_state_transfer::{
     BuildResult as TransferBuildResult, BuildState as TransferBuildState, ConflictPolicy,
@@ -1364,7 +1364,7 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             .await
             .expect("start under current session")
     );
-    assert!(
+    assert_eq!(
         store
             .renew_attempt_lease_in_session(
                 organization_id,
@@ -1376,10 +1376,12 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
                 30,
             )
             .await
-            .expect("reject stale renewal")
-            .is_none()
+            .expect("reject stale renewal"),
+        LeaseRenewalDisposition::Rejected {
+            cause: "agent_session_stale"
+        }
     );
-    assert!(
+    assert_eq!(
         store
             .renew_attempt_lease_in_session(
                 organization_id,
@@ -1391,8 +1393,10 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
                 30,
             )
             .await
-            .expect("renew current session")
-            .is_some()
+            .expect("renew current session"),
+        LeaseRenewalDisposition::Renewed {
+            cancellation_requested: false
+        }
     );
     let chunk = NewLogChunk {
         organization_id,
@@ -1459,7 +1463,132 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             )
             .await
             .expect("terminal replay renewal is an idempotent no-op"),
-        Some(false)
+        LeaseRenewalDisposition::TerminalNoOp
+    );
+    // A refused renewal is controller-visible named truth; the terminal-replay
+    // no-op above must not add one.
+    let rejection_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'
+           AND payload ->> 'cause' = 'agent_session_stale'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count renewal rejection events");
+    assert_eq!(
+        rejection_events, 1,
+        "the stale-session renewal denial must be named in the event stream"
+    );
+    // The out-of-transaction recording wrapper binds to durable lease truth:
+    // a caller naming an attempt it does not lease, or a stale fence, appends
+    // nothing, so a stale-session agent cannot forge rejection events.
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            "an-agent-that-does-not-hold-this-lease",
+            "agent_session_stale",
+        )
+        .await
+        .expect("foreign-agent recording attempt returns without error");
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence + 41,
+            &agent_id,
+            "agent_session_stale",
+        )
+        .await
+        .expect("stale-fence recording attempt returns without error");
+    let after_forgery_attempts = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after forgery attempts");
+    assert_eq!(
+        after_forgery_attempts, 1,
+        "unverified callers must not inject rejection events"
+    );
+    // A terminal attempt retains its lease_owner but holds no live lease; a
+    // correct-owner, correct-fence recording attempt against it must also
+    // append nothing.
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            &agent_id,
+            "agent_session_stale",
+        )
+        .await
+        .expect("terminal-attempt recording attempt returns without error");
+    let after_terminal_attempt = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after the terminal-attempt probe");
+    assert_eq!(
+        after_terminal_attempt, 1,
+        "a terminal attempt without a live lease must not accrete rejection events"
+    );
+    // The in-transaction path carries the same binding. A renewal that passed
+    // the request boundary's non-locking authority check can serialize only
+    // after the attempt terminalized; its stale-session refusal must stay a
+    // receipt, not a second published fact contradicting the terminal no-op
+    // the live-session renewal above recorded for this very attempt.
+    assert_eq!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                30,
+            )
+            .await
+            .expect("stale-session renewal against a terminal attempt"),
+        LeaseRenewalDisposition::Rejected {
+            cause: "agent_session_stale"
+        }
+    );
+    let after_terminal_stale_session = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after the terminal stale-session renewal");
+    assert_eq!(
+        after_terminal_stale_session, 1,
+        "a stale-session refusal must not append against a terminalized attempt"
     );
 }
 
