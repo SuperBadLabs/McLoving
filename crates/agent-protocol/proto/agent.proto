@@ -175,6 +175,10 @@ message WorkLeaseReceipt {
   uint64 session_epoch = 1;
   bool accepted = 2;
   bool cancellation_requested = 3;
+  // Names the store's refusal cause on a rejected renewal so the agent's
+  // durable result agrees with the controller's recorded event. Empty when
+  // accepted or when the refusal happened before the store path.
+  string rejection_cause = 4;
 }
 
 message WorkLogChunk {
