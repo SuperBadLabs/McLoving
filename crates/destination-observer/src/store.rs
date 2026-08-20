@@ -27,6 +27,7 @@ struct ExistingObservation {
     status: String,
     retry_count: u8,
     reservation_reached: bool,
+    evidence_bytes: Option<u64>,
     receipt_json: Option<Vec<u8>>,
     failure_code: Option<String>,
 }
@@ -335,11 +336,13 @@ impl ObserverStore {
         outcome
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn validate_admission(
         &self,
         config: &ObserverConfig,
         config_sha256: &str,
         request: &ObservationRequest,
+        request_sha256: &str,
         scope_sha256: &str,
         started_at_ms: i64,
         started_at: Instant,
@@ -356,6 +359,19 @@ impl ObserverStore {
         validate_temporal(config, request, admission_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         enforce_scope_head_capacity(&transaction, config, scope_sha256, admission_at_ms)?;
+        let existing_request_sha256: Option<String> = transaction
+            .query_row(
+                "SELECT request_sha256 FROM observations WHERE observation_id=?1",
+                [request.observation_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if let Some(existing_request_sha256) = existing_request_sha256
+            && existing_request_sha256 != request_sha256
+        {
+            return Err(ObserverError::ReplayMismatch);
+        }
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)
@@ -387,15 +403,16 @@ impl ObserverStore {
 
         let existing: Option<ExistingObservation> = transaction
             .query_row(
-                "SELECT request_sha256, status, retry_count, reservation_reached, receipt_json, failure_code FROM observations WHERE observation_id=?1",
+                "SELECT request_sha256, status, retry_count, reservation_reached, evidence_bytes, receipt_json, failure_code FROM observations WHERE observation_id=?1",
                 [request.observation_id.to_string()],
                 |row| Ok(ExistingObservation {
                     request_sha256: row.get(0)?,
                     status: row.get(1)?,
                     retry_count: row.get(2)?,
                     reservation_reached: row.get(3)?,
-                    receipt_json: row.get(4)?,
-                    failure_code: row.get(5)?,
+                    evidence_bytes: row.get(4)?,
+                    receipt_json: row.get(5)?,
+                    failure_code: row.get(6)?,
                 }),
             )
             .optional()
@@ -430,15 +447,41 @@ impl ObserverStore {
                 return Err(error);
             }
             enforce_scope_head_capacity(&transaction, config, scope_sha256, claim_at_ms)?;
-            let reservation_reached = match existing.status.as_str() {
-                "pending" => existing.reservation_reached,
+            let (reservation_reached, reserved_evidence_bytes) = match existing.status.as_str() {
+                "pending" => (
+                    existing.reservation_reached,
+                    reserve_receipt_capacity(
+                        &transaction,
+                        config,
+                        config_sha256,
+                        request,
+                        &request.observation_id.to_string(),
+                    )?,
+                ),
                 "failed" if rate_limited => {
-                    enforce_receipt_capacity(&transaction, config)?;
+                    let reserved_evidence_bytes = reserve_receipt_capacity(
+                        &transaction,
+                        config,
+                        config_sha256,
+                        request,
+                        &request.observation_id.to_string(),
+                    )?;
                     enforce_phase(&transaction, request, scope_sha256)?;
-                    false
+                    (false, reserved_evidence_bytes)
                 }
                 _ => return Err(ObserverError::StateUnavailable),
             };
+            if existing.evidence_bytes != Some(reserved_evidence_bytes) || rate_limited {
+                let changed = transaction
+                    .execute(
+                        "UPDATE observations SET status='pending', failure_code=NULL, evidence_bytes=?3 WHERE observation_id=?1 AND request_sha256=?2 AND (status='pending' OR (status='failed' AND failure_code='rate_limited'))",
+                        params![request.observation_id.to_string(), request_sha256, reserved_evidence_bytes],
+                    )
+                    .map_err(|_| ObserverError::StateUnavailable)?;
+                if changed != 1 {
+                    return Err(ObserverError::ReplayMismatch);
+                }
+            }
             transaction
                 .commit()
                 .map_err(|_| ObserverError::StateUnavailable)?;
@@ -449,7 +492,13 @@ impl ObserverStore {
         }
 
         validate_temporal(config, request, claim_at_ms)?;
-        enforce_receipt_capacity(&transaction, config)?;
+        let reserved_evidence_bytes = reserve_receipt_capacity(
+            &transaction,
+            config,
+            config_sha256,
+            request,
+            &request.observation_id.to_string(),
+        )?;
         enforce_phase(&transaction, request, scope_sha256)?;
         enforce_scope_head_capacity(&transaction, config, scope_sha256, claim_at_ms)?;
         let observation_count: usize = transaction
@@ -460,8 +509,8 @@ impl ObserverStore {
         }
         transaction
             .execute(
-                "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, reservation_reached, created_at_ms, expires_at_ms)
-                 VALUES(?1, ?2, ?3, ?4, ?5, 'pending', 0, 0, ?6, ?7)",
+                "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, reservation_reached, created_at_ms, expires_at_ms, evidence_bytes)
+                 VALUES(?1, ?2, ?3, ?4, ?5, 'pending', 0, 0, ?6, ?7, ?8)",
                 params![
                     request.observation_id.to_string(),
                     scope_sha256,
@@ -469,7 +518,8 @@ impl ObserverStore {
                     request_sha256,
                     request.phase.as_str(),
                     claim_at_ms,
-                    request.expires_at_unix_ms
+                    request.expires_at_unix_ms,
+                    reserved_evidence_bytes
                 ],
             )
             .map_err(|error| {
@@ -573,6 +623,56 @@ impl ObserverStore {
             .map_err(|_| ObserverError::StateUnavailable)?;
         if changed != 1 {
             return Err(ObserverError::ReplayMismatch);
+        }
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)
+    }
+
+    pub(crate) fn release_pending(
+        &self,
+        generation: u64,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        request_sha256: &str,
+    ) -> Result<(), ObserverError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        assert_active_transaction(&transaction, generation, config_sha256)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM observations WHERE observation_id=?1 AND request_sha256=?2 AND status='pending' AND reservation_reached=0",
+                params![request.observation_id.to_string(), request_sha256],
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if changed == 0 {
+            let existing: Option<(String, String, bool)> = transaction
+                .query_row(
+                    "SELECT request_sha256, status, reservation_reached FROM observations WHERE observation_id=?1",
+                    [request.observation_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            match existing {
+                None => {}
+                Some((stored_request_sha256, status, reservation_reached))
+                    if stored_request_sha256 == request_sha256
+                        && status == "pending"
+                        && reservation_reached =>
+                {
+                    return Err(ObserverError::ObservationPending);
+                }
+                Some((stored_request_sha256, _, _)) if stored_request_sha256 != request_sha256 => {
+                    return Err(ObserverError::ReplayMismatch);
+                }
+                Some(_) => return Err(ObserverError::ReplayMismatch),
+            }
         }
         transaction
             .commit()
@@ -730,6 +830,7 @@ impl ObserverStore {
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
         let finalize_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
+        expire_pending_observations(&transaction, finalize_at_ms)?;
         prune_terminal_observations(&transaction, config, finalize_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         enforce_scope_head_capacity(&transaction, config, scope_sha256, finalize_at_ms)?;
@@ -745,22 +846,42 @@ impl ObserverStore {
             return Err(ObserverError::CursorRollback);
         }
 
+        let reserved_evidence_bytes: Option<Option<u64>> = transaction
+            .query_row(
+                "SELECT evidence_bytes FROM observations
+                 WHERE observation_id=?1 AND request_sha256=?2 AND scope_sha256=?3 AND status='pending'",
+                params![request.observation_id.to_string(), request_sha256, scope_sha256],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let Some(reserved_evidence_bytes) = reserved_evidence_bytes else {
+            if let Some(stored) = stored_failure(&transaction, request, request_sha256)? {
+                return Err(stored);
+            }
+            return Err(ObserverError::ReplayMismatch);
+        };
+        let reserved_evidence_bytes = reserved_evidence_bytes.unwrap_or(0);
         let total: u64 = transaction
             .query_row(
-                "SELECT COALESCE(SUM(evidence_bytes), 0) FROM observations WHERE status='complete'",
+                "SELECT COALESCE(SUM(evidence_bytes), 0) FROM observations
+                 WHERE status IN ('pending', 'complete')",
                 [],
                 |row| row.get(0),
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
         let count: usize = transaction
             .query_row(
-                "SELECT COUNT(*) FROM observations WHERE status='complete'",
+                "SELECT COUNT(*) FROM observations WHERE status IN ('pending', 'complete')",
                 [],
                 |row| row.get(0),
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
-        if count >= config.limits.max_receipts
-            || total
+        let total_without_current = total
+            .checked_sub(reserved_evidence_bytes)
+            .ok_or(ObserverError::StateUnavailable)?;
+        if count > config.limits.max_receipts
+            || total_without_current
                 .checked_add(evidence_bytes)
                 .is_none_or(|value| value > config.limits.max_evidence_bytes)
         {
@@ -873,14 +994,18 @@ fn stored_failure(
     Ok((status == "failed").then(|| error_from_code(failure_code.as_deref())))
 }
 
-fn enforce_receipt_capacity(
+fn reserve_receipt_capacity(
     transaction: &rusqlite::Transaction<'_>,
     config: &ObserverConfig,
-) -> Result<(), ObserverError> {
+    config_sha256: &str,
+    request: &ObservationRequest,
+    observation_id: &str,
+) -> Result<u64, ObserverError> {
     let count: usize = transaction
         .query_row(
-            "SELECT COUNT(*) FROM observations WHERE status='complete'",
-            [],
+            "SELECT COUNT(*) FROM observations
+             WHERE status IN ('pending', 'complete') AND observation_id<>?1",
+            [observation_id],
             |row| row.get(0),
         )
         .map_err(|_| ObserverError::StateUnavailable)?;
@@ -889,15 +1014,29 @@ fn enforce_receipt_capacity(
     }
     let total: u64 = transaction
         .query_row(
-            "SELECT COALESCE(SUM(evidence_bytes), 0) FROM observations WHERE status='complete'",
-            [],
+            "SELECT COALESCE(SUM(evidence_bytes), 0) FROM observations
+             WHERE status IN ('pending', 'complete') AND observation_id<>?1",
+            [observation_id],
             |row| row.get(0),
         )
         .map_err(|_| ObserverError::StateUnavailable)?;
-    if total >= config.limits.max_evidence_bytes {
+    let reservation = crate::observer::maximum_receipt_evidence_bytes_for_request(
+        config,
+        config_sha256,
+        &config.implementation_sha256,
+        request,
+    )
+    .ok_or(ObserverError::StateUnavailable)?;
+    if reservation > config.limits.max_evidence_bytes {
         return Err(ObserverError::CapacityExceeded);
     }
-    Ok(())
+    if total
+        .checked_add(reservation)
+        .is_none_or(|value| value > config.limits.max_evidence_bytes)
+    {
+        return Err(ObserverError::CapacityExceeded);
+    }
+    Ok(reservation)
 }
 
 fn prune_terminal_observations(

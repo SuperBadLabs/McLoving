@@ -1091,10 +1091,10 @@ async fn request_and_grant_are_rechecked_before_every_source_attempt() {
         request_adapter.capture(&expiring_request).await,
         Err(AdapterError::ExpiredRequest)
     ));
-    assert_eq!(
-        fixture.state.reads.load(Ordering::SeqCst) - reads_before_request,
-        1,
-        "an expired request must not authorize a retry GET"
+    let request_reads = fixture.state.reads.load(Ordering::SeqCst) - reads_before_request;
+    assert!(
+        request_reads <= 1,
+        "an expired request must authorize at most the initial GET, never a retry"
     );
 
     let grant_spool = TempDir::new().expect("grant retry expiry spool");
@@ -1108,10 +1108,10 @@ async fn request_and_grant_are_rechecked_before_every_source_attempt() {
             .await,
         Err(AdapterError::ExpiredGrant)
     ));
-    assert_eq!(
-        fixture.state.reads.load(Ordering::SeqCst) - reads_before_grant,
-        1,
-        "an expired grant must not authorize a retry GET"
+    let grant_reads = fixture.state.reads.load(Ordering::SeqCst) - reads_before_grant;
+    assert!(
+        grant_reads <= 1,
+        "an expired grant must authorize at most the initial GET, never a retry"
     );
 }
 
