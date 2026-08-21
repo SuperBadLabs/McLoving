@@ -514,10 +514,13 @@ fn hostile_namespaces_cannot_escape_the_store() {
         );
     }
     // Nothing was written outside the store root.
-    let entries = fs::read_dir(parent.path())
+    // `read_dir` yields no defined order, so the assertion sorts rather than
+    // depending on one.
+    let mut entries = fs::read_dir(parent.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
+    entries.sort();
     assert_eq!(entries, vec![std::ffi::OsString::from("store")]);
     assert!(staged_files(&root).is_empty());
 }

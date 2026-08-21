@@ -2201,9 +2201,12 @@ mod tests {
                 Err(error) => error.to_string(),
                 Ok(_) => panic!("plain-HTTP loopback must fail closed for {name}"),
             };
-            assert_eq!(
-                error, "validate complete OIDC runtime client before persistence",
-                "unexpected rejection for {name}"
+            // Assert the named refusal, not the whole error chain: `context`
+            // composes the underlying message into the display string, so an
+            // exact match binds this gate to wording it does not own.
+            assert!(
+                error.contains("validate complete OIDC runtime client before persistence"),
+                "unexpected rejection for {name}: {error}"
             );
         }
     }
