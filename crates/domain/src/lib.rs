@@ -68,6 +68,12 @@ pub mod capability {
         /// No declared capability spells `platform:<supported>`, so no
         /// submission (including the default) could ever be claimed.
         NoSchedulablePlatform { declared: Vec<String> },
+        /// A capability claims the reserved `platform:` namespace but names a
+        /// platform outside the closed set.
+        UnsupportedPlatform {
+            capability: String,
+            platform: String,
+        },
     }
 
     impl fmt::Display for EmbeddedWorkerCapabilityError {
@@ -92,6 +98,17 @@ pub mod capability {
                      platform:linux or platform:windows, or exactly \
                      {EMBEDDED_WORKER_DISABLED_SENTINEL:?} to disable the \
                      embedded worker"
+                ),
+                Self::UnsupportedPlatform {
+                    capability,
+                    platform,
+                } => write!(
+                    formatter,
+                    "EmbeddedWorkerCapabilityError::UnsupportedPlatform: \
+                     capability {capability:?} names platform {platform:?}, \
+                     which is outside the supported set \
+                     {SUPPORTED_PLATFORMS:?}; the {PLATFORM_CAPABILITY_PREFIX:?} \
+                     namespace is closed, so no submission can ever require it"
                 ),
             }
         }
@@ -118,6 +135,21 @@ pub mod capability {
                     declared: declared.to_vec(),
                 })
             };
+        }
+        // The `platform:` namespace is closed, so a token inside it that names
+        // an unsupported platform is refused rather than ignored. Accepting it
+        // because some *other* declared platform is schedulable would leave the
+        // configuration surface silently lying about a capability no submission
+        // can ever require — the failure this ticket removes.
+        for capability in declared {
+            if let Some(platform) = capability.strip_prefix(PLATFORM_CAPABILITY_PREFIX)
+                && !is_supported_platform(platform)
+            {
+                return Err(EmbeddedWorkerCapabilityError::UnsupportedPlatform {
+                    capability: capability.clone(),
+                    platform: platform.to_owned(),
+                });
+            }
         }
         let schedulable = SUPPORTED_PLATFORMS
             .iter()
@@ -248,9 +280,14 @@ mod tests {
     #[test]
     fn unsupported_platform_prefix_fails_closed() {
         let macos = declared(&["platform:macos"]);
+        // Named for what is actually wrong: the token claims the closed
+        // namespace, rather than merely failing to schedule.
         assert_eq!(
             classify_embedded_worker_capabilities(&macos),
-            Err(EmbeddedWorkerCapabilityError::NoSchedulablePlatform { declared: macos })
+            Err(EmbeddedWorkerCapabilityError::UnsupportedPlatform {
+                capability: platform_capability("macos"),
+                platform: "macos".to_owned(),
+            })
         );
     }
 
@@ -265,5 +302,35 @@ mod tests {
             classify_embedded_worker_capabilities(&[]),
             Err(EmbeddedWorkerCapabilityError::EmptyDeclaration)
         );
+    }
+
+    /// The `platform:` namespace is closed. A token inside it naming an
+    /// unsupported platform must be refused even when another declared
+    /// platform would schedule, or the configuration surface still accepts a
+    /// capability no submission can ever require.
+    #[test]
+    fn an_unsupported_platform_capability_is_refused_even_alongside_a_supported_one() {
+        for declared in [
+            vec![platform_capability("linux"), platform_capability("macos")],
+            vec![platform_capability("macos"), platform_capability("linux")],
+        ] {
+            assert_eq!(
+                classify_embedded_worker_capabilities(&declared),
+                Err(EmbeddedWorkerCapabilityError::UnsupportedPlatform {
+                    capability: platform_capability("macos"),
+                    platform: "macos".to_owned(),
+                }),
+                "declared {declared:?}"
+            );
+        }
+        // A capability outside the reserved namespace is not the classifier's
+        // business, so it still schedules alongside a supported platform.
+        assert!(matches!(
+            classify_embedded_worker_capabilities(&[
+                platform_capability("linux"),
+                "gpu".to_owned(),
+            ]),
+            Ok(EmbeddedWorkerCapabilities::Schedulable(_))
+        ));
     }
 }
