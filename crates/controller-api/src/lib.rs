@@ -3661,6 +3661,13 @@ async fn process_trigger_delivery(
             return fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await;
         }
     };
+    // A delivery persisted before the vocabulary was closed can name a platform
+    // no worker will ever advertise. Retrying it forever is the queue-silently
+    // failure this ticket removes, so the delivery is terminalized instead.
+    if !mcloving_domain::capability::is_supported_platform(&claimed.requested_platform) {
+        return fail_claimed_trigger_delivery(state, claimed, worker_identity, invalid_platform())
+            .await;
+    }
     match admit_pipeline_parameters(
         state,
         PipelineAdmissionInput {
@@ -4156,6 +4163,14 @@ async fn admit_pipeline_parameters(
     };
     let pipeline = compile_source_with_parameters(&source, parameters)?;
     validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    // Revalidated here, not only at ingress. A delivery captured by an earlier
+    // release can carry a platform outside the closed set, and every admission
+    // path — header submission, claimed processing, and replay — funnels
+    // through this function. Admitting one would build a DAG requiring a
+    // capability no valid worker can advertise, which queues forever.
+    if !mcloving_domain::capability::is_supported_platform(&required_platform) {
+        return Err(invalid_platform());
+    }
     validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
