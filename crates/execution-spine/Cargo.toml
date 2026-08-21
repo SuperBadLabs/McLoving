@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+mcloving-domain = { version = "0.0.0", path = "../domain" }
 mcloving-agent-runtime = { version = "0.0.0", path = "../agent-runtime" }
 mcloving-controller-store = { version = "0.0.0", path = "../controller-store" }
 mcloving-destination-observer = { version = "0.0.0", path = "../destination-observer" }
