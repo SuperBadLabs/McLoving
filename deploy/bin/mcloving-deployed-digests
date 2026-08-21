@@ -87,19 +87,27 @@ def file_record(path: Path, root: Path) -> dict:
             "symlink_target": os.readlink(path),
             "kind": "directory_symlink",
         }
-    try:
-        status = path.stat()
-    except OSError:
-        # Only reachable if the target disappeared between the checks above and
-        # here. Losing the whole document to a race would deny CUTOVER-001 its
-        # re-read exactly when the tree is changing underneath it.
+    def unreadable(reason: str) -> dict:
+        # Losing the whole document to one unreadable entry would deny
+        # CUTOVER-001 its re-read exactly when the tree is drifting underneath
+        # it, and an entry that cannot be read is itself the drift worth
+        # reporting. The reason is recorded so a permission change is not
+        # mistaken for a disappearance.
         record = {
             "path": path.relative_to(root).as_posix(),
             "kind": "unreadable",
+            "reason": reason,
         }
         if path.is_symlink():
             record["symlink_target"] = os.readlink(path)
         return record
+
+    try:
+        status = path.stat()
+    except PermissionError:
+        return unreadable("permission_denied")
+    except OSError:
+        return unreadable("stat_failed")
     if not stat.S_ISREG(status.st_mode):
         # A FIFO, socket, or device node in a deployment tree has no content to
         # digest, and opening one is not a neutral act: a FIFO with no writer
@@ -113,9 +121,19 @@ def file_record(path: Path, root: Path) -> dict:
         if path.is_symlink():
             record["symlink_target"] = os.readlink(path)
         return record
+    # `stat()` succeeding does not mean the bytes can be read: a contract at
+    # mode 000, an ACL that withdrew access, or a file unlinked between the
+    # stat above and the open below all raise here, and every one of them is
+    # deployment drift rather than a reason to lose the document.
+    try:
+        digest = sha256_file(path)
+    except PermissionError:
+        return unreadable("permission_denied")
+    except OSError:
+        return unreadable("read_failed")
     record = {
         "path": path.relative_to(root).as_posix(),
-        "sha256": sha256_file(path),
+        "sha256": digest,
         "size_bytes": status.st_size,
     }
     if path.is_symlink():

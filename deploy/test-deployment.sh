@@ -645,6 +645,41 @@ if "sha256" in entry[0]:
     raise SystemExit("special node was digested as a regular file")
 SPECIAL
 
+# `stat()` succeeding does not mean the bytes can be read. A contract whose
+# mode or ACL withdrew access is drift, and losing the whole canonical document
+# to it would deny CUTOVER-001 the re-read exactly when it matters.
+echo "locked" > "${config_dir}/locked.env"
+chmod 000 "${config_dir}/locked.env"
+if [[ -r "${config_dir}/locked.env" ]]; then
+  # Running as root (or under a permissive ACL) defeats mode 000, so the gate
+  # cannot be asserted here. Say so rather than passing silently.
+  echo "NOTE: ${config_dir}/locked.env is still readable at mode 000; skipping the unreadable-file gate" >&2
+  rm -f "${config_dir}/locked.env"
+else
+  unreadable_digests="$(timeout 60 "${libexec}/helpers/mcloving-deployed-digests" --home "${home}")" || {
+    echo "digest re-read failed on an unreadable file instead of recording it" >&2
+    rm -f "${config_dir}/locked.env"
+    exit 1
+  }
+  rm -f "${config_dir}/locked.env"
+  python3 - "${unreadable_digests}" <<'UNREADABLE'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+contracts = document.get("environment_contracts", [])
+entry = [item for item in contracts if item["path"].endswith("/locked.env")]
+if not entry:
+    raise SystemExit("unreadable file missing from the re-read")
+if entry[0].get("kind") != "unreadable":
+    raise SystemExit(f"unreadable file recorded as {entry[0]}")
+if entry[0].get("reason") != "permission_denied":
+    raise SystemExit(f"unreadable file recorded without its reason: {entry[0]}")
+if "sha256" in entry[0]:
+    raise SystemExit("unreadable file was recorded with a digest it could not compute")
+UNREADABLE
+fi
+
 # The root of a walked tree is configuration too. Repointing ~/.config/mcloving
 # itself at another managed directory with identical contents must not leave
 # the re-read byte-identical: that substitution redirects every contract, key,
