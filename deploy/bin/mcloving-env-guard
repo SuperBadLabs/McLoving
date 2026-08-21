@@ -62,10 +62,15 @@ require_readable_file() {
 }
 
 require_min_bytes() {
-  local name="$1" minimum="$2" value
+  local name="$1" minimum="$2" value bytes
   value="$(contract_value "${name}")"
-  if [[ "${#value}" -lt "${minimum}" ]]; then
-    fail "variable ${name} must contain at least ${minimum} bytes"
+  # Bytes, not characters. ${#value} counts characters under a UTF-8 locale,
+  # while the controller measures String::len(), which is the UTF-8 byte
+  # length — so a valid multi-byte token would be refused here and accepted
+  # there, stopping a service over a contract it could have run.
+  bytes="$(printf '%s' "${value}" | wc -c)"
+  if [[ "${bytes}" -lt "${minimum}" ]]; then
+    fail "variable ${name} must contain at least ${minimum} bytes, got ${bytes}"
   fi
 }
 

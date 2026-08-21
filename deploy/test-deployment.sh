@@ -448,6 +448,20 @@ GRAMMAR
   exit 1
 }
 
+# Token length is measured in bytes, as the controller measures it. A
+# multi-byte token that satisfies the controller must satisfy the guard, or a
+# valid contract stops a service that could have run it.
+utf8_env="${workdir}/utf8-token.env"
+utf8_api="$(python3 -c "print('\u00e9' * 16)")"
+utf8_artifact="$(python3 -c "print('\u00fc' * 16)")"
+sed -e "s|^MCLOVING_API_TOKEN=.*|MCLOVING_API_TOKEN=${utf8_api}|" \
+    -e "s|^MCLOVING_ARTIFACT_AGENT_TOKEN=.*|MCLOVING_ARTIFACT_AGENT_TOKEN=${utf8_artifact}|" \
+    "${config_dir}/controller.env" > "${utf8_env}"
+"${libexec}/helpers/mcloving-env-guard" controller "${utf8_env}" >/dev/null || {
+  echo "guard rejected a 32-byte token because it counted characters" >&2
+  exit 1
+}
+
 # Two spellings of one database role are one role. Comparing URL text would
 # accept them as distinct and let the controller run as the migration role.
 equivalent_env="${workdir}/equivalent.env"
