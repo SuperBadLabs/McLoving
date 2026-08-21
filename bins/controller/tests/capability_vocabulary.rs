@@ -82,9 +82,11 @@ async fn measured_misconfiguration_fails_startup_with_named_error() {
         "EmbeddedWorkerCapabilityError::NoSchedulablePlatform",
     )
     .await;
+    // Inside the reserved namespace but outside the closed set: named for the
+    // namespace violation, not for an absence of schedulable platforms.
     assert_startup_rejects(
         "platform:macos",
-        "EmbeddedWorkerCapabilityError::NoSchedulablePlatform",
+        "EmbeddedWorkerCapabilityError::UnsupportedPlatform",
     )
     .await;
     assert_startup_rejects(
@@ -93,6 +95,12 @@ async fn measured_misconfiguration_fails_startup_with_named_error() {
     )
     .await;
     assert_startup_rejects(" , ", "EmbeddedWorkerCapabilityError::EmptyDeclaration").await;
+    // A supported platform does not license an unsupported one alongside it.
+    assert_startup_rejects(
+        "platform:linux,platform:macos",
+        "EmbeddedWorkerCapabilityError::UnsupportedPlatform",
+    )
+    .await;
 }
 
 /// Embedded-only execution: a controller whose embedded worker declares the
