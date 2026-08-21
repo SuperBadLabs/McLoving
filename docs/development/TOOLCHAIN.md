@@ -15,6 +15,8 @@ The Rust compiler and gitleaks scanner execute from digest-pinned containers.
 Actionlint, cargo-deny, and TLA+ download artifacts are cached only after
 checksum verification. Executables are extracted fresh from the verified
 archives for every invocation and removed on exit.
+The canonical Rust gate explicitly enables every destination-observer feature,
+so its literal-loopback contract suite cannot compile as an empty test target.
 
 ## Cache policy
 

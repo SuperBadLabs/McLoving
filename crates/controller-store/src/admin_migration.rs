@@ -105,10 +105,17 @@ impl ExternalAdminOperation {
             )),
             Self::BuildSubmit => Some((
                 "POST",
-                "/api/v1/organizations/{organization}/projects/{project}/builds",
-                "pipeline_digest",
-                "idempotency_key",
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/builds",
+                "saved_revision+enabled_operational_generation",
+                "parameters+idempotency_key",
                 Action::BuildTrigger,
+            )),
+            Self::PipelineDisable => Some((
+                "PUT",
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state",
+                "if_match_operational_generation",
+                "transition_provenance+idempotency_key",
+                Action::ProjectConfigure,
             )),
             Self::BuildCancel => Some((
                 "POST",

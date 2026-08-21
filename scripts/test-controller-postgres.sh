@@ -56,9 +56,14 @@ podman run --rm \
    cargo test --locked -p mcloving-controller-store --test external_read_consumers &&
    cargo test --locked -p mcloving-controller-store --test external_admin_clients &&
    cargo test --locked -p mcloving-controller-api --test oidc_flow &&
-   cargo test --locked -p mcloving-execution-spine --test real_spine &&
+   cargo test --locked -p mcloving-controller-api --test unsupported_spec_gate &&
+   cargo test --locked -p mcloving-execution-spine --test real_spine -- --test-threads=1 &&
    cargo test --locked -p mcloving-controller --test deployable_runtime &&
    cargo test --locked -p mcloving-controller --test diff_001 &&
+   cargo test --locked -p mcloving-controller --test capability_vocabulary &&
    cargo build --locked -p mcloving-controller &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
-     cargo test --locked -p mcloving-agent --test remote_work'
+     cargo test --locked -p mcloving-agent --test remote_work &&
+   MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
+     cargo test --locked -p mcloving-agent --test identity_collision &&
+     cargo test --locked -p mcloving-agent --test long_step_lease'

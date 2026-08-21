@@ -67,6 +67,9 @@ fn matrix_order_is_presentation_independent_and_bounded() {
         validate_dag_contract(&NewDagBuild {
             organization_id: Uuid::nil(),
             project_id: Uuid::nil(),
+            pipeline_id: Uuid::nil(),
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "matrix-contract".to_owned(),
             pipeline_digest: [1; 32],
             priority: 1,
@@ -120,6 +123,9 @@ fn dag_public_types_preserve_explicit_semantics() {
     let build = NewDagBuild {
         organization_id: Uuid::nil(),
         project_id: Uuid::nil(),
+        pipeline_id: Uuid::nil(),
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "contract".to_owned(),
         pipeline_digest: [1; 32],
         priority: 1,
@@ -163,6 +169,9 @@ fn capabilities_are_canonical_and_bounded() {
     let build = |node| NewDagBuild {
         organization_id: Uuid::nil(),
         project_id: Uuid::nil(),
+        pipeline_id: Uuid::nil(),
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "capability-contract".to_owned(),
         pipeline_digest: [1; 32],
         priority: 1,

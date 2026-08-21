@@ -610,7 +610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -846,9 +846,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "9f877e75f39e9827ec50a572dd592684ac28c029578726c85f1b2aa6ab807449"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1382,6 +1382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-boundary-differential"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "mcloving-cache"
 version = "0.0.0"
 dependencies = [
@@ -1398,6 +1408,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-canary-qualification"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "mcloving-destination-observer",
+ "mcloving-external-connector",
+ "ring",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-cli"
 version = "0.0.0"
 dependencies = [
@@ -1406,6 +1431,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "mcloving-controller-api",
+ "mcloving-domain",
  "serde",
  "serde_json",
  "tokio",
@@ -1421,7 +1447,9 @@ dependencies = [
  "mcloving-agent-protocol",
  "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-domain",
  "mcloving-execution-spine",
+ "mcloving-external-connector",
  "mcloving-object-store",
  "serde_json",
  "sha2",
@@ -1441,7 +1469,9 @@ dependencies = [
  "base64",
  "http",
  "jsonwebtoken",
+ "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-domain",
  "mcloving-object-store",
  "mcloving-pipeline-ir",
  "rand 0.8.7",
@@ -1462,6 +1492,7 @@ version = "0.0.0"
 dependencies = [
  "aho-corasick",
  "hex",
+ "mcloving-domain",
  "mcloving-state-transfer",
  "quick-xml",
  "serde",
@@ -1495,8 +1526,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-destination-observer"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "http-body-util",
+ "mcloving-external-connector",
+ "nix",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "mcloving-differential-aggregate"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-boundary-differential",
+ "mcloving-jenkins-differential",
+ "mcloving-state-policy-differential",
+ "mcloving-windows-job",
+ "nix",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "mcloving-domain"
 version = "0.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "mcloving-execution-spine"
@@ -1506,6 +1581,10 @@ dependencies = [
  "mcloving-agent-runtime",
  "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-destination-observer",
+ "mcloving-domain",
+ "mcloving-external-connector",
+ "nix",
  "reqwest",
  "serde",
  "serde_json",
@@ -1515,6 +1594,28 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "mcloving-external-connector"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "mcloving-destination-observer",
+ "nix",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
  "uuid",
 ]
 
@@ -1598,6 +1699,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-jenkins-state-transfer"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-controller-store",
+ "mcloving-state-transfer",
+ "nix",
+ "quick-xml",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "mcloving-migration-package"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-differential-aggregate",
+ "mcloving-jenkins-compiler-admission",
+ "mcloving-jenkins-mapping-catalog",
+ "mcloving-jenkins-state-transfer",
+ "mcloving-state-policy-differential",
+ "mcloving-state-transfer",
+ "nix",
+ "rustix",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "mcloving-object-store"
 version = "0.0.0"
 dependencies = [
@@ -1638,6 +1776,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-release-provenance"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "nix",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "mcloving-secret-broker"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "nix",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "mcloving-shadow-qualification"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "mcloving-migration-package",
+ "nix",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-source-acquirer"
 version = "0.0.0"
 dependencies = [
@@ -1660,8 +1848,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcloving-state-machine"
+name = "mcloving-state-policy-differential"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
 
 [[package]]
 name = "mcloving-state-transfer"
@@ -2252,7 +2446,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2440,6 +2634,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -2548,7 +2743,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3131,7 +3326,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

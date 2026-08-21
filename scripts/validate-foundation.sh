@@ -77,7 +77,11 @@ podman run --rm \
   'cargo fmt --all -- --check &&
    cargo metadata --locked --no-deps --format-version 1 >/tmp/metadata.json &&
    cargo clippy --locked --workspace --all-targets -- -D warnings &&
-   cargo test --locked --workspace'
+   cargo test --locked --workspace &&
+   cargo clippy --locked -p mcloving-destination-observer --all-targets --all-features -- -D warnings &&
+   cargo test --locked -p mcloving-destination-observer --all-features &&
+   cargo clippy --locked -p mcloving-external-connector --all-targets --all-features -- -D warnings &&
+   cargo test --locked -p mcloving-external-connector --all-features'
 
 podman run --rm \
   -v "${repo_root}:/work:Z" \
@@ -89,6 +93,7 @@ podman run --rm \
 python3 "${repo_root}/scripts/test-windows-agent-impact.py"
 python3 "${repo_root}/scripts/test-execution-board.py"
 python3 "${repo_root}/scripts/verify-execution-board.py"
+bash -n "${repo_root}/scripts/validate-external-shadow-apparmor.sh"
 "${actionlint_dir}/actionlint" "${repo_root}/.github/workflows/"*.yml
 
 java -cp "${tlaplus_jar}" tla2sany.SANY \

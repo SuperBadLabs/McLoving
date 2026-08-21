@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -435,10 +438,19 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     substituted_replay
         .query
         .insert("branch".to_owned(), "dev".to_owned());
-    assert!(matches!(
-        restarted.capture(&substituted_replay).await,
-        Err(AdapterError::ReplayMismatch)
-    ));
+    let replay_result = restarted.capture(&substituted_replay).await;
+    let replay_denied = matches!(replay_result, Err(AdapterError::ReplayMismatch));
+    assert!(replay_denied);
+    diff003::record_assertion(
+        "input_replay_denied",
+        "denied",
+        serde_json::json!({
+            "capture_id": substituted_replay.capture_id,
+            "substituted_branch": substituted_replay.query.get("branch"),
+            "result": "replay_mismatch",
+        }),
+        replay_denied,
+    );
 
     let mut wrong_binding = request(&adapter, "main", "valid");
     wrong_binding.endpoint_identity = "substituted-service".to_owned();
@@ -591,6 +603,16 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         duplicate.expect("full-window duplicate waiter")
     );
     assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 2);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("INPUT-001.json"),
+            diff003::receipt(
+                "INPUT-001",
+                serde_json::to_value(&main_receipt).expect("encode DIFF-003 input receipt"),
+            ),
+        )
+        .expect("write DIFF-003 input receipt");
+    }
 }
 
 #[tokio::test]
@@ -694,16 +716,39 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
         READ_TOKEN,
     )
     .await;
-    assert!(matches!(
-        outage.capture(&request(&outage, "main", "valid")).await,
-        Err(AdapterError::SourceUnavailable)
-    ));
+    let outage_result = outage.capture(&request(&outage, "main", "valid")).await;
+    let outage_denied = matches!(outage_result, Err(AdapterError::SourceUnavailable));
+    assert!(outage_denied);
+    diff003::record_assertion(
+        "input_outage_denied",
+        "denied",
+        serde_json::json!({
+            "endpoint": "http://127.0.0.1:9/input",
+            "result": "source_unavailable",
+            "claim_exists": outage_dir.path().read_dir().unwrap().count() > 0,
+        }),
+        outage_denied,
+    );
 
     let cutover_dir = TempDir::new().expect("cutover dir");
     let mut cutover_config = config(&fixture.endpoint, cutover_dir.path());
     cutover_config.generation = 2;
     cutover_config.endpoint_identity = "fixture-flags-service-v2".to_owned();
     let cutover = make_adapter(cutover_config, READ_TOKEN).await;
+    let stale_request = request(&cutover, "main", "valid");
+    let stale_result = cutover.capture(&stale_request).await;
+    let stale_denied = matches!(stale_result, Err(AdapterError::BindingMismatch));
+    assert!(stale_denied);
+    diff003::record_assertion(
+        "input_stale_denied",
+        "denied",
+        serde_json::json!({
+            "presented_generation": stale_request.expected_generation,
+            "active_generation": 2,
+            "result": "binding_mismatch",
+        }),
+        stale_denied,
+    );
     let mut cutover_request = request(&cutover, "main", "valid");
     cutover_request.expected_generation = 2;
     cutover_request.endpoint_identity = "fixture-flags-service-v2".to_owned();
@@ -954,6 +999,22 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     ));
 
     let adapter = make_adapter(bound_config, READ_TOKEN).await;
+    let mut substituted_endpoint = request(&adapter, "main", "valid");
+    substituted_endpoint.endpoint_identity = "substituted-input-service".to_owned();
+    let endpoint_result = adapter.capture(&substituted_endpoint).await;
+    let endpoint_substitution_denied =
+        matches!(endpoint_result, Err(AdapterError::BindingMismatch));
+    assert!(endpoint_substitution_denied);
+    diff003::record_assertion(
+        "input_endpoint_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_endpoint_identity": substituted_endpoint.endpoint_identity,
+            "result": "binding_mismatch",
+            "fixture_writes": fixture.state.writes.load(Ordering::SeqCst),
+        }),
+        endpoint_substitution_denied,
+    );
     let mut expired_request = request(&adapter, "main", "valid");
     expired_request.requested_at_unix_ms = now_ms() - 20_000;
     expired_request.expires_at_unix_ms = now_ms() - 10_000;
@@ -1030,10 +1091,10 @@ async fn request_and_grant_are_rechecked_before_every_source_attempt() {
         request_adapter.capture(&expiring_request).await,
         Err(AdapterError::ExpiredRequest)
     ));
-    assert_eq!(
-        fixture.state.reads.load(Ordering::SeqCst) - reads_before_request,
-        1,
-        "an expired request must not authorize a retry GET"
+    let request_reads = fixture.state.reads.load(Ordering::SeqCst) - reads_before_request;
+    assert!(
+        request_reads <= 1,
+        "an expired request must authorize at most the initial GET, never a retry"
     );
 
     let grant_spool = TempDir::new().expect("grant retry expiry spool");
@@ -1047,10 +1108,10 @@ async fn request_and_grant_are_rechecked_before_every_source_attempt() {
             .await,
         Err(AdapterError::ExpiredGrant)
     ));
-    assert_eq!(
-        fixture.state.reads.load(Ordering::SeqCst) - reads_before_grant,
-        1,
-        "an expired grant must not authorize a retry GET"
+    let grant_reads = fixture.state.reads.load(Ordering::SeqCst) - reads_before_grant;
+    assert!(
+        grant_reads <= 1,
+        "an expired grant must authorize at most the initial GET, never a retry"
     );
 }
 

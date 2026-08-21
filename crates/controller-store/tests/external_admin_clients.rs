@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -67,9 +70,16 @@ fn contracts(retire_unsupported: bool) -> Vec<ExternalAdminOperationContract> {
             ExternalAdminOperation::BuildSubmit => mapped_contract(
                 operation,
                 "POST",
-                "/api/v1/organizations/{organization}/projects/{project}/builds",
-                "pipeline_digest",
-                "idempotency_key",
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/builds",
+                "saved_revision+enabled_operational_generation",
+                "parameters+idempotency_key",
+            ),
+            ExternalAdminOperation::PipelineDisable => mapped_contract(
+                operation,
+                "PUT",
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state",
+                "if_match_operational_generation",
+                "transition_provenance+idempotency_key",
             ),
             ExternalAdminOperation::BuildCancel => mapped_contract(
                 operation,
@@ -193,7 +203,12 @@ async fn fixture(store: &Store, slug: &str, scopes: BTreeSet<ServiceScope>) -> (
     let project_id = Uuid::new_v4();
     let identity_id = Uuid::new_v4();
     store
-        .create_project(organization_id, slug, project_id, "admin migration fixture")
+        .create_project(
+            organization_id,
+            &format!("{slug}-{organization_id}"),
+            project_id,
+            "admin migration fixture",
+        )
         .await
         .expect("create admin migration tenant");
     store
@@ -338,10 +353,23 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
     pending.source_writes_observed = 1;
     pending.expected_contract_digest =
         compute_external_admin_client_digest(&pending).expect("residual-write digest");
-    assert!(matches!(
-        store.install_external_admin_client(&pending).await,
-        Err(StoreError::InvalidAdminMigration(message)) if message.contains("zero residual Jenkins writes")
-    ));
+    let residual_result = store.install_external_admin_client(&pending).await;
+    let residual_write_denied = matches!(
+        residual_result,
+        Err(StoreError::InvalidAdminMigration(message))
+            if message.contains("zero residual Jenkins writes")
+    );
+    assert!(residual_write_denied);
+    diff003::record_assertion(
+        "admin_residual_jenkins_write_denied",
+        "denied",
+        serde_json::json!({
+            "source_writes_observed": pending.source_writes_observed,
+            "requested_authority": pending.authority,
+            "result": "zero_residual_writes_required",
+        }),
+        residual_write_denied,
+    );
 
     pending.source_writes_observed = 0;
     pending.expected_contract_digest =
@@ -377,6 +405,19 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
         rollback_receipt.authority,
         ExternalAdminAuthority::JenkinsSource
     );
+    let rollback_restored = rollback_receipt.authority == ExternalAdminAuthority::JenkinsSource
+        && rollback_receipt.generation == 3
+        && rollback_receipt.binding_digest == source_receipt.binding_digest;
+    diff003::record_assertion(
+        "admin_rollback_restored",
+        "restored",
+        serde_json::json!({
+            "restored_generation": rollback_receipt.generation,
+            "restored_authority": rollback_receipt.authority,
+            "binding_preserved": rollback_receipt.binding_digest == source_receipt.binding_digest,
+        }),
+        rollback_restored,
+    );
 
     let audit = store
         .verify_audit_chain(organization_id)
@@ -394,6 +435,47 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
             .iter()
             .any(|event| event.action == "external_admin_client.rolled_back")
     );
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let trigger_receipt = std::fs::read(std::path::Path::new(&root).join("TRIG-001.json"))
+            .expect("read live DIFF-003 trigger receipt");
+        let trigger: serde_json::Value =
+            serde_json::from_slice(&trigger_receipt).expect("parse live DIFF-003 trigger receipt");
+        std::fs::write(
+            std::path::Path::new(&root).join("ADMIN-001.json"),
+            diff003::receipt(
+                "ADMIN-001",
+                serde_json::json!({
+                    "source": {
+                        "client_id": source_receipt.client_id,
+                        "generation": source_receipt.generation,
+                        "authority": source_receipt.authority,
+                        "binding_digest": source_receipt.binding_digest,
+                        "contract_digest": source_receipt.contract_digest,
+                    },
+                    "target": {
+                        "client_id": target_receipt.client_id,
+                        "generation": target_receipt.generation,
+                        "authority": target_receipt.authority,
+                        "binding_digest": target_receipt.binding_digest,
+                        "contract_digest": target_receipt.contract_digest,
+                    },
+                    "rollback": {
+                        "client_id": rollback_receipt.client_id,
+                        "generation": rollback_receipt.generation,
+                        "authority": rollback_receipt.authority,
+                        "binding_digest": rollback_receipt.binding_digest,
+                        "contract_digest": rollback_receipt.contract_digest,
+                    },
+                    "trigger_receipt_sha256": format!("{:x}", Sha256::digest(&trigger_receipt)),
+                    "trigger_id": trigger["trigger_id"],
+                    "trigger_organization_id": trigger["organization_id"],
+                    "trigger_project_id": trigger["project_id"],
+                    "trigger_pipeline_id": trigger["pipeline_id"],
+                }),
+            ),
+        )
+        .expect("write DIFF-003 admin receipts");
+    }
 }
 
 #[tokio::test]
@@ -457,10 +539,23 @@ async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_clos
     );
     let mut substituted = source.clone();
     substituted.source_endpoint = "https://substituted.invalid/jenkins".to_owned();
-    assert!(matches!(
-        store.install_external_admin_client(&substituted).await,
-        Err(StoreError::InvalidAdminMigration(message)) if message.contains("digest does not match")
-    ));
+    let substitution_result = store.install_external_admin_client(&substituted).await;
+    let target_substitution_denied = matches!(
+        substitution_result,
+        Err(StoreError::InvalidAdminMigration(message))
+            if message.contains("digest does not match")
+    );
+    assert!(target_substitution_denied);
+    diff003::record_assertion(
+        "admin_target_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "presented_source_endpoint": substituted.source_endpoint,
+            "expected_contract_digest": substituted.expected_contract_digest,
+            "result": "contract_digest_mismatch",
+        }),
+        target_substitution_denied,
+    );
 
     let mut omitted = source.clone();
     omitted.operation_contracts.pop();
@@ -501,7 +596,7 @@ async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_clos
     store
         .create_project(
             foreign_organization,
-            "admin-foreign",
+            &format!("admin-foreign-{foreign_organization}"),
             foreign_project,
             "foreign admin migration tenant",
         )

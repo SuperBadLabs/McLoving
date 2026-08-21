@@ -4,7 +4,10 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{RESTORE_FENCE_LOCK_KEY, Store, StoreError, append_event_and_outbox};
+use crate::{
+    Store, StoreError, acquire_org_scheduler_lock, acquire_restore_fence_shared,
+    append_event_and_outbox,
+};
 
 /// Inputs to one deterministic scheduler claim.
 #[derive(Clone, Debug)]
@@ -30,6 +33,19 @@ pub struct ClaimedAttempt {
     pub fence: i64,
     pub restore_epoch: i64,
     pub agent_id: String,
+}
+
+/// Outcome of one fenced lease-renewal request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LeaseRenewalDisposition {
+    /// The lease was extended under current authority.
+    Renewed { cancellation_requested: bool },
+    /// The attempt is already terminal; an exact replay's renewal is an
+    /// acknowledged no-op that extends nothing.
+    TerminalNoOp,
+    /// The renewal was refused; the cause matches the recorded
+    /// `attempt.lease_renewal_rejected` event.
+    Rejected { cause: &'static str },
 }
 
 /// Stable explanation when the scheduler cannot claim work.
@@ -86,14 +102,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("mcloving.scheduler.{}", request.organization_id))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, request.organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let restore_epoch = sqlx::query_scalar::<_, i64>(
             "SELECT restore_epoch
              FROM controller_metadata
@@ -112,6 +122,16 @@ impl Store {
                ON a.node_id = n.id
               AND a.organization_id = n.organization_id
               AND a.status = 'queued'
+             JOIN pipeline_definitions AS d
+               ON d.organization_id = b.organization_id
+              AND d.project_id = b.project_id
+              AND d.pipeline_id = b.pipeline_id
+              AND d.operational_generation = b.pipeline_operational_generation
+             JOIN pipeline_operational_state_history AS h
+               ON h.organization_id = d.organization_id
+              AND h.pipeline_id = d.pipeline_id
+              AND h.generation = d.operational_generation
+              AND h.state = 'enabled'
              WHERE n.organization_id = $1
                AND n.status = 'queued'
                AND (
@@ -167,6 +187,17 @@ impl Store {
         let node_id: Uuid = candidate.try_get("node_id")?;
         let build_id: Uuid = candidate.try_get("build_id")?;
         let attempt_id: Uuid = candidate.try_get("attempt_id")?;
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, request.organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(None)
+                }
+                other => Err(other),
+            };
+        }
 
         let fence = sqlx::query_scalar::<_, i64>(
             "UPDATE attempts
@@ -289,10 +320,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -321,6 +350,17 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
         if status != "offered" {
             tx.commit().await?;
             return Ok(true);
@@ -369,16 +409,26 @@ impl Store {
         agent_id: &str,
         lease_seconds: i32,
     ) -> Result<Option<bool>, StoreError> {
-        self.renew_attempt_lease_with_session(
-            organization_id,
-            attempt_id,
-            fence,
-            restore_epoch,
-            agent_id,
-            None,
-            lease_seconds,
+        Ok(
+            match self
+                .renew_attempt_lease_with_session(
+                    organization_id,
+                    attempt_id,
+                    fence,
+                    restore_epoch,
+                    agent_id,
+                    None,
+                    lease_seconds,
+                )
+                .await?
+            {
+                LeaseRenewalDisposition::Renewed {
+                    cancellation_requested,
+                } => Some(cancellation_requested),
+                LeaseRenewalDisposition::TerminalNoOp => Some(false),
+                LeaseRenewalDisposition::Rejected { .. } => None,
+            },
         )
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -391,7 +441,7 @@ impl Store {
         agent_id: &str,
         session_epoch: u64,
         lease_seconds: i32,
-    ) -> Result<Option<bool>, StoreError> {
+    ) -> Result<LeaseRenewalDisposition, StoreError> {
         self.renew_attempt_lease_with_session(
             organization_id,
             attempt_id,
@@ -414,21 +464,77 @@ impl Store {
         agent_id: &str,
         session_epoch: Option<u64>,
         lease_seconds: i32,
-    ) -> Result<Option<bool>, StoreError> {
+    ) -> Result<LeaseRenewalDisposition, StoreError> {
         if lease_seconds <= 0 {
-            return Ok(None);
+            return Ok(LeaseRenewalDisposition::Rejected {
+                cause: "invalid_lease_window",
+            });
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
+            // Naming the refusal appends to build_events and the outbox, so
+            // this branch is a multi-table writer like the renewal below it and
+            // takes the same canonical order. The shared restore fence
+            // additionally makes the event serialize against restore
+            // activation, which holds it exclusively while rewriting authority.
+            acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+            acquire_restore_fence_shared(&mut tx).await?;
+            record_lease_renewal_rejection(
+                &mut tx,
+                organization_id,
+                attempt_id,
+                fence,
+                agent_id,
+                "agent_session_stale",
+            )
             .await?;
+            tx.commit().await?;
+            return Ok(LeaseRenewalDisposition::Rejected {
+                cause: "agent_session_stale",
+            });
+        }
+        // Renewal stopped being a single-table writer when the operational
+        // fence arrived: it locks the pipeline operational-state row before
+        // updating the attempt, so it must follow the canonical order like
+        // every other multi-table path or it deadlocks against DAG advance
+        // and cancellation, which lock builds/nodes/attempts under this lock.
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let active_build = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(build_id) = active_build
+            && let Err(error) =
+                crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(LeaseRenewalDisposition::Renewed {
+                        cancellation_requested: true,
+                    })
+                }
+                other => Err(other),
+            };
+        }
         let cancellation_requested = sqlx::query_scalar::<_, bool>(
             "UPDATE attempts AS a
              SET lease_expires_at =
@@ -460,9 +566,11 @@ impl Store {
         .bind(f64::from(lease_seconds))
         .fetch_optional(&mut *tx)
         .await?;
-        if cancellation_requested.is_some() {
+        if let Some(cancellation_requested) = cancellation_requested {
             tx.commit().await?;
-            return Ok(cancellation_requested);
+            return Ok(LeaseRenewalDisposition::Renewed {
+                cancellation_requested,
+            });
         }
         // A response-loss replay can observe an already-terminal attempt.
         // Its exact terminal publication is idempotent and needs no renewed
@@ -488,8 +596,23 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
+        if terminal.is_some() {
+            tx.commit().await?;
+            return Ok(LeaseRenewalDisposition::TerminalNoOp);
+        }
+        record_lease_renewal_rejection(
+            &mut tx,
+            organization_id,
+            attempt_id,
+            fence,
+            agent_id,
+            "lease_not_current",
+        )
+        .await?;
         tx.commit().await?;
-        Ok(terminal.map(|_| false))
+        Ok(LeaseRenewalDisposition::Rejected {
+            cause: "lease_not_current",
+        })
     }
 
     /// Resolves one expired active lease without changing its fence.
@@ -499,14 +622,8 @@ impl Store {
     /// and routes the attempt through explicit reconciliation.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("mcloving.scheduler.{organization_id}"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let expired = sqlx::query(
             "SELECT a.id AS attempt_id, a.fence, n.id AS node_id, n.build_id,
                     (
@@ -541,14 +658,28 @@ impl Store {
         let node_id: Uuid = expired.try_get("node_id")?;
         let build_id: Uuid = expired.try_get("build_id")?;
         let cancellation_requested: bool = expired.try_get("cancellation_requested")?;
+        let pipeline_enabled =
+            match crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+                Ok(_) => true,
+                Err(StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_)) => {
+                    false
+                }
+                Err(error) => return Err(error),
+            };
         let protected_effects = sqlx::query_as::<_, (String, String)>(
             "SELECT effect_key, status
              FROM attempt_effects
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND effect_class = 'non_idempotent'
-               AND status IN ('prepared', 'applied', 'confirmed', 'uncertain')
+               AND (
+                   effect_class = 'non_idempotent'
+                   OR payload ->> 'schema_version' =
+                      'mcloving.controller-effect-prepared/v1'
+               )
+               AND status IN (
+                   'prepared', 'applied', 'confirmed', 'uncertain', 'release_pending'
+               )
              ORDER BY effect_key
              FOR UPDATE",
         )
@@ -563,7 +694,11 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND effect_class = 'non_idempotent'
+               AND (
+                   effect_class = 'non_idempotent'
+                   OR payload ->> 'schema_version' =
+                      'mcloving.controller-effect-prepared/v1'
+               )
                AND status IN ('prepared', 'applied')",
         )
         .bind(organization_id)
@@ -577,7 +712,12 @@ impl Store {
             .filter(|(_, status)| status != "confirmed")
             .count();
         let confirmed_effects = protected_effects.len() - uncertain_effects;
-        if cancellation_requested && !requires_reconciliation {
+        if (cancellation_requested || !pipeline_enabled) && !requires_reconciliation {
+            let terminal_reason = if pipeline_enabled {
+                "cancellation_lease_expired"
+            } else {
+                "pipeline_operational_generation_fenced"
+            };
             sqlx::query(
                 "UPDATE attempts
                  SET status = 'aborted',
@@ -588,7 +728,7 @@ impl Store {
             )
             .bind(attempt_id)
             .bind(organization_id)
-            .bind(json!({"reason": "cancellation_lease_expired"}))
+            .bind(json!({"reason": terminal_reason}))
             .execute(&mut *tx)
             .await?;
             if !crate::dag::advance_dag_after_attempt(
@@ -624,7 +764,11 @@ impl Store {
                 &mut tx,
                 organization_id,
                 build_id,
-                "attempt.cancellation_lease_expired",
+                if pipeline_enabled {
+                    "attempt.cancellation_lease_expired"
+                } else {
+                    "attempt.pipeline_generation_fenced"
+                },
                 json!({
                     "attempt_id": attempt_id,
                     "node_id": node_id,
@@ -723,6 +867,16 @@ impl Store {
                  JOIN builds AS b
                    ON b.id = n.build_id
                   AND b.organization_id = n.organization_id
+                 JOIN pipeline_definitions AS d
+                   ON d.organization_id = b.organization_id
+                  AND d.project_id = b.project_id
+                  AND d.pipeline_id = b.pipeline_id
+                  AND d.operational_generation = b.pipeline_operational_generation
+                 JOIN pipeline_operational_state_history AS h
+                   ON h.organization_id = d.organization_id
+                  AND h.pipeline_id = d.pipeline_id
+                  AND h.generation = d.operational_generation
+                  AND h.state = 'enabled'
                  WHERE n.organization_id = $1
                    AND n.status = 'queued'
                    AND (
@@ -774,6 +928,16 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id
               AND b.organization_id = n.organization_id
+             JOIN pipeline_definitions AS d
+               ON d.organization_id = b.organization_id
+              AND d.project_id = b.project_id
+              AND d.pipeline_id = b.pipeline_id
+              AND d.operational_generation = b.pipeline_operational_generation
+             JOIN pipeline_operational_state_history AS h
+               ON h.organization_id = d.organization_id
+              AND h.pipeline_id = d.pipeline_id
+              AND h.generation = d.operational_generation
+              AND h.state = 'enabled'
              WHERE n.organization_id = $1
                AND n.status = 'queued'
                AND (
@@ -832,4 +996,130 @@ impl Store {
         tx.commit().await?;
         Ok(WaitReason::CapabilityMismatch { required, missing })
     }
+}
+
+impl Store {
+    /// Records a named renewal rejection outside the renewal transaction, for
+    /// callers that refuse authority before the store's renewal path runs
+    /// (the session-epoch gate in the agent-control handler). The event binds
+    /// only to durable truth: it is appended solely when the named attempt at
+    /// this exact fence is currently leased by the reporting agent, so a
+    /// stale-session caller cannot inject a false event against another
+    /// agent's attempt or an arbitrary fence. Best effort otherwise.
+    pub async fn record_lease_renewal_rejection(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+        cause: &str,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        // Appending the event touches attempts, nodes, build_events, and the
+        // outbox, so this is a multi-table write and takes the canonical order.
+        // The shared restore fence additionally keeps the event from landing
+        // after restore activation invalidates the lease it describes.
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let build = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = build else {
+            tx.rollback().await?;
+            return Ok(());
+        };
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.lease_renewal_rejected",
+            json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "agent_id": agent_id,
+                "cause": cause,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+/// Names a refused lease renewal in the build's event stream so authority
+/// loss under a running step is controller-visible truth, never only a later
+/// silent expiry or an agent-side surprise.
+///
+/// Callers reach this after a non-locking authority check at the request
+/// boundary, so the described authority can have lapsed before this
+/// transaction serialized. The lookup therefore re-derives the build under the
+/// caller's already-held shared restore fence and appends only while the named
+/// attempt still sits at this exact fence, owned by this agent, non-terminal,
+/// and under the live restore epoch. A terminalized attempt is deliberately
+/// silent here: the renewal path treats that same attempt as a terminal no-op,
+/// and one refusal must not be published as two contradicting facts. Lease
+/// expiry is not part of the predicate, because an expired lease is precisely
+/// the refusal this event exists to name.
+async fn record_lease_renewal_rejection(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    fence: i64,
+    agent_id: &str,
+    cause: &str,
+) -> Result<(), StoreError> {
+    let build = sqlx::query_scalar::<_, Uuid>(
+        "SELECT n.build_id
+         FROM attempts AS a
+         JOIN nodes AS n
+           ON n.id = a.node_id AND n.organization_id = a.organization_id
+         WHERE a.organization_id = $1
+           AND a.id = $2
+           AND a.fence = $3
+           AND a.lease_owner = $4
+           AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+           AND a.restore_epoch = (
+               SELECT restore_epoch FROM controller_metadata WHERE singleton
+           )",
+    )
+    .bind(organization_id)
+    .bind(attempt_id)
+    .bind(fence)
+    .bind(agent_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(build_id) = build else {
+        return Ok(());
+    };
+    append_event_and_outbox(
+        tx,
+        organization_id,
+        build_id,
+        "attempt.lease_renewal_rejected",
+        json!({
+            "attempt_id": attempt_id,
+            "fence": fence,
+            "agent_id": agent_id,
+            "cause": cause,
+        }),
+    )
+    .await
 }

@@ -176,6 +176,8 @@ pub struct VerificationError {
     pub message: String,
 }
 
+type Bundle = BTreeMap<String, Vec<u8>>;
+
 impl VerificationError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -256,15 +258,39 @@ struct CoverageAuthority {
 }
 
 pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationError> {
-    verify_manifest(root)?;
-    verify_jenkins_capture_manifest(root)?;
-    verify_source_and_pipeline(root)?;
-    verify_jenkins_job_definition(root)?;
-    verify_jenkins_plugin_profile(root)?;
-    let coverage = verify_coverage(root)?;
-    let jenkins = derive_jenkins_trace(root)?;
-    verify_jenkins_capture_identity(root)?;
-    let mcloving = derive_mcloving_trace(root)?;
+    verify_exact_tree(root)?;
+    let mut bundle = Bundle::new();
+    for name in BUNDLE_FILES.into_iter().chain(["SHA256SUMS"]) {
+        bundle.insert(name.to_owned(), read_path(root, name)?);
+    }
+    verify_snapshot(&bundle)
+}
+
+/// Verifies an already authenticated, immutable in-memory bundle without
+/// reopening any filesystem path.
+pub fn verify_snapshot(
+    bundle: &BTreeMap<String, Vec<u8>>,
+) -> Result<VerificationReceipt, VerificationError> {
+    let mut expected = BUNDLE_FILES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<BTreeSet<_>>();
+    expected.insert("SHA256SUMS".to_owned());
+    if bundle.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(VerificationError::new(
+            "E_TREE",
+            "in-memory bundle file set is not exact",
+        ));
+    }
+    verify_manifest(bundle)?;
+    verify_jenkins_capture_manifest(bundle)?;
+    verify_source_and_pipeline(bundle)?;
+    verify_jenkins_job_definition(bundle)?;
+    verify_jenkins_plugin_profile(bundle)?;
+    let coverage = verify_coverage(bundle)?;
+    let jenkins = derive_jenkins_trace(bundle)?;
+    verify_jenkins_capture_identity(bundle)?;
+    let mcloving = derive_mcloving_trace(bundle)?;
     if jenkins != mcloving {
         return Err(VerificationError::new(
             "E_TRACE_MISMATCH",
@@ -286,9 +312,8 @@ pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationErr
     })
 }
 
-fn verify_manifest(root: &Path) -> Result<(), VerificationError> {
-    verify_exact_tree(root)?;
-    let manifest = read(root, "SHA256SUMS")?;
+fn verify_manifest(bundle: &Bundle) -> Result<(), VerificationError> {
+    let manifest = read(bundle, "SHA256SUMS")?;
     let text = std::str::from_utf8(&manifest)
         .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
     let mut entries = BTreeMap::new();
@@ -317,7 +342,7 @@ fn verify_manifest(root: &Path) -> Result<(), VerificationError> {
     }
     let mut total = 0_u64;
     for (name, expected_digest) in entries {
-        let bytes = read(root, &name)?;
+        let bytes = read(bundle, &name)?;
         total = total.saturating_add(bytes.len() as u64);
         if sha256(&bytes) != expected_digest {
             return Err(VerificationError::new(
@@ -332,8 +357,8 @@ fn verify_manifest(root: &Path) -> Result<(), VerificationError> {
     Ok(())
 }
 
-fn verify_jenkins_capture_manifest(root: &Path) -> Result<(), VerificationError> {
-    let manifest = text(root, "jenkins/file-sha256.txt")?;
+fn verify_jenkins_capture_manifest(bundle: &Bundle) -> Result<(), VerificationError> {
+    let manifest = text(bundle, "jenkins/file-sha256.txt")?;
     let mut entries = BTreeMap::new();
     for line in manifest.lines() {
         let (digest, absolute_path) = line.split_once("  ").ok_or_else(|| {
@@ -382,7 +407,7 @@ fn verify_jenkins_capture_manifest(root: &Path) -> Result<(), VerificationError>
                 "Jenkins capture manifest entry is absent",
             )
         })?;
-        if sha256(&read(root, &format!("jenkins/{name}"))?) != *expected_digest {
+        if sha256(&read(bundle, &format!("jenkins/{name}"))?) != *expected_digest {
             return Err(VerificationError::new(
                 "E_JENKINS_CAPTURE_MANIFEST",
                 format!("Jenkins capture digest differs for {name}"),
@@ -392,8 +417,8 @@ fn verify_jenkins_capture_manifest(root: &Path) -> Result<(), VerificationError>
     Ok(())
 }
 
-fn verify_jenkins_capture_identity(root: &Path) -> Result<(), VerificationError> {
-    if sha256(&read(root, "jenkins/file-sha256.txt")?) != JENKINS_CAPTURE_MANIFEST_SHA256 {
+fn verify_jenkins_capture_identity(bundle: &Bundle) -> Result<(), VerificationError> {
+    if sha256(&read(bundle, "jenkins/file-sha256.txt")?) != JENKINS_CAPTURE_MANIFEST_SHA256 {
         return Err(VerificationError::new(
             "E_JENKINS_CAPTURE_IDENTITY",
             "Jenkins capture manifest does not match the certified execution",
@@ -468,14 +493,14 @@ fn collect_tree(
     Ok(())
 }
 
-fn verify_source_and_pipeline(root: &Path) -> Result<(), VerificationError> {
-    if sha256(&read(root, "jenkins/Jenkinsfile")?) != SOURCE_SHA256 {
+fn verify_source_and_pipeline(bundle: &Bundle) -> Result<(), VerificationError> {
+    if sha256(&read(bundle, "jenkins/Jenkinsfile")?) != SOURCE_SHA256 {
         return Err(VerificationError::new(
             "E_SOURCE",
             "source digest is not the admitted source",
         ));
     }
-    if sha256(&read(root, "pipeline.yaml")?) != PIPELINE_SHA256 {
+    if sha256(&read(bundle, "pipeline.yaml")?) != PIPELINE_SHA256 {
         return Err(VerificationError::new(
             "E_PIPELINE",
             "pipeline digest is not the admitted compilation",
@@ -484,8 +509,8 @@ fn verify_source_and_pipeline(root: &Path) -> Result<(), VerificationError> {
     Ok(())
 }
 
-fn verify_jenkins_job_definition(root: &Path) -> Result<(), VerificationError> {
-    let init = read(root, "jenkins/init.groovy")?;
+fn verify_jenkins_job_definition(bundle: &Bundle) -> Result<(), VerificationError> {
+    let init = read(bundle, "jenkins/init.groovy")?;
     if sha256(&init) != JENKINS_INIT_SHA256 {
         return Err(VerificationError::new(
             "E_JENKINS_SOURCE",
@@ -493,7 +518,7 @@ fn verify_jenkins_job_definition(root: &Path) -> Result<(), VerificationError> {
         ));
     }
 
-    let controller_log = text(root, "jenkins/controller.log")?;
+    let controller_log = text(bundle, "jenkins/controller.log")?;
     let init_position = controller_log
         .find("Executing /var/jenkins_home/init.groovy.d/99-diff001.groovy")
         .ok_or_else(|| {
@@ -514,8 +539,8 @@ fn verify_jenkins_job_definition(root: &Path) -> Result<(), VerificationError> {
     Ok(())
 }
 
-fn verify_coverage(root: &Path) -> Result<Coverage, VerificationError> {
-    let bytes = read(root, "coverage.yaml")?;
+fn verify_coverage(bundle: &Bundle) -> Result<Coverage, VerificationError> {
+    let bytes = read(bundle, "coverage.yaml")?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| VerificationError::new("E_COVERAGE", error.to_string()))?;
     let coverage: Coverage = serde_saphyr::from_str(text)
@@ -576,8 +601,8 @@ fn verify_coverage(root: &Path) -> Result<Coverage, VerificationError> {
     Ok(coverage)
 }
 
-fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
-    let build = json(root, "jenkins/build.json")?;
+fn derive_jenkins_trace(bundle: &Bundle) -> Result<CanonicalTrace, VerificationError> {
+    let build = json(bundle, "jenkins/build.json")?;
     exact_object_keys(
         &build,
         &[],
@@ -643,7 +668,7 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_empty_array(&build, &["changeSets"], "E_JENKINS_BUILD")?;
     exact_empty_array(&build, &["culprits"], "E_JENKINS_BUILD")?;
 
-    let workflow = json(root, "jenkins/wfapi.json")?;
+    let workflow = json(bundle, "jenkins/wfapi.json")?;
     exact_object_keys(
         &workflow,
         &[],
@@ -731,7 +756,7 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
         "E_JENKINS_WORKFLOW",
     )?;
 
-    let stage = json(root, "jenkins/stage-build.json")?;
+    let stage = json(bundle, "jenkins/stage-build.json")?;
     exact_object_keys(
         &stage,
         &[],
@@ -842,21 +867,21 @@ Hello World\n\
 [Pipeline] // node\n\
 [Pipeline] End of Pipeline\n\
 Finished: SUCCESS\n";
-    if text(root, "jenkins/console.txt")? != EXPECTED_CONSOLE {
+    if text(bundle, "jenkins/console.txt")? != EXPECTED_CONSOLE {
         return Err(VerificationError::new(
             "E_JENKINS_LOG",
             "Jenkins console transcript is not exact",
         ));
     }
-    if !read(root, "jenkins/workspace.tsv")?.is_empty()
-        || !read(root, "jenkins/workspace-tmp.tsv")?.is_empty()
+    if !read(bundle, "jenkins/workspace.tsv")?.is_empty()
+        || !read(bundle, "jenkins/workspace-tmp.tsv")?.is_empty()
     {
         return Err(VerificationError::new(
             "E_JENKINS_WORKSPACE",
             "Jenkins workspace is not empty",
         ));
     }
-    verify_jenkins_containment(root)?;
+    verify_jenkins_containment(bundle)?;
     Ok(expected_trace())
 }
 
@@ -920,9 +945,13 @@ fn verify_jenkins_chronology(
     Ok(())
 }
 
-fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
-    verify_receipt_digests(root, &JENKINS_CONTAINMENT_RECEIPTS, "E_JENKINS_CONTAINMENT")?;
-    let image_inspect = json(root, "jenkins/image-inspect.json")?;
+fn verify_jenkins_containment(bundle: &Bundle) -> Result<(), VerificationError> {
+    verify_receipt_digests(
+        bundle,
+        &JENKINS_CONTAINMENT_RECEIPTS,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    let image_inspect = json(bundle, "jenkins/image-inspect.json")?;
     let image = first_object(&image_inspect, "E_JENKINS_CONTAINMENT")?;
     exact_string(
         image,
@@ -933,7 +962,7 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
     exact_string(image, &["Architecture"], "amd64", "E_JENKINS_CONTAINMENT")?;
     exact_string(image, &["Os"], "linux", "E_JENKINS_CONTAINMENT")?;
 
-    let inspect = json(root, "jenkins/container-inspect.json")?;
+    let inspect = json(bundle, "jenkins/container-inspect.json")?;
     let container = inspect
         .as_array()
         .and_then(|values| values.first())
@@ -1290,8 +1319,8 @@ controller_timeout_kill_after_seconds=30\n\
 jenkins_home_ceiling_bytes=2147483648\n\
 controller_log_ceiling_bytes=16777216\n\
 controller_log_observed_bytes=8721\n";
-    if text(root, "jenkins/external-network.txt")? != EXPECTED_EXTERNAL_NETWORK
-        || text(root, "jenkins/runtime.txt")? != EXPECTED_RUNTIME
+    if text(bundle, "jenkins/external-network.txt")? != EXPECTED_EXTERNAL_NETWORK
+        || text(bundle, "jenkins/runtime.txt")? != EXPECTED_RUNTIME
     {
         return Err(VerificationError::new(
             "E_JENKINS_CONTAINMENT",
@@ -1301,8 +1330,8 @@ controller_log_observed_bytes=8721\n";
     Ok(())
 }
 
-fn verify_jenkins_plugin_profile(root: &Path) -> Result<(), VerificationError> {
-    let manifest = read(root, "jenkins/PLUGIN_SHA256SUMS")?;
+fn verify_jenkins_plugin_profile(bundle: &Bundle) -> Result<(), VerificationError> {
+    let manifest = read(bundle, "jenkins/PLUGIN_SHA256SUMS")?;
     if sha256(&manifest) != JENKINS_PLUGIN_MANIFEST_SHA256 {
         return Err(VerificationError::new(
             "E_JENKINS_PLUGINS",
@@ -1349,7 +1378,7 @@ latest_plugin_mtime_epoch=1785045308.9504840000\n\
 jenkins_execution_started_at=2026-08-01T17:24:40.33500311Z\n\
 verified_at=2026-08-01T17:26:25Z\n\
 verification=sha256sum-strict-all-ok\n";
-    if text(root, "jenkins/plugin-verification.txt")? != EXPECTED_RECEIPT {
+    if text(bundle, "jenkins/plugin-verification.txt")? != EXPECTED_RECEIPT {
         return Err(VerificationError::new(
             "E_JENKINS_PLUGINS",
             "Jenkins plugin verification receipt differs",
@@ -1358,9 +1387,9 @@ verification=sha256sum-strict-all-ok\n";
     Ok(())
 }
 
-fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
-    verify_mcloving_containment(root)?;
-    let raw = json(root, "mcloving/mcloving-raw.json")?;
+fn derive_mcloving_trace(bundle: &Bundle) -> Result<CanonicalTrace, VerificationError> {
+    verify_mcloving_containment(bundle)?;
+    let raw = json(bundle, "mcloving/mcloving-raw.json")?;
     exact_object_keys(
         &raw,
         &[],
@@ -1695,7 +1724,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         exact_empty_array(&raw, &[field], "E_MCLOVING")?;
     }
     let checked: CanonicalTrace =
-        serde_json::from_slice(&read(root, "mcloving/mcloving-trace.json")?)
+        serde_json::from_slice(&read(bundle, "mcloving/mcloving-trace.json")?)
             .map_err(|error| VerificationError::new("E_MCLOVING_TRACE", error.to_string()))?;
     let expected = expected_trace();
     if checked != expected {
@@ -1707,13 +1736,13 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     Ok(expected)
 }
 
-fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
+fn verify_mcloving_containment(bundle: &Bundle) -> Result<(), VerificationError> {
     verify_receipt_digests(
-        root,
+        bundle,
         &MCLOVING_CONTAINMENT_RECEIPTS,
         "E_MCLOVING_CONTAINMENT",
     )?;
-    let network_inspect = json(root, "mcloving/network-inspect.json")?;
+    let network_inspect = json(bundle, "mcloving/network-inspect.json")?;
     let network = first_object(&network_inspect, "E_MCLOVING_CONTAINMENT")?;
     exact_string(
         network,
@@ -1769,7 +1798,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         "E_MCLOVING_CONTAINMENT",
     )?;
 
-    let pre = json(root, "mcloving/runner-inspect-pre.json")?;
+    let pre = json(bundle, "mcloving/runner-inspect-pre.json")?;
     let pre = first_object(&pre, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(pre, false)?;
     verify_network_attachment(pre, "", "", 0, "", "a9bcaa4cfcd9")?;
@@ -1781,7 +1810,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         "E_MCLOVING_CONTAINMENT",
     )?;
 
-    let post = json(root, "mcloving/runner-inspect-post.json")?;
+    let post = json(bundle, "mcloving/runner-inspect-post.json")?;
     let post = first_object(&post, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(post, true)?;
     verify_network_attachment(post, "", "", 0, "", "a9bcaa4cfcd9")?;
@@ -1804,7 +1833,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         "E_MCLOVING_CONTAINMENT",
     )?;
 
-    let database = json(root, "mcloving/postgres-inspect.json")?;
+    let database = json(bundle, "mcloving/postgres-inspect.json")?;
     let database = first_object(&database, "E_MCLOVING_CONTAINMENT")?;
     verify_common_container(
         database,
@@ -1976,7 +2005,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         "E_MCLOVING_CONTAINMENT",
     )?;
 
-    let runtime = text(root, "mcloving/runtime.txt")?;
+    let runtime = text(bundle, "mcloving/runtime.txt")?;
     let expected_runtime = format!(
         "uid=1000(srikanth) gid=1000(1000) groups=1000(1000)\n\
 Linux a9bcaa4cfcd9 7.0.0-28-generic #28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 15:50:57 UTC 2 x86_64 GNU/Linux\n\
@@ -2005,8 +2034,8 @@ LC_ALL=C.UTF-8\n\
         ));
     }
     const EXPECTED_TEST_OUTPUT: &str = "\nrunning 1 test\ntest admitted_jenkins_case_executes_with_a_canonical_trace ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s\n\n";
-    if text(root, "mcloving/database-integrity.txt")? != "mcloving|1\n"
-        || text(root, "mcloving/test-output.txt")? != EXPECTED_TEST_OUTPUT
+    if text(bundle, "mcloving/database-integrity.txt")? != "mcloving|1\n"
+        || text(bundle, "mcloving/test-output.txt")? != EXPECTED_TEST_OUTPUT
     {
         return Err(VerificationError::new(
             "E_MCLOVING_CONTAINMENT",
@@ -2301,12 +2330,12 @@ fn verify_network_attachment(
 }
 
 fn verify_receipt_digests(
-    root: &Path,
+    bundle: &Bundle,
     receipts: &[(&str, &str)],
     code: &'static str,
 ) -> Result<(), VerificationError> {
     for (path, expected_digest) in receipts {
-        if sha256(&read(root, path)?) != *expected_digest {
+        if sha256(&read(bundle, path)?) != *expected_digest {
             return Err(VerificationError::new(
                 code,
                 format!("detached digest differs for {path}"),
@@ -2343,7 +2372,7 @@ fn expected_trace() -> CanonicalTrace {
     }
 }
 
-fn read(root: &Path, name: &str) -> Result<Vec<u8>, VerificationError> {
+fn read_path(root: &Path, name: &str) -> Result<Vec<u8>, VerificationError> {
     validate_relative_path(name)?;
     let path = root.join(name);
     let metadata = fs::symlink_metadata(&path)
@@ -2357,13 +2386,27 @@ fn read(root: &Path, name: &str) -> Result<Vec<u8>, VerificationError> {
     fs::read(&path).map_err(|error| VerificationError::new("E_READ", format!("{name}: {error}")))
 }
 
-fn text(root: &Path, name: &str) -> Result<String, VerificationError> {
-    String::from_utf8(read(root, name)?)
+fn read(bundle: &Bundle, name: &str) -> Result<Vec<u8>, VerificationError> {
+    validate_relative_path(name)?;
+    let bytes = bundle
+        .get(name)
+        .ok_or_else(|| VerificationError::new("E_READ", format!("missing {name}")))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(VerificationError::new(
+            "E_BOUNDS",
+            format!("{name} exceeds the byte ceiling"),
+        ));
+    }
+    Ok(bytes.clone())
+}
+
+fn text(bundle: &Bundle, name: &str) -> Result<String, VerificationError> {
+    String::from_utf8(read(bundle, name)?)
         .map_err(|error| VerificationError::new("E_TEXT", format!("{name}: {error}")))
 }
 
-fn json(root: &Path, name: &str) -> Result<Value, VerificationError> {
-    serde_json::from_slice(&read(root, name)?)
+fn json(bundle: &Bundle, name: &str) -> Result<Value, VerificationError> {
+    serde_json::from_slice(&read(bundle, name)?)
         .map_err(|error| VerificationError::new("E_JSON", format!("{name}: {error}")))
 }
 

@@ -34,6 +34,7 @@ plugin compatibility are not promised.
 
 See:
 
+- [Mario end-to-end alpha demo](docs/ALPHA_DEMO.md)
 - [Architecture charter](docs/architecture/CHARTER.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Execution board](docs/EXECUTION_BOARD.md)

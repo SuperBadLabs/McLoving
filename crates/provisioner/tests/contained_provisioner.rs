@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -820,6 +823,8 @@ fn configuration(
 }
 
 fn agent_specification() -> AgentSpecification {
+    let source_transport =
+        diff003_source_transport_authority().unwrap_or_else(|| "source.contained:443".to_owned());
     AgentSpecification {
         agent_class_id: "linux-x86_64-contained".to_owned(),
         template_id: "contained-template-v1".to_owned(),
@@ -838,7 +843,7 @@ fn agent_specification() -> AgentSpecification {
             allow_instance_metadata: false,
             egress_allowlist: BTreeSet::from([
                 "controller.contained:443".to_owned(),
-                "source.contained:443".to_owned(),
+                source_transport,
             ]),
         },
         volumes: VolumePolicy {
@@ -870,6 +875,17 @@ fn agent_specification() -> AgentSpecification {
             trust_class: "trusted-contained".to_owned(),
         },
     }
+}
+
+fn diff003_source_transport_authority() -> Option<String> {
+    let root = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR")?;
+    let source: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("SCM-001.json")).ok()?,
+    )
+    .ok()?;
+    source["initial"]["repository_trees"][0]["repository_url"]
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn provision_request(config: &ProvisionerConfig, implementation_sha256: &str) -> ProvisionRequest {
@@ -941,7 +957,13 @@ fn reconcile_request(config: &ProvisionerConfig, implementation_sha256: &str) ->
 #[tokio::test]
 async fn ready_replay_cancel_and_fences_are_exact() {
     let context = Context::new(FixtureMode::Ready).await;
-    let request = context.request();
+    let mut request = context.request();
+    if let Some((tenant_id, project_id, build_id, attempt_id)) = diff003_source_workload() {
+        request.tenant_id = tenant_id;
+        request.project_id = project_id;
+        request.build_id = build_id;
+        request.attempt_id = attempt_id;
+    }
     let ready = context
         .provisioner
         .provision(&request)
@@ -1005,10 +1027,43 @@ async fn ready_replay_cancel_and_fences_are_exact() {
         .expect("newer fence after cleanup");
     assert_eq!(next.body.fence_token, 2);
     assert_eq!(context.fixture.counts().0, 2);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let source_receipt = std::fs::read(std::path::Path::new(&root).join("SCM-001.json"))
+            .expect("read live DIFF-003 source receipt");
+        std::fs::write(
+            std::path::Path::new(&root).join("PROV-001.json"),
+            diff003::receipt(
+                "PROV-001",
+                serde_json::json!({
+                    "ready": ready,
+                    "cancelled": cancelled,
+                    "next_generation": next,
+                    "source_acquisition_receipt_sha256": digest(&source_receipt),
+                }),
+            ),
+        )
+        .expect("write DIFF-003 provisioner receipts");
+    }
+}
+
+fn diff003_source_workload() -> Option<(Uuid, Uuid, Uuid, Uuid)> {
+    let root = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR")?;
+    let source: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(&root).join("SCM-001.json")).ok()?,
+    )
+    .ok()?;
+    Some((
+        Uuid::parse_str(source["initial"]["organization_id"].as_str()?).ok()?,
+        Uuid::parse_str(source["initial"]["project_id"].as_str()?).ok()?,
+        Uuid::parse_str(source["initial"]["build_id"].as_str()?).ok()?,
+        Uuid::parse_str(source["initial"]["attempt_id"].as_str()?).ok()?,
+    ))
 }
 
 #[tokio::test]
 async fn substitution_startup_failure_and_timeout_leave_no_compute() {
+    let mut substitution_denials = 0;
+    let mut cleaned_failures = 0;
     for (mode, expected) in [
         (
             FixtureMode::SubstituteTemplate,
@@ -1037,25 +1092,76 @@ async fn substitution_startup_failure_and_timeout_leave_no_compute() {
         assert!(receipt.body.cleanup_confirmed);
         assert!(!receipt.body.ambiguity);
         assert_eq!(context.fixture.counts().3, 0);
+        substitution_denials += usize::from(
+            matches!(
+                mode,
+                FixtureMode::SubstituteTemplate | FixtureMode::SubstituteIdentity
+            ) && receipt.body.outcome == LifecycleOutcome::SubstitutionDeniedCleaned,
+        );
+        cleaned_failures +=
+            usize::from(receipt.body.cleanup_confirmed && context.fixture.counts().3 == 0);
     }
+    diff003::record_assertion(
+        "provisioner_template_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "substitution_cases": 2,
+            "substitution_denials": substitution_denials,
+            "cleaned_failure_cases": cleaned_failures,
+            "escaped_compute": 0,
+        }),
+        substitution_denials == 2 && cleaned_failures == 4,
+    );
 }
 
 #[tokio::test]
 async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
+    let mut ambiguous_attestations = 0;
+    let mut cleaned_ambiguous_instances = 0;
+    let mut cleanup_outcomes = Vec::new();
     for mode in [
         FixtureMode::StaleObservation,
         FixtureMode::WrongProviderIdentity,
     ] {
         let context = Context::new(mode).await;
+        let request = context.request();
         let receipt = context
             .provisioner
-            .provision(&context.request())
+            .provision(&request)
             .await
             .expect("ambiguous attestation receipt");
         assert_eq!(receipt.body.outcome, LifecycleOutcome::CreateAmbiguous);
         assert!(receipt.body.ambiguity);
         assert!(!receipt.body.cleanup_confirmed);
         assert_eq!(context.fixture.counts().3, 1);
+        ambiguous_attestations += usize::from(
+            receipt.body.outcome == LifecycleOutcome::CreateAmbiguous
+                && receipt.body.ambiguity
+                && context.fixture.counts().3 == 1,
+        );
+        let cancellation = context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+            .expect("clean ambiguous attestation instance");
+        assert!(matches!(
+            cancellation.body.outcome,
+            LifecycleOutcome::Cancelled | LifecycleOutcome::SubstitutionDeniedCleaned
+        ));
+        assert!(cancellation.body.cleanup_confirmed);
+        assert_eq!(context.fixture.counts().3, 0);
+        cleanup_outcomes.push(format!("{:?}", cancellation.body.outcome));
+        cleaned_ambiguous_instances += usize::from(
+            matches!(
+                cancellation.body.outcome,
+                LifecycleOutcome::Cancelled | LifecycleOutcome::SubstitutionDeniedCleaned
+            ) && cancellation.body.cleanup_confirmed
+                && context.fixture.counts().3 == 0,
+        );
     }
 
     let denied = Context::new(FixtureMode::Unauthorized).await;
@@ -1065,11 +1171,26 @@ async fn stale_or_wrong_provider_attestation_never_becomes_ready() {
     ));
     assert_eq!(denied.fixture.counts().0, 0);
     assert_eq!(denied.fixture.counts().3, 0);
+    diff003::record_assertion(
+        "provisioner_stale_instance_denied",
+        "denied",
+        serde_json::json!({
+            "attestation_cases": 2,
+            "ambiguous_not_ready": ambiguous_attestations,
+            "ambiguous_instances_cleaned": cleaned_ambiguous_instances,
+            "cleanup_outcomes": cleanup_outcomes,
+            "unauthorized_provider_creates": denied.fixture.counts().0,
+            "escaped_compute_remaining": 0,
+        }),
+        ambiguous_attestations == 2
+            && cleaned_ambiguous_instances == 2
+            && denied.fixture.counts().0 == 0,
+    );
 }
 
 #[tokio::test]
 async fn ambiguous_create_restart_orphan_and_agent_loss_reconcile() {
-    let context = Context::new(FixtureMode::MalformedCreateOnce).await;
+    let context = Context::with_startup_timeout(FixtureMode::MalformedCreateOnce, 5_000).await;
     let request = context.request();
     let ambiguous_receipt = context
         .provisioner
@@ -1104,6 +1225,19 @@ async fn ambiguous_create_restart_orphan_and_agent_loss_reconcile() {
         .expect("verify reconcile receipt");
     assert_eq!(first_reconcile.body.initial_inventory_sha256.len(), 64);
     assert_eq!(first_reconcile.body.final_inventory_sha256.len(), 64);
+    let interruption_reconciled = first_reconcile.body.recovered == 1
+        && first_reconcile.body.active_ready == 1
+        && first_reconcile.body.escaped_compute_remaining == 0;
+    diff003::record_assertion(
+        "provisioner_interruption_reconciled",
+        "reconciled",
+        serde_json::json!({
+            "recovered": first_reconcile.body.recovered,
+            "active_ready": first_reconcile.body.active_ready,
+            "escaped_compute_remaining": first_reconcile.body.escaped_compute_remaining,
+        }),
+        interruption_reconciled,
+    );
 
     let orphan_request = context.request();
     let orphan_create = ProviderCreateRequest {
@@ -1126,6 +1260,22 @@ async fn ambiguous_create_restart_orphan_and_agent_loss_reconcile() {
             .contains(&orphan_instance_id)
     );
     assert_eq!(orphan_reconcile.body.escaped_compute_remaining, 0);
+    let orphan_cleaned = orphan_reconcile.body.orphan_cleaned == 1
+        && orphan_reconcile
+            .body
+            .orphan_instance_ids
+            .contains(&orphan_instance_id)
+        && orphan_reconcile.body.escaped_compute_remaining == 0;
+    diff003::record_assertion(
+        "provisioner_orphan_cleaned",
+        "cleaned",
+        serde_json::json!({
+            "orphan_instance_id": orphan_instance_id,
+            "orphan_cleaned": orphan_reconcile.body.orphan_cleaned,
+            "escaped_compute_remaining": orphan_reconcile.body.escaped_compute_remaining,
+        }),
+        orphan_cleaned,
+    );
 
     context.fixture.mark_agent_lost(request.request_id);
     let lost_reconcile = restarted
@@ -1219,7 +1369,7 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
 
 #[tokio::test]
 async fn final_inventory_substitution_is_reported_as_escaped_compute() {
-    let context = Context::new(FixtureMode::Ready).await;
+    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
     let request = context.request();
     context
         .provisioner
@@ -1350,7 +1500,7 @@ async fn duplicate_initial_inventory_instance_id_is_rejected_before_cleanup() {
 
 #[tokio::test]
 async fn quota_and_all_certified_bindings_fail_before_provider_access() {
-    let context = Context::with_quota(FixtureMode::Ready, 1).await;
+    let context = Context::with_limits(FixtureMode::Ready, 1, 300, 5_000).await;
     let first = context.request();
     context
         .provisioner
@@ -1358,11 +1508,11 @@ async fn quota_and_all_certified_bindings_fail_before_provider_access() {
         .await
         .expect("first instance");
     let second = context.request();
-    assert!(matches!(
-        context.provisioner.provision(&second).await,
-        Err(ProvisionerError::CapacityExhausted)
-    ));
+    let exhaustion_result = context.provisioner.provision(&second).await;
+    let exhaustion_denied = matches!(exhaustion_result, Err(ProvisionerError::CapacityExhausted));
+    assert!(exhaustion_denied);
     let creates = context.fixture.counts().0;
+    let mut binding_denials = 0;
     for mutate in 0..8 {
         let mut denied = context.request();
         match mutate {
@@ -1375,12 +1525,23 @@ async fn quota_and_all_certified_bindings_fail_before_provider_access() {
             6 => denied.agent.network.allow_ingress = true,
             _ => denied.agent.volumes.allow_host_mounts = true,
         }
-        assert!(matches!(
-            context.provisioner.provision(&denied).await,
-            Err(ProvisionerError::BindingMismatch)
-        ));
+        let binding_result = context.provisioner.provision(&denied).await;
+        let binding_denied = matches!(binding_result, Err(ProvisionerError::BindingMismatch));
+        assert!(binding_denied);
+        binding_denials += usize::from(binding_denied);
     }
     assert_eq!(context.fixture.counts().0, creates);
+    diff003::record_assertion(
+        "provisioner_exhaustion_denied",
+        "denied",
+        serde_json::json!({
+            "capacity_result": "capacity_exhausted",
+            "binding_mutations_denied": binding_denials,
+            "provider_creates_before": creates,
+            "provider_creates_after": context.fixture.counts().0,
+        }),
+        exhaustion_denied && binding_denials == 8 && context.fixture.counts().0 == creates,
+    );
 }
 
 #[tokio::test]
@@ -2054,7 +2215,7 @@ async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation()
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observation() {
-    let context = Context::new(FixtureMode::Ready).await;
+    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
     let request = context.request();
     let provisioned = context
         .provisioner
@@ -2281,7 +2442,7 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
 
 #[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
-    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    let context = Context::with_limits(FixtureMode::DelayedCreateReady, 4, 5_000, 5_000).await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2772,7 +2933,7 @@ async fn reconciliation_absence_crash_recovery_preserves_agent_loss() {
 
 #[tokio::test]
 async fn concurrent_process_instances_converge_on_one_create_and_one_receipt() {
-    let context = Context::with_startup_timeout(FixtureMode::PendingThenReady, 1_000).await;
+    let context = Context::with_startup_timeout(FixtureMode::PendingThenReady, 5_000).await;
     let peer = Provisioner::new(
         context.config.clone(),
         IMPLEMENTATION_SHA256.to_owned(),

@@ -7,6 +7,75 @@ use crate::{Store, StoreError};
 
 pub const MAX_PRODUCT_PAGE: u32 = 200;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineOperationalState {
+    Enabled,
+    Disabled,
+}
+
+impl PipelineOperationalState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    fn from_stored(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(StoreError::InvalidPipelineState(format!(
+                "stored pipeline operational state '{other}' is invalid"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PipelineOperationalStateRecord {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub generation: i64,
+    pub state: PipelineOperationalState,
+    pub reason: String,
+    pub actor_subject: String,
+    pub source_identity: String,
+    pub source_generation: String,
+    pub source_effective_at_unix_ms: i64,
+    pub source_provenance_sha256: [u8; 32],
+    pub idempotency_key: String,
+    pub effective_at_unix_ms: i64,
+    pub audit_sequence: Option<i64>,
+    pub audit_event_hash: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PipelineOperationalStateTransition {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub expected_generation: i64,
+    pub state: PipelineOperationalState,
+    pub reason: String,
+    pub actor_subject: String,
+    pub source_identity: String,
+    pub source_generation: String,
+    pub source_effective_at_unix_ms: i64,
+    pub source_provenance_sha256: [u8; 32],
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PipelineOperationalStateTransitionOutcome {
+    Applied(PipelineOperationalStateRecord),
+    Idempotent(PipelineOperationalStateRecord),
+    NotFound,
+    PreconditionFailed { current_generation: i64 },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PipelineWrite {
     pub organization_id: Uuid,
@@ -34,6 +103,8 @@ pub struct PipelineRecord {
     pub schema_major: i32,
     pub schema_minor: i32,
     pub parameter_schema: Value,
+    pub operational_generation: i64,
+    pub operational_state: PipelineOperationalState,
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
 }
@@ -404,7 +475,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
-        crate::audit::append_audit_record(
+        let audit = crate::audit::append_audit_record(
             &mut tx,
             input.organization_id,
             "pipeline",
@@ -426,6 +497,32 @@ impl Store {
             }),
         )
         .await?;
+        if outcome_kind == 0 {
+            sqlx::query(
+                "INSERT INTO pipeline_operational_state_history (
+                     organization_id, project_id, pipeline_id, generation, state,
+                     reason, actor_subject, source_identity, source_generation,
+                     source_effective_at_unix_ms, source_provenance_sha256,
+                     idempotency_key, audit_sequence, audit_event_hash
+                 )
+                 VALUES (
+                     $1, $2, $3, 1, 'enabled',
+                     'pipeline created enabled', $4, 'pipeline:create', 'revision:1',
+                     $5, $6, $7, $8, $9
+                 )",
+            )
+            .bind(input.organization_id)
+            .bind(input.project_id)
+            .bind(input.pipeline_id)
+            .bind(actor_subject)
+            .bind(audit.occurred_at_unix_ms)
+            .bind(input.source_sha256.as_slice())
+            .bind(format!("pipeline:create:{}", input.pipeline_id))
+            .bind(audit.sequence)
+            .bind(audit.event_hash.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        }
         let record =
             pipeline_record_in_transaction(&mut tx, input.organization_id, input.pipeline_id)
                 .await?
@@ -457,6 +554,198 @@ impl Store {
         Ok(record)
     }
 
+    pub async fn pipeline_operational_state(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+    ) -> Result<Option<PipelineOperationalStateRecord>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let record =
+            pipeline_operational_state_in_transaction(&mut tx, organization_id, pipeline_id, None)
+                .await?;
+        if record
+            .as_ref()
+            .is_some_and(|record| record.project_id != project_id)
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn transition_pipeline_operational_state(
+        &self,
+        input: &PipelineOperationalStateTransition,
+    ) -> Result<PipelineOperationalStateTransitionOutcome, StoreError> {
+        validate_pipeline_operational_transition(input)?;
+        let next_generation = input.expected_generation.checked_add(1).ok_or_else(|| {
+            StoreError::InvalidPipelineState(
+                "pipeline operational-state generation overflow".to_owned(),
+            )
+        })?;
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.pipeline.{}.{}",
+                input.organization_id, input.pipeline_id
+            ))
+            .execute(&mut *tx)
+            .await?;
+
+        if let Some(existing) = pipeline_operational_state_by_idempotency_in_transaction(
+            &mut tx,
+            input.organization_id,
+            input.pipeline_id,
+            &input.idempotency_key,
+        )
+        .await?
+        {
+            let exact = existing.project_id == input.project_id
+                && existing.generation == next_generation
+                && existing.state == input.state
+                && existing.reason == input.reason
+                && existing.actor_subject == input.actor_subject
+                && existing.source_identity == input.source_identity
+                && existing.source_generation == input.source_generation
+                && existing.source_effective_at_unix_ms == input.source_effective_at_unix_ms
+                && existing.source_provenance_sha256 == input.source_provenance_sha256;
+            if exact {
+                tx.commit().await?;
+                return Ok(PipelineOperationalStateTransitionOutcome::Idempotent(
+                    existing,
+                ));
+            }
+            tx.rollback().await?;
+            return Err(StoreError::PipelineStateConflict(format!(
+                "idempotency key '{}' is already bound to a different transition",
+                input.idempotency_key
+            )));
+        }
+
+        let current = sqlx::query(
+            "SELECT d.project_id, d.operational_generation, h.state
+             FROM pipeline_definitions AS d
+             JOIN pipeline_operational_state_history AS h
+               ON h.organization_id = d.organization_id
+              AND h.pipeline_id = d.pipeline_id
+              AND h.generation = d.operational_generation
+             WHERE d.organization_id = $1 AND d.pipeline_id = $2
+             FOR UPDATE OF d",
+        )
+        .bind(input.organization_id)
+        .bind(input.pipeline_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current) = current else {
+            tx.rollback().await?;
+            return Ok(PipelineOperationalStateTransitionOutcome::NotFound);
+        };
+        if current.try_get::<Uuid, _>("project_id")? != input.project_id {
+            tx.rollback().await?;
+            return Ok(PipelineOperationalStateTransitionOutcome::NotFound);
+        }
+        let current_generation: i64 = current.try_get("operational_generation")?;
+        if current_generation != input.expected_generation {
+            tx.rollback().await?;
+            return Ok(
+                PipelineOperationalStateTransitionOutcome::PreconditionFailed {
+                    current_generation,
+                },
+            );
+        }
+        let current_state =
+            PipelineOperationalState::from_stored(current.try_get::<&str, _>("state")?)?;
+        if current_state == input.state {
+            tx.rollback().await?;
+            return Err(StoreError::InvalidPipelineState(format!(
+                "pipeline is already {} at generation {current_generation}",
+                current_state.as_str()
+            )));
+        }
+
+        let audit = crate::audit::append_audit_record(
+            &mut tx,
+            input.organization_id,
+            "pipeline",
+            &input.actor_subject,
+            if input.state == PipelineOperationalState::Enabled {
+                "pipeline.enabled"
+            } else {
+                "pipeline.disabled"
+            },
+            &format!(
+                "project:{}:pipeline:{}",
+                input.project_id, input.pipeline_id
+            ),
+            json!({
+                "project_id": input.project_id,
+                "pipeline_id": input.pipeline_id,
+                "previous_generation": current_generation,
+                "generation": next_generation,
+                "state": input.state.as_str(),
+                "reason": input.reason,
+                "source_identity": input.source_identity,
+                "source_generation": input.source_generation,
+                "source_effective_at_unix_ms": input.source_effective_at_unix_ms,
+                "source_provenance_sha256": hex::encode(input.source_provenance_sha256),
+                "idempotency_key": input.idempotency_key,
+            }),
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO pipeline_operational_state_history (
+                 organization_id, project_id, pipeline_id, generation, state,
+                 reason, actor_subject, source_identity, source_generation,
+                 source_effective_at_unix_ms, source_provenance_sha256,
+                 idempotency_key, audit_sequence, audit_event_hash
+             )
+             VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+             )",
+        )
+        .bind(input.organization_id)
+        .bind(input.project_id)
+        .bind(input.pipeline_id)
+        .bind(next_generation)
+        .bind(input.state.as_str())
+        .bind(&input.reason)
+        .bind(&input.actor_subject)
+        .bind(&input.source_identity)
+        .bind(&input.source_generation)
+        .bind(input.source_effective_at_unix_ms)
+        .bind(input.source_provenance_sha256.as_slice())
+        .bind(&input.idempotency_key)
+        .bind(audit.sequence)
+        .bind(audit.event_hash.as_slice())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE pipeline_definitions
+             SET operational_generation = $4
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND pipeline_id = $3",
+        )
+        .bind(input.organization_id)
+        .bind(input.project_id)
+        .bind(input.pipeline_id)
+        .bind(next_generation)
+        .execute(&mut *tx)
+        .await?;
+        let record = pipeline_operational_state_in_transaction(
+            &mut tx,
+            input.organization_id,
+            input.pipeline_id,
+            Some(next_generation),
+        )
+        .await?
+        .ok_or(StoreError::IncompleteAdmission)?;
+        tx.commit().await?;
+        Ok(PipelineOperationalStateTransitionOutcome::Applied(record))
+    }
+
     pub async fn pipelines(
         &self,
         organization_id: Uuid,
@@ -471,6 +760,7 @@ impl Store {
                     d.current_revision AS revision, r.source,
                     r.source_sha256, r.semantic_digest,
                     r.schema_major, r.schema_minor, r.parameter_schema,
+                    d.operational_generation, s.state AS operational_state,
                     (EXTRACT(EPOCH FROM d.created_at) * 1000)::bigint AS created_ms,
                     (EXTRACT(EPOCH FROM d.updated_at) * 1000)::bigint AS updated_ms
              FROM pipeline_definitions AS d
@@ -478,6 +768,10 @@ impl Store {
                ON r.organization_id = d.organization_id
               AND r.pipeline_id = d.pipeline_id
               AND r.revision = d.current_revision
+             JOIN pipeline_operational_state_history AS s
+               ON s.organization_id = d.organization_id
+              AND s.pipeline_id = d.pipeline_id
+              AND s.generation = d.operational_generation
              WHERE d.organization_id = $1
                AND d.project_id = $2
                AND ($3::text IS NULL OR d.slug > $3)
@@ -1005,6 +1299,7 @@ async fn pipeline_record_in_transaction(
                 d.current_revision AS revision, r.source,
                 r.source_sha256, r.semantic_digest,
                 r.schema_major, r.schema_minor, r.parameter_schema,
+                d.operational_generation, s.state AS operational_state,
                 (EXTRACT(EPOCH FROM d.created_at) * 1000)::bigint AS created_ms,
                 (EXTRACT(EPOCH FROM d.updated_at) * 1000)::bigint AS updated_ms
          FROM pipeline_definitions AS d
@@ -1012,6 +1307,10 @@ async fn pipeline_record_in_transaction(
            ON r.organization_id = d.organization_id
           AND r.pipeline_id = d.pipeline_id
           AND r.revision = d.current_revision
+         JOIN pipeline_operational_state_history AS s
+           ON s.organization_id = d.organization_id
+          AND s.pipeline_id = d.pipeline_id
+          AND s.generation = d.operational_generation
          WHERE d.organization_id = $1 AND d.pipeline_id = $2",
     )
     .bind(organization_id)
@@ -1034,8 +1333,96 @@ fn pipeline_record_from_row(row: &sqlx::postgres::PgRow) -> Result<PipelineRecor
         schema_major: row.try_get("schema_major")?,
         schema_minor: row.try_get("schema_minor")?,
         parameter_schema: row.try_get("parameter_schema")?,
+        operational_generation: row.try_get("operational_generation")?,
+        operational_state: PipelineOperationalState::from_stored(
+            row.try_get("operational_state")?,
+        )?,
         created_at_unix_ms: row.try_get("created_ms")?,
         updated_at_unix_ms: row.try_get("updated_ms")?,
+    })
+}
+
+async fn pipeline_operational_state_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    pipeline_id: Uuid,
+    generation: Option<i64>,
+) -> Result<Option<PipelineOperationalStateRecord>, StoreError> {
+    let row = sqlx::query(
+        "SELECT h.organization_id, h.project_id, h.pipeline_id, h.generation,
+                h.state, h.reason, h.actor_subject, h.source_identity,
+                h.source_generation, h.source_effective_at_unix_ms,
+                h.source_provenance_sha256, h.idempotency_key,
+                (EXTRACT(EPOCH FROM h.effective_at) * 1000)::bigint AS effective_ms,
+                h.audit_sequence, h.audit_event_hash
+         FROM pipeline_definitions AS d
+         JOIN pipeline_operational_state_history AS h
+           ON h.organization_id = d.organization_id
+          AND h.pipeline_id = d.pipeline_id
+          AND h.generation = COALESCE($3, d.operational_generation)
+         WHERE d.organization_id = $1 AND d.pipeline_id = $2",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .bind(generation)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref()
+        .map(pipeline_operational_state_from_row)
+        .transpose()
+}
+
+async fn pipeline_operational_state_by_idempotency_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    pipeline_id: Uuid,
+    idempotency_key: &str,
+) -> Result<Option<PipelineOperationalStateRecord>, StoreError> {
+    let row = sqlx::query(
+        "SELECT organization_id, project_id, pipeline_id, generation,
+                state, reason, actor_subject, source_identity,
+                source_generation, source_effective_at_unix_ms,
+                source_provenance_sha256, idempotency_key,
+                (EXTRACT(EPOCH FROM effective_at) * 1000)::bigint AS effective_ms,
+                audit_sequence, audit_event_hash
+         FROM pipeline_operational_state_history
+         WHERE organization_id = $1
+           AND pipeline_id = $2
+           AND idempotency_key = $3",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref()
+        .map(pipeline_operational_state_from_row)
+        .transpose()
+}
+
+fn pipeline_operational_state_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<PipelineOperationalStateRecord, StoreError> {
+    let audit_event_hash = row
+        .try_get::<Option<Vec<u8>>, _>("audit_event_hash")?
+        .map(digest)
+        .transpose()?;
+    Ok(PipelineOperationalStateRecord {
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        pipeline_id: row.try_get("pipeline_id")?,
+        generation: row.try_get("generation")?,
+        state: PipelineOperationalState::from_stored(row.try_get("state")?)?,
+        reason: row.try_get("reason")?,
+        actor_subject: row.try_get("actor_subject")?,
+        source_identity: row.try_get("source_identity")?,
+        source_generation: row.try_get("source_generation")?,
+        source_effective_at_unix_ms: row.try_get("source_effective_at_unix_ms")?,
+        source_provenance_sha256: digest(row.try_get("source_provenance_sha256")?)?,
+        idempotency_key: row.try_get("idempotency_key")?,
+        effective_at_unix_ms: row.try_get("effective_ms")?,
+        audit_sequence: row.try_get("audit_sequence")?,
+        audit_event_hash,
     })
 }
 
@@ -1085,6 +1472,32 @@ fn validate_pipeline_write(input: &PipelineWrite) -> Result<(), StoreError> {
     {
         return Err(StoreError::InvalidProductOperation(
             "pipeline catalog input is outside its bounds".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pipeline_operational_transition(
+    input: &PipelineOperationalStateTransition,
+) -> Result<(), StoreError> {
+    let canonical_bounded = |value: &str, maximum: usize| {
+        !value.is_empty()
+            && value.len() <= maximum
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    };
+    if input.expected_generation <= 0
+        || !canonical_bounded(&input.reason, 2048)
+        || !canonical_bounded(&input.actor_subject, 512)
+        || !canonical_bounded(&input.source_identity, 512)
+        || input.source_identity == "migration:v27"
+        || !canonical_bounded(&input.source_generation, 512)
+        || input.source_effective_at_unix_ms < 0
+        || input.source_provenance_sha256 == [0; 32]
+        || !canonical_bounded(&input.idempotency_key, 256)
+    {
+        return Err(StoreError::InvalidPipelineState(
+            "pipeline operational-state transition is outside its bounds".to_owned(),
         ));
     }
     Ok(())

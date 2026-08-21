@@ -3,12 +3,14 @@ use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, ComponentPutOutcome, ComponentWrite,
-    DagDependency, DagNodeKind, DependencyCondition, EffectClass, EffectStatus, JunitLimits,
-    MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus, PipelinePutOutcome,
-    PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
-    TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
+    AgentReconciliationDisposition, BuildAdmission, CancellationDecision, ClaimRequest,
+    ComponentPutOutcome, ComponentWrite, DagAdmission, DagDependency, DagNodeKind,
+    DependencyCondition, EffectClass, EffectEvidenceKind, EffectStatus, JunitLimits,
+    LeaseRenewalDisposition, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
+    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
+    ObjectStatus, OutboxBacklog, PipelinePutOutcome, PipelineRecord, PipelineWrite,
+    ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
+    TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use mcloving_state_transfer::{
     BuildResult as TransferBuildResult, BuildState as TransferBuildState, ConflictPolicy,
@@ -34,6 +36,90 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+trait TestBoundAdmission {
+    async fn admit_test_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError>;
+    async fn admit_test_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError>;
+}
+
+impl TestBoundAdmission for Store {
+    async fn admit_test_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError> {
+        let pipeline = bind_test_pipeline(
+            self,
+            input.organization_id,
+            input.project_id,
+            input.pipeline_id,
+            input.pipeline_digest,
+        )
+        .await?;
+        let mut bound = input.clone();
+        bound.pipeline_revision = pipeline.revision;
+        bound.pipeline_operational_generation = pipeline.operational_generation;
+        self.admit_build(&bound).await
+    }
+
+    async fn admit_test_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {
+        let pipeline = bind_test_pipeline(
+            self,
+            input.organization_id,
+            input.project_id,
+            input.pipeline_id,
+            input.pipeline_digest,
+        )
+        .await?;
+        let mut bound = input.clone();
+        bound.pipeline_revision = pipeline.revision;
+        bound.pipeline_operational_generation = pipeline.operational_generation;
+        self.admit_dag(&bound).await
+    }
+}
+
+async fn bind_test_pipeline(
+    store: &Store,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    semantic_digest: [u8; 32],
+) -> Result<PipelineRecord, StoreError> {
+    let current = store
+        .pipeline(organization_id, project_id, pipeline_id)
+        .await?;
+    if current
+        .as_ref()
+        .is_some_and(|pipeline| pipeline.semantic_digest == semantic_digest)
+    {
+        return Ok(current.expect("matching current pipeline exists"));
+    }
+    let source = format!("test pipeline {}", hex::encode(semantic_digest));
+    let expected_revision = current.as_ref().map_or(0, |pipeline| pipeline.revision);
+    let outcome = store
+        .put_pipeline(
+            &PipelineWrite {
+                organization_id,
+                project_id,
+                pipeline_id,
+                slug: format!("test-{project_id}"),
+                source_sha256: Sha256::digest(source.as_bytes()).into(),
+                source,
+                semantic_digest,
+                schema_major: 1,
+                schema_minor: 0,
+                parameter_schema: json!({}),
+            },
+            Some(expected_revision),
+        )
+        .await?;
+    match outcome {
+        PipelinePutOutcome::Created(record)
+        | PipelinePutOutcome::Updated(record)
+        | PipelinePutOutcome::Unchanged(record) => Ok(record),
+        PipelinePutOutcome::PreconditionFailed { current_revision } => {
+            Err(StoreError::ProductConflict(format!(
+                "test pipeline binding raced at revision {current_revision}"
+            )))
+        }
+    }
 }
 
 #[tokio::test]
@@ -803,6 +889,49 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     .await
     .expect("count state-transfer audit records");
     assert_eq!(audit_count, 3);
+
+    // Bounded outbox retention must never consume state-transfer proof rows:
+    // the reaper excludes the 'state_transfer.imported' topic regardless of
+    // age, and the receipt flow replays exactly afterwards.
+    sqlx::query(
+        "UPDATE outbox
+         SET created_at = clock_timestamp() - interval '8760 hours'
+         WHERE organization_id = $1 AND topic = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect("age state-transfer outbox rows far past any retention horizon");
+    assert_eq!(
+        store
+            .reap_outbox(organization_id, 1, 1_000)
+            .await
+            .expect("reap with an aggressive one-hour horizon"),
+        0
+    );
+    let retained_outbox: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count retained state-transfer outbox records");
+    assert_eq!(retained_outbox, 3);
+    let replay_after_reap = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("state-transfer receipt replays exactly after the reaper runs");
+    assert!(!replay_after_reap.created);
+    assert_eq!(replay_after_reap.id, first.id);
 }
 
 fn transfer_digest(byte: u8) -> [u8; 32] {
@@ -1111,9 +1240,12 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
         .await
         .expect("create tenant");
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "session-fenced-work".into(),
             pipeline_digest: [0x5e; 32],
             node_key: "execute".into(),
@@ -1233,7 +1365,7 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             .await
             .expect("start under current session")
     );
-    assert!(
+    assert_eq!(
         store
             .renew_attempt_lease_in_session(
                 organization_id,
@@ -1245,10 +1377,12 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
                 30,
             )
             .await
-            .expect("reject stale renewal")
-            .is_none()
+            .expect("reject stale renewal"),
+        LeaseRenewalDisposition::Rejected {
+            cause: "agent_session_stale"
+        }
     );
-    assert!(
+    assert_eq!(
         store
             .renew_attempt_lease_in_session(
                 organization_id,
@@ -1260,8 +1394,10 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
                 30,
             )
             .await
-            .expect("renew current session")
-            .is_some()
+            .expect("renew current session"),
+        LeaseRenewalDisposition::Renewed {
+            cancellation_requested: false
+        }
     );
     let chunk = NewLogChunk {
         organization_id,
@@ -1328,7 +1464,132 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             )
             .await
             .expect("terminal replay renewal is an idempotent no-op"),
-        Some(false)
+        LeaseRenewalDisposition::TerminalNoOp
+    );
+    // A refused renewal is controller-visible named truth; the terminal-replay
+    // no-op above must not add one.
+    let rejection_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'
+           AND payload ->> 'cause' = 'agent_session_stale'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count renewal rejection events");
+    assert_eq!(
+        rejection_events, 1,
+        "the stale-session renewal denial must be named in the event stream"
+    );
+    // The out-of-transaction recording wrapper binds to durable lease truth:
+    // a caller naming an attempt it does not lease, or a stale fence, appends
+    // nothing, so a stale-session agent cannot forge rejection events.
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            "an-agent-that-does-not-hold-this-lease",
+            "agent_session_stale",
+        )
+        .await
+        .expect("foreign-agent recording attempt returns without error");
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence + 41,
+            &agent_id,
+            "agent_session_stale",
+        )
+        .await
+        .expect("stale-fence recording attempt returns without error");
+    let after_forgery_attempts = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after forgery attempts");
+    assert_eq!(
+        after_forgery_attempts, 1,
+        "unverified callers must not inject rejection events"
+    );
+    // A terminal attempt retains its lease_owner but holds no live lease; a
+    // correct-owner, correct-fence recording attempt against it must also
+    // append nothing.
+    store
+        .record_lease_renewal_rejection(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            &agent_id,
+            "agent_session_stale",
+        )
+        .await
+        .expect("terminal-attempt recording attempt returns without error");
+    let after_terminal_attempt = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after the terminal-attempt probe");
+    assert_eq!(
+        after_terminal_attempt, 1,
+        "a terminal attempt without a live lease must not accrete rejection events"
+    );
+    // The in-transaction path carries the same binding. A renewal that passed
+    // the request boundary's non-locking authority check can serialize only
+    // after the attempt terminalized; its stale-session refusal must stay a
+    // receipt, not a second published fact contradicting the terminal no-op
+    // the live-session renewal above recorded for this very attempt.
+    assert_eq!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                30,
+            )
+            .await
+            .expect("stale-session renewal against a terminal attempt"),
+        LeaseRenewalDisposition::Rejected {
+            cause: "agent_session_stale"
+        }
+    );
+    let after_terminal_stale_session = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.lease_renewal_rejected'",
+    )
+    .bind(organization_id)
+    .bind(claim.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count rejection events after the terminal stale-session renewal");
+    assert_eq!(
+        after_terminal_stale_session, 1,
+        "a stale-session refusal must not append against a terminalized attempt"
     );
 }
 
@@ -1352,6 +1613,9 @@ async fn admission_is_atomic_and_idempotent() {
     let input = NewBuild {
         organization_id,
         project_id,
+        pipeline_id: project_id,
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "submission-1".into(),
         pipeline_digest: [7; 32],
         node_key: "stage-1".into(),
@@ -1361,8 +1625,14 @@ async fn admission_is_atomic_and_idempotent() {
         execution_spec: json!({}),
     };
 
-    let first = store.admit_build(&input).await.expect("first admission");
-    let second = store.admit_build(&input).await.expect("repeat admission");
+    let first = store
+        .admit_test_build(&input)
+        .await
+        .expect("first admission");
+    let second = store
+        .admit_test_build(&input)
+        .await
+        .expect("repeat admission");
     assert!(first.created);
     assert!(!second.created);
     assert_eq!(first.build_id, second.build_id);
@@ -1385,6 +1655,208 @@ async fn admission_is_atomic_and_idempotent() {
 }
 
 #[tokio::test]
+async fn outbox_reaper_bounds_retention_and_respects_tenancy() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_a = Uuid::new_v4();
+    let project_a = Uuid::new_v4();
+    store
+        .create_project(
+            organization_a,
+            &format!("org-{organization_a}"),
+            project_a,
+            "reaper-a",
+        )
+        .await
+        .expect("create reaper tenant A");
+    let organization_b = Uuid::new_v4();
+    let project_b = Uuid::new_v4();
+    store
+        .create_project(
+            organization_b,
+            &format!("org-{organization_b}"),
+            project_b,
+            "reaper-b",
+        )
+        .await
+        .expect("create reaper tenant B");
+    for (organization_id, project_id, key) in [
+        (organization_a, project_a, "reap-old-1"),
+        (organization_a, project_a, "reap-old-2"),
+        (organization_a, project_a, "reap-young"),
+        (organization_b, project_b, "reap-neighbor"),
+    ] {
+        store
+            .admit_test_build(&NewBuild {
+                organization_id,
+                project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
+                idempotency_key: key.into(),
+                pipeline_digest: [11; 32],
+                node_key: "stage-1".into(),
+                required_capabilities: vec!["linux".into()],
+                required_trust_pool: "trusted".into(),
+                priority: 10,
+                execution_spec: json!({}),
+            })
+            .await
+            .expect("admit outbox-producing build");
+    }
+
+    // Age tenant B's row and tenant A's two oldest rows past a 168-hour
+    // horizon. The admin test role stands in for elapsed wall-clock time.
+    let aged = sqlx::query(
+        "UPDATE outbox
+         SET created_at = clock_timestamp() - interval '240 hours'
+         WHERE organization_id = $2
+            OR id IN (
+                SELECT id FROM outbox WHERE organization_id = $1 ORDER BY id LIMIT 2
+            )",
+    )
+    .bind(organization_a)
+    .bind(organization_b)
+    .execute(store.pool())
+    .await
+    .expect("age outbox rows past the retention horizon");
+    assert_eq!(aged.rows_affected(), 3);
+
+    // Both sides of the age comparison must share one clock source; the
+    // aged rows were stamped by Postgres, so "now" comes from Postgres too.
+    let now_unix_ms = sqlx::query_scalar::<_, i64>(
+        "SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read database clock");
+    let before = store
+        .outbox_backlog(organization_a)
+        .await
+        .expect("read backlog before reap");
+    assert_eq!(before.unpublished_count, 3);
+    assert_eq!(before.total_count, 3);
+    let oldest = before
+        .oldest_unpublished_created_at_unix_ms
+        .expect("aged rows expose an oldest unpublished timestamp");
+    assert!(oldest < now_unix_ms - 239 * 3_600 * 1_000);
+
+    // Out-of-range inputs reap nothing, mirroring publish_outbox bounds.
+    for (older_than_hours, limit) in [(0, 512), (168, 0), (168, 1_001), (u32::MAX, 512)] {
+        assert_eq!(
+            store
+                .reap_outbox(organization_a, older_than_hours, limit)
+                .await
+                .expect("out-of-range reap input is a bounded no-op"),
+            0
+        );
+    }
+
+    // The RLS-constrained runtime role reaps only its own tenant, oldest
+    // first, in bounded batches, and repeating the reap is a no-op.
+    let runtime_store = unprivileged_store(&store).await;
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 1)
+            .await
+            .expect("reap first bounded batch"),
+        1
+    );
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 512)
+            .await
+            .expect("reap remaining expired rows"),
+        1
+    );
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 512)
+            .await
+            .expect("repeat reap is a no-op"),
+        0
+    );
+
+    // Tenant B's row is past the horizon but belongs to another tenant.
+    let neighbor_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox WHERE organization_id = $1")
+            .bind(organization_b)
+            .fetch_one(store.pool())
+            .await
+            .expect("count neighbor outbox rows");
+    assert_eq!(neighbor_rows, 1);
+
+    let after = store
+        .outbox_backlog(organization_a)
+        .await
+        .expect("read backlog after reap");
+    assert_eq!(after.unpublished_count, 1);
+    assert_eq!(after.total_count, 1);
+    assert!(
+        after
+            .oldest_unpublished_created_at_unix_ms
+            .expect("the young row remains unpublished")
+            > now_unix_ms - 3_600 * 1_000
+    );
+
+    // The surviving young row still publishes exactly once.
+    let published = store
+        .publish_outbox(organization_a, 10)
+        .await
+        .expect("publish surviving outbox rows");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].topic, "build.admitted");
+    assert!(
+        store
+            .publish_outbox(organization_a, 10)
+            .await
+            .expect("republish returns nothing")
+            .is_empty()
+    );
+    let drained = store
+        .outbox_backlog(organization_a)
+        .await
+        .expect("read backlog after publish");
+    assert_eq!(drained.unpublished_count, 0);
+    assert_eq!(drained.total_count, 1);
+    assert_eq!(drained.oldest_unpublished_created_at_unix_ms, None);
+
+    // Retention applies to published rows too: publication never exempts a
+    // row from the horizon, because outbox rows are delivery staging while
+    // build_events and audit_events remain the durable records.
+    sqlx::query(
+        "UPDATE outbox
+         SET created_at = clock_timestamp() - interval '240 hours'
+         WHERE organization_id = $1",
+    )
+    .bind(organization_a)
+    .execute(store.pool())
+    .await
+    .expect("age the published row past the retention horizon");
+    assert_eq!(
+        runtime_store
+            .reap_outbox(organization_a, 168, 512)
+            .await
+            .expect("reap the aged published row"),
+        1
+    );
+    assert_eq!(
+        store
+            .outbox_backlog(organization_a)
+            .await
+            .expect("read emptied backlog"),
+        OutboxBacklog {
+            unpublished_count: 0,
+            oldest_unpublished_created_at_unix_ms: None,
+            total_count: 0,
+            protected_count: 0,
+        }
+    );
+}
+
+#[tokio::test]
 async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1402,9 +1874,12 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "cancel-before-claim".into(),
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
@@ -1472,6 +1947,288 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
 }
 
 #[tokio::test]
+async fn missing_and_legacy_build_cancellation_remain_no_ops() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "legacy-cancellation",
+        )
+        .await
+        .expect("create legacy cancellation tenant");
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, Uuid::new_v4())
+            .await
+            .expect("missing cancellation target remains a no-op")
+    );
+
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "legacy-cancellation-binding".into(),
+            pipeline_digest: [0x81; 32],
+            node_key: "legacy-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit legacy cancellation fixture");
+    sqlx::query(
+        "UPDATE builds SET pipeline_id=NULL, pipeline_revision=NULL,
+                           pipeline_operational_generation=NULL,
+                           pipeline_revision_digest=NULL
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(store.pool())
+    .await
+    .expect("remove the post-v27 operational binding");
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("legacy cancellation target remains a no-op")
+    );
+}
+
+#[tokio::test]
+async fn execution_reads_cancellation_after_the_pipeline_lock() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "post-lock-cancellation",
+        )
+        .await
+        .expect("create post-lock cancellation tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "post-lock-cancellation".into(),
+            pipeline_digest: [0x82; 32],
+            node_key: "post-lock-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit post-lock cancellation build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "post-lock-scheduler".into(),
+            agent_id: "post-lock-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim post-lock attempt")
+        .expect("post-lock attempt is claimable");
+
+    let mut cancellation = store.pool().begin().await.expect("begin cancellation race");
+    sqlx::query(
+        "SELECT d.pipeline_id
+         FROM pipeline_definitions AS d
+         WHERE d.organization_id=$1 AND d.pipeline_id=$2
+         FOR UPDATE OF d",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(&mut *cancellation)
+    .await
+    .expect("lock pipeline before cancellation publication");
+    sqlx::query(
+        "UPDATE builds SET cancellation_requested_at=clock_timestamp()
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(&mut *cancellation)
+    .await
+    .expect("stage cancellation behind the pipeline lock");
+
+    let execution_store = store.clone();
+    let execution_claim = claim.clone();
+    let execution = tokio::spawn(async move {
+        execution_store
+            .attempt_execution(
+                execution_claim.organization_id,
+                execution_claim.attempt_id,
+                execution_claim.fence,
+                execution_claim.restore_epoch,
+                &execution_claim.agent_id,
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancellation
+        .commit()
+        .await
+        .expect("commit the cancellation before execution acquires the pipeline lock");
+    let loaded = execution
+        .await
+        .expect("join post-lock execution read")
+        .expect("load post-lock execution")
+        .expect("exact attempt remains executable");
+    assert!(
+        loaded.cancellation_requested,
+        "the authoritative cancellation read must occur after the pipeline lock"
+    );
+}
+
+#[tokio::test]
+async fn execution_revalidates_lease_after_the_pipeline_lock() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "post-lock-lease",
+        )
+        .await
+        .expect("create post-lock lease tenant");
+    store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "post-lock-lease".into(),
+            pipeline_digest: [0x83; 32],
+            node_key: "post-lock-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit post-lock lease build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "post-lock-lease-scheduler".into(),
+            agent_id: "post-lock-lease-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim post-lock lease attempt")
+        .expect("post-lock lease attempt is claimable");
+
+    let mut authority_loss = store.pool().begin().await.expect("begin lease race");
+    sqlx::query(
+        "SELECT d.pipeline_id
+         FROM pipeline_definitions AS d
+         WHERE d.organization_id=$1 AND d.pipeline_id=$2
+         FOR UPDATE OF d",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(&mut *authority_loss)
+    .await
+    .expect("lock pipeline before lease expiry");
+    let authority_loss_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *authority_loss)
+        .await
+        .expect("read lease-expiry transaction backend PID");
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at=clock_timestamp() - interval '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(&mut *authority_loss)
+    .await
+    .expect("stage lease expiry behind the pipeline lock");
+
+    let execution_store = store.clone();
+    let execution_claim = claim.clone();
+    let execution = tokio::spawn(async move {
+        execution_store
+            .attempt_execution(
+                execution_claim.organization_id,
+                execution_claim.attempt_id,
+                execution_claim.fence,
+                execution_claim.restore_epoch,
+                &execution_claim.agent_id,
+            )
+            .await
+    });
+    let mut execution_reached_pipeline_lock = false;
+    for _ in 0..100 {
+        execution_reached_pipeline_lock = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid))
+             )",
+        )
+        .bind(authority_loss_backend_pid)
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect execution pipeline-lock waiter");
+        if execution_reached_pipeline_lock {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        execution_reached_pipeline_lock,
+        "execution must complete its initial authority read and wait on the held pipeline lock"
+    );
+    authority_loss
+        .commit()
+        .await
+        .expect("commit lease expiry before execution acquires the pipeline lock");
+    let loaded = execution
+        .await
+        .expect("join post-lock execution read")
+        .expect("load post-lock execution result");
+    assert!(
+        loaded.is_none(),
+        "the complete execution-authority predicate must be revalidated after the pipeline lock"
+    );
+}
+
+#[tokio::test]
 async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1502,9 +2259,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             .expect("open agent session")
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-complete".into(),
             pipeline_digest: [0xAC; 32],
             node_key: "stage-1".into(),
@@ -1629,9 +2389,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(completions, 1);
 
     let recovered = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-recovery-termination".into(),
             pipeline_digest: [0xAE; 32],
             node_key: "stage-recovery".into(),
@@ -1742,9 +2505,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(recovery_events, 1);
 
     let retained = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-unverifiable".into(),
             pipeline_digest: [0xAD; 32],
             node_key: "stage-unverifiable".into(),
@@ -1828,9 +2594,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(retained_events, 1);
 
     let recycled = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-recycled-pid".into(),
             pipeline_digest: [0xAE; 32],
             node_key: "stage-recycled".into(),
@@ -1914,9 +2683,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(recycled_events, 1);
 
     let re_enrolled = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-re-enrolled-trust-pool".into(),
             pipeline_digest: [0xAF; 32],
             node_key: "stage-re-enrolled".into(),
@@ -1997,6 +2769,306 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
 }
 
 #[tokio::test]
+async fn recovered_discharge_is_authorized_only_when_the_fence_is_disowned() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("exec003-discharge-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "recovered-discharge",
+        )
+        .await
+        .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                1,
+                0,
+                &["journal-v1".to_owned()],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("open agent session")
+    );
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "recovered-discharge-parked".into(),
+            pipeline_digest: [0xD1; 32],
+            node_key: "stage-parked".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit parked build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: agent_id.clone(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim parked work")
+        .expect("parked claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+            )
+            .await
+            .expect("accept parked offer")
+    );
+
+    // An interrupted execution that cannot prove containment parks the
+    // attempt; while the controller-side reconciliation is unresolved the
+    // report stays parked and is never discharged.
+    let completion = AgentCancellationCompletion {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        session_epoch: 1,
+        outcome: AgentCancellationOutcome::ReconciliationRequired,
+    };
+    for label in ["park recovered attempt", "replay parked recovered attempt"] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(completion)
+                .await
+                .expect(label),
+            AgentCancellationDisposition::ReconciliationRequired
+        );
+    }
+    let parked = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read parked build")
+        .expect("parked build exists");
+    assert_eq!(parked.build_status, "reconciliation_required");
+    assert_eq!(parked.attempt_status, "reconciliation_required");
+
+    // Cancelling the parked build is refused with its exact state instead of
+    // a bare conflict.
+    assert_eq!(
+        store
+            .request_cancellation_decision_as(
+                organization_id,
+                project_id,
+                admission.build_id,
+                "oidc:operator",
+            )
+            .await
+            .expect("decide parked cancellation"),
+        CancellationDecision::NotCancellable {
+            build_status: Some("reconciliation_required".to_owned()),
+        }
+    );
+    assert_eq!(
+        store
+            .request_cancellation_decision_as(
+                organization_id,
+                project_id,
+                Uuid::new_v4(),
+                "oidc:operator",
+            )
+            .await
+            .expect("decide unknown cancellation"),
+        CancellationDecision::NotCancellable { build_status: None }
+    );
+
+    // A stale session can never obtain a discharge authorization.
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                session_epoch: 999,
+                ..completion
+            })
+            .await
+            .expect("reject stale-session discharge"),
+        AgentCancellationDisposition::RetireStale
+    );
+
+    // The explicit operator retry supersedes the parked fence, and only then
+    // is the recovered report authorized to discharge.
+    assert!(matches!(
+        store
+            .schedule_retry_as(
+                organization_id,
+                claim.attempt_id,
+                3,
+                "operator resolves the recovered attempt",
+                "oidc:operator",
+            )
+            .await
+            .expect("schedule operator retry"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    for label in ["authorize discharge", "replay discharge authorization"] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(completion)
+                .await
+                .expect(label),
+            AgentCancellationDisposition::DischargeRecovered
+        );
+    }
+    let discharge_events = sqlx::query_as::<_, (i64, Value)>(
+        "SELECT count(*), min(payload::text)::jsonb
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.recovered_discharge_authorized'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count discharge authorizations");
+    assert_eq!(discharge_events.0, 1, "discharge replay emits one event");
+    assert_eq!(
+        discharge_events.1.get("reason").and_then(Value::as_str),
+        Some("operator_retry_superseded")
+    );
+    assert_eq!(
+        discharge_events.1.get("agent_id").and_then(Value::as_str),
+        Some(agent_id.as_str())
+    );
+
+    // A fence that finished as terminal truth also discharges a late
+    // recovered report — the collision-twin case.
+    let terminal = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "recovered-discharge-terminal".into(),
+            pipeline_digest: [0xD2; 32],
+            node_key: "stage-terminal".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            // Outranks the operator-retry child queued above so this claim is
+            // deterministic.
+            priority: 100,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit terminal build");
+    let terminal_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: agent_id.clone(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 2,
+        })
+        .await
+        .expect("claim terminal work")
+        .expect("terminal claim exists");
+    assert_eq!(terminal_claim.build_id, terminal.build_id);
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                terminal_claim.attempt_id,
+                terminal_claim.fence,
+                terminal_claim.restore_epoch,
+                &agent_id,
+            )
+            .await
+            .expect("accept terminal offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, terminal.build_id)
+            .await
+            .expect("request terminal cancellation")
+    );
+    let terminal_completion = AgentCancellationCompletion {
+        organization_id,
+        attempt_id: terminal_claim.attempt_id,
+        fence: terminal_claim.fence,
+        restore_epoch: terminal_claim.restore_epoch,
+        agent_id: &agent_id,
+        session_epoch: 1,
+        outcome: AgentCancellationOutcome::Terminated,
+    };
+    assert_eq!(
+        store
+            .complete_agent_cancellation(terminal_completion)
+            .await
+            .expect("complete terminal cancellation"),
+        AgentCancellationDisposition::Completed
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                outcome: AgentCancellationOutcome::ReconciliationRequired,
+                ..terminal_completion
+            })
+            .await
+            .expect("discharge late recovered report for terminal fence"),
+        AgentCancellationDisposition::DischargeRecovered
+    );
+
+    // A fence this controller does not know at all discharges a recovered
+    // report, while every other outcome keeps the stale-retirement contract.
+    let unknown = AgentCancellationCompletion {
+        organization_id,
+        attempt_id: Uuid::new_v4(),
+        fence: 7,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        session_epoch: 1,
+        outcome: AgentCancellationOutcome::ReconciliationRequired,
+    };
+    assert_eq!(
+        store
+            .complete_agent_cancellation(unknown)
+            .await
+            .expect("discharge unknown recovered report"),
+        AgentCancellationDisposition::DischargeRecovered
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                outcome: AgentCancellationOutcome::Terminated,
+                ..unknown
+            })
+            .await
+            .expect("retire unknown terminated report"),
+        AgentCancellationDisposition::RetireStale
+    );
+}
+
+#[tokio::test]
 async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -2027,9 +3099,12 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
             .expect("open agent session")
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-reconciliation".into(),
             pipeline_digest: [0xCE; 32],
             node_key: "stage-1".into(),
@@ -2183,6 +3258,177 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
 }
 
 #[tokio::test]
+async fn cancellation_aware_publication_derives_the_terminal_under_its_own_lock() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "cancellation-aware-publication",
+        )
+        .await
+        .expect("create tenant");
+    let claim_leased_attempt = async |key: &'static str| {
+        let admission = store
+            .admit_test_build(&NewBuild {
+                organization_id,
+                project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
+                idempotency_key: key.into(),
+                pipeline_digest: [0xAB; 32],
+                node_key: "stage-1".into(),
+                required_capabilities: vec!["linux".into()],
+                required_trust_pool: "trusted".into(),
+                priority: 0,
+                execution_spec: json!({}),
+            })
+            .await
+            .expect("admit build");
+        let claim = store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-a".into(),
+                agent_id: "agent-a".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim query")
+            .expect("claim exists");
+        assert!(
+            store
+                .accept_offer(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "agent-a",
+                )
+                .await
+                .expect("accept offer")
+        );
+        (admission, claim)
+    };
+    let summary = json!({"observation_joined": true});
+
+    // A cancellation that commits after the caller read execution state must
+    // still win: the publishing transaction re-derives the terminal under the
+    // attempt row lock the cancellation writer also takes.
+    let (cancelled_build, cancelled) = claim_leased_attempt("cancellation-aware-cancelled").await;
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, cancelled_build.build_id)
+            .await
+            .expect("request cancellation after the caller's execution read")
+    );
+    assert_eq!(
+        store
+            .finalize_attempt_cancellation_aware(
+                organization_id,
+                cancelled.attempt_id,
+                cancelled.fence,
+                cancelled.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary.clone(),
+            )
+            .await
+            .expect("publish under a committed cancellation"),
+        Some(TerminalOutcome::Aborted),
+        "a committed cancellation must override the caller's stale terminal"
+    );
+    let cancelled_snapshot = store
+        .build_snapshot(organization_id, project_id, cancelled_build.build_id)
+        .await
+        .expect("read cancelled snapshot")
+        .expect("build exists");
+    assert_eq!(cancelled_snapshot.attempt_status, "aborted");
+    // The agent retries naming the outcome it originally asked for; the
+    // substitution must read as the same publication, not authority loss.
+    assert_eq!(
+        store
+            .finalize_attempt_cancellation_aware(
+                organization_id,
+                cancelled.attempt_id,
+                cancelled.fence,
+                cancelled.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary.clone(),
+            )
+            .await
+            .expect("replay the substituted publication"),
+        Some(TerminalOutcome::Aborted)
+    );
+
+    // Without a cancellation the caller's own terminal is published unchanged.
+    let (plain_build, plain) = claim_leased_attempt("cancellation-aware-uncancelled").await;
+    assert_eq!(
+        store
+            .finalize_attempt_cancellation_aware(
+                organization_id,
+                plain.attempt_id,
+                plain.fence,
+                plain.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary.clone(),
+            )
+            .await
+            .expect("publish without a cancellation"),
+        Some(TerminalOutcome::Succeeded)
+    );
+    let plain_snapshot = store
+        .build_snapshot(organization_id, project_id, plain_build.build_id)
+        .await
+        .expect("read uncancelled snapshot")
+        .expect("build exists");
+    assert_eq!(plain_snapshot.attempt_status, "succeeded");
+
+    // The contrast that motivates the aware entry point: the ordinary
+    // publication accepts a `cancelling` attempt and takes the caller's word,
+    // so a caller whose cancellation read predates the commit publishes the
+    // wrong terminal.
+    let (unaware_build, unaware) = claim_leased_attempt("cancellation-aware-contrast").await;
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, unaware_build.build_id)
+            .await
+            .expect("request cancellation before the unaware publication")
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                unaware.attempt_id,
+                unaware.fence,
+                unaware.restore_epoch,
+                "agent-a",
+                TerminalOutcome::Succeeded,
+                summary,
+            )
+            .await
+            .expect("publish through the unaware path")
+    );
+    let unaware_snapshot = store
+        .build_snapshot(organization_id, project_id, unaware_build.build_id)
+        .await
+        .expect("read unaware snapshot")
+        .expect("build exists");
+    assert_eq!(unaware_snapshot.attempt_status, "succeeded");
+}
+
+#[tokio::test]
 async fn cancellation_targets_the_latest_retry_attempt() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -2200,9 +3446,12 @@ async fn cancellation_targets_the_latest_retry_attempt() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "cancel-current-retry".into(),
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
@@ -2450,9 +3699,12 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         "runtime role must not bootstrap tenant metadata"
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "runtime-role".into(),
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
@@ -2500,9 +3752,12 @@ async fn concurrent_terminal_publication_has_one_winner() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "terminal-race".into(),
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
@@ -2609,9 +3864,12 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
         .await
         .expect("create tenant");
     let build = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "release-pool".into(),
             pipeline_digest: [0x71; 32],
             node_key: "release".into(),
@@ -2762,9 +4020,12 @@ async fn scheduler_explains_the_offered_pool_before_higher_priority_other_pool_w
         .await
         .expect("create tenant");
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "higher-release".into(),
             pipeline_digest: [0x72; 32],
             node_key: "release".into(),
@@ -2776,9 +4037,12 @@ async fn scheduler_explains_the_offered_pool_before_higher_priority_other_pool_w
         .await
         .expect("admit higher-priority release work");
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "lower-trusted".into(),
             pipeline_digest: [0x73; 32],
             node_key: "trusted".into(),
@@ -2820,9 +4084,12 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
         .await
         .expect("create tenant");
     let windows = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "windows".into(),
             pipeline_digest: [1; 32],
             node_key: "windows-stage".into(),
@@ -2834,9 +4101,12 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
         .await
         .expect("admit Windows work");
     let linux = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "linux".into(),
             pipeline_digest: [2; 32],
             node_key: "linux-stage".into(),
@@ -2921,9 +4191,12 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reclaim".into(),
             pipeline_digest: [3; 32],
             node_key: "stage".into(),
@@ -3022,9 +4295,12 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "effect-expiry".into(),
             pipeline_digest: [39; 32],
             node_key: "deploy".into(),
@@ -3252,9 +4528,12 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "confirmed-effect-expiry".into(),
             pipeline_digest: [40; 32],
             node_key: "deploy".into(),
@@ -3416,9 +4695,12 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-decision".into(),
             pipeline_digest: [42; 32],
             node_key: "recover".into(),
@@ -3512,9 +4794,12 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
     assert_eq!(child.attempt_id, child_id);
 
     let exhausted = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-dead-letter".into(),
             pipeline_digest: [43; 32],
             node_key: "exhausted".into(),
@@ -3614,9 +4899,12 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
     );
 
     let terminal_first = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-terminal-first".into(),
             pipeline_digest: [44; 32],
             node_key: "terminal-first".into(),
@@ -3741,9 +5029,12 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "fenced-logs".into(),
             pipeline_digest: [19; 32],
             node_key: "stage-1".into(),
@@ -3975,6 +5266,745 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
 }
 
 #[tokio::test]
+async fn expired_undispatched_reservation_can_be_abandoned_and_closed() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "expired-release-pending",
+        )
+        .await
+        .expect("create release-pending tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "expired-release-pending".into(),
+            pipeline_digest: [0x84; 32],
+            node_key: "release-pending-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit release-pending build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "release-pending-scheduler".into(),
+            agent_id: "release-pending-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim release-pending attempt")
+        .expect("release-pending attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept release-pending offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    for (status, label) in [
+        (EffectStatus::Prepared, "prepare undispatched effect"),
+        (
+            EffectStatus::ReleasePending,
+            "retain failed observer reservation release",
+        ),
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &payload,
+                )
+                .await
+                .expect(label)
+        );
+    }
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"reason": "observer_reservation_release"}),
+            )
+            .await
+            .expect("route release-pending effect to reconciliation")
+    );
+    let pending = store
+        .uncertain_effects(organization_id)
+        .await
+        .expect("list release-pending effect");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, EffectStatus::ReleasePending);
+    assert!(
+        !store
+            .confirm_uncertain_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("release-pending effect cannot be confirmed as dispatched")
+    );
+    let mut substituted_payload = payload.clone();
+    substituted_payload["request_sha256"] = json!("b".repeat(64));
+    assert!(
+        !store
+            .abandon_expired_release_pending_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &substituted_payload,
+            )
+            .await
+            .expect("reject substituted cleanup payload")
+    );
+    assert!(
+        store
+            .abandon_expired_release_pending_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("abandon expired undispatched reservation")
+    );
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "release-reconciler",
+                TerminalOutcome::Succeeded,
+                json!({"reason": "observer_reservation_expired"}),
+            )
+            .await
+            .expect("abandoned effect cannot become a success")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "release-reconciler",
+                TerminalOutcome::Aborted,
+                json!({"reason": "observer_reservation_expired"}),
+            )
+            .await
+            .expect("close expired undispatched reservation")
+    );
+    let terminal = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("load closed release-pending build")
+        .expect("release-pending build exists");
+    assert_eq!(terminal.build_status, "aborted");
+    assert_eq!(terminal.attempt_status, "aborted");
+}
+
+#[tokio::test]
+async fn dispatch_committed_effect_can_never_become_undispatched_cleanup() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dispatch-commit-guard",
+        )
+        .await
+        .expect("create dispatch-commit tenant");
+    let _admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "dispatch-commit-guard".into(),
+            pipeline_digest: [0x85; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit dispatch-commit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "dispatch-commit-scheduler".into(),
+            agent_id: "dispatch-commit-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim dispatch-commit attempt")
+        .expect("dispatch-commit attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept dispatch-commit offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare dispatch-commit effect")
+    );
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("durably commit dispatch")
+    );
+    // The commit acknowledgement is now lost to the worker and its lease
+    // expires before any cleanup disposition could be persisted.
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire dispatch-commit lease");
+    for released in [false, true] {
+        assert!(
+            !store
+                .record_undispatched_release_after_authority_loss(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    &payload,
+                    released,
+                )
+                .await
+                .expect("stale worker cleanup must refuse a dispatch-committed effect"),
+            "released={released}"
+        );
+    }
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("read guarded effect status");
+    assert_eq!(status, "prepared");
+    for hostile_status in ["release_pending", "abandoned"] {
+        let violation = sqlx::query(
+            "UPDATE attempt_effects SET status = $5
+             WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+        )
+        .bind(organization_id)
+        .bind(claim.attempt_id)
+        .bind(claim.fence)
+        .bind("deploy")
+        .bind(hostile_status)
+        .execute(store.pool())
+        .await
+        .expect_err("hostile direct status update must violate the dispatch-commit constraint");
+        assert!(
+            violation
+                .to_string()
+                .contains("attempt_effects_dispatch_commit_release_check"),
+            "unexpected violation for {hostile_status}: {violation}"
+        );
+    }
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route committed dispatch to reconciliation")
+    );
+    for released in [false, true] {
+        assert!(
+            !store
+                .record_undispatched_release_after_authority_loss(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    &payload,
+                    released,
+                )
+                .await
+                .expect("reconciliation keeps refusing dispatch-committed cleanup"),
+            "released={released}"
+        );
+    }
+    // Simulate a hostile or pre-constraint legacy row so the API predicate is
+    // proven independently of the CHECK constraint: drop the constraint, force
+    // the impossible state, and verify both APIs still refuse the row.
+    sqlx::query(
+        "ALTER TABLE attempt_effects
+         DROP CONSTRAINT attempt_effects_dispatch_commit_release_check",
+    )
+    .execute(store.pool())
+    .await
+    .expect("temporarily drop the dispatch-commit constraint");
+    sqlx::query(
+        "UPDATE attempt_effects SET status = 'release_pending'
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .execute(store.pool())
+    .await
+    .expect("force the legacy hostile release_pending state");
+    assert!(
+        !store
+            .abandon_expired_release_pending_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("expired-reservation abandonment must refuse a dispatch-committed row")
+    );
+    assert!(
+        !store
+            .record_undispatched_release_after_authority_loss(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+                true,
+            )
+            .await
+            .expect("authority-loss cleanup must refuse a dispatch-committed row")
+    );
+    sqlx::query(
+        "UPDATE attempt_effects SET status = 'uncertain'
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .execute(store.pool())
+    .await
+    .expect("restore the reconcilable state");
+    sqlx::query(
+        "ALTER TABLE attempt_effects
+         ADD CONSTRAINT attempt_effects_dispatch_commit_release_check CHECK (
+             dispatch_committed_at IS NULL
+             OR status NOT IN ('release_pending', 'abandoned')
+         )",
+    )
+    .execute(store.pool())
+    .await
+    .expect("restore the dispatch-commit constraint");
+    // The dispatched effect remains reconcilable as dispatched truth.
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("confirm the dispatch-committed effect")
+    );
+}
+
+#[tokio::test]
+async fn committed_cancellation_rejects_a_fresh_dispatch_commit() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dispatch-cancellation-race",
+        )
+        .await
+        .expect("create dispatch-cancellation tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "dispatch-cancellation-race".into(),
+            pipeline_digest: [0x86; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit dispatch-cancellation build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "dispatch-cancellation-scheduler".into(),
+            agent_id: "dispatch-cancellation-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim dispatch-cancellation attempt")
+        .expect("dispatch-cancellation attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept dispatch-cancellation offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare dispatch-cancellation effect")
+    );
+    // Cancellation commits after the worker's final pre-dispatch check but
+    // before the durable dispatch transaction. The commit predicate must see
+    // the committed `cancelling` state and refuse to invoke the connector.
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("commit cancellation before the durable dispatch")
+    );
+    assert!(
+        !store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("dispatch commit after committed cancellation must refuse"),
+        "a fresh dispatch commit must not accept a cancelled attempt"
+    );
+    let (status, dispatch_committed) = sqlx::query_as::<_, (String, bool)>(
+        "SELECT status, dispatch_committed_at IS NOT NULL FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("read the refused dispatch effect");
+    assert_eq!(status, "prepared");
+    assert!(
+        !dispatch_committed,
+        "the refused commit must leave no durable dispatch marker"
+    );
+    // The cancelling lease owner still closes the undispatched intent cleanly.
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Abandoned,
+                &payload,
+            )
+            .await
+            .expect("abandon the cancelled undispatched effect")
+    );
+}
+
+#[tokio::test]
+async fn cancellation_after_dispatch_commit_keeps_the_idempotent_replay() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dispatch-cancellation-replay",
+        )
+        .await
+        .expect("create dispatch-replay tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "dispatch-cancellation-replay".into(),
+            pipeline_digest: [0x87; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit dispatch-replay build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "dispatch-replay-scheduler".into(),
+            agent_id: "dispatch-replay-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim dispatch-replay attempt")
+        .expect("dispatch-replay attempt is claimable");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept dispatch-replay offer")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "observer_reservation_expires_at_unix_ms": 0,
+        "request_sha256": "a".repeat(64)
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare dispatch-replay effect")
+    );
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("durably commit the dispatch before cancellation")
+    );
+    let committed_at = sqlx::query_scalar::<_, String>(
+        "SELECT dispatch_committed_at::text FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("read the durable dispatch marker");
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("commit cancellation after the durable dispatch")
+    );
+    // A worker retrying the lost commit acknowledgement replays idempotently
+    // even while the attempt is cancelling; the marker never moves.
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("idempotent replay of the committed dispatch while cancelling")
+    );
+    let replayed_at = sqlx::query_scalar::<_, String>(
+        "SELECT dispatch_committed_at::text FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3 AND effect_key = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("deploy")
+    .fetch_one(store.pool())
+    .await
+    .expect("re-read the durable dispatch marker");
+    assert_eq!(
+        committed_at, replayed_at,
+        "the idempotent replay must not move the dispatch marker"
+    );
+}
+
+#[tokio::test]
 async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -3992,9 +6022,12 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "effect-ledger".into(),
             pipeline_digest: [23; 32],
             node_key: "stage-1".into(),
@@ -4074,6 +6107,153 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     assert!(first_prepare.expect("prepare effect"));
     assert!(concurrent_replay.expect("concurrent prepared replay"));
     assert!(
+        !store
+            .commit_effect_dispatch(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "wrong-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("reject dispatch commit from non-owner")
+    );
+    assert!(
+        !store
+            .commit_effect_dispatch(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                &json!({"destination": "deploy/production", "release": "substituted"}),
+            )
+            .await
+            .expect("reject substituted dispatch commit")
+    );
+    assert!(
+        store
+            .commit_effect_dispatch(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("commit dispatch under live fenced authority")
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT dispatch_committed_at IS NOT NULL
+             FROM attempt_effects
+             WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND effect_key=$4",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .bind(claim.fence)
+        .bind("deploy")
+        .fetch_one(store.pool())
+        .await
+        .expect("read durable dispatch commit")
+    );
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Abandoned,
+                &payload,
+            )
+            .await
+            .expect("dispatch commit forbids undispatched abandonment")
+    );
+    let outcome_receipt = json!({
+        "schema_version": "mcloving.external-outcome-receipt/v1",
+        "request_sha256": "sha256:exact-request",
+        "signature_base64": "signed-outcome",
+    });
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "wrong-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome_receipt,
+            )
+            .await
+            .expect("reject outcome from non-owner")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome_receipt,
+            )
+            .await
+            .expect("append outcome receipt")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome_receipt,
+            )
+            .await
+            .expect("replay exact outcome receipt")
+    );
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &json!({"signature_base64": "substituted"}),
+            )
+            .await
+            .expect("reject substituted outcome receipt")
+    );
+    let evidence = store
+        .effect_evidence(organization_id, admission.attempt_id, claim.fence, "deploy")
+        .await
+        .expect("load effect evidence");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].kind, EffectEvidenceKind::Outcome);
+    assert_eq!(evidence[0].receipt, outcome_receipt);
+    assert!(
         store
             .checkpoint_effect(
                 organization_id,
@@ -4088,6 +6268,78 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             )
             .await
             .expect("mark uncertain")
+    );
+    let reconciliation_receipt = json!({
+        "schema_version": "mcloving.external-outcome-receipt/v1",
+        "request_sha256": "sha256:exact-request",
+        "evidence_sequence": 2,
+        "signature_base64": "signed-reconciliation",
+    });
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::ReconciliationOutcome,
+                &reconciliation_receipt,
+            )
+            .await
+            .expect("reject reconciliation before observation")
+    );
+    let observation_receipt = json!({
+        "schema_version": "mcloving.destination-observation-receipt/v1",
+        "phase": "reconciliation",
+        "signature_base64": "signed-observation",
+    });
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::Observation,
+                &observation_receipt,
+            )
+            .await
+            .expect("append reconciliation observation")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectEvidenceKind::ReconciliationOutcome,
+                &reconciliation_receipt,
+            )
+            .await
+            .expect("append reconciliation outcome")
+    );
+    let joined_evidence = store
+        .effect_evidence(organization_id, admission.attempt_id, claim.fence, "deploy")
+        .await
+        .expect("load ambiguity evidence join");
+    assert_eq!(joined_evidence.len(), 3);
+    assert_eq!(
+        joined_evidence
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            EffectEvidenceKind::Outcome,
+            EffectEvidenceKind::ReconciliationOutcome,
+            EffectEvidenceKind::Observation,
+        ]
     );
     assert!(
         !store
@@ -4287,6 +6539,206 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
 }
 
 #[tokio::test]
+async fn reconciliation_can_complete_a_partial_runtime_effect_join_without_a_lease() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "effect-reconciliation-evidence",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "effect-reconciliation-evidence".into(),
+            pipeline_digest: [73; 32],
+            node_key: "effect".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit effect build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "effect-reconciliation-scheduler".into(),
+            agent_id: "effect-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim effect build")
+        .expect("effect build exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+            )
+            .await
+            .expect("accept effect build")
+    );
+    let payload = json!({
+        "schema_version": "mcloving.controller-effect-prepared/v1",
+        "request_sha256": "a".repeat(64),
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare effect")
+    );
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Uncertain,
+                &payload,
+            )
+            .await
+            .expect("freeze uncertain effect")
+    );
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                TerminalOutcome::Failed,
+                json!({"reason": "post-dispatch join interrupted"}),
+            )
+            .await
+            .expect("route incomplete effect to reconciliation")
+    );
+    let outcome = json!({"status": "succeeded", "signature_base64": "outcome"});
+    assert!(
+        !store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch + 1,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome,
+            )
+            .await
+            .expect("reject evidence for a substituted restore epoch")
+    );
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::Outcome,
+                &outcome,
+            )
+            .await
+            .expect("append recovered outcome without a live lease")
+    );
+    let observation = json!({"phase": "reconciliation", "signature_base64": "observation"});
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::Observation,
+                &observation,
+            )
+            .await
+            .expect("append recovered observation without a live lease")
+    );
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("confirm recovered effect")
+    );
+    let shadow = json!({"denied_authority": true, "signature_base64": "shadow"});
+    assert!(
+        store
+            .append_effect_evidence(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "reconciliation-controller",
+                "deploy",
+                EffectEvidenceKind::ShadowReplay,
+                &shadow,
+            )
+            .await
+            .expect("append recovered shadow receipt without a live lease")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "effect-operator",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "all recovered receipts verified"}),
+            )
+            .await
+            .expect("finalize the complete recovered join")
+    );
+}
+
+#[tokio::test]
 async fn retry_history_is_immutable_idempotent_and_bounded() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -4304,9 +6756,12 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "bounded-retry".into(),
             pipeline_digest: [24; 32],
             node_key: "stage-1".into(),
@@ -4584,9 +7039,12 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "object-reference".into(),
             pipeline_digest: [25; 32],
             node_key: "stage-1".into(),
@@ -4751,9 +7209,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "retained-object".into(),
             pipeline_digest: [51; 32],
             node_key: "stage-1".into(),
@@ -4832,9 +7293,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
         .await
         .expect("create second tenant");
     let second_admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id: second_organization_id,
             project_id: second_project_id,
+            pipeline_id: second_project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "shared-digest".into(),
             pipeline_digest: [53; 32],
             node_key: "stage-1".into(),
@@ -5231,9 +7695,12 @@ async fn backup_restore_canary_seed() {
         .await
         .expect("create recovery canary");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "backup-restore-canary".into(),
             pipeline_digest: [61; 32],
             node_key: "stage-1".into(),
@@ -5366,9 +7833,12 @@ async fn backup_restore_canary_seed() {
             .expect("prepare recovery effect")
     );
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "queued-rewind-canary".into(),
             pipeline_digest: [64; 32],
             node_key: "queued-stage".into(),
@@ -5503,6 +7973,18 @@ async fn backup_restore_canary_verify() {
     assert_eq!(restored_historical.fence, admission.2 - 1);
     assert_eq!(restored_historical.status, EffectStatus::Uncertain);
     assert_eq!(restored_historical.payload, historical_effect);
+    let public_effects = store
+        .effect_evidence_summaries(organization_id, admission.1)
+        .await
+        .expect("read all restored effect fences");
+    assert_eq!(public_effects.len(), 2);
+    assert_eq!(
+        public_effects
+            .iter()
+            .map(|effect| (effect.fence, effect.effect_key.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(admission.2 - 1, "publish-cache"), (admission.2, "deploy"),]
+    );
     assert!(
         !store
             .checkpoint_effect(
@@ -5833,9 +8315,12 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
         "create and actual policy changes are audited while a no-op is not"
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "protected-deploy".into(),
             pipeline_digest,
             node_key: "deploy".into(),
@@ -6303,9 +8788,12 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
         (organization_b, project_b, "tenant-b"),
     ] {
         store
-            .admit_build(&NewBuild {
+            .admit_test_build(&NewBuild {
                 organization_id,
                 project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
                 idempotency_key: key.into(),
                 pipeline_digest: [4; 32],
                 node_key: "stage".into(),
@@ -6377,6 +8865,9 @@ async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
     let input = NewDagBuild {
         organization_id,
         project_id,
+        pipeline_id: project_id,
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "stable-key".to_owned(),
         pipeline_digest: [0x91; 32],
         priority: 0,
@@ -6388,11 +8879,14 @@ async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
             "build",
         )],
     };
-    store.admit_dag(&input).await.expect("admit original DAG");
+    store
+        .admit_test_dag(&input)
+        .await
+        .expect("admit original DAG");
     let mut conflicting = input.clone();
     conflicting.pipeline_digest = [0x92; 32];
     assert!(matches!(
-        store.admit_dag(&conflicting).await,
+        store.admit_test_dag(&conflicting).await,
         Err(StoreError::IdempotencyConflict(_))
     ));
 }
@@ -6415,9 +8909,12 @@ async fn dag_log_cursor_never_hides_later_node_output() {
         .await
         .expect("create DAG log project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-log-cursor".to_owned(),
             pipeline_digest: [0xd2; 32],
             priority: 0,
@@ -6526,9 +9023,12 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
     let mut sibling = dag_node("sibling", DagNodeKind::Work, vec![], "linux", "sibling");
     sibling.priority = 10;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-fail-fast-retry".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -6645,9 +9145,12 @@ async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
         .await
         .expect("create DAG retry project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-operator-retry".to_owned(),
             pipeline_digest: [0xd3; 32],
             priority: 0,
@@ -6759,9 +9262,12 @@ async fn rolling_upgrade_attempt_inserts_preserve_runnable_and_blocked_readiness
         .await
         .expect("create readiness compatibility project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "attempt-readiness-rolling-upgrade".to_owned(),
             pipeline_digest: [0xd5; 32],
             priority: 0,
@@ -6941,9 +9447,12 @@ async fn automatic_retry_waits_for_a_reopened_completed_dependency() {
     );
     child.max_attempts = 2;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "automatic-retry-readiness".to_owned(),
             pipeline_digest: [0xd6; 32],
             priority: 0,
@@ -7091,9 +9600,12 @@ async fn operator_retry_waits_for_a_reopened_completed_dependency() {
         .await
         .expect("create operator retry readiness project");
     let _admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "operator-retry-readiness".to_owned(),
             pipeline_digest: [0xd7; 32],
             priority: 0,
@@ -7287,9 +9799,12 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
         "post",
     );
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -7299,9 +9814,12 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
         .expect("admit DAG");
     assert!(admission.created);
     let replay = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -7348,9 +9866,12 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
     changed_linux.max_attempts = 2;
     changed_linux.execution_spec = json!({"program": "false", "node": "linux"});
     let changed_replay = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -7612,9 +10133,12 @@ async fn dag_retry_refuses_confirmed_non_idempotent_effects() {
     let mut deploy = dag_node("deploy", DagNodeKind::Work, vec![], "linux", "deploy");
     deploy.max_attempts = 2;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-non-idempotent".to_owned(),
             pipeline_digest: [0xe4; 32],
             priority: 0,
@@ -7723,9 +10247,12 @@ async fn dag_reconciliation_required_pauses_other_ready_work() {
     let mut after = dag_node("after", DagNodeKind::Work, vec![], "linux", "build");
     after.priority = 0;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-pauses-dag".to_owned(),
             pipeline_digest: [0xd5; 32],
             priority: 0,
@@ -7888,9 +10415,12 @@ async fn dag_fail_fast_cancels_active_skips_queued_and_still_runs_post() {
         "post",
     );
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "fail-fast".to_owned(),
             pipeline_digest: [0xf4; 32],
             priority: 0,
@@ -8067,9 +10597,12 @@ async fn dag_fail_fast_cooperative_cancellation_and_retry_race_converge() {
         "post",
     );
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "fail-fast-cooperative".to_owned(),
             pipeline_digest: [0xf5; 32],
             priority: 0,
@@ -8216,9 +10749,12 @@ async fn dag_owner_cancellation_is_durable_idempotent_and_monotonic() {
         .await
         .expect("create cancellation project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "cancel-dag".to_owned(),
             pipeline_digest: [0xca; 32],
             priority: 0,
@@ -8331,9 +10867,12 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
         .await
         .expect("create audited project");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "audit-build".to_owned(),
             pipeline_digest: [0x71; 32],
             node_key: "build".to_owned(),
@@ -8613,9 +11152,12 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .await
         .expect("create artifact project");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "artifact-build".to_owned(),
             pipeline_digest: [0x81; 32],
             node_key: "package".to_owned(),
@@ -9007,9 +11549,12 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
         .await
         .expect("create test-truth project");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "test-truth-build".to_owned(),
             pipeline_digest: [0x91; 32],
             node_key: "test".to_owned(),

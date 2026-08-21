@@ -1,0 +1,25 @@
+[package]
+name = "mcloving-shadow-qualification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "=0.22.1"
+mcloving-migration-package = { version = "0.0.0", path = "../migration-package" }
+ring = "=0.17.14"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+sha2 = "=0.10.9"
+uuid = { version = "=1.18.1", features = ["serde", "v4"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", features = ["user"] }
+rustix = { version = "=1.1.4", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,310 @@
+# Shadow qualification v1
+
+Status: SHADOW-001 complete; deny-authority owner-private session accepted
+
+## Purpose and boundary
+
+mcloving.jenkins.shadow-qualification/private-v1 is the owner-private,
+deny-authority join between the exact MIG-007 package and a bounded paired
+shadow session. It verifies that one authoritative Jenkins ingress observation
+is captured once, replayed to McLoving without accepting the original
+operation, and compared under frozen package, release, runtime, operational
+state, authorization, clock, entropy, input, and isolation identities.
+
+The current Mario population contains 230 disabled jobs. The one MIG-007
+packaged case, corpus-052-cinqict_jenkinsdev, is also disabled. V1 therefore
+requires denial parity for all five inventoried ingress classes—API, manual,
+schedule, upstream, and webhook—and joins that current denial truth to the
+already-certified isolated paired execution trace. It cannot reinterpret a
+disabled job as live successful production traffic.
+
+The verifier is a separate crate. It composes the MIG-007 private verifier in
+memory but does not add fields to the migration package or rerun a replacement
+state transform. It owns no trigger, scheduler, controller database or
+filesystem, agent protocol, credential, connector, external effect, canary,
+cutover, rollback, or decommission authority.
+
+## Private inputs
+
+The caller supplies:
+
+- canonical private session bytes;
+- independently owner-held session, source-capture public-key, live
+  authorization-generation, and exact verifier-binary pins;
+- the exact owner-private MIG-007 package bytes;
+- the existing owner-held package, forward-manifest, reverse-manifest, and
+  transform-implementation pins;
+- the sealed source-history root;
+- the exact reviewed SHADOW-001 implementation head.
+
+The verifier authenticates the session against its owner pin and compares the
+session's source-capture, variable authorization, and verifier identities with
+their three independent owner pins. The package verifier then authenticates the package,
+source, state-transfer evidence, and owner pins before the session is
+considered. The session binds the package digest internally. Operational
+output must never print either private digest or any package,
+evidence-manifest, or owner-pin digest. Session bytes, private package bytes,
+pins, and signing seeds remain owner-only on HeMan and never enter GitHub.
+
+The Linux CLI opens every private file by walking from `/` with retained
+directory descriptors, `NOFOLLOW`, and nonblocking leaf reads. It rejects
+unsafe path components, redirectable foreign ancestors, a non-owner or broad
+immediate parent, nonregular or multiply linked inputs, broad file modes, and
+files above their byte ceiling. Publication is create-new, mode `0600`,
+file-synced, and parent-directory-synced; an incomplete two-file session/pin or
+four-file source-key/source-pin/shadow-key/shadow-public-identity publication is rolled back and
+otherwise reported as requiring manual reconciliation.
+
+## Frozen identity
+
+The session freezes the exact:
+
+- protected-main MIG-007 closure and reviewed SHADOW-001 implementation head;
+- Mario controller, accepted inventory epoch and fingerprint;
+- job, source, compiled pipeline, disabled source and target state, and matching
+  operational generation;
+- independently pinned authorization generation and the empty admitted
+  agent-input set;
+- v0.1.0 private Linux release identity and envelope;
+- Jenkins image and plugin set, McLoving runtime image, PostgreSQL image, and
+  independently pinned shadow-verifier binary;
+- distinct authoritative-capture and shadow-replay Ed25519 public keys.
+
+Runtime or state drift rejects the complete session. A later source or runtime
+revision requires its own current migration package and shadow qualification.
+
+## Capture and replay receipts
+
+Each ingress class has one pair of canonical signed receipts:
+
+1. the authoritative Jenkins-side capture is signed by the capture identity,
+   records disabled_pre_queue, and proves zero queued build, scheduled attempt,
+   credential grant, connector request, and production effect;
+2. the McLoving replay is signed by a distinct shadow identity, repeats the
+   exact event ID, class, capture digest, state, generation, outcome, and zero
+   counts, and is explicitly marked as replayed.
+
+The verifier authenticates both Ed25519 signatures, rejects shared signing
+keys, and requires exact one-to-one joins. Omission, duplication, event-ID
+reuse, capture substitution, class substitution, divergent state/outcome, or
+signature mutation fails closed.
+
+Every source receipt signature also covers one canonical session-binding
+digest derived from the ceremony UUID, capture wall-clock instant, migration
+package, reviewed implementation heads, source controller, inventory, job,
+source and pipeline, disabled generations, authorization, release, runtime,
+verifier, source-capture identity, precommitted shadow-replay identity, complete
+comparison inputs, paired trace, isolation evidence, and denied-authority
+ledger.
+The verifier recomputes this digest from the complete session. Consequently,
+an authentic receipt set from another job, controller, inventory, package,
+freeze, capture instant, or session cannot be transplanted into the current
+ceremony, and the same source capture cannot be resealed under a different
+shadow identity.
+
+`generate-keys` creates the two keys directly as owner-private PKCS#8 files,
+publishes a separate owner-private digest pin for the source-capture public key,
+and publishes the owner-private Base64 shadow public identity that the capture
+sidecar must embed before it signs. The four-file bundle is create-new and
+rolls back as one unit on partial publication.
+The source private key is reserved for and may be consumed only by the
+independently reviewed live capture sidecar; it is not an input to `seal`.
+`seal` accepts only a canonical
+template containing five already-signed source receipts under the independently
+pinned capture identity and the precommitted shadow public identity while every
+shadow signature field remains empty. It authenticates the source key pin,
+exact session binding, all source signatures, and exact equality between the
+precommitted shadow public identity and the supplied shadow private key, then
+signs only the five replay receipts. The source-authenticated binding contains
+an unsigned projection of both halves of every paired event, including both
+audit digests and every denial count, while excluding only the fields populated
+by signing. An intermediary therefore cannot replace replay evidence between
+`prepare` and `seal` without invalidating all source signatures. `seal` then
+runs the complete MIG-007 and SHADOW-001 verification stack in memory—including
+the separately supplied source-capture, authorization, and verifier pins—and
+only then publishes the session and its independent owner pin. A sealing caller
+cannot manufacture or replace authoritative observations, self-endorse a
+variable freeze value, inject a shadow signature, or reuse one key for both
+roles through the sealing interface.
+
+`prepare` is the only interface that converts live runtime observations into
+that template. It reads the bounded Jenkins source observation, isolated
+McLoving ingress replay, executable trace observation, post-teardown isolation
+observation, exact private package and independent pin, source-capture private
+key and public-key pin, precommitted shadow public identity, live authorization
+pin, verifier-binary pin, and reviewed implementation head. It validates the
+canonical five-class order and distinct source/target paths, unchanged Jenkins
+activity, exact zero-count denials, the certified trace, complete teardown,
+distinct fixtures and networks, and zero production reachability or authority.
+It derives each unique capture digest only from the authoritative source
+observation, signs only the source receipt, leaves every shadow signature field
+empty, and publishes one create-new owner-private template. The source private
+key never enters `seal`.
+
+The admitted case has no live external input, secret outcome, connector
+outcome, administrative operation, semantic time, or semantic entropy
+dependency. Its session therefore binds one wall-clock instant plus empty
+clock and entropy streams with zero consumption, and requires zero receipts in
+those boundary classes. A later case with any such dependency needs a new
+schema and its canonical typed receipt verifier; a nonempty count cannot be
+smuggled into v1.
+
+## Paired trace and isolation
+
+The current denial session also binds the exact DIFF-001 certified trace for the
+sole admitted case, one isolated source/target replay, equal successful
+normalized results, the exact newline-inclusive bounded and ordered
+`+ echo Hello World` stderr and `Hello World` stdout records, zero artifacts or
+effect intents, and zero mismatches. The target's raw two-spool publication
+order is independently asserted as stdout sequence zero and stderr sequence
+one; the comparison receipt then maps the fixed `sh -xe` semantic order to the
+canonical one-based stderr/stdout trace. This trace
+join does not by itself claim live production execution; it proves the
+effect-free executable semantics that accompany the current live disabled
+denial observations.
+
+Source and target run in distinct disposable fixtures and distinct private
+networks. The session requires digest-bound network and reachability receipts,
+zero production endpoint mapping, network request, credential, host mount,
+cross-fixture mount, or effect, plus completed teardown. The two fixture and
+network identities must be distinct.
+
+The target replay fixture installs the exact compiler-v1 pipeline source and
+semantic digest plus the reviewed imported job-state generation for the sole
+admitted case. It reads the pipeline and operational-state records back from
+PostgreSQL before emitting the target receipt; the receipt's job, state, and
+source generation are derived from those observed records rather than copied
+claims. Synthetic trigger definitions are only typed ingress adapters because
+trigger validation precedes the pipeline's disabled-state fence.
+
+`scripts/capture-shadow001-runtime.sh` is the reviewed runtime sidecar. From a
+clean exact head on HeMan it first builds and pins the exact verifier and
+atomically creates the distinct source and precommitted shadow key identities.
+Before that ceremony, `scripts/capture-shadow001-authz-pin.sh` independently
+captures the live Mario realm, authorization-strategy, stable user-seed, and
+job ACL decision generation into one create-new owner-private digest pin. The
+generation also hashes the exact controller and job configuration bytes, so a
+global or job ACL edit changes the pin even when the sampled principal retains
+the same four effective decisions. It
+publishes no realm, seed, decision, or digest value to operational output.
+Immediately before source capture, the runtime sidecar repeats that bounded
+capture into a second owner-private pin and requires byte-for-byte equality
+with the independently supplied pin. Immediately before template preparation,
+after source capture, replay, teardown, and the final repository check, it
+captures authorization a third time and again requires exact equality.
+Authorization drift at either boundary aborts before a source-authenticated
+template can be created. It then submits the fixed Groovy probe to
+Mario through an authenticated crumb-bearing session; the Mario credential is read and used only on Mario,
+and only the bounded `SHADOW001_SOURCE` marker returns. Neither signing private
+key leaves the owner-private HeMan output directory. The probe exercises the
+real disabled `WorkflowJob` through five distinct Jenkins entry points in
+canonical API/manual/schedule/upstream/webhook order, asserts unchanged build,
+queue, next-build, trigger, and disabled state, captures the live inline
+Jenkinsfile and raw job-configuration digests before any temporary trigger is
+installed, and requires both to match the accepted source and operational
+generation before a source receipt can be signed. It restores the exact
+preexisting trigger-property shape in `finally`, then re-hashes both the live
+Jenkinsfile and raw job configuration and requires equality with their
+pre-probe values before emitting the source marker.
+
+The sidecar independently inspects Mario's live source container and network
+immediately before and after the probe. Both bounded observations must be
+byte-identical and prove the pinned Jenkins image is running with a read-only
+root, no privilege, added capability, device, or shared PID namespace, only the
+three expected Jenkins mounts, and exclusive membership in the internal
+`jenkins-oracle-net` network with no reachable connector peer or production
+endpoint mapping. Static containment is supplemented by a concurrent live
+effect monitor: a temporary credentials-provider observer rejects any Jenkins
+credential lookup; an outbound all-interface packet capture in the container
+network namespace, including loopback, rejects any request attempt other than replies from the already-open
+Jenkins control port; and recursive inotify watches reject every mutation in
+the writable Jenkins home except the exact temporary target-job configuration
+and SCM-polling-log writes whose original bytes and log timestamp the probe
+restores and verifies. The monitor must
+observe those probe-control mutations, which proves it was active, while
+reporting zero unclassified home mutation and zero outbound request. Only those
+dynamically observed zeros become credential-grant, connector-request, and
+production-effect counts. The effect receipt and both live boundary
+observations are hashed into the source fixture and network identities that the
+source signatures authenticate.
+
+The target phase builds the exact controller-store ingress test, admitted-case
+controller test, and controller executable offline. It copies only those exact
+executables into a stopped container, then runs them with a read-only root,
+empty host-mount set, dropped capabilities, no-new-privileges, bounded
+resources, and a fresh PostgreSQL peer on a new internal-only network. The
+PostgreSQL peer also has a read-only root and exactly two explicit tmpfs mounts
+for its data directory and the resolved `/run/postgresql` backing directory for
+the image's `/var/run/postgresql` Unix-socket path;
+both container inspections must prove empty host-mount sets, and both
+inspections are bound into the target-fixture identity. The
+runtime test emits the target receipt only after all five real target entry
+points return `PipelineDisabled` with zero build rows. The admitted-case test
+emits the trace receipt only after the exact process and normalized logs,
+terminal result, empty artifact/input/credential/effect surfaces, and empty
+user workspace are proven. Both emitters line-frame their bounded marker, and
+the sidecar requires exactly one marker of each class before parsing. A
+public-network negative must pass, the runtime
+mount sets, both PostgreSQL tmpfs mounts, and internal network are inspected, and both
+containers and their network are removed before the isolation observation can state teardown
+complete. The sidecar finally invokes `prepare` against the independently
+supplied private package, package pin, and authorization-generation pin after
+the live boundary resample has matched that pin, and publishes the
+source-authenticated, shadow-unsigned template. Runtime
+observations and topology details remain owner-private.
+Immediately before `prepare`, it also re-reads worktree status, `HEAD`, and
+the commit tree and requires exact equality with the clean identities captured
+before the build.
+
+## Verification surface
+
+The library returns only:
+
+- the schema and private session UUID;
+- five captured and five replayed ingress events;
+- one compared trace and zero mismatches;
+- one packaged case and 227 deterministic rejections;
+- shadow_qualified=true;
+- production_authority=false.
+
+Operational tooling must omit the private session UUID if it is not approved
+for disclosure and must never print private digests. A successful verifier
+receipt makes only this exact disabled case eligible for continued
+deny-authority shadow work. It does not make the job canary-, cutover-,
+rollback-, or production-authority eligible.
+
+## Current implementation evidence
+
+crates/shadow-qualification provides canonical parsing, live-observation
+template preparation, MIG-007 private
+verification composition, exact identity joins, Ed25519 receipt verification,
+denominator checks, exact log-sequence validation, trace/isolation checks, the
+all-false authority ledger, distinct-key generation, template sealing, safe
+owner-private path handling, and bounded digest-free operational output.
+Focused tests cover the positive exact session; every authority bit; event
+omission, duplication, substitution, and signature mutation; package/runtime
+drift; undeclared inputs; production reachability; unknown fields;
+noncanonical presentation; session-pin substitution; caller-supplied
+shadow signatures; forged or substituted source signatures and source-key pins;
+cross-session, cross-capture-time, and cross-freeze receipt transplantation;
+shadow-key replacement and cross-shadow-identity capture transplantation;
+shared signing keys; owner modes, hard links, aliases, create-new publication;
+non-UTF-8 paths; redacted failure output; and size bounds.
+
+PR #68 passed all nine protected checks and a clean exact-head review with all
+review threads resolved, then squash-merged as protected-main commit
+`dbc3bad735bc45241ee048e1d364ed478eae7e3c`. Post-merge Foundation run
+`31973862276` and Windows run `31973862272` passed on that exact commit.
+
+The owner-private HeMan ceremony retained at
+`/sn8100/runs/mcloving/shadow001-ceremony-20260816T221103Z` independently
+verified five captured and five replayed ingress events, one exact paired
+trace, zero mismatches, one packaged case, and 227 deterministic rejections.
+It accepted `shadow_qualified=true` and retained
+`production_authority=false`. Session bytes, signing keys, package and
+evidence bytes, and all private pins and digests remain owner-only on HeMan and
+are intentionally absent from GitHub.
+
+This closes SHADOW-001 only for the exact disabled, deny-authority case. It
+grants no production execution, credential, trigger, scheduler, connector,
+effect, canary, cutover, rollback, or decommission authority.

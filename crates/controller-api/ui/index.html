@@ -60,6 +60,9 @@
     <section id="pipeline-view" class="view panel hidden" aria-labelledby="pipeline-heading">
       <h2 id="pipeline-heading">Strict YAML pipeline</h2>
       <form id="pipeline-form">
+        <label>Pipeline ID <input id="pipeline-id" required autocomplete="off" inputmode="text" pattern="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" title="UUID"></label>
+        <label>Pipeline slug <input id="pipeline-slug" value="hello" required></label>
+        <label>Expected source revision <input id="pipeline-revision" type="number" min="0" value="0" required></label>
         <label>Pipeline source
           <textarea id="pipeline-source" rows="14" required>version: 1
 name: hello
@@ -77,13 +80,30 @@ stages:
         <div class="actions">
           <button type="button" id="validate-pipeline">Validate</button>
           <button type="button" id="plan-pipeline">Plan</button>
-          <button type="submit">Submit</button>
+          <button type="button" id="save-pipeline">Save pipeline</button>
+          <button type="submit">Submit saved pipeline</button>
         </div>
         <label>Idempotency key <input id="idempotency-key" required></label>
         <label>Platform
           <select id="platform"><option>linux</option><option>windows</option></select>
         </label>
         <label>Trust pool <input id="trust-pool" value="trusted-linux" required></label>
+      </form>
+      <form id="pipeline-state-form">
+        <h3>Operational state</h3>
+        <div class="actions">
+          <button type="button" id="load-pipeline-state">Load state</button>
+          <button type="submit">Advance state</button>
+        </div>
+        <label>Target state
+          <select id="pipeline-state"><option>enabled</option><option>disabled</option></select>
+        </label>
+        <label>Expected generation <input id="pipeline-state-generation" type="number" min="1" value="1" required></label>
+        <label>Transition idempotency key <input id="pipeline-state-idempotency" required></label>
+        <label>Reviewed reason <input id="pipeline-state-reason" required value="operator reviewed transition"></label>
+        <label>Source identity <input id="pipeline-state-source" required value="ui:manual"></label>
+        <label>Source generation <input id="pipeline-state-source-generation" required value="manual:1"></label>
+        <label>Source provenance SHA-256 <input id="pipeline-state-provenance" required pattern="[0-9a-fA-F]{64}"></label>
       </form>
     </section>
 

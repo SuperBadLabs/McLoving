@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use mcloving_controller_api::{
-    ApprovalRequest, BuildCursor, Client, LogCursor, PipelineUpsertRequest, RetryRequest,
+    ApprovalRequest, BuildCursor, Client, LogCursor, PipelineBuildRequest,
+    PipelineOperationalState, PipelineOperationalStateRequest, PipelineUpsertRequest, RetryRequest,
     SubmissionRequest,
 };
 use serde::Serialize;
@@ -19,6 +20,21 @@ pub enum OutputMode {
     #[default]
     Human,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PipelineStateArg {
+    Enabled,
+    Disabled,
+}
+
+impl From<PipelineStateArg> for PipelineOperationalState {
+    fn from(value: PipelineStateArg) -> Self {
+        match value {
+            PipelineStateArg::Enabled => Self::Enabled,
+            PipelineStateArg::Disabled => Self::Disabled,
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -62,15 +78,43 @@ pub enum Command {
         parameters: Vec<String>,
     },
     Submit {
-        pipeline: PathBuf,
+        pipeline_id: Uuid,
         #[arg(long)]
         idempotency_key: String,
         #[arg(long = "parameter", value_name = "NAME=JSON")]
         parameters: Vec<String>,
         #[arg(long, default_value = "trusted-linux")]
         trust_pool: String,
-        #[arg(long, default_value = "linux", value_parser = ["linux", "windows"])]
+        #[arg(
+            long,
+            default_value = mcloving_domain::capability::DEFAULT_PLATFORM,
+            value_parser = clap::builder::PossibleValuesParser::new(
+                mcloving_domain::capability::SUPPORTED_PLATFORMS
+            )
+        )]
         platform: String,
+    },
+    PipelineState {
+        pipeline_id: Uuid,
+    },
+    SetPipelineState {
+        pipeline_id: Uuid,
+        #[arg(long, value_enum)]
+        state: PipelineStateArg,
+        #[arg(long)]
+        expected_generation: i64,
+        #[arg(long)]
+        idempotency_key: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        source_identity: String,
+        #[arg(long)]
+        source_generation: String,
+        #[arg(long)]
+        source_effective_at_unix_ms: i64,
+        #[arg(long)]
+        source_provenance_sha256: String,
     },
     Watch {
         build: Uuid,
@@ -254,22 +298,65 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
             )?
         }
         Command::Submit {
-            pipeline,
+            pipeline_id,
             idempotency_key,
             parameters,
             trust_pool,
             platform,
+        } => to_value(
+            client
+                .submit_pipeline_on_platform_in_pool(
+                    arguments.organization,
+                    required_project(arguments.project)?,
+                    *pipeline_id,
+                    idempotency_key,
+                    platform,
+                    trust_pool,
+                    &PipelineBuildRequest {
+                        parameters: parse_parameters(parameters)?,
+                    },
+                )
+                .await?,
+        )?,
+        Command::PipelineState { pipeline_id } => to_value(
+            client
+                .pipeline_operational_state(
+                    arguments.organization,
+                    required_project(arguments.project)?,
+                    *pipeline_id,
+                )
+                .await?,
+        )?,
+        Command::SetPipelineState {
+            pipeline_id,
+            state,
+            expected_generation,
+            idempotency_key,
+            reason,
+            source_identity,
+            source_generation,
+            source_effective_at_unix_ms,
+            source_provenance_sha256,
         } => {
-            let request = submission_request(pipeline, parameters).await?;
+            if *expected_generation <= 0 {
+                bail!("--expected-generation must be positive");
+            }
             to_value(
                 client
-                    .submit_request_on_platform_in_pool(
+                    .transition_pipeline_operational_state(
                         arguments.organization,
                         required_project(arguments.project)?,
+                        *pipeline_id,
+                        *expected_generation,
                         idempotency_key,
-                        platform,
-                        trust_pool,
-                        &request,
+                        &PipelineOperationalStateRequest {
+                            state: (*state).into(),
+                            reason: reason.clone(),
+                            source_identity: source_identity.clone(),
+                            source_generation: source_generation.clone(),
+                            source_effective_at_unix_ms: *source_effective_at_unix_ms,
+                            source_provenance_sha256: source_provenance_sha256.clone(),
+                        },
                     )
                     .await?,
             )?

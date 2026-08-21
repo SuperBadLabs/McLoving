@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+{
+  printf '%s\n' "$#"
+  printf '%s\n' "$@"
+} > /var/jenkins_home/mig005a-template-shell-invocation.txt
+printf '%s\n' MIG005A_SERIALIZATION_TEMPLATE_ONLY

@@ -4,8 +4,11 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::time::Duration;
 
-use mcloving_controller_api::Client;
-use mcloving_controller_store::{NewBuild, NewCredentialGrant, NewEnvironmentApproval, Store};
+use mcloving_controller_api::{Client, PipelineBuildRequest, PipelineUpsertRequest};
+use mcloving_controller_store::{
+    BuildAdmission, NewBuild, NewCredentialGrant, NewEnvironmentApproval, PipelinePutOutcome,
+    PipelineWrite, Store, StoreError,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -25,6 +28,66 @@ stages:
           args: [-c, "printf 'remote-agent-ran\n'; printf 'remote-agent-stderr\n' >&2"]
           timeout_seconds: 10
 "#;
+
+/// Both shipped-binary tests run this catalog update concurrently, and
+/// PostgreSQL surfaces the race as `tuple concurrently updated`; retry until
+/// one writer wins.
+async fn enable_runtime_login(pool: &sqlx::PgPool) {
+    for _ in 0..50 {
+        if sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+            .execute(pool)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+        .execute(pool)
+        .await
+        .expect("enable test-only runtime login");
+}
+
+async fn admit_bound_test_build(
+    store: &Store,
+    mut input: NewBuild,
+) -> Result<BuildAdmission, StoreError> {
+    let current = store
+        .pipeline(input.organization_id, input.project_id, input.pipeline_id)
+        .await?;
+    let source = format!("test pipeline {:?}", input.pipeline_digest);
+    let outcome = store
+        .put_pipeline(
+            &PipelineWrite {
+                organization_id: input.organization_id,
+                project_id: input.project_id,
+                pipeline_id: input.pipeline_id,
+                slug: format!("test-{}", input.pipeline_id),
+                source_sha256: Sha256::digest(source.as_bytes()).into(),
+                source,
+                semantic_digest: input.pipeline_digest,
+                schema_major: 1,
+                schema_minor: 0,
+                parameter_schema: json!({}),
+            },
+            Some(current.as_ref().map_or(0, |pipeline| pipeline.revision)),
+        )
+        .await?;
+    let pipeline = match outcome {
+        PipelinePutOutcome::Created(record)
+        | PipelinePutOutcome::Updated(record)
+        | PipelinePutOutcome::Unchanged(record) => record,
+        PipelinePutOutcome::PreconditionFailed { current_revision } => {
+            return Err(StoreError::ProductConflict(format!(
+                "test pipeline raced at revision {current_revision}"
+            )));
+        }
+    };
+    input.pipeline_revision = pipeline.revision;
+    input.pipeline_operational_generation = pipeline.operational_generation;
+    store.admit_build(&input).await
+}
 
 #[tokio::test]
 async fn shipped_agent_executes_fenced_work_over_mtls() {
@@ -46,10 +109,7 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .expect("connect migration role");
     let store = Store::new(pool.clone());
     store.migrate().await.expect("install schema");
-    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
-        .execute(&pool)
-        .await
-        .expect("enable test-only runtime login");
+    enable_runtime_login(&pool).await;
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     store
@@ -63,7 +123,7 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .expect("create test project");
 
     let directory = tempfile::tempdir().expect("test root");
-    let tls = create_mtls(directory.path(), organization_id);
+    let tls = create_mtls(directory.path(), organization_id, "remote-test-agent");
     let api_port = free_port();
     let agent_port = free_port();
     let workspace = directory.path().join("workspace");
@@ -112,18 +172,43 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     wait_until_listening(&client, organization_id).await;
 
     let journal = directory.path().join("remote-agent.db");
-    let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
-        .env("MCLOVING_TEST_CRASH_AFTER_TERMINAL_COMMIT", "1")
-        .kill_on_drop(true)
-        .spawn()
-        .expect("start shipped remote agent");
+    let mut agent = agent_command(
+        "remote-test-agent",
+        organization_id,
+        agent_port,
+        &tls,
+        &journal,
+        &workspace,
+    )
+    .env("MCLOVING_TEST_CRASH_AFTER_TERMINAL_COMMIT", "1")
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent");
 
-    let admission = client
-        .submit(
+    let pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
             organization_id,
             project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "remote-agent-e2e".to_owned(),
+                source: PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save remote-agent pipeline");
+    let admission = client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
             "remote-agent-e2e",
-            PIPELINE.to_owned(),
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
         )
         .await
         .expect("submit work");
@@ -142,9 +227,16 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
 
     let probe_status = tokio::time::timeout(
         Duration::from_secs(10),
-        agent_command(organization_id, agent_port, &tls, &journal, &workspace)
-            .arg("probe")
-            .status(),
+        agent_command(
+            "remote-test-agent",
+            organization_id,
+            agent_port,
+            &tls,
+            &journal,
+            &workspace,
+        )
+        .arg("probe")
+        .status(),
     )
     .await
     .expect("probe exits within bound")
@@ -158,10 +250,17 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         "probe must not renew and strand a replayable finalization"
     );
 
-    let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
-        .kill_on_drop(true)
-        .spawn()
-        .expect("restart shipped remote agent");
+    let mut agent = agent_command(
+        "remote-test-agent",
+        organization_id,
+        agent_port,
+        &tls,
+        &journal,
+        &workspace,
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .expect("restart shipped remote agent");
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if mcloving_agent::journal_health(&journal)
@@ -229,10 +328,14 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .expect("configure protected environment");
     let protected_digest = [0xc3; 32];
     let secret = ["mcloving", "e2e", "redaction", "probe"].join("-");
-    let protected = store
-        .admit_build(&NewBuild {
+    let protected = admit_bound_test_build(
+        &store,
+        NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "remote-agent-protected-e2e".to_owned(),
             pipeline_digest: protected_digest,
             node_key: "protected-deploy".to_owned(),
@@ -252,7 +355,8 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
                     "timeout_seconds": 10
                 }]
             }),
-        })
+        },
+    )
         .await
         .expect("admit protected remote work");
     let approval_ids = [Uuid::new_v4(), Uuid::new_v4()];
@@ -277,10 +381,17 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
                 .expect("approve protected remote work")
         );
     }
-    let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
-        .kill_on_drop(true)
-        .spawn()
-        .expect("start protected remote agent");
+    let mut agent = agent_command(
+        "remote-test-agent",
+        organization_id,
+        agent_port,
+        &tls,
+        &journal,
+        &workspace,
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start protected remote agent");
     let accepted = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let snapshot = store
@@ -403,6 +514,207 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     stop(&mut controller).await;
 }
 
+/// EXEC-001 regression gate for the shipped remote agent: an execution spec
+/// injected behind validate (100 process steps in one node) must be finalized
+/// as a named terminal failure within one lease term of being claimed. The
+/// measured defect kept exactly this shape `running` through 1,460+ build
+/// events while the agent retried a permanent refusal forever.
+#[tokio::test]
+async fn unsupported_execution_spec_is_finalized_failed_within_one_lease_term() {
+    let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let agent_id = "exec001-unsupported-agent";
+    let controller_binary = std::env::var_os("MCLOVING_CONTROLLER_BINARY")
+        .map(PathBuf::from)
+        .expect("MCLOVING_CONTROLLER_BINARY must name the shipped controller binary");
+    let runtime_url =
+        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1);
+    assert_ne!(migration_url, runtime_url);
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&migration_url)
+        .await
+        .expect("connect migration role");
+    let store = Store::new(pool.clone());
+    store.migrate().await.expect("install schema");
+    enable_runtime_login(&pool).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("exec001-org-{organization_id}"),
+            project_id,
+            "unsupported-spec",
+        )
+        .await
+        .expect("create test project");
+
+    let directory = tempfile::tempdir().expect("test root");
+    let tls = create_mtls(directory.path(), organization_id, agent_id);
+    let api_port = free_port();
+    let agent_port = free_port();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create remote workspace root");
+    let mut controller = Command::new(controller_binary)
+        .env("MCLOVING_MIGRATION_DATABASE_URL", &migration_url)
+        .env("MCLOVING_DATABASE_URL", &runtime_url)
+        .env("MCLOVING_API_TOKEN", TOKEN)
+        .env(
+            "MCLOVING_ARTIFACT_AGENT_TOKEN",
+            "remote-artifact-agent-token-32-bytes",
+        )
+        .env("MCLOVING_LISTEN", format!("127.0.0.1:{api_port}"))
+        .env("MCLOVING_AGENT_LISTEN", format!("127.0.0.1:{agent_port}"))
+        .env("MCLOVING_AGENT_SERVER_CERT_PATH", &tls.server_certificate)
+        .env("MCLOVING_AGENT_SERVER_KEY_PATH", &tls.server_key)
+        .env("MCLOVING_AGENT_CLIENT_CA_PATH", &tls.ca_certificate)
+        .env("MCLOVING_AGENT_IDENTITY_BINDINGS_PATH", &tls.bindings)
+        .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
+        .env("MCLOVING_AGENT_ID", "exec001-embedded-disabled")
+        .env("MCLOVING_AGENT_CAPABILITIES", "disabled")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
+        .env("MCLOVING_LEASE_SECONDS", "5")
+        .env("MCLOVING_POLL_MILLISECONDS", "10")
+        .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
+        .env("MCLOVING_TERMINATION_GRACE_MILLISECONDS", "100")
+        .env("MCLOVING_SESSION_EPOCH", "1")
+        .env(
+            "MCLOVING_WORKSPACE_ROOT",
+            directory.path().join("embedded-workspace"),
+        )
+        .env(
+            "MCLOVING_AGENT_JOURNAL",
+            directory.path().join("embedded-agent.db"),
+        )
+        .env(
+            "MCLOVING_OBJECT_ROOT",
+            directory.path().join("embedded-objects"),
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped controller");
+    let client = Client::new(&format!("http://127.0.0.1:{api_port}"), TOKEN);
+    wait_until_listening(&client, organization_id).await;
+
+    let steps = (0..100)
+        .map(|index| {
+            json!({
+                "kind": "process",
+                "program": "/bin/sh",
+                "args": ["-c", format!("echo step-{index}")],
+                "timeout_seconds": 10
+            })
+        })
+        .collect::<Vec<_>>();
+    let admission = admit_bound_test_build(
+        &store,
+        NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "exec001-unsupported-spec".to_owned(),
+            pipeline_digest: [0xe1; 32],
+            node_key: "hundred-steps".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted-linux".to_owned(),
+            priority: 0,
+            execution_spec: json!({"version": 1, "steps": steps}),
+        },
+    )
+    .await
+    .expect("admit the unrunnable build behind validate");
+
+    let journal = directory.path().join("exec001-agent.db");
+    let mut agent = agent_command(
+        agent_id,
+        organization_id,
+        agent_port,
+        &tls,
+        &journal,
+        &workspace,
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent");
+
+    let lease_term = Duration::from_secs(5);
+    let mut claim_observed_at = None;
+    let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let snapshot = store
+                .build_snapshot(organization_id, project_id, admission.build_id)
+                .await
+                .expect("read build snapshot")
+                .expect("build exists");
+            if matches!(
+                snapshot.attempt_status.as_str(),
+                "succeeded" | "failed" | "aborted"
+            ) {
+                break snapshot;
+            }
+            if snapshot.attempt_status != "queued" {
+                let observed_at = *claim_observed_at.get_or_insert_with(std::time::Instant::now);
+                assert!(
+                    observed_at.elapsed() < lease_term,
+                    "claimed refusal must reach a terminal state within one lease term, still {}",
+                    snapshot.attempt_status
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the unsupported build reaches a terminal state instead of running forever");
+    assert_eq!(snapshot.build_status, "failed");
+    assert_eq!(snapshot.attempt_status, "failed");
+    let reason = snapshot
+        .terminal_summary
+        .and_then(|summary| summary["reason"].as_str().map(str::to_owned))
+        .expect("terminal summary names the refusal");
+    assert_eq!(
+        reason,
+        "unsupported_execution_spec: execution spec declares 100 steps (expected exactly 1 process step)"
+    );
+    let terminal_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.terminal'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count terminal events");
+    assert_eq!(terminal_events, 1, "the refusal is finalized exactly once");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if mcloving_agent::journal_health(&journal)
+                .expect("read agent journal")
+                .2
+                == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the refused attempt retires from the agent journal");
+    assert!(
+        agent.try_wait().expect("inspect agent").is_none(),
+        "the agent session must survive a refused assignment"
+    );
+    stop(&mut agent).await;
+    stop(&mut controller).await;
+}
+
 fn directory_contains(root: &Path, needle: &[u8]) -> bool {
     let entries = std::fs::read_dir(root).expect("read test directory");
     for entry in entries {
@@ -421,6 +733,7 @@ fn directory_contains(root: &Path, needle: &[u8]) -> bool {
 }
 
 fn agent_command(
+    agent_id: &str,
     organization_id: Uuid,
     agent_port: u16,
     tls: &MtlsFiles,
@@ -429,7 +742,7 @@ fn agent_command(
 ) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mcloving-agent"));
     command
-        .env("MCLOVING_AGENT_ID", "remote-test-agent")
+        .env("MCLOVING_AGENT_ID", agent_id)
         .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
         .env(
             "MCLOVING_AGENT_ORGANIZATION_ID",
@@ -487,7 +800,7 @@ struct MtlsFiles {
     bindings: PathBuf,
 }
 
-fn create_mtls(root: &Path, organization_id: Uuid) -> MtlsFiles {
+fn create_mtls(root: &Path, organization_id: Uuid, agent_id: &str) -> MtlsFiles {
     let ca_certificate = root.join("ca.pem");
     let ca_key = root.join("ca-key.pem");
     openssl([
@@ -549,7 +862,7 @@ fn create_mtls(root: &Path, organization_id: Uuid) -> MtlsFiles {
         "rsa:2048",
         "-nodes",
         "-subj",
-        "/CN=remote-test-agent",
+        &format!("/CN={agent_id}"),
         "-keyout",
         path(&agent_key),
         "-out",
@@ -577,7 +890,7 @@ fn create_mtls(root: &Path, organization_id: Uuid) -> MtlsFiles {
     std::fs::write(
         &bindings,
         format!(
-            "{} remote-test-agent trusted-linux {organization_id}\n",
+            "{} {agent_id} trusted-linux {organization_id}\n",
             hex(&digest)
         ),
     )

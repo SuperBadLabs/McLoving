@@ -1,14 +1,16 @@
+#![recursion_limit = "256"]
 //! Versioned public HTTP API and its Rust client.
 
 mod oidc;
 
-pub use mcloving_controller_store::BuildCursor;
+pub use mcloving_controller_store::{BuildCursor, PipelineOperationalState};
 pub use oidc::{
-    MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
-    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
+    InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
+    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
+    OidcClientConfig,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,11 +22,22 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mcloving_controller_store::{
-    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
-    ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
-    DagDependency, DagNodeKind, DependencyCondition, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, ObjectKind, ObjectStatus, PipelinePage, PipelinePutOutcome,
-    PipelineRecord, PipelineWrite, RetryDecision, Store, StoreError, TestReportView, WaitReason,
+    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, CancellationDecision,
+    ComponentCursor, ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite,
+    CredentialGrantView, DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind,
+    DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent,
+    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
+    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite,
+    ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
+    NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy,
+    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite,
+    PullRequestDiscoveryStrategy, RetryDecision, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
+    TestReportView, TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
+    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
+    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -44,9 +57,14 @@ pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
 pub const PLATFORM_HEADER: &str = "mcloving-platform";
 pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorization";
+pub const MAX_DISCOVERY_SCAN_BODY_BYTES: usize = 128 * 1024 * 1024;
+pub const CONNECTOR_MAPPING_CATALOG_V1: &str = "mcloving.connector-mapping-catalog/v1";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
-const DEFAULT_PLATFORM: &str = "linux";
+// The scheduling capability vocabulary (docs/architecture/CAPABILITY_VOCABULARY_V1.md)
+// defines the closed platform set and the default; spell both through it.
+const DEFAULT_PLATFORM: &str = mcloving_domain::capability::DEFAULT_PLATFORM;
 const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
+const MAX_DISCOVERY_SCAN_OBSERVATIONS: usize = 4096;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -58,6 +76,67 @@ pub struct ApiState {
     staged_upload_ttl: Duration,
     publication_claim_cursor: Arc<Mutex<Option<String>>>,
     oidc_clients: BTreeMap<(Uuid, Uuid), oidc::OidcClient>,
+    connector_mapping_catalog: ConnectorMappingCatalog,
+}
+
+/// Deployment-owned admission catalog for one exact execution profile.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorMappingCatalog {
+    pub schema_version: String,
+    pub profile: String,
+    pub generation: u64,
+    pub mappings: Vec<ConnectorMappingRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorMappingRecord {
+    pub mapping_id: String,
+    pub mapping_digest: String,
+}
+
+impl ConnectorMappingCatalog {
+    fn deny_all() -> Self {
+        Self {
+            schema_version: CONNECTOR_MAPPING_CATALOG_V1.to_owned(),
+            profile: "unconfigured".to_owned(),
+            generation: 0,
+            mappings: Vec::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.schema_version != CONNECTOR_MAPPING_CATALOG_V1
+            || self.generation == 0
+            || !canonical_mapping_name(&self.profile)
+            || self.mappings.is_empty()
+            || self.mappings.len() > 1_024
+        {
+            return Err(ApiError::configuration(
+                "connector mapping catalog schema, profile, generation, or size is invalid",
+            ));
+        }
+        let mut identifiers = BTreeSet::new();
+        for mapping in &self.mappings {
+            if !canonical_mapping_name(&mapping.mapping_id)
+                || !canonical_sha256_reference(&mapping.mapping_digest)
+                || !identifiers.insert(&mapping.mapping_id)
+            {
+                return Err(ApiError::configuration(
+                    "connector mapping catalog contains an invalid or duplicate mapping",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn contains_exact(&self, mapping_id: &str, mapping_digest: &str) -> bool {
+        self.mappings.iter().any(|mapping| {
+            mapping.mapping_id == mapping_id && mapping.mapping_digest == mapping_digest
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -99,6 +178,7 @@ impl ApiState {
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
+            connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
         })
     }
 
@@ -117,7 +197,27 @@ impl ApiState {
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
+            connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
         }
+    }
+
+    pub async fn process_due_trigger_deliveries(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<usize, ApiError> {
+        let scan_unix_ms = unix_time_ms();
+        let deliveries = self
+            .store
+            .due_trigger_deliveries(organization_id, scan_unix_ms, limit)
+            .await
+            .map_err(trigger_error)?;
+        let mut processed = 0;
+        for delivery in deliveries {
+            process_trigger_delivery(self, delivery, unix_time_ms()).await?;
+            processed += 1;
+        }
+        Ok(processed)
     }
 
     /// Adds another independently authenticated API principal.
@@ -246,6 +346,15 @@ impl ApiState {
         self
     }
 
+    pub fn with_connector_mapping_catalog(
+        mut self,
+        catalog: ConnectorMappingCatalog,
+    ) -> Result<Self, ApiError> {
+        catalog.validate()?;
+        self.connector_mapping_catalog = catalog;
+        Ok(self)
+    }
+
     /// Sets the maximum age of a durable but unpublished artifact upload.
     ///
     /// Reclamation runs before each new upload, so abandoned reservations
@@ -280,6 +389,16 @@ pub fn router(state: ApiState) -> Router {
             post(stage_artifact),
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
+    let discovery_scan = Router::new()
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
+            post(reconcile_discovery_scan),
+        )
+        // A maximally populated accepted observation contains fewer than 30 KiB
+        // even with six-byte JSON escaping for every bounded string byte and
+        // escaped field names. 4,096 observations plus the bounded envelope
+        // therefore fit below this conservative 128 MiB transport ceiling.
+        .route_layer(DefaultBodyLimit::max(MAX_DISCOVERY_SCAN_BODY_BYTES));
     static_ui_router()
         .route("/openapi.json", get(openapi))
         .route(
@@ -319,6 +438,35 @@ pub fn router(state: ApiState) -> Router {
             get(get_pipeline).put(put_pipeline),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
+            get(get_pipeline_state).put(put_pipeline_state),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
+            post(submit_pipeline_build),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+            get(get_pipeline_trigger).put(put_pipeline_trigger),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
+            post(submit_trigger_event),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
+            post(redrive_trigger_event),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
+            get(get_discovery_parent).put(put_discovery_parent),
+        )
+        .merge(discovery_scan)
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
+            get(list_discovery_children),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
             get(list_components),
         )
@@ -328,7 +476,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
-            post(submit).get(list_builds),
+            get(list_builds),
         )
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}",
@@ -443,6 +591,255 @@ pub struct SubmissionRequest {
     pub parameters: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PipelineBuildRequest {
+    #[serde(default)]
+    pub parameters: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineOperationalStateRequest {
+    pub state: PipelineOperationalState,
+    pub reason: String,
+    pub source_identity: String,
+    pub source_generation: String,
+    pub source_effective_at_unix_ms: i64,
+    pub source_provenance_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineTriggerRequest {
+    pub kind: TriggerKind,
+    pub state: PipelineTriggerState,
+    pub implementation_sha256: String,
+    pub configuration_sha256: String,
+    pub filter_sha256: String,
+    pub event_source_identity: String,
+    pub source_generation: String,
+    pub configuration: Value,
+    pub deduplication_window_seconds: i64,
+    pub max_delivery_attempts: i32,
+    pub delivery_ttl_seconds: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineTriggerResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub trigger_id: Uuid,
+    pub generation: i64,
+    pub kind: TriggerKind,
+    pub state: PipelineTriggerState,
+    pub implementation_sha256: String,
+    pub configuration_sha256: String,
+    pub filter_sha256: String,
+    pub event_source_identity: String,
+    pub source_generation: String,
+    pub configuration: Value,
+    pub deduplication_window_seconds: i64,
+    pub max_delivery_attempts: i32,
+    pub delivery_ttl_seconds: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerEventRequest {
+    pub trigger_generation: i64,
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_kind: String,
+    pub event_time_unix_ms: i64,
+    pub payload: Value,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, Value>,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    #[serde(default = "default_trust_pool")]
+    pub trust_pool: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TriggerEventResponse {
+    pub delivery: TriggerDelivery,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRedriveRequest {
+    pub delivery_id: String,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryParentRequest {
+    pub kind: DiscoveryParentKind,
+    pub state: DiscoveryParentState,
+    pub implementation_sha256: String,
+    pub protocol_version: String,
+    pub configuration_sha256: String,
+    pub provider: String,
+    pub provider_identity: String,
+    pub organization_identity: Option<String>,
+    pub repositories: Vec<String>,
+    #[serde(default)]
+    pub branch_includes: Vec<String>,
+    #[serde(default)]
+    pub branch_excludes: Vec<String>,
+    pub pull_request_strategy: PullRequestDiscoveryStrategy,
+    pub fork_trust_strategy: ForkTrustStrategy,
+    #[serde(default)]
+    pub trusted_fork_repositories: Vec<String>,
+    pub jenkinsfile_path: String,
+    pub child_configuration_policy_sha256: String,
+    pub orphan_policy: OrphanPolicy,
+    pub authorization_generation: i64,
+    pub authorization_policy_sha256: String,
+    pub trigger_id: Uuid,
+    pub trigger_generation: i64,
+    pub trigger_configuration_sha256: String,
+    pub source_implementation_sha256: String,
+    pub source_protocol_version: String,
+    pub source_configuration_sha256: String,
+    pub restored_from_generation: Option<i64>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DiscoveryParentResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub parent_id: Uuid,
+    pub generation: i64,
+    pub kind: DiscoveryParentKind,
+    pub state: DiscoveryParentState,
+    pub implementation_sha256: String,
+    pub protocol_version: String,
+    pub configuration_sha256: String,
+    pub provider: String,
+    pub provider_identity: String,
+    pub organization_identity: Option<String>,
+    pub repositories: Vec<String>,
+    pub branch_includes: Vec<String>,
+    pub branch_excludes: Vec<String>,
+    pub pull_request_strategy: PullRequestDiscoveryStrategy,
+    pub fork_trust_strategy: ForkTrustStrategy,
+    pub trusted_fork_repositories: Vec<String>,
+    pub jenkinsfile_path: String,
+    pub child_configuration_policy_sha256: String,
+    pub orphan_policy: OrphanPolicy,
+    pub authorization_generation: i64,
+    pub authorization_policy_sha256: String,
+    pub trigger_id: Uuid,
+    pub trigger_generation: i64,
+    pub trigger_configuration_sha256: String,
+    pub source_implementation_sha256: String,
+    pub source_protocol_version: String,
+    pub source_configuration_sha256: String,
+    pub restored_from_generation: Option<i64>,
+    pub audit_sequence: i64,
+    pub audit_event_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryObservationRequest {
+    pub child_key: String,
+    pub child_pipeline_id: Uuid,
+    pub repository_identity: String,
+    pub ref_kind: DiscoveredRefKind,
+    pub ref_name: String,
+    pub pull_request_number: Option<i64>,
+    pub head_repository_identity: String,
+    pub present: bool,
+    pub revision: String,
+    pub provenance_sha256: String,
+    pub jenkinsfile_path: String,
+    pub jenkinsfile_sha256: String,
+    pub child_configuration_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryScanRequest {
+    pub parent_generation: i64,
+    pub scan_id: String,
+    pub source: DiscoveryScanSource,
+    pub source_event_id: Option<String>,
+    pub source_cursor: i64,
+    pub complete_snapshot: bool,
+    pub provider_snapshot_sha256: String,
+    pub request_sha256: String,
+    pub observations: Vec<DiscoveryObservationRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryScanResponse {
+    pub receipt: DiscoveryScanReceiptResponse,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryScanReceiptResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub parent_id: Uuid,
+    pub parent_generation: i64,
+    pub scan_id: String,
+    pub source: DiscoveryScanSource,
+    pub source_event_id: Option<String>,
+    pub source_cursor: i64,
+    pub complete_snapshot: bool,
+    pub provider_snapshot_sha256: String,
+    pub request_sha256: String,
+    pub observation_count: usize,
+    pub selected_count: usize,
+    pub active_count: usize,
+    pub quarantined_count: usize,
+    pub retired_count: usize,
+    pub audit_sequence: i64,
+    pub audit_event_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryChildResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub parent_id: Uuid,
+    pub child_key: String,
+    pub child_pipeline_id: Uuid,
+    pub repository_identity: String,
+    pub ref_kind: DiscoveredRefKind,
+    pub ref_name: String,
+    pub pull_request_number: Option<i64>,
+    pub head_repository_identity: String,
+    pub is_fork: bool,
+    pub state: DiscoveryChildState,
+    pub state_generation: i64,
+    pub revision: String,
+    pub provenance_sha256: String,
+    pub jenkinsfile_path: String,
+    pub jenkinsfile_sha256: String,
+    pub child_configuration_sha256: String,
+    pub parent_generation: i64,
+    pub source_cursor: i64,
+    pub last_scan_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryChildPageResponse {
+    pub items: Vec<DiscoveryChildResponse>,
+    pub next_after: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PipelineUpsertRequest {
     pub slug: String,
@@ -465,6 +862,7 @@ pub struct PipelineStagePlan {
     pub id: String,
     pub name: String,
     pub process_steps: usize,
+    pub connector_intent_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -542,6 +940,9 @@ fn openapi_document() -> Value {
     let provider = path_parameter("provider_id", "uuid");
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
+    let trigger = path_parameter("trigger_id", "uuid");
+    let discovery_parent = path_parameter("parent_id", "uuid");
+    let delivery = path_parameter("delivery_id", "string");
     let digest = path_parameter("digest", "sha256");
     let build = path_parameter("build_id", "uuid");
     let attempt = path_parameter("attempt_id", "uuid");
@@ -561,6 +962,7 @@ fn openapi_document() -> Value {
         query_parameter("after", "string"),
         query_parameter("after_digest", "sha256"),
     ];
+    let trigger_event_payload = trigger_event_payload_schema();
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -572,6 +974,8 @@ fn openapi_document() -> Value {
         "tags": [
             {"name": "authentication"},
             {"name": "pipelines"},
+            {"name": "triggers"},
+            {"name": "discovery"},
             {"name": "components"},
             {"name": "builds"},
             {"name": "evidence"},
@@ -645,12 +1049,60 @@ fn openapi_document() -> Value {
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}": {
-                "parameters": [organization.clone(), project.clone(), pipeline],
+                "parameters": [organization.clone(), project.clone(), pipeline.clone()],
                 "get": api_operation(
                     "getPipeline", "pipelines", "Read one pipeline revision", "200",
                     Vec::new(), None
                 ),
                 "put": put_pipeline_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone()],
+                "get": api_operation(
+                    "getPipelineState", "pipelines", "Read current pipeline operational state", "200",
+                    Vec::new(), None
+                ),
+                "put": put_pipeline_state_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "get": api_operation(
+                    "getPipelineTrigger", "triggers", "Read the current typed trigger generation", "200",
+                    Vec::new(), None
+                ),
+                "put": put_pipeline_trigger_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "post": trigger_event_operation(
+                    "submitTriggerEvent", "Authenticate, durably capture, and process a typed trigger event", "TriggerEventRequest"
+                )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger, delivery],
+                "post": trigger_event_operation(
+                    "redriveTriggerDelivery", "Explicitly redrive one dead-lettered trigger delivery", "TriggerRedriveRequest"
+                )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent.clone()],
+                "get": api_operation(
+                    "getDiscoveryParent", "discovery", "Read the current immutable discovery-parent generation", "200",
+                    Vec::new(), None
+                ),
+                "put": put_discovery_parent_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent.clone()],
+                "post": discovery_scan_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent],
+                "get": discovery_children_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
+                "parameters": [organization.clone(), project.clone(), pipeline],
+                "post": submit_build_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components": {
                 "parameters": [organization.clone(), project.clone()],
@@ -672,8 +1124,7 @@ fn openapi_document() -> Value {
                 "get": api_operation(
                     "listBuilds", "builds", "List builds with a stable cursor", "200",
                     build_page, None
-                ),
-                "post": submit_build_operation()
+                )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
@@ -825,10 +1276,94 @@ fn openapi_document() -> Value {
                     "required": ["source"],
                     "properties": {
                         "source": {"type": "string"},
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
+                "PipelineBuildRequest": {
+                    "type": "object",
+                    "properties": {
+                        "parameters": parameter_values_schema()
+                    },
+                    "additionalProperties": false
+                },
+                "PipelineOperationalStateRequest": {
+                    "type": "object",
+                    "required": [
+                        "state", "reason", "source_identity", "source_generation",
+                        "source_effective_at_unix_ms", "source_provenance_sha256"
+                    ],
+                    "properties": {
+                        "state": {"type": "string", "enum": ["enabled", "disabled"]},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "source_effective_at_unix_ms": {"type": "integer", "minimum": 0},
+                        "source_provenance_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "additionalProperties": false
+                },
+                "PipelineTriggerRequest": pipeline_trigger_request_schema(),
+                "ScmPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "scm_webhook", "ScmTriggerConfiguration"
+                ),
+                "SchedulePipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "schedule", "ScheduleTriggerConfiguration"
+                ),
+                "UpstreamPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "upstream", "UpstreamTriggerConfiguration"
+                ),
+                "RemoteApiPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "remote_api", "RemoteApiTriggerConfiguration"
+                ),
+                "TriggerEventRequest": {
+                    "type": "object",
+                    "required": ["trigger_generation", "delivery_id", "event_id", "event_kind", "event_time_unix_ms", "payload"],
+                    "properties": {
+                        "trigger_generation": {
+                            "type": "integer", "format": "int64",
+                            "minimum": 1, "maximum": i64::MAX
+                        },
+                        "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "event_time_unix_ms": {
+                            "type": "integer", "format": "int64",
+                            "minimum": 0, "maximum": i64::MAX
+                        },
+                        "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
+                        "parameters": parameter_values_schema(),
+                        "platform": {"type": "string", "enum": mcloving_domain::capability::SUPPORTED_PLATFORMS},
+                        "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
+                    },
+                    "additionalProperties": false
+                },
+                "TriggerEventResponse": trigger_event_response_schema(),
+                "TriggerDelivery": trigger_delivery_schema(),
+                "AdmissionResponse": admission_response_schema(),
+                "ScmTriggerConfiguration": scm_trigger_configuration_schema(),
+                "ScheduleTriggerConfiguration": schedule_trigger_configuration_schema(),
+                "UpstreamTriggerConfiguration": upstream_trigger_configuration_schema(),
+                "RemoteApiTriggerConfiguration": remote_api_trigger_configuration_schema(),
+                "TriggerEventPayload": trigger_event_payload,
+                "ScmTriggerEventPayload": scm_trigger_event_payload_schema(),
+                "ScheduleTriggerEventPayload": schedule_trigger_event_payload_schema(),
+                "UpstreamTriggerEventPayload": upstream_trigger_event_payload_schema(),
+                "RemoteApiTriggerEventPayload": remote_api_trigger_event_payload_schema(),
+                "TriggerRedriveRequest": {
+                    "type": "object",
+                    "required": ["delivery_id", "event_id"],
+                    "properties": {
+                        "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_id": {"type": "string", "minLength": 1, "maxLength": 512}
+                    },
+                    "additionalProperties": false
+                },
+                "DiscoveryParentRequest": discovery_parent_request_schema(),
+                "DiscoveryScanRequest": discovery_scan_request_schema(),
+                "DiscoveryObservationRequest": discovery_observation_request_schema(),
+                "DiscoveryChild": discovery_child_schema(),
+                "DiscoveryChildPage": discovery_child_page_schema(),
                 "RefreshRequest": {
                     "type": "object",
                     "required": ["refresh_token"],
@@ -843,7 +1378,7 @@ fn openapi_document() -> Value {
                     "properties": {
                         "slug": {"type": "string"},
                         "source": {"type": "string"},
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
@@ -899,6 +1434,493 @@ fn openapi_document() -> Value {
                 "BinaryArtifact": {"type": "string", "format": "binary"}
             }
         }
+    })
+}
+
+fn pipeline_trigger_request_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"$ref": "#/components/schemas/ScmPipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/SchedulePipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/UpstreamPipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/RemoteApiPipelineTriggerRequest"}
+        ],
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "scm_webhook": "#/components/schemas/ScmPipelineTriggerRequest",
+                "schedule": "#/components/schemas/SchedulePipelineTriggerRequest",
+                "upstream": "#/components/schemas/UpstreamPipelineTriggerRequest",
+                "remote_api": "#/components/schemas/RemoteApiPipelineTriggerRequest"
+            }
+        }
+    })
+}
+
+fn discovery_parent_request_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    let strings = json!({
+        "type": "array", "maxItems": 4096, "uniqueItems": true,
+        "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    });
+    json!({
+        "type": "object",
+        "required": [
+            "kind", "state", "implementation_sha256", "protocol_version",
+            "configuration_sha256", "provider", "provider_identity", "repositories",
+            "pull_request_strategy", "fork_trust_strategy", "jenkinsfile_path",
+            "child_configuration_policy_sha256", "orphan_policy",
+            "authorization_generation", "authorization_policy_sha256", "trigger_id",
+            "trigger_generation", "trigger_configuration_sha256",
+            "source_implementation_sha256", "source_protocol_version",
+            "source_configuration_sha256", "reason"
+        ],
+        "properties": {
+            "kind": {"type": "string", "enum": ["multibranch_pipeline", "organization_folder"]},
+            "state": {"type": "string", "enum": ["enabled", "quiesced"]},
+            "implementation_sha256": digest.clone(),
+            "protocol_version": {"type": "string", "minLength": 1, "maxLength": 128},
+            "configuration_sha256": digest.clone(),
+            "provider": {"type": "string", "enum": ["github", "gitlab", "bitbucket", "gitea"]},
+            "provider_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "organization_identity": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+            "repositories": strings.clone(),
+            "branch_includes": strings.clone(),
+            "branch_excludes": strings.clone(),
+            "pull_request_strategy": {"type": "string", "enum": ["none", "origin_only", "origin_and_forks"]},
+            "fork_trust_strategy": {"type": "string", "enum": ["none", "named_repositories", "all"]},
+            "trusted_fork_repositories": strings,
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_configuration_policy_sha256": digest.clone(),
+            "orphan_policy": {"type": "string", "enum": ["retain", "retire"]},
+            "authorization_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "authorization_policy_sha256": digest.clone(),
+            "trigger_id": {"type": "string", "format": "uuid"},
+            "trigger_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "trigger_configuration_sha256": digest.clone(),
+            "source_implementation_sha256": digest.clone(),
+            "source_protocol_version": {"type": "string", "minLength": 1, "maxLength": 128},
+            "source_configuration_sha256": digest,
+            "restored_from_generation": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_observation_request_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    json!({
+        "type": "object",
+        "required": [
+            "child_key", "child_pipeline_id", "repository_identity", "ref_kind",
+            "ref_name", "head_repository_identity", "present", "revision",
+            "provenance_sha256", "jenkinsfile_path", "jenkinsfile_sha256",
+            "child_configuration_sha256"
+        ],
+        "properties": {
+            "child_key": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_pipeline_id": {"type": "string", "format": "uuid"},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "ref_kind": {"type": "string", "enum": ["branch", "pull_request"]},
+            "ref_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "pull_request_number": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "head_repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "present": {"type": "boolean"},
+            "revision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,128}$"},
+            "provenance_sha256": digest.clone(),
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "jenkinsfile_sha256": digest.clone(),
+            "child_configuration_sha256": digest
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_scan_request_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "parent_generation", "scan_id", "source", "source_cursor",
+            "complete_snapshot", "provider_snapshot_sha256", "request_sha256",
+            "observations"
+        ],
+        "properties": {
+            "parent_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "scan_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "source": {"type": "string", "enum": ["webhook", "periodic", "recovery"]},
+            "source_event_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+            "source_cursor": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "complete_snapshot": {"type": "boolean"},
+            "provider_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "observations": {
+                "type": "array", "maxItems": MAX_DISCOVERY_SCAN_OBSERVATIONS,
+                "items": {"$ref": "#/components/schemas/DiscoveryObservationRequest"}
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_child_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    json!({
+        "type": "object",
+        "required": [
+            "organization_id", "project_id", "pipeline_id", "parent_id", "child_key",
+            "child_pipeline_id", "repository_identity", "ref_kind", "ref_name",
+            "pull_request_number", "head_repository_identity", "is_fork", "state",
+            "state_generation", "revision", "provenance_sha256", "jenkinsfile_path",
+            "jenkinsfile_sha256", "child_configuration_sha256", "parent_generation",
+            "source_cursor", "last_scan_id"
+        ],
+        "properties": {
+            "organization_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "pipeline_id": {"type": "string", "format": "uuid"},
+            "parent_id": {"type": "string", "format": "uuid"},
+            "child_key": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_pipeline_id": {"type": "string", "format": "uuid"},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "ref_kind": {"type": "string", "enum": ["branch", "pull_request"]},
+            "ref_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "pull_request_number": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "head_repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "is_fork": {"type": "boolean"},
+            "state": {"type": "string", "enum": ["active", "quarantined", "retired"]},
+            "state_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "revision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,128}$"},
+            "provenance_sha256": digest.clone(),
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "jenkinsfile_sha256": digest.clone(),
+            "child_configuration_sha256": digest,
+            "parent_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "source_cursor": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "last_scan_id": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_child_page_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["items", "next_after"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "maxItems": mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE,
+                "items": {"$ref": "#/components/schemas/DiscoveryChild"}
+            },
+            "next_after": {"type": ["string", "null"], "maxLength": 1024}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn parameter_values_schema() -> Value {
+    json!({
+        "type": "object",
+        "maxProperties": 128,
+        "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]{1,256}$"
+        },
+        "additionalProperties": {
+            "oneOf": [
+                {"type": "boolean"},
+                {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": i64::MIN,
+                    "maximum": i64::MAX
+                },
+                {"type": "string", "maxLength": 4096}
+            ]
+        }
+    })
+}
+
+fn trigger_event_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["delivery"],
+        "properties": {
+            "delivery": {"$ref": "#/components/schemas/TriggerDelivery"},
+            "admission": {"$ref": "#/components/schemas/AdmissionResponse"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn trigger_delivery_schema() -> Value {
+    let digest = json!({
+        "type": "array",
+        "minItems": 32,
+        "maxItems": 32,
+        "items": {"type": "integer", "minimum": 0, "maximum": 255}
+    });
+    json!({
+        "type": "object",
+        "required": [
+            "organization_id", "project_id", "pipeline_id", "trigger_id",
+            "trigger_generation", "delivery_id", "event_id", "event_kind",
+            "caller_identity", "payload_sha256", "canonical_payload", "parameters",
+            "requested_platform", "requested_trust_pool", "event_time_unix_ms",
+            "accepted_at_unix_ms", "expires_at_unix_ms", "status", "attempt_count",
+            "next_attempt_at_unix_ms", "claim_owner", "claim_fence",
+            "claim_expires_at_unix_ms", "redrive_of_delivery_id", "redrive_ordinal",
+            "build_id", "terminal_reason", "audit_sequence", "audit_event_hash"
+        ],
+        "properties": {
+            "organization_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "pipeline_id": {"type": "string", "format": "uuid"},
+            "trigger_id": {"type": "string", "format": "uuid"},
+            "trigger_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
+            "caller_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "payload_sha256": digest.clone(),
+            "canonical_payload": {"type": "object"},
+            "parameters": {"type": "object"},
+            "requested_platform": {"type": "string", "enum": mcloving_domain::capability::SUPPORTED_PLATFORMS},
+            "requested_trust_pool": {"type": "string", "minLength": 1, "maxLength": 128},
+            "event_time_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "accepted_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "expires_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "status": {"type": "string", "enum": ["pending", "retry_wait", "admitted", "dead_lettered"]},
+            "attempt_count": {"type": "integer", "format": "int32", "minimum": 0, "maximum": i32::MAX},
+            "next_attempt_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "claim_owner": {"type": ["string", "null"]},
+            "claim_fence": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "claim_expires_at_unix_ms": {"type": ["integer", "null"], "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "redrive_of_delivery_id": {"type": ["string", "null"]},
+            "redrive_ordinal": {"type": ["integer", "null"], "format": "int32", "minimum": 1, "maximum": i32::MAX},
+            "build_id": {"type": ["string", "null"], "format": "uuid"},
+            "terminal_reason": {"type": ["string", "null"], "maxLength": 2048},
+            "audit_sequence": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "audit_event_hash": digest
+        },
+        "additionalProperties": false
+    })
+}
+
+fn admission_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["build_id", "node_id", "attempt_id", "created", "pipeline_digest"],
+        "properties": {
+            "build_id": {"type": "string", "format": "uuid"},
+            "node_id": {"type": "string", "format": "uuid"},
+            "attempt_id": {"type": "string", "format": "uuid"},
+            "created": {"type": "boolean"},
+            "pipeline_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn pipeline_trigger_request_variant_schema(kind: &str, configuration_schema: &str) -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "kind", "state", "implementation_sha256", "configuration_sha256",
+            "filter_sha256", "event_source_identity", "source_generation",
+            "configuration", "deduplication_window_seconds",
+            "max_delivery_attempts", "delivery_ttl_seconds", "reason"
+        ],
+        "properties": {
+            "kind": {"type": "string", "const": kind},
+            "state": {"type": "string", "enum": ["enabled", "paused"]},
+            "implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "filter_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+            "configuration": {"$ref": format!("#/components/schemas/{configuration_schema}")},
+            "deduplication_window_seconds": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 2592000},
+            "max_delivery_attempts": {"type": "integer", "format": "int32", "minimum": 1, "maximum": 100},
+            "delivery_ttl_seconds": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 2592000},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn scm_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "provider": {"type": "string", "minLength": 1, "maxLength": 512},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": trigger_filter_schema(&["event_kinds", "branches", "path_prefixes"])
+        },
+        "required": ["provider", "repository_identity", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn schedule_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolver_implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_unix_ms": {
+                "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
+                "description": "Resolved Unix-millisecond slots in strictly increasing order; the digest binds this exact ordered array.",
+                "x-mcloving-ordering": "strictly_increasing",
+                "items": {
+                    "type": "integer", "format": "int64",
+                    "minimum": 0, "maximum": i64::MAX
+                }
+            },
+            "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_hash_inputs_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "filter": trigger_filter_schema(&["event_kinds"])
+        },
+        "required": [
+            "timezone", "calendar", "expression", "schedule_identity_sha256",
+            "resolver_implementation_sha256", "resolved_slots_sha256",
+            "resolved_slots_unix_ms", "filter"
+        ],
+        "dependentRequired": {
+            "jenkins_hash_algorithm_version": ["jenkins_full_item_name", "jenkins_hash_inputs_sha256"],
+            "jenkins_full_item_name": ["jenkins_hash_algorithm_version", "jenkins_hash_inputs_sha256"],
+            "jenkins_hash_inputs_sha256": ["jenkins_hash_algorithm_version", "jenkins_full_item_name"]
+        },
+        "additionalProperties": false
+    })
+}
+
+fn upstream_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "filter": trigger_filter_schema(&["event_kinds", "statuses"])
+        },
+        "required": ["upstream_pipeline_id", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn remote_api_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": trigger_filter_schema(&["event_kinds", "request_methods"])
+        },
+        "required": ["audience", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn trigger_filter_schema(fields: &[&str]) -> Value {
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        properties.insert(
+            (*field).to_owned(),
+            json!({
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+            }),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": false
+    })
+}
+
+fn trigger_event_payload_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"$ref": "#/components/schemas/ScmTriggerEventPayload"},
+            {"$ref": "#/components/schemas/ScheduleTriggerEventPayload"},
+            {"$ref": "#/components/schemas/UpstreamTriggerEventPayload"},
+            {"$ref": "#/components/schemas/RemoteApiTriggerEventPayload"}
+        ]
+    })
+}
+
+fn scm_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "revision": {"type": "string", "minLength": 1, "maxLength": 512},
+            "branch": {"type": "string", "minLength": 1, "maxLength": 512},
+            "paths": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+            }
+        },
+        "required": ["repository_identity", "revision", "branch"],
+        "additionalProperties": false
+    })
+}
+
+fn schedule_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "expected_last_resolved_slot_unix_ms": {
+                "type": "integer", "format": "int64",
+                "minimum": 0, "maximum": i64::MAX
+            },
+            "resolved_slot_unix_ms": {
+                "type": "integer", "format": "int64",
+                "minimum": 0, "maximum": i64::MAX
+            }
+        },
+        "required": [
+            "timezone", "calendar", "expression", "schedule_identity_sha256",
+            "resolved_slot_unix_ms"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn upstream_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "upstream_build_id": {"type": "string", "format": "uuid"},
+            "status": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "required": ["upstream_pipeline_id", "upstream_build_id", "status"],
+        "additionalProperties": false
+    })
+}
+
+fn remote_api_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "request_method": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "required": ["audience", "request_id", "request_method"],
+        "additionalProperties": false
     })
 }
 
@@ -1029,19 +2051,144 @@ fn submit_build_operation() -> Value {
     let mut operation = api_operation(
         "submitBuild",
         "builds",
-        "Submit strict YAML for idempotent admission",
+        "Submit parameters to an enabled saved pipeline",
         "201",
         vec![
             header_parameter(IDEMPOTENCY_HEADER, true),
             header_parameter(PLATFORM_HEADER, false),
             header_parameter(TRUST_POOL_HEADER, false),
         ],
-        Some("SubmissionRequest"),
+        Some("PipelineBuildRequest"),
     );
     operation["responses"]["200"] = json!({
         "description": "Idempotent replay of an existing build",
         "content": {"application/json": {"schema": {"type": "object"}}}
     });
+    operation
+}
+
+fn put_pipeline_state_operation() -> Value {
+    let mut operation = api_operation(
+        "putPipelineState",
+        "pipelines",
+        "Advance enabled or disabled operational state",
+        "200",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("PipelineOperationalStateRequest"),
+    );
+    operation["responses"]["412"] = json!({
+        "description": "Operational-state generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn put_pipeline_trigger_operation() -> Value {
+    let mut operation = api_operation(
+        "putPipelineTrigger",
+        "triggers",
+        "Create, pause, resume, rotate, or revise a typed trigger",
+        "201",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("PipelineTriggerRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Updated trigger generation or idempotent replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Trigger generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn put_discovery_parent_operation() -> Value {
+    let mut operation = api_operation(
+        "putDiscoveryParent",
+        "discovery",
+        "Create, quiesce, restore, or revise an immutable discovery-parent generation",
+        "201",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("DiscoveryParentRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Updated discovery generation or exact idempotent replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Discovery generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn discovery_scan_operation() -> Value {
+    let mut operation = api_operation(
+        "reconcileDiscoveryScan",
+        "discovery",
+        "Atomically reconcile one digest-bound webhook, periodic, or recovery scan",
+        "201",
+        Vec::new(),
+        Some("DiscoveryScanRequest"),
+    );
+    operation["requestBody"]["x-mcloving-max-body-bytes"] = json!(MAX_DISCOVERY_SCAN_BODY_BYTES);
+    operation["responses"]["200"] = json!({
+        "description": "Exact scan replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation
+}
+
+fn discovery_children_operation() -> Value {
+    let mut after = query_parameter("after", "string");
+    after["schema"]["maxLength"] = json!(1024);
+    let mut limit = query_parameter("limit", "integer");
+    limit["schema"]["minimum"] = json!(1);
+    limit["schema"]["maximum"] = json!(mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE);
+    let mut operation = api_operation(
+        "listDiscoveryChildren",
+        "discovery",
+        "List one bounded child-key page of retained discovery truth",
+        "200",
+        vec![after, limit],
+        None,
+    );
+    operation["responses"]["200"]["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/DiscoveryChildPage"});
+    operation
+}
+
+fn trigger_event_operation(operation_id: &str, summary: &str, body_schema: &str) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        "triggers",
+        summary,
+        "201",
+        Vec::new(),
+        Some(body_schema),
+    );
+    let response = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TriggerEventResponse"}}}
+        })
+    };
+    operation["responses"]["200"] = response("Exact replay of an admitted trigger delivery");
+    operation["responses"]["201"] = response("New trigger delivery admitted or durably captured");
+    operation["responses"]["202"] =
+        response("Delivery is durably leased or waiting for its bounded retry");
+    operation["responses"]["422"] =
+        response("Delivery is durably dead-lettered and carries its terminal state");
     operation
 }
 
@@ -1165,6 +2312,7 @@ async fn validate_pipeline(
     .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     Ok(Json(ValidationResponse {
         valid: true,
@@ -1188,6 +2336,7 @@ async fn plan_pipeline(
     .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     Ok(Json(pipeline_plan(&pipeline)?))
 }
 
@@ -1208,6 +2357,7 @@ async fn put_pipeline(
     let expected_revision = expected_revision(&headers)?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     let semantic_digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     let source_sha256 = Sha256::digest(request.source.as_bytes()).into();
     let parameter_schema = parameter_schema(&pipeline);
@@ -1276,6 +2426,104 @@ async fn get_pipeline(
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&format!("\"{}\"", record.revision)).map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn get_pipeline_state(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let record = state
+        .store
+        .pipeline_operational_state(organization_id, project_id, pipeline_id)
+        .await
+        .map_err(pipeline_state_error)?
+        .ok_or_else(resource_not_found)?;
+    pipeline_state_response(StatusCode::OK, record)
+}
+
+async fn put_pipeline_state(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<PipelineOperationalStateRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    if expected_generation == 0 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_state_precondition",
+            "pipeline operational-state If-Match generation must be positive",
+        ));
+    }
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let source_provenance_sha256 = parse_hex_digest_named(
+        &request.source_provenance_sha256,
+        "pipeline state provenance",
+    )?;
+    let outcome = state
+        .store
+        .transition_pipeline_operational_state(&PipelineOperationalStateTransition {
+            organization_id,
+            project_id,
+            pipeline_id,
+            expected_generation,
+            state: request.state,
+            reason: request.reason,
+            actor_subject: principal.subject,
+            source_identity: request.source_identity,
+            source_generation: request.source_generation,
+            source_effective_at_unix_ms: request.source_effective_at_unix_ms,
+            source_provenance_sha256,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(pipeline_state_error)?;
+    match outcome {
+        PipelineOperationalStateTransitionOutcome::Applied(record) => {
+            pipeline_state_response(StatusCode::OK, record)
+        }
+        PipelineOperationalStateTransitionOutcome::Idempotent(record) => {
+            pipeline_state_response(StatusCode::OK, record)
+        }
+        PipelineOperationalStateTransitionOutcome::NotFound => Err(resource_not_found()),
+        PipelineOperationalStateTransitionOutcome::PreconditionFailed { current_generation } => {
+            Err(ApiError::new(
+                StatusCode::PRECONDITION_FAILED,
+                "state_generation_precondition_failed",
+                format!("current pipeline operational-state generation is {current_generation}"),
+            ))
+        }
+    }
+}
+
+fn pipeline_state_response(
+    status: StatusCode,
+    record: PipelineOperationalStateRecord,
+) -> Result<Response, ApiError> {
+    let generation = record.generation;
+    let mut response = (status, Json(record)).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\"")).map_err(internal)?,
     );
     Ok(response)
 }
@@ -1624,6 +2872,20 @@ pub struct BuildResponse {
     pub lease_owner: Option<String>,
     pub cancellation_requested: bool,
     pub terminal_summary: Option<Value>,
+    pub effects: Vec<RuntimeEffectEvidenceResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeEffectEvidenceResponse {
+    pub fence: i64,
+    pub effect_key: String,
+    pub effect_class: String,
+    pub status: String,
+    pub payload_sha256: String,
+    pub outcome_receipt_sha256: Option<String>,
+    pub reconciliation_receipt_sha256: Option<String>,
+    pub observation_receipt_sha256: Option<String>,
+    pub shadow_replay_receipt_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1654,6 +2916,9 @@ pub struct LogPage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancellationResponse {
     pub accepted: bool,
+    /// Names why a refusal happened; absent when the request was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1757,11 +3022,1048 @@ impl IntoResponse for ApiError {
 type ProjectPath = (Uuid, Uuid);
 type BuildPath = (Uuid, Uuid, Uuid);
 
-async fn submit(
+async fn get_pipeline_trigger(
     State(state): State<Arc<ApiState>>,
-    Path((organization_id, project_id)): Path<ProjectPath>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
     headers: HeaderMap,
-    source: Bytes,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let trigger = state
+        .store
+        .pipeline_trigger(organization_id, project_id, pipeline_id, trigger_id)
+        .await
+        .map_err(trigger_error)?
+        .ok_or_else(resource_not_found)?;
+    trigger_response(StatusCode::OK, trigger)
+}
+
+async fn put_pipeline_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<PipelineTriggerRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let outcome = state
+        .store
+        .put_pipeline_trigger(&PipelineTriggerWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_generation,
+            kind: request.kind,
+            state: request.state,
+            implementation_sha256: parse_hex_digest_named(
+                &request.implementation_sha256,
+                "trigger implementation",
+            )?,
+            configuration_sha256: parse_hex_digest_named(
+                &request.configuration_sha256,
+                "trigger configuration",
+            )?,
+            filter_sha256: parse_hex_digest_named(&request.filter_sha256, "trigger filter")?,
+            event_source_identity: request.event_source_identity,
+            source_generation: request.source_generation,
+            configuration: request.configuration,
+            deduplication_window_seconds: request.deduplication_window_seconds,
+            max_delivery_attempts: request.max_delivery_attempts,
+            delivery_ttl_seconds: request.delivery_ttl_seconds,
+            actor_subject: principal.subject,
+            reason: request.reason,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(trigger_error)?;
+    match outcome {
+        TriggerPutOutcome::Created(trigger) => trigger_response(StatusCode::CREATED, trigger),
+        TriggerPutOutcome::Revised(trigger) | TriggerPutOutcome::Replayed(trigger) => {
+            trigger_response(StatusCode::OK, trigger)
+        }
+        TriggerPutOutcome::PreconditionFailed { current_generation } => Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "trigger_generation_precondition_failed",
+            format!("current trigger generation is {current_generation}"),
+        )),
+    }
+}
+
+fn trigger_response(status: StatusCode, trigger: PipelineTrigger) -> Result<Response, ApiError> {
+    let generation = trigger.generation;
+    let mut response = (
+        status,
+        Json(PipelineTriggerResponse {
+            organization_id: trigger.organization_id,
+            project_id: trigger.project_id,
+            pipeline_id: trigger.pipeline_id,
+            trigger_id: trigger.trigger_id,
+            generation,
+            kind: trigger.kind,
+            state: trigger.state,
+            implementation_sha256: hex(&trigger.implementation_sha256),
+            configuration_sha256: hex(&trigger.configuration_sha256),
+            filter_sha256: hex(&trigger.filter_sha256),
+            event_source_identity: trigger.event_source_identity,
+            source_generation: trigger.source_generation,
+            configuration: trigger.configuration,
+            deduplication_window_seconds: trigger.deduplication_window_seconds,
+            max_delivery_attempts: trigger.max_delivery_attempts,
+            delivery_ttl_seconds: trigger.delivery_ttl_seconds,
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\"")).map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn get_discovery_parent(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let parent = state
+        .store
+        .discovery_parent(organization_id, project_id, pipeline_id, parent_id)
+        .await
+        .map_err(discovery_error)?
+        .ok_or_else(resource_not_found)?;
+    discovery_parent_response(StatusCode::OK, parent)
+}
+
+async fn put_discovery_parent(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<DiscoveryParentRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let outcome = state
+        .store
+        .put_discovery_parent(&DiscoveryParentWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            expected_generation,
+            kind: request.kind,
+            state: request.state,
+            implementation_sha256: parse_lowercase_hex_digest_named(
+                &request.implementation_sha256,
+                "discovery implementation",
+            )?,
+            protocol_version: request.protocol_version,
+            expected_configuration_sha256: parse_lowercase_hex_digest_named(
+                &request.configuration_sha256,
+                "discovery configuration",
+            )?,
+            provider: request.provider,
+            provider_identity: request.provider_identity,
+            organization_identity: request.organization_identity,
+            repositories: request.repositories,
+            branch_includes: request.branch_includes,
+            branch_excludes: request.branch_excludes,
+            pull_request_strategy: request.pull_request_strategy,
+            fork_trust_strategy: request.fork_trust_strategy,
+            trusted_fork_repositories: request.trusted_fork_repositories,
+            jenkinsfile_path: request.jenkinsfile_path,
+            child_configuration_policy_sha256: parse_lowercase_hex_digest_named(
+                &request.child_configuration_policy_sha256,
+                "discovery child configuration policy",
+            )?,
+            orphan_policy: request.orphan_policy,
+            authorization_generation: request.authorization_generation,
+            authorization_policy_sha256: parse_lowercase_hex_digest_named(
+                &request.authorization_policy_sha256,
+                "discovery authorization policy",
+            )?,
+            trigger_id: request.trigger_id,
+            trigger_generation: request.trigger_generation,
+            trigger_configuration_sha256: parse_lowercase_hex_digest_named(
+                &request.trigger_configuration_sha256,
+                "discovery trigger configuration",
+            )?,
+            source_implementation_sha256: parse_lowercase_hex_digest_named(
+                &request.source_implementation_sha256,
+                "discovery source implementation",
+            )?,
+            source_protocol_version: request.source_protocol_version,
+            source_configuration_sha256: parse_lowercase_hex_digest_named(
+                &request.source_configuration_sha256,
+                "discovery source configuration",
+            )?,
+            restored_from_generation: request.restored_from_generation,
+            actor_subject: principal.subject,
+            reason: request.reason,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(discovery_error)?;
+    match outcome {
+        DiscoveryParentPutOutcome::Created(parent) => {
+            discovery_parent_response(StatusCode::CREATED, parent)
+        }
+        DiscoveryParentPutOutcome::Revised(parent)
+        | DiscoveryParentPutOutcome::Replayed(parent) => {
+            discovery_parent_response(StatusCode::OK, parent)
+        }
+        DiscoveryParentPutOutcome::PreconditionFailed { current_generation } => Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "discovery_generation_precondition_failed",
+            format!("current discovery generation is {current_generation}"),
+        )),
+    }
+}
+
+async fn reconcile_discovery_scan(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<DiscoveryScanRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let observations = request
+        .observations
+        .into_iter()
+        .map(|observation| {
+            Ok(DiscoveryObservationWrite {
+                child_key: observation.child_key,
+                child_pipeline_id: observation.child_pipeline_id,
+                repository_identity: observation.repository_identity,
+                ref_kind: observation.ref_kind,
+                ref_name: observation.ref_name,
+                pull_request_number: observation.pull_request_number,
+                head_repository_identity: observation.head_repository_identity,
+                present: observation.present,
+                revision: observation.revision,
+                provenance_sha256: parse_lowercase_hex_digest_named(
+                    &observation.provenance_sha256,
+                    "discovery observation provenance",
+                )?,
+                jenkinsfile_path: observation.jenkinsfile_path,
+                jenkinsfile_sha256: parse_lowercase_hex_digest_named(
+                    &observation.jenkinsfile_sha256,
+                    "discovery Jenkinsfile",
+                )?,
+                child_configuration_sha256: parse_lowercase_hex_digest_named(
+                    &observation.child_configuration_sha256,
+                    "discovery child configuration",
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let outcome = state
+        .store
+        .reconcile_discovery_scan(&DiscoveryScanWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            expected_parent_generation: request.parent_generation,
+            scan_id: request.scan_id,
+            source: request.source,
+            source_event_id: request.source_event_id,
+            source_cursor: request.source_cursor,
+            complete_snapshot: request.complete_snapshot,
+            provider_snapshot_sha256: parse_lowercase_hex_digest_named(
+                &request.provider_snapshot_sha256,
+                "discovery provider snapshot",
+            )?,
+            observations,
+            expected_request_sha256: parse_lowercase_hex_digest_named(
+                &request.request_sha256,
+                "discovery scan request",
+            )?,
+            actor_subject: principal.subject,
+        })
+        .await
+        .map_err(discovery_error)?;
+    let (status, receipt, replayed) = match outcome {
+        DiscoveryScanOutcome::Reconciled(receipt) => (StatusCode::CREATED, receipt, false),
+        DiscoveryScanOutcome::Replayed(receipt) => (StatusCode::OK, receipt, true),
+    };
+    Ok((
+        status,
+        Json(DiscoveryScanResponse {
+            receipt: receipt.into(),
+            replayed,
+        }),
+    )
+        .into_response())
+}
+
+async fn list_discovery_children(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    Query(query): Query<PageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let page = state
+        .store
+        .discovery_children(
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            query.after.as_deref(),
+            discovery_child_page_limit(query.limit)?,
+        )
+        .await
+        .map_err(discovery_error)?;
+    Ok(Json(DiscoveryChildPageResponse {
+        items: page
+            .items
+            .into_iter()
+            .map(DiscoveryChildResponse::from)
+            .collect::<Vec<_>>(),
+        next_after: page.next_after,
+    })
+    .into_response())
+}
+
+impl From<DiscoveryScanReceipt> for DiscoveryScanReceiptResponse {
+    fn from(receipt: DiscoveryScanReceipt) -> Self {
+        Self {
+            organization_id: receipt.organization_id,
+            project_id: receipt.project_id,
+            pipeline_id: receipt.pipeline_id,
+            parent_id: receipt.parent_id,
+            parent_generation: receipt.parent_generation,
+            scan_id: receipt.scan_id,
+            source: receipt.source,
+            source_event_id: receipt.source_event_id,
+            source_cursor: receipt.source_cursor,
+            complete_snapshot: receipt.complete_snapshot,
+            provider_snapshot_sha256: hex(&receipt.provider_snapshot_sha256),
+            request_sha256: hex(&receipt.request_sha256),
+            observation_count: receipt.observation_count,
+            selected_count: receipt.selected_count,
+            active_count: receipt.active_count,
+            quarantined_count: receipt.quarantined_count,
+            retired_count: receipt.retired_count,
+            audit_sequence: receipt.audit_sequence,
+            audit_event_hash: hex(&receipt.audit_event_hash),
+        }
+    }
+}
+
+impl From<DiscoveryChild> for DiscoveryChildResponse {
+    fn from(child: DiscoveryChild) -> Self {
+        Self {
+            organization_id: child.organization_id,
+            project_id: child.project_id,
+            pipeline_id: child.pipeline_id,
+            parent_id: child.parent_id,
+            child_key: child.child_key,
+            child_pipeline_id: child.child_pipeline_id,
+            repository_identity: child.repository_identity,
+            ref_kind: child.ref_kind,
+            ref_name: child.ref_name,
+            pull_request_number: child.pull_request_number,
+            head_repository_identity: child.head_repository_identity,
+            is_fork: child.is_fork,
+            state: child.state,
+            state_generation: child.state_generation,
+            revision: child.revision,
+            provenance_sha256: hex(&child.provenance_sha256),
+            jenkinsfile_path: child.jenkinsfile_path,
+            jenkinsfile_sha256: hex(&child.jenkinsfile_sha256),
+            child_configuration_sha256: hex(&child.child_configuration_sha256),
+            parent_generation: child.parent_generation,
+            source_cursor: child.source_cursor,
+            last_scan_id: child.last_scan_id,
+        }
+    }
+}
+
+fn discovery_parent_response(
+    status: StatusCode,
+    parent: DiscoveryParent,
+) -> Result<Response, ApiError> {
+    let generation = parent.generation;
+    let mut response = (
+        status,
+        Json(DiscoveryParentResponse {
+            organization_id: parent.organization_id,
+            project_id: parent.project_id,
+            pipeline_id: parent.pipeline_id,
+            parent_id: parent.parent_id,
+            generation,
+            kind: parent.kind,
+            state: parent.state,
+            implementation_sha256: hex(&parent.implementation_sha256),
+            protocol_version: parent.protocol_version,
+            configuration_sha256: hex(&parent.configuration_sha256),
+            provider: parent.provider,
+            provider_identity: parent.provider_identity,
+            organization_identity: parent.organization_identity,
+            repositories: parent.repositories,
+            branch_includes: parent.branch_includes,
+            branch_excludes: parent.branch_excludes,
+            pull_request_strategy: parent.pull_request_strategy,
+            fork_trust_strategy: parent.fork_trust_strategy,
+            trusted_fork_repositories: parent.trusted_fork_repositories,
+            jenkinsfile_path: parent.jenkinsfile_path,
+            child_configuration_policy_sha256: hex(&parent.child_configuration_policy_sha256),
+            orphan_policy: parent.orphan_policy,
+            authorization_generation: parent.authorization_generation,
+            authorization_policy_sha256: hex(&parent.authorization_policy_sha256),
+            trigger_id: parent.trigger_id,
+            trigger_generation: parent.trigger_generation,
+            trigger_configuration_sha256: hex(&parent.trigger_configuration_sha256),
+            source_implementation_sha256: hex(&parent.source_implementation_sha256),
+            source_protocol_version: parent.source_protocol_version,
+            source_configuration_sha256: hex(&parent.source_configuration_sha256),
+            restored_from_generation: parent.restored_from_generation,
+            audit_sequence: parent.audit_sequence,
+            audit_event_hash: hex(&parent.audit_event_hash),
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\""))
+            .map_err(|_| ApiError::configuration("invalid discovery generation ETag"))?,
+    );
+    Ok(response)
+}
+
+async fn submit_trigger_event(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<TriggerEventRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::BuildTrigger,
+    )
+    .await?;
+    let trigger = state
+        .store
+        .pipeline_trigger_generation(
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            request.trigger_generation,
+        )
+        .await
+        .map_err(trigger_error)?
+        .ok_or_else(resource_not_found)?;
+    validate_trigger_event_filter(&trigger, &request)?;
+    // Reject parameter shapes before durable capture. The processing path
+    // repeats this validation for crash/restart and legacy-corruption safety.
+    parameter_values(request.parameters.clone())?;
+    let accepted_at_unix_ms = unix_time_ms();
+    let canonical_payload = canonical_trigger_payload(&request)?;
+    let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
+    let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
+    let parameters = Value::Object(request.parameters.clone().into_iter().collect());
+    let schedule_slot = trigger_schedule_slot(&trigger, &request)?;
+    let delivery = state
+        .store
+        .accept_trigger_delivery(&NewTriggerDelivery {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_trigger_generation: request.trigger_generation,
+            delivery_id: request.delivery_id.clone(),
+            event_id: request.event_id.clone(),
+            event_kind: request.event_kind.clone(),
+            caller_identity: principal.subject.clone(),
+            payload_sha256,
+            canonical_payload,
+            parameters,
+            requested_platform: request.platform.clone(),
+            requested_trust_pool: request.trust_pool.clone(),
+            event_time_unix_ms: request.event_time_unix_ms,
+            accepted_at_unix_ms,
+            schedule_slot,
+        })
+        .await
+        .map_err(trigger_error)?;
+    // An unsupported platform is not refused before capture. The store has to
+    // resolve identity first, because an exact replay of an already terminal
+    // admission must stay readable and must not mint a second build, and
+    // refusing ahead of that would make a delivery admitted under the old
+    // vocabulary permanently unreadable. Processing instead claims the record
+    // and dead-letters it with a named reason, so it is captured, terminal,
+    // and never queued against a capability no worker can advertise.
+    let delivery = match delivery {
+        TriggerDeliveryAdmission::Created(delivery)
+        | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
+    };
+    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+}
+
+async fn redrive_trigger_event(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id, dead_letter_delivery_id)): Path<(
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+    )>,
+    headers: HeaderMap,
+    Json(request): Json<TriggerRedriveRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let accepted_at_unix_ms = unix_time_ms();
+    let delivery = state
+        .store
+        .redrive_trigger_delivery(&TriggerDeliveryRedrive {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            dead_letter_delivery_id,
+            new_delivery_id: request.delivery_id,
+            new_event_id: request.event_id,
+            actor_subject: principal.subject,
+            accepted_at_unix_ms,
+        })
+        .await
+        .map_err(trigger_error)?;
+    let delivery = match delivery {
+        TriggerDeliveryAdmission::Created(delivery)
+        | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
+    };
+    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+}
+
+async fn process_trigger_delivery(
+    state: &ApiState,
+    delivery: TriggerDelivery,
+    now_unix_ms: i64,
+) -> Result<Response, ApiError> {
+    if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
+        return admitted_trigger_response(state, delivery).await;
+    }
+    if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::DeadLettered {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(TriggerEventResponse {
+                delivery,
+                admission: None,
+            }),
+        )
+            .into_response());
+    }
+    let worker_identity = format!("trigger-api:{}", Uuid::new_v4());
+    let claim = state
+        .store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id: delivery.organization_id,
+            trigger_id: delivery.trigger_id,
+            delivery_id: delivery.delivery_id.clone(),
+            worker_identity: worker_identity.clone(),
+            now_unix_ms,
+            lease_expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+        })
+        .await
+        .map_err(trigger_error)?;
+    let claimed = match claim {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        TriggerDeliveryClaimOutcome::NotDue(delivery)
+        | TriggerDeliveryClaimOutcome::Leased(delivery) => {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response());
+        }
+        TriggerDeliveryClaimOutcome::Terminal(delivery) => {
+            if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
+                return admitted_trigger_response(state, delivery).await;
+            }
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response());
+        }
+    };
+    let build_idempotency = trigger_build_idempotency(claimed.trigger_id, &claimed.delivery_id);
+    let parameters = match parameter_values_from_delivery(&claimed) {
+        Ok(parameters) => parameters,
+        Err(error) => {
+            return fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await;
+        }
+    };
+    // A delivery persisted before the vocabulary was closed can name a platform
+    // no worker will ever advertise. Retrying it forever is the queue-silently
+    // failure this ticket removes, so the delivery is terminalized instead.
+    if !mcloving_domain::capability::is_supported_platform(&claimed.requested_platform) {
+        return fail_claimed_trigger_delivery(state, claimed, worker_identity, invalid_platform())
+            .await;
+    }
+    match admit_pipeline_parameters(
+        state,
+        PipelineAdmissionInput {
+            organization_id: claimed.organization_id,
+            project_id: claimed.project_id,
+            pipeline_id: claimed.pipeline_id,
+            idempotency_key: build_idempotency,
+            parameters,
+            required_platform: claimed.requested_platform.clone(),
+            required_trust_pool: claimed.requested_trust_pool.clone(),
+            trigger_claim: Some(TriggerDeliveryDagAdmissionRequest {
+                organization_id: claimed.organization_id,
+                trigger_id: claimed.trigger_id,
+                delivery_id: claimed.delivery_id.clone(),
+                worker_identity: worker_identity.clone(),
+                claim_fence: claimed.claim_fence,
+            }),
+            trigger_replay: false,
+        },
+    )
+    .await
+    {
+        Ok(result) => {
+            let delivery = result
+                .trigger_delivery
+                .ok_or_else(|| internal("trigger admission omitted its atomic delivery result"))?;
+            Ok((
+                result.status,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: result.admission,
+                }),
+            )
+                .into_response())
+        }
+        Err(error) => fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await,
+    }
+}
+
+async fn fail_claimed_trigger_delivery(
+    state: &ApiState,
+    claimed: TriggerDelivery,
+    worker_identity: String,
+    error: ApiError,
+) -> Result<Response, ApiError> {
+    let retryable = error.status.is_server_error();
+    let failure_unix_ms = unix_time_ms();
+    let failed = state
+        .store
+        .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+            organization_id: claimed.organization_id,
+            trigger_id: claimed.trigger_id,
+            delivery_id: claimed.delivery_id,
+            worker_identity,
+            claim_fence: claimed.claim_fence,
+            now_unix_ms: failure_unix_ms,
+            retry_at_unix_ms: failure_unix_ms.saturating_add(60_000),
+            retryable,
+            reason: bounded_trigger_failure_reason(&error),
+        })
+        .await
+        .map_err(trigger_error)?;
+    let (status, delivery) = match failed {
+        TriggerDeliveryFailure::RetryScheduled(delivery) => (StatusCode::ACCEPTED, delivery),
+        TriggerDeliveryFailure::DeadLettered(delivery) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, delivery)
+        }
+        TriggerDeliveryFailure::LeaseLost(delivery) => (StatusCode::ACCEPTED, delivery),
+    };
+    Ok((
+        status,
+        Json(TriggerEventResponse {
+            delivery,
+            admission: None,
+        }),
+    )
+        .into_response())
+}
+
+async fn admitted_trigger_response(
+    state: &ApiState,
+    delivery: TriggerDelivery,
+) -> Result<Response, ApiError> {
+    let build_id = delivery
+        .build_id
+        .ok_or_else(|| internal("admitted trigger delivery is missing its bound build identity"))?;
+    let result = admit_pipeline_parameters(
+        state,
+        PipelineAdmissionInput {
+            organization_id: delivery.organization_id,
+            project_id: delivery.project_id,
+            pipeline_id: delivery.pipeline_id,
+            idempotency_key: trigger_build_idempotency(delivery.trigger_id, &delivery.delivery_id),
+            parameters: parameter_values_from_delivery(&delivery)?,
+            required_platform: delivery.requested_platform.clone(),
+            required_trust_pool: delivery.requested_trust_pool.clone(),
+            trigger_claim: None,
+            trigger_replay: true,
+        },
+    )
+    .await?;
+    let admission = result
+        .admission
+        .ok_or_else(|| internal("admitted trigger replay omitted its build admission"))?;
+    if admission.build_id != build_id {
+        return Err(internal(
+            "trigger delivery replay resolved to a different build identity",
+        ));
+    }
+    Ok((
+        result.status,
+        Json(TriggerEventResponse {
+            delivery,
+            admission: Some(admission),
+        }),
+    )
+        .into_response())
+}
+
+fn parameter_values_from_delivery(
+    delivery: &TriggerDelivery,
+) -> Result<BTreeMap<String, ParameterValue>, ApiError> {
+    let parameters: BTreeMap<String, Value> = serde_json::from_value(delivery.parameters.clone())
+        .map_err(|_| {
+        internal("stored trigger delivery parameters are not a canonical object")
+    })?;
+    parameter_values(parameters)
+}
+
+fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, ApiError> {
+    if !request.payload.is_object() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_trigger_payload",
+            "trigger payload must be an object",
+        ));
+    }
+    Ok(json!({
+        "trigger_generation": request.trigger_generation,
+        "event_kind": request.event_kind.clone(),
+        "event_time_unix_ms": request.event_time_unix_ms,
+        "payload": request.payload.clone(),
+    }))
+}
+
+fn validate_trigger_event_filter(
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+) -> Result<(), ApiError> {
+    if trigger.state == PipelineTriggerState::Paused {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "trigger_paused",
+            format!("trigger is paused at generation {}", trigger.generation),
+        ));
+    }
+    let filter = trigger
+        .configuration
+        .get("filter")
+        .and_then(Value::as_object)
+        .ok_or_else(|| internal("stored trigger filter is not an object"))?;
+    if let Some(events) = filter.get("event_kinds") {
+        let events = canonical_string_array(events, "event_kinds")?;
+        if !events.is_empty() && !events.iter().any(|event| event == &request.event_kind) {
+            return Err(trigger_filtered("event kind"));
+        }
+    }
+    match trigger.kind {
+        TriggerKind::ScmWebhook => {
+            let configured = trigger
+                .configuration
+                .get("repository_identity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored SCM repository identity is missing"))?;
+            if trigger_payload_text(request, "repository_identity")? != configured {
+                return Err(trigger_filtered("SCM repository identity"));
+            }
+            trigger_payload_text(request, "revision")?;
+            if let Some(branches) = filter.get("branches") {
+                let branches = canonical_string_array(branches, "branches")?;
+                let branch = request
+                    .payload
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| trigger_filtered("missing branch"))?;
+                if !branches.is_empty() && !branches.iter().any(|allowed| allowed == branch) {
+                    return Err(trigger_filtered("branch"));
+                }
+            }
+            let supplied_paths = request
+                .payload
+                .get("paths")
+                .map(|paths| {
+                    let paths = paths
+                        .as_array()
+                        .ok_or_else(|| trigger_filtered("invalid paths"))?;
+                    if paths.len() > 128 {
+                        return Err(trigger_filtered("invalid paths"));
+                    }
+                    paths
+                        .iter()
+                        .map(|path| {
+                            path.as_str()
+                                .filter(|path| {
+                                    !path.is_empty()
+                                        && path.trim() == *path
+                                        && path.len() <= 512
+                                        && !path.chars().any(char::is_control)
+                                })
+                                .ok_or_else(|| trigger_filtered("invalid path"))
+                        })
+                        .collect::<Result<Vec<_>, ApiError>>()
+                })
+                .transpose()?;
+            if let Some(prefixes) = filter.get("path_prefixes") {
+                let prefixes = canonical_string_array(prefixes, "path_prefixes")?;
+                let matched = prefixes.is_empty()
+                    || supplied_paths
+                        .as_ref()
+                        .ok_or_else(|| trigger_filtered("missing paths"))?
+                        .iter()
+                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)));
+                if !matched {
+                    return Err(trigger_filtered("path"));
+                }
+            }
+        }
+        TriggerKind::Upstream => {
+            let configured = trigger
+                .configuration
+                .get("upstream_pipeline_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored upstream pipeline identity is missing"))?;
+            let supplied = request
+                .payload
+                .get("upstream_pipeline_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| trigger_filtered("missing upstream pipeline identity"))?;
+            if supplied != configured {
+                return Err(trigger_filtered("upstream pipeline identity"));
+            }
+            let upstream_build = trigger_payload_text(request, "upstream_build_id")?;
+            Uuid::parse_str(upstream_build)
+                .map_err(|_| trigger_filtered("invalid upstream build identity"))?;
+            if let Some(statuses) = filter.get("statuses") {
+                let statuses = canonical_string_array(statuses, "statuses")?;
+                let status = request
+                    .payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| trigger_filtered("missing upstream status"))?;
+                if !statuses.is_empty() && !statuses.iter().any(|allowed| allowed == status) {
+                    return Err(trigger_filtered("upstream status"));
+                }
+            }
+        }
+        TriggerKind::Schedule => {
+            if request.event_kind != "schedule" {
+                return Err(trigger_filtered("schedule event kind"));
+            }
+        }
+        TriggerKind::RemoteApi => {
+            let configured = trigger
+                .configuration
+                .get("audience")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored remote-build audience is missing"))?;
+            if trigger_payload_text(request, "audience")? != configured {
+                return Err(trigger_filtered("remote-build audience"));
+            }
+            if trigger_payload_text(request, "request_id")? != request.event_id {
+                return Err(trigger_filtered("remote-build request identity"));
+            }
+            let method = trigger_payload_text(request, "request_method")?;
+            if let Some(methods) = filter.get("request_methods") {
+                let methods = canonical_string_array(methods, "request_methods")?;
+                if !methods.is_empty() && !methods.iter().any(|allowed| allowed == method) {
+                    return Err(trigger_filtered("request method"));
+                }
+            }
+        }
+        TriggerKind::Plugin => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "trigger_class_ineligible",
+                "plugin trigger class has no installed admitted implementation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn trigger_payload_text<'a>(
+    request: &'a TriggerEventRequest,
+    field: &str,
+) -> Result<&'a str, ApiError> {
+    request
+        .payload
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value && value.len() <= 512)
+        .ok_or_else(|| trigger_filtered(&format!("missing or invalid {field}")))
+}
+
+fn trigger_schedule_slot(
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+) -> Result<Option<TriggerScheduleSlot>, ApiError> {
+    if trigger.kind != TriggerKind::Schedule {
+        return Ok(None);
+    }
+    let required_text = |field: &str| {
+        request
+            .payload
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| trigger_filtered(&format!("missing schedule {field}")))
+    };
+    let resolved_slot_unix_ms = request
+        .payload
+        .get("resolved_slot_unix_ms")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| trigger_filtered("missing resolved schedule slot"))?;
+    let expected_last_resolved_slot_unix_ms = request
+        .payload
+        .get("expected_last_resolved_slot_unix_ms")
+        .map(|value| {
+            value.as_i64().ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_schedule_watermark",
+                    "expected schedule watermark must be an integer",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Some(TriggerScheduleSlot {
+        timezone: required_text("timezone")?,
+        calendar: required_text("calendar")?,
+        expression: required_text("expression")?,
+        schedule_identity_sha256: parse_hex_digest_named(
+            &required_text("schedule_identity_sha256")?,
+            "schedule identity",
+        )?,
+        expected_last_resolved_slot_unix_ms,
+        resolved_slot_unix_ms,
+    }))
+}
+
+fn canonical_string_array(value: &Value, field: &str) -> Result<Vec<String>, ApiError> {
+    let values = value.as_array().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_trigger_configuration",
+            format!("stored trigger filter '{field}' must be an array"),
+        )
+    })?;
+    let strings = values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_trigger_configuration",
+                    format!("stored trigger filter '{field}' contains a non-string"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(strings)
+}
+
+fn trigger_filtered(field: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "trigger_filtered",
+        format!("trigger event did not pass the configured {field} filter"),
+    )
+}
+
+fn trigger_build_idempotency(trigger_id: Uuid, delivery_id: &str) -> String {
+    let digest: [u8; 32] = Sha256::digest(delivery_id.as_bytes()).into();
+    format!(
+        "{TRIGGER_DAG_IDEMPOTENCY_PREFIX}{trigger_id}-{}",
+        hex(&digest)
+    )
+}
+
+fn default_platform() -> String {
+    DEFAULT_PLATFORM.to_owned()
+}
+
+async fn submit_pipeline_build(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<PipelineBuildRequest>,
 ) -> Result<(StatusCode, Json<AdmissionResponse>), ApiError> {
     authorize(
         &state,
@@ -1773,19 +4075,100 @@ async fn submit(
     .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
-    let idempotency_key = headers
-        .get(IDEMPOTENCY_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "idempotency_key_required",
-                "a non-empty Idempotency-Key header of at most 256 bytes is required",
+    let idempotency_key = ordinary_build_idempotency_key(&headers)?;
+    let parameters = parameter_values(request.parameters)?;
+    let result = admit_pipeline_parameters(
+        &state,
+        PipelineAdmissionInput {
+            organization_id,
+            project_id,
+            pipeline_id,
+            idempotency_key: idempotency_key.to_owned(),
+            parameters,
+            required_platform,
+            required_trust_pool,
+            trigger_claim: None,
+            trigger_replay: false,
+        },
+    )
+    .await?;
+    let response = result
+        .admission
+        .ok_or_else(|| internal("pipeline admission omitted its build response"))?;
+    Ok((result.status, Json(response)))
+}
+
+struct PipelineAdmissionInput {
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    idempotency_key: String,
+    parameters: BTreeMap<String, ParameterValue>,
+    required_platform: String,
+    required_trust_pool: String,
+    trigger_claim: Option<TriggerDeliveryDagAdmissionRequest>,
+    trigger_replay: bool,
+}
+
+struct PipelineAdmissionResult {
+    status: StatusCode,
+    admission: Option<AdmissionResponse>,
+    trigger_delivery: Option<TriggerDelivery>,
+}
+
+async fn admit_pipeline_parameters(
+    state: &ApiState,
+    input: PipelineAdmissionInput,
+) -> Result<PipelineAdmissionResult, ApiError> {
+    let PipelineAdmissionInput {
+        organization_id,
+        project_id,
+        pipeline_id,
+        idempotency_key,
+        parameters,
+        required_platform,
+        required_trust_pool,
+        trigger_claim,
+        trigger_replay,
+    } = input;
+    let replay = state
+        .store
+        .dag_replay_binding(organization_id, project_id, &idempotency_key)
+        .await
+        .map_err(admission_error)?;
+    let (source, pipeline_revision, pipeline_operational_generation) = match replay {
+        Some(binding) => {
+            if binding.pipeline_id != pipeline_id {
+                return Err(admission_error(StoreError::IdempotencyConflict(
+                    "idempotency key already belongs to a different pipeline".to_owned(),
+                )));
+            }
+            (
+                binding.source,
+                binding.pipeline_revision,
+                binding.pipeline_operational_generation,
             )
-        })?;
-    let (source, parameters) = submission_payload(&headers, &source)?;
+        }
+        None => {
+            let saved = state
+                .store
+                .pipeline(organization_id, project_id, pipeline_id)
+                .await
+                .map_err(product_error)?
+                .ok_or_else(resource_not_found)?;
+            (saved.source, saved.revision, saved.operational_generation)
+        }
+    };
     let pipeline = compile_source_with_parameters(&source, parameters)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    // Revalidated here, not only at ingress. A delivery captured by an earlier
+    // release can carry a platform outside the closed set, and every admission
+    // path — header submission, claimed processing, and replay — funnels
+    // through this function. Admitting one would build a DAG requiring a
+    // capability no valid worker can advertise, which queues forever.
+    if !mcloving_domain::capability::is_supported_platform(&required_platform) {
+        return Err(invalid_platform());
+    }
     validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
@@ -1819,18 +4202,56 @@ async fn submit(
             max_attempts: 1,
         })
         .collect();
-    let admission = state
-        .store
-        .admit_dag(&NewDagBuild {
-            organization_id,
-            project_id,
-            idempotency_key: idempotency_key.to_owned(),
-            pipeline_digest: digest,
-            priority: 0,
-            nodes,
-        })
-        .await
-        .map_err(admission_error)?;
+    let dag = NewDagBuild {
+        organization_id,
+        project_id,
+        pipeline_id,
+        pipeline_revision,
+        pipeline_operational_generation,
+        idempotency_key: idempotency_key.to_owned(),
+        pipeline_digest: digest,
+        priority: 0,
+        nodes,
+    };
+    let (admission, trigger_delivery) = match trigger_claim {
+        Some(claim) => match state
+            .store
+            .admit_trigger_delivery_dag(&claim, &dag)
+            .await
+            .map_err(admission_error)?
+        {
+            TriggerDeliveryDagAdmission::Admitted {
+                delivery,
+                admission,
+            } => (admission, Some(delivery)),
+            TriggerDeliveryDagAdmission::DeadLettered(delivery) => {
+                return Ok(PipelineAdmissionResult {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    admission: None,
+                    trigger_delivery: Some(delivery),
+                });
+            }
+            TriggerDeliveryDagAdmission::LeaseLost(delivery) => {
+                return Ok(PipelineAdmissionResult {
+                    status: StatusCode::ACCEPTED,
+                    admission: None,
+                    trigger_delivery: Some(delivery),
+                });
+            }
+        },
+        None if trigger_replay => (
+            state
+                .store
+                .replay_trigger_dag(&dag)
+                .await
+                .map_err(admission_error)?,
+            None,
+        ),
+        None => (
+            state.store.admit_dag(&dag).await.map_err(admission_error)?,
+            None,
+        ),
+    };
     let first = pipeline
         .stages
         .first()
@@ -1841,16 +4262,48 @@ async fn submit(
     } else {
         StatusCode::OK
     };
-    Ok((
+    Ok(PipelineAdmissionResult {
         status,
-        Json(AdmissionResponse {
+        admission: Some(AdmissionResponse {
             build_id: admission.build_id,
             node_id: first.node_id,
             attempt_id: first.attempt_id,
             created: admission.created,
             pipeline_digest: hex(&digest),
         }),
-    ))
+        trigger_delivery,
+    })
+}
+
+fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get(IDEMPOTENCY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "idempotency_key_required",
+                "a canonical non-empty Idempotency-Key header of at most 256 bytes is required",
+            )
+        })
+}
+
+fn ordinary_build_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let value = required_idempotency_key(headers)?;
+    if value.starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "reserved_idempotency_key",
+            "the trigger DAG idempotency namespace is reserved",
+        ));
+    }
+    Ok(value)
 }
 
 fn submission_trust_pool(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -1877,7 +4330,7 @@ fn submission_platform(headers: &HeaderMap) -> Result<String, ApiError> {
         Some(value) => value.to_str().map_err(|_| invalid_platform())?,
         None => DEFAULT_PLATFORM,
     };
-    if !matches!(value, "linux" | "windows") {
+    if !mcloving_domain::capability::is_supported_platform(value) {
         return Err(invalid_platform());
     }
     Ok(value.to_owned())
@@ -1892,6 +4345,9 @@ fn invalid_platform() -> ApiError {
 }
 
 fn execution_spec(steps: &[Step]) -> Value {
+    let contains_connector_intent = steps
+        .iter()
+        .any(|step| matches!(step, Step::ConnectorIntent(_)));
     let steps = steps
         .iter()
         .map(|step| match step {
@@ -1903,9 +4359,37 @@ fn execution_spec(steps: &[Step]) -> Value {
                 "env": process.env,
                 "timeout_seconds": process.timeout_seconds,
             }),
+            Step::ConnectorIntent(intent) => json!({
+                "kind": "connector_intent",
+                "mapping_id": intent.mapping_id,
+                "mapping_digest": intent.mapping_digest,
+                "effect_class": match intent.effect_class {
+                    mcloving_pipeline_ir::ConnectorEffectClass::Idempotent => "idempotent",
+                    mcloving_pipeline_ir::ConnectorEffectClass::ExternallyIdempotent => "externally_idempotent",
+                    mcloving_pipeline_ir::ConnectorEffectClass::NonIdempotent => "non_idempotent",
+                },
+                "effect_key_template": intent.effect_key_template,
+                "public_input_schema": intent.public_input_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "protected_secret_ref_schema": intent.protected_secret_ref_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "expected_public_result_schema": intent.expected_public_result_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "timeout_seconds": intent.timeout_seconds,
+                "ambiguity_policy": "observe_then_reconcile",
+                "downstream_control_digest": intent.downstream_control_digest,
+            }),
         })
         .collect::<Vec<_>>();
-    json!({"version": 1, "steps": steps})
+    json!({"version": if contains_connector_intent { 2 } else { 1 }, "steps": steps})
+}
+
+fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
+    match kind {
+        mcloving_pipeline_ir::JsonFieldType::Array => "array",
+        mcloving_pipeline_ir::JsonFieldType::Boolean => "boolean",
+        mcloving_pipeline_ir::JsonFieldType::Null => "null",
+        mcloving_pipeline_ir::JsonFieldType::Number => "number",
+        mcloving_pipeline_ir::JsonFieldType::Object => "object",
+        mcloving_pipeline_ir::JsonFieldType::String => "string",
+    }
 }
 
 fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
@@ -1944,6 +4428,54 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
     }
 }
 
+/// The execution machinery runs exactly one bounded step per scheduled node,
+/// and that step is either a process or a connector intent (`bins/agent`
+/// `validate_assignment` and the embedded execution spine both refuse anything
+/// else at claim time). Validation, planning, storage, and admission all
+/// compile through [`compile_source_with_parameters`], so this single check
+/// keeps "validate accepted" equivalent to "runnable".
+const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
+    for stage in &pipeline.stages {
+        if stage.steps.len() != 1 {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares {} steps; the execution machinery runs exactly one step per stage",
+                    stage.id,
+                    stage.steps.len()
+                ),
+            ));
+        }
+        for step in &stage.steps {
+            // Both runnable step kinds carry a bounded timeout, and both are
+            // checked here. An unbounded one would be accepted by validate and
+            // then be unrunnable, which is exactly the "validate accepted"
+            // versus "runnable" gap this function exists to close.
+            let (kind, timeout_seconds) = match step {
+                Step::Process(process) => ("process", process.timeout_seconds),
+                Step::ConnectorIntent(intent) => ("connector-intent", Some(intent.timeout_seconds)),
+            };
+            if !matches!(
+                timeout_seconds,
+                None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
+            ) {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsupported_execution_spec",
+                    format!(
+                        "stage {} declares a {kind} timeout outside 1..={MAX_EXECUTION_TIMEOUT_SECONDS} seconds",
+                        stage.id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn compile_source_with_parameters(
     source: &str,
     parameters: BTreeMap<String, ParameterValue>,
@@ -1955,37 +4487,68 @@ fn compile_source_with_parameters(
             "pipeline source exceeds the configured parser byte limit",
         ));
     }
-    compile_strict_yaml_with_parameters("public-api", source, ParseLimits::default(), parameters)
-        .map_err(pipeline_rejected)
+    let pipeline = compile_strict_yaml_with_parameters(
+        "public-api",
+        source,
+        ParseLimits::default(),
+        parameters,
+    )
+    .map_err(pipeline_rejected)?;
+    validate_execution_support(&pipeline)?;
+    Ok(pipeline)
 }
 
-fn submission_payload(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(String, BTreeMap<String, ParameterValue>), ApiError> {
-    let is_json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(';').next() == Some("application/json"));
-    if !is_json {
-        let source = std::str::from_utf8(body).map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_utf8",
-                "pipeline source must be UTF-8",
-            )
-        })?;
-        return Ok((source.to_owned(), BTreeMap::new()));
+fn validate_connector_mappings(
+    pipeline: &PipelineIr,
+    catalog: &ConnectorMappingCatalog,
+) -> Result<(), ApiError> {
+    for intent in pipeline
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.steps)
+        .filter_map(|step| match step {
+            Step::ConnectorIntent(intent) => Some(intent),
+            Step::Process(_) => None,
+        })
+    {
+        let Some(mapping) = catalog
+            .mappings
+            .iter()
+            .find(|mapping| mapping.mapping_id == intent.mapping_id)
+        else {
+            return Err(pipeline_rejected(format!(
+                "connector mapping {} is not admitted by deployment profile {}",
+                intent.mapping_id, catalog.profile
+            )));
+        };
+        if mapping.mapping_digest != intent.mapping_digest {
+            return Err(pipeline_rejected(format!(
+                "connector mapping {} digest is floating, stale, or substituted for deployment profile {}",
+                intent.mapping_id, catalog.profile
+            )));
+        }
     }
-    let request: SubmissionRequest = serde_json::from_slice(body).map_err(|error| {
-        ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_submission",
-            format!("submission JSON is invalid: {error}"),
-        )
-    })?;
-    let parameters = parameter_values(request.parameters)?;
-    Ok((request.source, parameters))
+    Ok(())
+}
+
+fn canonical_mapping_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'/')
+        })
+}
+
+fn canonical_sha256_reference(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn parameter_values(
@@ -2001,6 +4564,14 @@ fn parameter_values(
     parameters
         .into_iter()
         .map(|(name, value)| {
+            if name.is_empty()
+                || name.len() > 256
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(invalid_parameter_name());
+            }
             let value = match value {
                 Value::Bool(value) => ParameterValue::Bool(value),
                 Value::Number(value) => value
@@ -2013,6 +4584,37 @@ fn parameter_values(
             Ok((name, value))
         })
         .collect()
+}
+
+fn invalid_parameter_name() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_parameters",
+        "parameter names must be 1-256 ASCII letters, digits, underscores, or hyphens",
+    )
+}
+
+fn bounded_trigger_failure_reason(error: &ApiError) -> String {
+    const MAX_FAILURE_REASON_BYTES: usize = 2048;
+
+    let mut reason = format!("{}: {}", error.code, error.message)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    reason = reason.trim().to_owned();
+    if reason.is_empty() {
+        reason = "trigger admission failed".to_owned();
+    }
+    while reason.len() > MAX_FAILURE_REASON_BYTES {
+        reason.pop();
+    }
+    reason
 }
 
 fn invalid_parameter_value() -> ApiError {
@@ -2043,7 +4645,16 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
             .map(|stage| PipelineStagePlan {
                 id: stage.id.clone(),
                 name: stage.name.clone(),
-                process_steps: stage.steps.len(),
+                process_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Process(_)))
+                    .count(),
+                connector_intent_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::ConnectorIntent(_)))
+                    .count(),
             })
             .collect(),
     })
@@ -2114,6 +4725,21 @@ fn page_limit(limit: Option<u32>) -> Result<u32, ApiError> {
     Ok(limit)
 }
 
+fn discovery_child_page_limit(limit: Option<u32>) -> Result<u32, ApiError> {
+    let limit = limit.unwrap_or(50);
+    if limit == 0 || limit > mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_discovery_page_limit",
+            format!(
+                "discovery child page limit must be between 1 and {}",
+                mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+            ),
+        ));
+    }
+    Ok(limit)
+}
+
 fn parse_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], ApiError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ApiError::new(
@@ -2126,6 +4752,21 @@ fn parse_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], A
     bytes
         .try_into()
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "invalid SHA-256"))
+}
+
+fn parse_lowercase_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], ApiError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_digest",
+            format!("{kind} SHA-256 must contain exactly 64 lowercase hexadecimal characters"),
+        ));
+    }
+    parse_hex_digest_named(value, kind)
 }
 
 fn parse_hex_bytes(value: &str, kind: &'static str) -> Result<Vec<u8>, ApiError> {
@@ -2167,6 +4808,69 @@ fn product_error(error: StoreError) -> ApiError {
     }
 }
 
+fn pipeline_state_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidPipelineState(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_pipeline_state", message)
+        }
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        other => internal(other),
+    }
+}
+
+fn trigger_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidTriggerIngress(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_trigger_ingress", message)
+        }
+        StoreError::TriggerIngressConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "trigger_ingress_conflict", message)
+        }
+        StoreError::TriggerPaused {
+            trigger_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "trigger_paused",
+            format!("trigger {trigger_id} is paused at generation {generation}"),
+        ),
+        StoreError::PipelineDisabled {
+            pipeline_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "pipeline_disabled",
+            format!("pipeline {pipeline_id} is disabled at operational generation {generation}"),
+        ),
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        other => internal(other),
+    }
+}
+
+fn discovery_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidDiscovery(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_discovery", message)
+        }
+        StoreError::DiscoveryConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "discovery_conflict", message)
+        }
+        StoreError::DiscoveryQuiesced {
+            parent_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "discovery_quiesced",
+            format!("discovery parent {parent_id} is quiesced at generation {generation}"),
+        ),
+        other => internal(other),
+    }
+}
+
 fn admission_error(error: StoreError) -> ApiError {
     match error {
         StoreError::IdempotencyConflict(message) => {
@@ -2177,6 +4881,20 @@ fn admission_error(error: StoreError) -> ApiError {
             "pipeline_rejected",
             message,
         ),
+        StoreError::PipelineDisabled {
+            pipeline_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "pipeline_disabled",
+            format!("pipeline {pipeline_id} is disabled at operational generation {generation}"),
+        ),
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        StoreError::InvalidPipelineState(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_pipeline_state", message)
+        }
         other => internal(other),
     }
 }
@@ -2222,6 +4940,30 @@ async fn status(
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
+    let effects = state
+        .store
+        .effect_evidence_summaries(organization_id, snapshot.attempt_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|effect| RuntimeEffectEvidenceResponse {
+            fence: effect.fence,
+            effect_key: effect.effect_key,
+            effect_class: effect.effect_class,
+            status: effect.status,
+            payload_sha256: hex(&effect.payload_digest),
+            outcome_receipt_sha256: effect.outcome_receipt_digest.map(|digest| hex(&digest)),
+            reconciliation_receipt_sha256: effect
+                .reconciliation_receipt_digest
+                .map(|digest| hex(&digest)),
+            observation_receipt_sha256: effect
+                .observation_receipt_digest
+                .map(|digest| hex(&digest)),
+            shadow_replay_receipt_sha256: effect
+                .shadow_replay_receipt_digest
+                .map(|digest| hex(&digest)),
+        })
+        .collect();
     Ok(Json(BuildResponse {
         build_id: snapshot.build_id,
         node_id: snapshot.node_id,
@@ -2232,6 +4974,7 @@ async fn status(
         lease_owner: snapshot.lease_owner,
         cancellation_requested: snapshot.cancellation_requested,
         terminal_summary: snapshot.terminal_summary,
+        effects,
     }))
 }
 
@@ -2719,12 +5462,54 @@ async fn cancel(
         Action::BuildCancel,
     )
     .await?;
-    let accepted = state
+    let decision = state
         .store
-        .request_cancellation_as(organization_id, project_id, build_id, &principal.subject)
+        .request_cancellation_decision_as(organization_id, project_id, build_id, &principal.subject)
         .await
         .map_err(internal)?;
-    Ok(Json(CancellationResponse { accepted }))
+    match decision {
+        CancellationDecision::Accepted => Ok(Json(CancellationResponse {
+            accepted: true,
+            reason: None,
+        })),
+        CancellationDecision::AlreadyRequested => Ok(Json(CancellationResponse {
+            accepted: false,
+            reason: Some("cancellation was already requested for this build".to_owned()),
+        })),
+        CancellationDecision::NotCancellable { build_status } => {
+            Err(cancellation_refusal(build_id, build_status))
+        }
+    }
+}
+
+/// Names the exact reason a build cannot be cancelled. A build parked in
+/// `reconciliation_required` in particular is refused with its state and the
+/// operator resolution path rather than a bare conflict.
+fn cancellation_refusal(build_id: Uuid, build_status: Option<String>) -> ApiError {
+    match build_status.as_deref() {
+        Some("reconciliation_required") => ApiError::new(
+            StatusCode::CONFLICT,
+            "build_reconciliation_required",
+            format!(
+                "build {build_id} is parked in reconciliation_required: a recovered agent \
+                 attempt is awaiting operator reconciliation, and cancellation cannot \
+                 discharge it; confirm the attempt's uncertain effects and then retry the \
+                 attempt or finalize the reconciliation, after which the owning agent \
+                 discharges its recovered journal record and resumes polling (see \
+                 docs/architecture/AGENT_RUNTIME.md, \"Recovered-attempt discharge\")"
+            ),
+        ),
+        Some(status) => ApiError::new(
+            StatusCode::CONFLICT,
+            "build_not_cancellable",
+            format!("build {build_id} is {status} and can no longer be cancelled"),
+        ),
+        None => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "build_not_found",
+            format!("build {build_id} was not found in this project"),
+        ),
+    }
 }
 
 async fn retry_attempt(
@@ -3177,81 +5962,84 @@ impl Client {
         self
     }
 
-    pub async fn submit(
+    /// Submits a build without naming a platform or trust pool, so the
+    /// controller applies the documented defaults (`platform:linux`,
+    /// `trusted-linux`).
+    pub async fn submit_pipeline_with_defaults(
         &self,
         organization_id: Uuid,
         project_id: Uuid,
+        pipeline_id: Uuid,
         idempotency_key: &str,
-        source: String,
-    ) -> Result<AdmissionResponse, ClientError> {
-        self.submit_in_pool(
-            organization_id,
-            project_id,
-            idempotency_key,
-            DEFAULT_TRUST_POOL,
-            source,
-        )
-        .await
-    }
-
-    pub async fn submit_in_pool(
-        &self,
-        organization_id: Uuid,
-        project_id: Uuid,
-        idempotency_key: &str,
-        trust_pool: &str,
-        source: String,
-    ) -> Result<AdmissionResponse, ClientError> {
-        self.submit_on_platform_in_pool(
-            organization_id,
-            project_id,
-            idempotency_key,
-            DEFAULT_PLATFORM,
-            trust_pool,
-            source,
-        )
-        .await
-    }
-
-    pub async fn submit_on_platform_in_pool(
-        &self,
-        organization_id: Uuid,
-        project_id: Uuid,
-        idempotency_key: &str,
-        platform: &str,
-        trust_pool: &str,
-        source: String,
+        request: &PipelineBuildRequest,
     ) -> Result<AdmissionResponse, ClientError> {
         self.send(
             self.inner
                 .post(format!(
-                    "{}/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
-                    self.base_url
+                    "{}/pipelines/{pipeline_id}/builds",
+                    self.project_url(organization_id, project_id)
                 ))
                 .header(IDEMPOTENCY_HEADER, idempotency_key)
-                .header(PLATFORM_HEADER, platform)
-                .header(TRUST_POOL_HEADER, trust_pool)
-                .header("content-type", "application/yaml")
-                .body(source),
+                .json(request),
         )
         .await
     }
 
-    pub async fn submit_request_on_platform_in_pool(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_pipeline_on_platform_in_pool(
         &self,
         organization_id: Uuid,
         project_id: Uuid,
+        pipeline_id: Uuid,
         idempotency_key: &str,
         platform: &str,
         trust_pool: &str,
-        request: &SubmissionRequest,
+        request: &PipelineBuildRequest,
     ) -> Result<AdmissionResponse, ClientError> {
         self.send(
             self.inner
-                .post(self.builds_url(organization_id, project_id))
+                .post(format!(
+                    "{}/pipelines/{pipeline_id}/builds",
+                    self.project_url(organization_id, project_id)
+                ))
                 .header(IDEMPOTENCY_HEADER, idempotency_key)
                 .header(PLATFORM_HEADER, platform)
                 .header(TRUST_POOL_HEADER, trust_pool)
+                .json(request),
+        )
+        .await
+    }
+
+    pub async fn pipeline_operational_state(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+    ) -> Result<PipelineOperationalStateRecord, ClientError> {
+        self.send(self.inner.get(format!(
+            "{}/pipelines/{pipeline_id}/state",
+            self.project_url(organization_id, project_id)
+        )))
+        .await
+    }
+
+    pub async fn transition_pipeline_operational_state(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+        expected_generation: i64,
+        idempotency_key: &str,
+        request: &PipelineOperationalStateRequest,
+    ) -> Result<PipelineOperationalStateRecord, ClientError> {
+        self.send(
+            self.inner
+                .put(format!(
+                    "{}/pipelines/{pipeline_id}/state",
+                    self.project_url(organization_id, project_id)
+                ))
+                .header(header::IF_MATCH, format!("\"{expected_generation}\""))
+                .header(IDEMPOTENCY_HEADER, idempotency_key)
                 .json(request),
         )
         .await
@@ -3796,6 +6584,31 @@ mod tests {
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
     }
 
+    #[test]
+    fn cancellation_refusals_name_their_exact_reason() {
+        let build_id = Uuid::from_u128(0x1234);
+
+        let parked = cancellation_refusal(build_id, Some("reconciliation_required".to_owned()));
+        assert_eq!(parked.status, StatusCode::CONFLICT);
+        assert_eq!(parked.code, "build_reconciliation_required");
+        assert!(parked.message.contains("reconciliation_required"));
+        assert!(
+            parked
+                .message
+                .contains("recovered agent attempt is awaiting operator reconciliation")
+        );
+        assert!(parked.message.contains("AGENT_RUNTIME.md"));
+
+        let terminal = cancellation_refusal(build_id, Some("succeeded".to_owned()));
+        assert_eq!(terminal.status, StatusCode::CONFLICT);
+        assert_eq!(terminal.code, "build_not_cancellable");
+        assert!(terminal.message.contains("succeeded"));
+
+        let missing = cancellation_refusal(build_id, None);
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(missing.code, "build_not_found");
+    }
+
     #[tokio::test]
     async fn bearer_tokens_resolve_distinct_approval_subjects() {
         let organization_id = Uuid::new_v4();
@@ -3969,6 +6782,19 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_builds_cannot_claim_the_trigger_idempotency_namespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            IDEMPOTENCY_HEADER,
+            HeaderValue::from_static("mcloving-trigger-v1-forged"),
+        );
+        let error = ordinary_build_idempotency_key(&headers).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "reserved_idempotency_key");
+        assert!(required_idempotency_key(&headers).is_ok());
+    }
+
+    #[test]
     fn artifact_retention_is_bounded_before_publication_claim() {
         for seconds in [0, MAX_OBJECT_RETENTION_SECONDS] {
             validate_artifact_retention(seconds).expect("retention boundary accepted");
@@ -3977,6 +6803,21 @@ mod tests {
             let error = validate_artifact_retention(seconds).expect_err("retention rejected");
             assert_eq!(error.status, StatusCode::BAD_REQUEST);
             assert_eq!(error.code, "artifact_retention_out_of_range");
+        }
+    }
+
+    #[test]
+    fn discovery_child_pages_have_closed_bounds() {
+        assert_eq!(discovery_child_page_limit(None).unwrap(), 50);
+        assert_eq!(
+            discovery_child_page_limit(Some(mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE))
+                .unwrap(),
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        for limit in [0, mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE + 1] {
+            let error = discovery_child_page_limit(Some(limit)).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_discovery_page_limit");
         }
     }
 
@@ -4027,6 +6868,76 @@ mod tests {
     }
 
     #[test]
+    fn discovery_responses_encode_digests_as_hex() {
+        assert!(parse_lowercase_hex_digest_named(&"ab".repeat(32), "discovery").is_ok());
+        let uppercase = parse_lowercase_hex_digest_named(&"AB".repeat(32), "discovery")
+            .expect_err("uppercase discovery digest must fail closed");
+        assert_eq!(uppercase.status, StatusCode::BAD_REQUEST);
+        assert_eq!(uppercase.code, "invalid_digest");
+
+        let receipt = DiscoveryScanReceiptResponse::from(DiscoveryScanReceipt {
+            organization_id: Uuid::from_u128(1),
+            project_id: Uuid::from_u128(2),
+            pipeline_id: Uuid::from_u128(3),
+            parent_id: Uuid::from_u128(4),
+            parent_generation: 1,
+            scan_id: "scan-1".to_owned(),
+            source: DiscoveryScanSource::Periodic,
+            source_event_id: None,
+            source_cursor: 1,
+            complete_snapshot: true,
+            provider_snapshot_sha256: [7; 32],
+            request_sha256: [8; 32],
+            observation_count: 1,
+            selected_count: 1,
+            active_count: 1,
+            quarantined_count: 0,
+            retired_count: 0,
+            audit_sequence: 1,
+            audit_event_hash: [9; 32],
+        });
+        assert_eq!(receipt.provider_snapshot_sha256, "07".repeat(32));
+        assert_eq!(receipt.request_sha256, "08".repeat(32));
+        assert_eq!(receipt.audit_event_hash, "09".repeat(32));
+
+        let child = DiscoveryChildResponse::from(DiscoveryChild {
+            organization_id: Uuid::from_u128(1),
+            project_id: Uuid::from_u128(2),
+            pipeline_id: Uuid::from_u128(3),
+            parent_id: Uuid::from_u128(4),
+            child_key: "repo:branch:main".to_owned(),
+            child_pipeline_id: Uuid::from_u128(5),
+            repository_identity: "github:example/repo".to_owned(),
+            ref_kind: DiscoveredRefKind::Branch,
+            ref_name: "main".to_owned(),
+            pull_request_number: None,
+            head_repository_identity: "github:example/repo".to_owned(),
+            is_fork: false,
+            state: DiscoveryChildState::Active,
+            state_generation: 1,
+            revision: "1111111".to_owned(),
+            provenance_sha256: [10; 32],
+            jenkinsfile_path: "Jenkinsfile".to_owned(),
+            jenkinsfile_sha256: [11; 32],
+            child_configuration_sha256: [12; 32],
+            parent_generation: 1,
+            source_cursor: 1,
+            last_scan_id: "scan-1".to_owned(),
+        });
+        assert_eq!(child.provenance_sha256, "0a".repeat(32));
+        assert_eq!(child.jenkinsfile_sha256, "0b".repeat(32));
+        assert_eq!(child.child_configuration_sha256, "0c".repeat(32));
+        let page = serde_json::to_value(DiscoveryChildPageResponse {
+            items: vec![child],
+            next_after: Some("repo:branch:main".to_owned()),
+        })
+        .unwrap();
+        assert!(page.is_object());
+        assert!(page["items"].is_array());
+        assert_eq!(page["next_after"], "repo:branch:main");
+    }
+
+    #[test]
     fn openapi_covers_every_public_route_with_unique_operations_and_errors() {
         let document = openapi_document();
         let paths = document["paths"].as_object().expect("paths object");
@@ -4069,6 +6980,50 @@ mod tests {
                 "put",
             ),
             (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
+                "post",
+            ),
+            (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
                 "get",
             ),
@@ -4083,10 +7038,6 @@ mod tests {
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
                 "get",
-            ),
-            (
-                "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
-                "post",
             ),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}",
@@ -4192,8 +7143,42 @@ mod tests {
         assert!(component["responses"]["200"].is_object());
         assert!(component["responses"]["201"].is_object());
 
-        let submission =
-            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds"]["post"];
+        let discovery_children = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children"]
+            ["get"];
+        let discovery_parameters = discovery_children["parameters"]
+            .as_array()
+            .expect("discovery child page parameters");
+        let discovery_limit = discovery_parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "limit")
+            .expect("bounded discovery child page limit");
+        assert_eq!(discovery_limit["schema"]["minimum"], 1);
+        assert_eq!(
+            discovery_limit["schema"]["maximum"],
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        assert_eq!(
+            discovery_children["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DiscoveryChildPage"
+        );
+        let discovery_page = &document["components"]["schemas"]["DiscoveryChildPage"];
+        assert_eq!(
+            discovery_page["properties"]["items"]["maxItems"],
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        assert_eq!(
+            discovery_page["properties"]["items"]["items"]["$ref"],
+            "#/components/schemas/DiscoveryChild"
+        );
+        let discovery_scan = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans"]
+            ["post"];
+        assert_eq!(
+            discovery_scan["requestBody"]["x-mcloving-max-body-bytes"],
+            MAX_DISCOVERY_SCAN_BODY_BYTES
+        );
+
+        let submission = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds"]
+            ["post"];
         assert!(submission["responses"]["200"].is_object());
         assert!(submission["responses"]["201"].is_object());
         assert!(submission["responses"]["202"].is_null());
@@ -4202,6 +7187,195 @@ mod tests {
             ["put"];
         assert!(pipeline["responses"]["200"].is_object());
         assert!(pipeline["responses"]["201"].is_object());
+
+        let state = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state"];
+        assert!(state["get"]["responses"]["200"].is_object());
+        assert!(state["put"]["responses"]["200"].is_object());
+        assert!(state["put"]["responses"]["201"].is_null());
+
+        for operation in [
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events"]
+                ["post"],
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive"]
+                ["post"],
+        ] {
+            for status in ["200", "201", "202", "422"] {
+                assert_eq!(
+                    operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/TriggerEventResponse"
+                );
+            }
+        }
+
+        let schemas = &document["components"]["schemas"];
+        assert_eq!(
+            schemas["TriggerEventResponse"]["properties"]["delivery"]["$ref"],
+            "#/components/schemas/TriggerDelivery"
+        );
+        assert!(
+            schemas["TriggerEventResponse"]["required"]
+                .as_array()
+                .expect("trigger-event response requirements")
+                .contains(&Value::from("delivery"))
+        );
+        assert_eq!(
+            schemas["TriggerDelivery"]["properties"]["status"]["enum"],
+            json!(["pending", "retry_wait", "admitted", "dead_lettered"])
+        );
+        let trigger_request = &schemas["PipelineTriggerRequest"];
+        assert_eq!(trigger_request["discriminator"]["propertyName"], "kind");
+        assert_eq!(
+            trigger_request["oneOf"]
+                .as_array()
+                .expect("typed trigger request variants")
+                .len(),
+            4
+        );
+        assert!(
+            trigger_request["discriminator"]["mapping"]["plugin"].is_null(),
+            "unimplemented plugin triggers must not be advertised as accepted"
+        );
+        let scm_request = &schemas["ScmPipelineTriggerRequest"];
+        assert_eq!(scm_request["properties"]["kind"]["const"], "scm_webhook");
+        assert_eq!(
+            scm_request["properties"]["configuration"]["$ref"],
+            "#/components/schemas/ScmTriggerConfiguration"
+        );
+        assert_eq!(
+            scm_request["properties"]["deduplication_window_seconds"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            scm_request["properties"]["max_delivery_attempts"]["format"],
+            "int32"
+        );
+        assert_eq!(
+            scm_request["properties"]["delivery_ttl_seconds"]["format"],
+            "int64"
+        );
+        let scm_configuration = &schemas["ScmTriggerConfiguration"];
+        assert!(
+            scm_configuration["required"]
+                .as_array()
+                .expect("SCM configuration requirements")
+                .contains(&Value::from("repository_identity"))
+        );
+        assert!(scm_configuration["properties"]["expression"].is_null());
+        assert!(scm_configuration["properties"]["filter"]["properties"]["statuses"].is_null());
+        assert_eq!(
+            scm_configuration["properties"]["filter"]["properties"]["event_kinds"]["uniqueItems"],
+            true
+        );
+        let schedule_configuration = &schemas["ScheduleTriggerConfiguration"];
+        assert!(
+            schedule_configuration["required"]
+                .as_array()
+                .expect("schedule configuration requirements")
+                .contains(&Value::from("resolved_slots_unix_ms"))
+        );
+        assert!(
+            schedule_configuration["properties"]["repository_identity"].is_null(),
+            "kind-specific configuration fields must fail closed"
+        );
+        let resolved_slots =
+            &schedule_configuration["properties"]["resolved_slots_unix_ms"]["items"];
+        assert_eq!(resolved_slots["format"], "int64");
+        assert_eq!(resolved_slots["maximum"], i64::MAX);
+        assert_eq!(
+            schedule_configuration["properties"]["resolved_slots_unix_ms"]["x-mcloving-ordering"],
+            "strictly_increasing"
+        );
+        assert!(
+            schedule_configuration["properties"]["resolved_slots_unix_ms"]["description"]
+                .as_str()
+                .expect("resolved-slot ordering description")
+                .contains("strictly increasing")
+        );
+        let trigger_event = &schemas["TriggerEventRequest"];
+        assert_eq!(
+            trigger_event["properties"]["trigger_generation"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            trigger_event["properties"]["trigger_generation"]["maximum"],
+            i64::MAX
+        );
+        assert_eq!(
+            trigger_event["properties"]["event_time_unix_ms"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            trigger_event["properties"]["event_time_unix_ms"]["maximum"],
+            i64::MAX
+        );
+        let event_payload = &schemas["TriggerEventPayload"];
+        assert_eq!(
+            event_payload["oneOf"]
+                .as_array()
+                .expect("typed trigger event payload variants")
+                .len(),
+            4
+        );
+        let scm_event = &schemas["ScmTriggerEventPayload"];
+        assert!(
+            scm_event["required"]
+                .as_array()
+                .expect("SCM event payload requirements")
+                .contains(&Value::from("revision"))
+        );
+        assert!(scm_event["properties"]["resolved_slot_unix_ms"].is_null());
+        let schedule_event = &schemas["ScheduleTriggerEventPayload"];
+        assert!(
+            schedule_event["required"]
+                .as_array()
+                .expect("schedule event payload requirements")
+                .contains(&Value::from("resolved_slot_unix_ms"))
+        );
+        for field in [
+            "expected_last_resolved_slot_unix_ms",
+            "resolved_slot_unix_ms",
+        ] {
+            assert_eq!(schedule_event["properties"][field]["format"], "int64");
+            assert_eq!(schedule_event["properties"][field]["maximum"], i64::MAX);
+        }
+        assert!(schedule_event["properties"]["repository_identity"].is_null());
+        let remote_event = &schemas["RemoteApiTriggerEventPayload"];
+        assert!(
+            remote_event["required"]
+                .as_array()
+                .expect("remote API event payload requirements")
+                .contains(&Value::from("request_id"))
+        );
+        let trigger_parameters = &schemas["TriggerEventRequest"]["properties"]["parameters"];
+        assert_eq!(trigger_parameters["maxProperties"], 128);
+        assert_eq!(
+            trigger_parameters["propertyNames"]["pattern"],
+            "^[A-Za-z0-9_-]{1,256}$"
+        );
+        assert_eq!(
+            schemas["ScmTriggerEventPayload"]["properties"]["paths"]["maxItems"],
+            128
+        );
+        let parameter_variants = trigger_parameters["additionalProperties"]["oneOf"]
+            .as_array()
+            .expect("closed trigger parameter value variants");
+        assert_eq!(parameter_variants.len(), 3);
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| variant["type"] == "boolean")
+        );
+        assert!(parameter_variants.iter().any(|variant| {
+            variant["type"] == "integer"
+                && variant["format"] == "int64"
+                && variant["minimum"] == i64::MIN
+                && variant["maximum"] == i64::MAX
+        }));
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| { variant["type"] == "string" && variant["maxLength"] == 4096 })
+        );
 
         let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];
         assert!(approvals["post"]["responses"]["200"].is_object());
@@ -4290,6 +7464,32 @@ mod tests {
     }
 
     #[test]
+    fn parameter_names_and_trigger_failure_reasons_are_bounded() {
+        for invalid_name in ["", "bad.name", "bad\nname"] {
+            let parameters = BTreeMap::from([(invalid_name.to_owned(), json!(true))]);
+            let error = parameter_values(parameters).expect_err("reject invalid parameter name");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_parameters");
+        }
+        let oversized_name = "x".repeat(257);
+        assert!(
+            parameter_values(BTreeMap::from([(oversized_name, json!(true))])).is_err(),
+            "reject names that exceed the OpenAPI/runtime limit"
+        );
+
+        let failure = ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "pipeline_rejected",
+            format!("{}\npoison", "x".repeat(3_000)),
+        );
+        let reason = bounded_trigger_failure_reason(&failure);
+        assert!(!reason.is_empty());
+        assert!(reason.len() <= 2_048);
+        assert!(!reason.chars().any(char::is_control));
+        assert_eq!(reason.trim(), reason);
+    }
+
+    #[test]
     fn pipeline_catalog_request_defaults_parameter_values() {
         let request: PipelineUpsertRequest = serde_json::from_value(
             json!({"slug": "release", "source": "version: 1\nname: release\nstages: []"}),
@@ -4372,6 +7572,77 @@ mod tests {
     }
 
     #[test]
+    fn connector_mapping_catalog_denies_unknown_floating_and_duplicate_entries() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: notify
+stages:
+  - id: notify
+    name: Notify
+    steps:
+      - connector_intent:
+          mapping_id: notification.v1
+          mapping_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          effect_class: externally_idempotent
+          effect_key_template: build.notification
+          public_input_schema:
+            message: string
+          protected_secret_ref_schema:
+            token: string
+          expected_public_result_schema:
+            delivery_id: string
+          timeout_seconds: 30
+          ambiguity_policy: observe_then_reconcile
+          downstream_control_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile connector intent");
+        let mapping = ConnectorMappingRecord {
+            mapping_id: "notification.v1".into(),
+            mapping_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let catalog = ConnectorMappingCatalog {
+            schema_version: CONNECTOR_MAPPING_CATALOG_V1.into(),
+            profile: "private-linux-x86_64".into(),
+            generation: 1,
+            mappings: vec![mapping.clone()],
+        };
+        catalog.validate().expect("validate exact catalog");
+        validate_connector_mappings(&pipeline, &catalog).expect("admit exact mapping");
+
+        let unknown = ConnectorMappingCatalog {
+            mappings: vec![ConnectorMappingRecord {
+                mapping_id: "different.v1".into(),
+                ..mapping.clone()
+            }],
+            ..catalog.clone()
+        };
+        let error = validate_connector_mappings(&pipeline, &unknown)
+            .expect_err("unknown mapping must fail closed");
+        assert_eq!(error.code, "pipeline_rejected");
+        assert!(error.message.contains("not admitted"));
+
+        let floating = ConnectorMappingCatalog {
+            mappings: vec![ConnectorMappingRecord {
+                mapping_digest: format!("sha256:{}", "c".repeat(64)),
+                ..mapping.clone()
+            }],
+            ..catalog.clone()
+        };
+        let error = validate_connector_mappings(&pipeline, &floating)
+            .expect_err("floating mapping must fail closed");
+        assert!(error.message.contains("floating, stale, or substituted"));
+
+        let duplicate = ConnectorMappingCatalog {
+            mappings: vec![mapping.clone(), mapping],
+            ..catalog
+        };
+        assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
     fn execution_spec_preserves_explicit_process_mode() {
         let pipeline = compile_source_with_parameters(
             r#"
@@ -4446,5 +7717,63 @@ stages:
         .expect("compile direct process mode");
         validate_execution_platform(&pipeline, "linux").expect("Linux accepts direct mode");
         validate_execution_platform(&pipeline, "windows").expect("Windows accepts direct mode");
+    }
+
+    fn single_stage_source(step_count: usize) -> String {
+        let mut source = String::from(
+            "version: 1\nname: dense\nstages:\n  - id: build\n    name: Build\n    steps:\n",
+        );
+        for index in 0..step_count {
+            source.push_str(&format!(
+                "      - process:\n          program: /bin/step-{index}\n"
+            ));
+        }
+        source
+    }
+
+    #[test]
+    fn hundred_step_single_stage_pipeline_is_rejected_at_the_shared_compile_choke_point() {
+        // The measured EXEC-001 defect: this exact shape passed validate and
+        // admission, then looped forever at agent claim time. Both routes
+        // compile through compile_source_with_parameters, so this rejection
+        // proves validate and admission agree exactly.
+        let error = compile_source_with_parameters(&single_stage_source(100), BTreeMap::new())
+            .expect_err("multi-step stages are not executable and must not validate");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
+        );
+
+        let error = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
+            .expect_err("two steps in one stage are equally unsupported");
+        assert_eq!(error.code, "unsupported_execution_spec");
+
+        compile_source_with_parameters(&single_stage_source(1), BTreeMap::new())
+            .expect("exactly one process step per stage remains admissible");
+    }
+
+    #[test]
+    fn process_timeout_bounds_match_the_agent_execution_contract() {
+        let source = |timeout: &str| {
+            format!(
+                "version: 1\nname: bounded\nstages:\n  - id: build\n    name: Build\n    steps:\n      - process:\n          program: /bin/tool\n          timeout_seconds: {timeout}\n"
+            )
+        };
+        for rejected in ["0", "604801"] {
+            let error = compile_source_with_parameters(&source(rejected), BTreeMap::new())
+                .expect_err("timeouts the agent refuses must not validate");
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "unsupported_execution_spec");
+            assert_eq!(
+                error.message,
+                "stage build declares a process timeout outside 1..=604800 seconds"
+            );
+        }
+        for accepted in ["1", "604800"] {
+            compile_source_with_parameters(&source(accepted), BTreeMap::new())
+                .expect("agent-executable timeouts remain admissible");
+        }
     }
 }

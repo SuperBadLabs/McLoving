@@ -516,6 +516,38 @@ pub fn verify_audit_page(page: &AuditPage) -> Result<(), StoreError> {
     Ok(())
 }
 
+pub(crate) fn verify_audit_event_hash(
+    organization_id: Uuid,
+    event: &AuditEvent,
+) -> Result<(), StoreError> {
+    let expected_hash = compute_audit_event_hash(organization_id, event)?;
+    if event.event_hash != expected_hash {
+        return Err(StoreError::CorruptAuditChain {
+            organization_id,
+            sequence: event.sequence,
+        });
+    }
+    Ok(())
+}
+
+pub fn compute_audit_event_hash(
+    organization_id: Uuid,
+    event: &AuditEvent,
+) -> Result<[u8; 32], StoreError> {
+    hash_event(
+        organization_id,
+        event.sequence,
+        event.event_id,
+        &event.category,
+        &event.actor_subject,
+        &event.action,
+        &event.subject,
+        &event.payload,
+        event.occurred_at_unix_ms,
+        event.previous_hash,
+    )
+}
+
 type AuditRow = (
     i64,
     Uuid,
@@ -644,7 +676,7 @@ pub(crate) async fn append_audit_record(
     })
 }
 
-async fn lock_audit_head(
+pub(crate) async fn lock_audit_head(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
 ) -> Result<(i64, Vec<u8>), StoreError> {

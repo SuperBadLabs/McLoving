@@ -6,15 +6,28 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+mcloving-domain = { version = "0.0.0", path = "../domain" }
 mcloving-agent-runtime = { version = "0.0.0", path = "../agent-runtime" }
 mcloving-controller-store = { version = "0.0.0", path = "../controller-store" }
+mcloving-destination-observer = { version = "0.0.0", path = "../destination-observer" }
+mcloving-external-connector = { version = "0.0.0", path = "../external-connector" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 sha2 = "=0.10.9"
 thiserror = "=2.0.17"
-tokio = { version = "=1.47.1", features = ["fs", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "=1.47.1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "time",
+] }
 tokio-util = { version = "=0.7.19", features = ["rt"] }
 uuid = { version = "=1.18.1", features = ["serde", "v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "=0.31.3", features = ["fs"] }
 
 [dev-dependencies]
 axum = "=0.8.6"

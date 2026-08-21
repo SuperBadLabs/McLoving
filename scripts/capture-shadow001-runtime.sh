@@ -1,0 +1,451 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: $0 OUTPUT_ROOT PRIVATE_PACKAGE PACKAGE_PIN AUTHZ_GENERATION_PIN" >&2
+  exit 64
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../tools/versions.env
+source "${repo_root}/tools/versions.env"
+for command in chmod cmp cut find git grep install jq mktemp podman python3 \
+  realpath sed sha256sum sort ssh tar; do
+  command -v "${command}" >/dev/null || {
+    echo "required command is unavailable: ${command}" >&2
+    exit 69
+  }
+done
+
+output_parent="$(realpath -e "$(dirname -- "$1")")"
+output_leaf="$(basename -- "$1")"
+if [[ ! "${output_leaf}" =~ ^shadow001-runtime-[0-9]{8}T[0-9]{6}Z$ || -e "$1" ]]; then
+  echo "output must be one new shadow001-runtime-TIMESTAMP directory" >&2
+  exit 73
+fi
+if [[ "${output_parent}/" == "${repo_root}/"* ]]; then
+  echo "output must be outside the source repository" >&2
+  exit 73
+fi
+source_status="$(git -C "${repo_root}" status --porcelain=v1 --untracked-files=all)"
+if [[ -n "${source_status}" ]]; then
+  echo "SHADOW-001 runtime evidence requires a clean exact-head source tree" >&2
+  exit 78
+fi
+
+source_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+source_tree="$(git -C "${repo_root}" rev-parse "${source_commit}^{tree}")"
+output_root="${output_parent}/${output_leaf}"
+private_package="$2"
+package_pin="$3"
+authz_generation_pin="$4"
+runtime_root="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-shadow001.XXXXXX")"
+build_target="${runtime_root}/cargo-target"
+runtime_stage="${runtime_root}/runtime-stage"
+network="mcloving-shadow001-target-${RANDOM}-${RANDOM}"
+postgres="mcloving-shadow001-postgres-${RANDOM}-${RANDOM}"
+runner="mcloving-shadow001-runner-${RANDOM}-${RANDOM}"
+cargo_registry="${CARGO_HOME:-${HOME}/.cargo}/registry"
+
+cleanup() {
+  for container in "${runner}" "${postgres}"; do
+    if [[ -n "${container}" ]]; then
+      podman rm --force "${container}" >/dev/null 2>&1 || true
+    fi
+  done
+  if [[ -n "${network}" ]]; then
+    podman network rm "${network}" >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "${runtime_root}"
+}
+trap cleanup EXIT
+
+if [[ ! -d "${cargo_registry}" ]]; then
+  echo "a prefetched Cargo registry is required for the offline build" >&2
+  exit 69
+fi
+install -d -m 0700 "${output_root}"
+install -d -m 0700 "${build_target}" "${runtime_stage}"
+
+podman run --rm --network none \
+  --cpus 4 --memory 8g --pids-limit 4096 \
+  --security-opt no-new-privileges --cap-drop all \
+  --env CARGO_NET_OFFLINE=true \
+  --env CARGO_TARGET_DIR=/cargo-target \
+  --env RUSTUP_TOOLCHAIN=1.97.1 \
+  --volume "${cargo_registry}:/usr/local/cargo/registry:ro" \
+  --volume "${build_target}:/cargo-target:Z" \
+  --volume "${repo_root}:/work:ro,Z" \
+  --workdir /work \
+  "${MCLOVING_RUST_IMAGE}" \
+  bash -c '
+    set -euo pipefail
+    cargo build --locked --offline -p mcloving-shadow-qualification
+    cargo test --locked --offline -p mcloving-controller-store \
+      --test trigger_ingress --no-run
+    cargo test --locked --offline -p mcloving-controller \
+      --test diff_001 --no-run
+  ' >/dev/null
+install -m 0700 "${build_target}/debug/mcloving-shadow-qualification" \
+  "${output_root}/mcloving-shadow-qualification"
+sha256sum "${output_root}/mcloving-shadow-qualification" \
+  | cut -d ' ' -f 1 >"${output_root}/verifier-binary.sha256"
+chmod 0600 "${output_root}/verifier-binary.sha256"
+"${output_root}/mcloving-shadow-qualification" generate-keys \
+  "${output_root}/source-capture-key.pkcs8" \
+  "${output_root}/source-capture-public.sha256" \
+  "${output_root}/shadow-replay-key.pkcs8" \
+  "${output_root}/shadow-replay-public.base64" \
+  >"${output_root}/key-generation.log"
+chmod 0600 "${output_root}/key-generation.log"
+
+capture_source_boundary() {
+  local destination="$1"
+  ssh -o BatchMode=yes srikanth@mario 'python3 -' \
+    <"${repo_root}/migration/shadow-runtime-v1/source-boundary.py" \
+    | sed -n 's/^SHADOW001_SOURCE_BOUNDARY=//p' >"${destination}"
+  chmod 0600 "${destination}"
+  jq --exit-status '
+    .schema == "mcloving.shadow001.source-boundary/v1"
+    and .container == "jenkins-oracle-228"
+    and .image == "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02"
+    and .running == true
+    and .read_only_root == true
+    and .privileged == false
+    and .added_capabilities == 0
+    and .devices == 0
+    and .no_new_privileges == true
+    and .pid_namespace == "private"
+    and .network == "jenkins-oracle-net"
+    and .network_internal == true
+    and .network_members == ["jenkins-oracle-228"]
+    and .proxy_environment_names == []
+    and .mounts == [
+      {"destination":"/oracle/corpus","type":"bind","writable":false},
+      {"destination":"/usr/share/jenkins/ref/plugins","type":"bind","writable":false},
+      {"destination":"/var/jenkins_home","type":"bind","writable":true}
+    ]
+    and .reachable_connector_peers == 0
+    and .production_endpoint_mappings == 0
+  ' "${destination}" >/dev/null
+}
+
+capture_source_boundary "${output_root}/source-boundary-before.json"
+
+live_authz_generation_pin="${output_root}/live-authz-generation.sha256"
+"${repo_root}/scripts/capture-shadow001-authz-pin.sh" \
+  "${live_authz_generation_pin}" >/dev/null
+if ! cmp -s -- "${authz_generation_pin}" "${live_authz_generation_pin}"; then
+  echo "live authorization generation changed after the independent pin" >&2
+  exit 1
+fi
+
+tar -C "${repo_root}" -cf - \
+  migration/shadow-runtime-v1/source-effects.py \
+  migration/shadow-runtime-v1/source-probe.groovy \
+  | ssh -o BatchMode=yes srikanth@mario '
+      set -euo pipefail
+      stage="$(mktemp -d)"
+      trap '\''rm -rf -- "${stage}"'\'' EXIT
+      tar -xf - -C "${stage}"
+      python3 "${stage}/migration/shadow-runtime-v1/source-effects.py" \
+        "${stage}/migration/shadow-runtime-v1/source-probe.groovy"
+    ' >"${output_root}/source-capture.markers"
+chmod 0600 "${output_root}/source-capture.markers"
+source_marker_count="$(grep -c '^SHADOW001_SOURCE=' \
+  "${output_root}/source-capture.markers" || true)"
+effect_marker_count="$(grep -c '^SHADOW001_SOURCE_EFFECTS=' \
+  "${output_root}/source-capture.markers" || true)"
+if [[ "${source_marker_count}" -ne 1 || "${effect_marker_count}" -ne 1 ]]; then
+  echo "live source capture did not emit exactly one bounded marker per class" >&2
+  exit 1
+fi
+sed -n 's/^SHADOW001_SOURCE=//p' \
+  "${output_root}/source-capture.markers" \
+  >"${output_root}/source-probe.raw.json"
+sed -n 's/^SHADOW001_SOURCE_EFFECTS=//p' \
+  "${output_root}/source-capture.markers" \
+  >"${output_root}/source-effects.json"
+chmod 0600 "${output_root}/source-probe.raw.json" \
+  "${output_root}/source-effects.json"
+
+capture_source_boundary "${output_root}/source-boundary-after.json"
+if ! cmp -s -- "${output_root}/source-boundary-before.json" \
+  "${output_root}/source-boundary-after.json"; then
+  echo "live source containment changed during capture" >&2
+  exit 1
+fi
+jq --exit-status '
+  .schema == "mcloving.shadow001.source-effects/v1"
+  and .network_request_attempts == 0
+  and .unclassified_home_mutations == 0
+  and .probe_control_mutations > 0
+' "${output_root}/source-effects.json" >/dev/null
+source_connector_requests="$(jq '.network_request_attempts' \
+  "${output_root}/source-effects.json")"
+source_production_effects="$(jq '.unclassified_home_mutations' \
+  "${output_root}/source-effects.json")"
+jq --argjson connector_requests "${source_connector_requests}" \
+  --argjson production_effects "${source_production_effects}" '
+  .observations |= map(. + {
+    connector_requests: $connector_requests,
+    production_effects: $production_effects
+  })
+' "${output_root}/source-probe.raw.json" >"${output_root}/source-probe.json"
+chmod 0600 "${output_root}/source-probe.json"
+
+jq --exit-status '
+  .schema == "mcloving.shadow001.jenkins-source-probe/v1"
+  and .job_id == "corpus-052-cinqict_jenkinsdev"
+  and .source_state == "disabled"
+  and .definition_kind == "org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition"
+  and .source_sha256 == "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100"
+  and .source_config_sha256 == "e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97"
+  and .captured_wall_clock_unix_ms > 0
+  and .original_activity == .terminal_activity
+  and .original_activity.queued == 0
+  and (.observations | map(.kind)) ==
+    ["api", "manual", "schedule", "upstream", "webhook"]
+  and ([.observations[].path] | unique | length) == 5
+  and ([.observations[] | .outcome == "disabled_pre_queue"] | all)
+  and ([.observations[] |
+    .queued_builds == 0
+    and .scheduled_attempts == 0
+    and .credential_grants == 0
+    and .connector_requests == 0
+    and .production_effects == 0] | all)
+' "${output_root}/source-probe.json" >/dev/null
+
+mapfile -t ingress_bins < <(
+  find "${build_target}/debug/deps" -maxdepth 1 -type f \
+    -name 'trigger_ingress-*' -perm -0100 | sort
+)
+mapfile -t trace_bins < <(
+  find "${build_target}/debug/deps" -maxdepth 1 -type f \
+    -name 'diff_001-*' -perm -0100 | sort
+)
+if [[ ${#ingress_bins[@]} -ne 1 || ${#trace_bins[@]} -ne 1 || \
+      ! -x "${build_target}/debug/mcloving-controller" ]]; then
+  echo "offline build did not produce the exact three runtime executables" >&2
+  exit 70
+fi
+install -m 0555 "${ingress_bins[0]}" "${runtime_stage}/trigger_ingress"
+install -m 0555 "${trace_bins[0]}" "${runtime_stage}/diff_001"
+install -d -m 0755 "${runtime_stage}/cargo-target/debug"
+install -m 0555 "${build_target}/debug/mcloving-controller" \
+  "${runtime_stage}/cargo-target/debug/mcloving-controller"
+
+podman network create --internal "${network}" >/dev/null
+podman run --detach --name "${postgres}" \
+  --network "${network}" --network-alias postgres \
+  --read-only \
+  --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev,size=1g \
+  --tmpfs /run/postgresql:rw,nosuid,nodev,size=16m \
+  --cpus 2 --memory 2g --pids-limit 1024 \
+  --security-opt no-new-privileges \
+  --env POSTGRES_USER=mcloving \
+  --env POSTGRES_HOST_AUTH_METHOD=trust \
+  --env POSTGRES_DB=mcloving \
+  "${MCLOVING_POSTGRES_IMAGE}" >/dev/null
+for _ in $(seq 1 120); do
+  if podman exec "${postgres}" pg_isready \
+    --username mcloving --dbname mcloving >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+podman exec "${postgres}" pg_isready \
+  --username mcloving --dbname mcloving >/dev/null
+
+podman create --name "${runner}" \
+  --network "${network}" \
+  --read-only --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+  --cpus 2 --memory 4g --pids-limit 2048 \
+  --security-opt no-new-privileges --cap-drop all \
+  --env MCLOVING_TEST_DATABASE_URL=postgres://mcloving@postgres:5432/mcloving \
+  --env MCLOVING_SHADOW001_REPLAY_OUTPUT=- \
+  --env MCLOVING_SHADOW001_TRACE_OUTPUT=- \
+  --env RUST_BACKTRACE=0 \
+  "${MCLOVING_RUST_IMAGE}" \
+  bash -c '
+    set -euo pipefail
+    /runtime/trigger_ingress \
+      disabled_pipeline_rejects_every_typed_ingress_before_queue \
+      --exact --nocapture --test-threads=1
+    /runtime/diff_001 admitted_jenkins_case_executes_with_a_canonical_trace \
+      --exact --nocapture --test-threads=1
+    if timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/443"; then
+      echo "target replay reached the public network" >&2
+      exit 1
+    fi
+    echo SHADOW001_TARGET_NETWORK=public-network-denied
+  ' >/dev/null
+podman cp "${runtime_stage}/." "${runner}:/runtime"
+podman cp "${runtime_stage}/cargo-target" "${runner}:/cargo-target"
+
+set +e
+podman start --attach "${runner}" >"${output_root}/target-runtime.log" 2>&1
+runner_status=$?
+set -e
+chmod 0600 "${output_root}/target-runtime.log"
+podman inspect "${runner}" >"${output_root}/target-runner-inspect.json"
+podman inspect "${postgres}" >"${output_root}/target-postgres-inspect.json"
+podman network inspect "${network}" >"${output_root}/target-network-inspect.json"
+chmod 0600 "${output_root}/target-runner-inspect.json" \
+  "${output_root}/target-postgres-inspect.json" \
+  "${output_root}/target-network-inspect.json"
+if [[ ${runner_status} -ne 0 ]]; then
+  echo "isolated target replay failed; owner-private evidence was retained" >&2
+  exit 1
+fi
+jq --exit-status '.[0].Mounts | length == 0' \
+  "${output_root}/target-runner-inspect.json" >/dev/null
+jq --exit-status '.[0].HostConfig.ReadonlyRootfs == true' \
+  "${output_root}/target-runner-inspect.json" >/dev/null
+jq --exit-status '
+  .[0]
+  | (.Mounts | length == 0)
+    and .HostConfig.ReadonlyRootfs == true
+    and (.HostConfig.Tmpfs | keys == [
+      "/run/postgresql",
+      "/var/lib/postgresql/data"
+    ])
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("rw"))
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nosuid"))
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("nodev"))
+    and (.HostConfig.Tmpfs["/var/lib/postgresql/data"] | contains("size=1g"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("rw"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("nosuid"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("nodev"))
+    and (.HostConfig.Tmpfs["/run/postgresql"] | contains("size=16m"))
+' "${output_root}/target-postgres-inspect.json" >/dev/null
+jq --exit-status '.[0].internal == true' \
+  "${output_root}/target-network-inspect.json" >/dev/null
+grep -Fxq 'SHADOW001_TARGET_NETWORK=public-network-denied' \
+  "${output_root}/target-runtime.log"
+target_marker_count="$(grep -c '^SHADOW001_TARGET=' \
+  "${output_root}/target-runtime.log" || true)"
+trace_marker_count="$(grep -c '^SHADOW001_TRACE=' \
+  "${output_root}/target-runtime.log" || true)"
+if [[ "${target_marker_count}" -ne 1 || "${trace_marker_count}" -ne 1 ]]; then
+  echo "isolated target replay did not emit exactly one bounded receipt per class" >&2
+  exit 1
+fi
+sed -n 's/^SHADOW001_TARGET=//p' "${output_root}/target-runtime.log" \
+  >"${output_root}/target-replay.json"
+sed -n 's/^SHADOW001_TRACE=//p' "${output_root}/target-runtime.log" \
+  >"${output_root}/trace-observation.json"
+chmod 0600 "${output_root}/target-replay.json" \
+  "${output_root}/trace-observation.json"
+jq --exit-status '.schema == "mcloving.shadow001.target-replay/v1"' \
+  "${output_root}/target-replay.json" >/dev/null
+jq --exit-status '.schema == "mcloving.shadow001.trace-observation/v1"' \
+  "${output_root}/trace-observation.json" >/dev/null
+
+source_fixture_sha256="$({
+  sha256sum \
+    "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/SHA256SUMS" \
+    "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/container-inspect.json" \
+    "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt" \
+    "${output_root}/source-boundary-before.json" \
+    "${output_root}/source-boundary-after.json" \
+    "${output_root}/source-effects.json"
+} | sha256sum | cut -d ' ' -f 1)"
+target_fixture_sha256="$({
+  sha256sum "${runtime_stage}/trigger_ingress" \
+    "${runtime_stage}/diff_001" \
+    "${runtime_stage}/cargo-target/debug/mcloving-controller" \
+    "${output_root}/target-runner-inspect.json" \
+    "${output_root}/target-postgres-inspect.json"
+} | sha256sum | cut -d ' ' -f 1)"
+source_network_sha256="$(sha256sum \
+  "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/container-inspect.json" \
+  "${repo_root}/migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/jenkins/external-network.txt" \
+  "${output_root}/source-boundary-before.json" \
+  "${output_root}/source-boundary-after.json" \
+  "${output_root}/source-effects.json" \
+  | sha256sum | cut -d ' ' -f 1)"
+target_network_sha256="$(sha256sum \
+  "${output_root}/target-network-inspect.json" | cut -d ' ' -f 1)"
+printf '%s\n' \
+  'source=certified-public-network-denied' \
+  'target=public-network-denied' \
+  >"${output_root}/reachability.txt"
+chmod 0600 "${output_root}/reachability.txt"
+reachability_sha256="$(sha256sum "${output_root}/reachability.txt" | cut -d ' ' -f 1)"
+
+podman rm --force "${runner}" >/dev/null
+runner=''
+podman rm --force "${postgres}" >/dev/null
+postgres=''
+podman network rm "${network}" >/dev/null
+network=''
+
+jq -n \
+  --arg source_fixture "diff001-certified-source:${source_fixture_sha256}" \
+  --arg target_fixture "shadow001-target:${target_fixture_sha256}" \
+  --arg source_network "${source_network_sha256}" \
+  --arg target_network "${target_network_sha256}" \
+  --arg reachability "${reachability_sha256}" '
+  {
+    schema: "mcloving.shadow001.isolation-observation/v1",
+    source_fixture_identity: $source_fixture,
+    target_fixture_identity: $target_fixture,
+    source_network_sha256: $source_network,
+    target_network_sha256: $target_network,
+    reachability_receipt_sha256: $reachability,
+    source_and_target_networks_disjoint: true,
+    production_network_requests: 0,
+    production_endpoint_mappings: 0,
+    production_credentials: 0,
+    host_mounts: 0,
+    cross_fixture_mounts: 0,
+    teardown_complete: true
+  }
+' >"${output_root}/isolation-observation.json"
+chmod 0600 "${output_root}/isolation-observation.json"
+
+printf '%s\n' "${source_commit}" >"${output_root}/implementation-head"
+printf '%s\n' "${source_tree}" >"${output_root}/implementation-tree"
+chmod 0600 "${output_root}/implementation-head" \
+  "${output_root}/implementation-tree"
+seal_source_status="$(git -C "${repo_root}" status \
+  --porcelain=v1 --untracked-files=all)"
+seal_source_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+seal_source_tree="$(git -C "${repo_root}" rev-parse "${seal_source_commit}^{tree}")"
+if [[ -n "${seal_source_status}" || "${seal_source_commit}" != "${source_commit}" ||
+      "${seal_source_tree}" != "${source_tree}" ]]; then
+  echo "SHADOW-001 source tree changed before template preparation" >&2
+  exit 78
+fi
+terminal_authz_generation_pin="${output_root}/terminal-authz-generation.sha256"
+"${repo_root}/scripts/capture-shadow001-authz-pin.sh" \
+  "${terminal_authz_generation_pin}" >/dev/null
+if ! cmp -s -- "${authz_generation_pin}" "${terminal_authz_generation_pin}"; then
+  echo "live authorization generation changed before template preparation" >&2
+  exit 1
+fi
+"${output_root}/mcloving-shadow-qualification" prepare \
+  "${output_root}/source-probe.json" \
+  "${output_root}/target-replay.json" \
+  "${output_root}/trace-observation.json" \
+  "${output_root}/isolation-observation.json" \
+  "${output_root}/source-capture-key.pkcs8" \
+  "${output_root}/source-capture-public.sha256" \
+  "${output_root}/shadow-replay-public.base64" \
+  "${private_package}" \
+  "${package_pin}" \
+  "${authz_generation_pin}" \
+  "${output_root}/verifier-binary.sha256" \
+  "${source_commit}" \
+  "${output_root}/session-template.private.json" \
+  >"${output_root}/template-preparation.log"
+chmod 0600 "${output_root}/template-preparation.log"
+printf '%s\n' \
+  'source_capture_key_created=true' \
+  'source_capture_complete=true' \
+  'target_replay_complete=true' \
+  'trace_replay_complete=true' \
+  'fixtures_torn_down=true' \
+  'source_authenticated_template_created=true' \
+  'production_authority=false'

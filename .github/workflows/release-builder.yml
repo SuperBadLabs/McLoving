@@ -1,0 +1,70 @@
+name: Release Builder
+
+on:
+  workflow_run:
+    workflows:
+      - Foundation
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-builder-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  isolated-linux-amd64:
+    name: Isolated Linux amd64
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the exact protected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+      - name: Install the lockfile toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Populate dependency archives outside the builder
+        run: cargo +1.97.1 fetch --locked --target x86_64-unknown-linux-gnu
+      - name: Pull the exact platform builder outside its network-denied run
+        run: >-
+          docker pull
+          docker.io/library/rust:1.97.1-bookworm@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6
+      - name: Build the immutable release inputs
+        env:
+          RELEASE_HEAD: ${{ github.event.workflow_run.head_sha }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${RELEASE_HEAD}"
+          test "${EXECUTING_WORKFLOW_SHA}" = "${RELEASE_HEAD}"
+          release_parent="${RUNNER_TEMP}/mcloving-release-private-${RELEASE_HEAD}"
+          install -d -m 0700 "${release_parent}"
+          release_output="${release_parent}/output"
+          scripts/release-builder-contained.sh \
+            "${GITHUB_WORKSPACE}" \
+            "${release_output}" \
+            "${HOME}/.cargo"
+          source_date_epoch="$(git show -s --format=%ct "${RELEASE_HEAD}")"
+          artifact="${RUNNER_TEMP}/mcloving-release-${RELEASE_HEAD}.tar"
+          tar --sort=name \
+            --mtime="@${source_date_epoch}" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf "${artifact}" \
+            -C "${release_output}" \
+            .
+          sha256sum "${artifact}"
+      - name: Publish the immutable unsigned build output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ runner.temp }}/mcloving-release-${{ github.event.workflow_run.head_sha }}.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 30

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use mcloving_controller_store::{
-    AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite, IdentityProviderWrite,
-    NewHumanIdentity, NewServiceCredential, NewServiceIdentity, OidcIdentityClaims, SessionIssue,
-    Store, StoreError,
-    authz::{Action, GrantDecision, ServiceScope, authorize},
+    AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite, IdentityLifecycle,
+    IdentityProviderWrite, NewHumanIdentity, NewServiceCredential, NewServiceIdentity,
+    OidcIdentityClaims, SessionIssue, Store, StoreError,
+    authz::{Action, GrantDecision, Principal, ServiceScope, authorize},
     compute_authorization_policy_digest,
 };
 use serde_json::json;
@@ -59,6 +59,97 @@ async fn unprivileged_store(admin: &Store) -> Store {
 
 fn digest(label: &str) -> [u8; 32] {
     Sha256::digest(label.as_bytes()).into()
+}
+
+fn observed_decisions(
+    principal: &Principal,
+    organization_id: Uuid,
+    project_id: Uuid,
+) -> serde_json::Value {
+    let decision = |action| {
+        if authorize(principal, organization_id, Some(project_id), action).is_ok() {
+            "allow"
+        } else {
+            "deny"
+        }
+    };
+    json!({
+        "project_view": decision(Action::ProjectView),
+        "build_trigger": decision(Action::BuildTrigger),
+        "build_cancel": decision(Action::BuildCancel),
+        "project_configure": decision(Action::ProjectConfigure),
+    })
+}
+
+async fn observed_token_decisions(
+    store: &Store,
+    organization_id: Uuid,
+    token_digest: [u8; 32],
+    now_unix_ms: i64,
+    project_id: Uuid,
+) -> serde_json::Value {
+    let project_view = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::ProjectView,
+            )
+            .ok()
+        })
+        .is_some();
+    let build_trigger = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::BuildTrigger,
+            )
+            .ok()
+        })
+        .is_some();
+    let build_cancel = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::BuildCancel,
+            )
+            .ok()
+        })
+        .is_some();
+    let project_configure = store
+        .authenticate_api_token(organization_id, token_digest, now_unix_ms)
+        .await
+        .ok()
+        .and_then(|authenticated| {
+            authorize(
+                &authenticated.principal,
+                organization_id,
+                Some(project_id),
+                Action::ProjectConfigure,
+            )
+            .ok()
+        })
+        .is_some();
+    json!({
+        "project_view": if project_view { "allow" } else { "deny" },
+        "build_trigger": if build_trigger { "allow" } else { "deny" },
+        "build_cancel": if build_cancel { "allow" } else { "deny" },
+        "project_configure": if project_configure { "allow" } else { "deny" },
+    })
 }
 
 fn policy(
@@ -329,6 +420,9 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
     let project_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0002);
     let provider_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0003);
     let identity_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0004);
+    let deleted_predecessor_identity_id =
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0005);
+    let deleted_reuse_identity_id = Uuid::from_u128(0x4d63_4c6f_7669_6e67_2000_0000_0000_0006);
     admin
         .create_project(
             organization_id,
@@ -375,6 +469,22 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         })
         .await
         .expect("bind immutable source principal");
+    admin
+        .provision_human_identity(&NewHumanIdentity {
+            organization_id,
+            identity_id: deleted_predecessor_identity_id,
+            subject: "principal:authz-deleted-predecessor".to_owned(),
+            provider_id,
+            external_subject: "jenkins-user-deleted-2041".to_owned(),
+            source_realm_digest: digest("authz-source-realm-v1"),
+            source_identity_id: "jenkins-user-deleted-2041".to_owned(),
+            source_membership_generation: 20,
+            alias_history: vec!["alice-reused".to_owned()],
+            provenance_digest: digest("authz-mig000-deleted-predecessor-provenance"),
+            actor_subject: "reviewer:authz-owner".to_owned(),
+        })
+        .await
+        .expect("bind the predecessor for the deleted-name-reuse lifecycle");
     sqlx::query(
         "INSERT INTO project_memberships(identity_id, organization_id, project_id, role)
          VALUES ($1, $2, $3, 'owner')",
@@ -385,6 +495,16 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
     .execute(admin.pool())
     .await
     .expect("seed a deliberately broader legacy role");
+    sqlx::query(
+        "INSERT INTO project_memberships(identity_id, organization_id, project_id, role)
+         VALUES ($1, $2, $3, 'viewer')",
+    )
+    .bind(deleted_predecessor_identity_id)
+    .bind(organization_id)
+    .bind(project_id)
+    .execute(admin.pool())
+    .await
+    .expect("grant the predecessor view authority before deletion");
 
     let runtime = unprivileged_store(&admin).await;
     let first_token = digest("authz-human-token-generation-1");
@@ -411,6 +531,30 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         )
         .await
         .expect("issue first exact-generation session");
+    let deleted_predecessor_token = digest("authz-deleted-predecessor-token-generation-1");
+    let deleted_predecessor_session = runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                organization_id,
+                provider_id,
+                issuer: provider.issuer.clone(),
+                external_subject: "jenkins-user-deleted-2041".to_owned(),
+                groups: vec!["release-viewers".to_owned()],
+                provider_configuration_generation: 1,
+                provider_jwks_generation: 1,
+                id_token_digest: digest("authz-deleted-predecessor-id-token-generation-1"),
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: deleted_predecessor_token,
+                refresh_token_digest: None,
+                issued_at_unix_ms: 10_000,
+                expires_at_unix_ms: 100_000,
+                refresh_expires_at_unix_ms: None,
+            },
+        )
+        .await
+        .expect("issue the predecessor session before deletion");
 
     let allow_mapping = human_mapping(
         Uuid::new_v4(),
@@ -429,26 +573,173 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
         first_session.group_generation,
         [(Action::BuildTrigger, GrantDecision::Deny)].into(),
     );
+    let mut deleted_predecessor_mapping = human_mapping(
+        Uuid::new_v4(),
+        deleted_predecessor_identity_id,
+        deleted_predecessor_session.group_generation,
+        [(Action::ProjectView, GrantDecision::Allow)].into(),
+    );
+    deleted_predecessor_mapping.source_identity_id = "jenkins-user-deleted-2041".to_owned();
+    deleted_predecessor_mapping.source_alias_history = json!(["alice-reused"]);
+    deleted_predecessor_mapping.source_membership_generation = 20;
+    deleted_predecessor_mapping.source_acl_entry_id =
+        "folder/release:user/jenkins-user-deleted-2041".to_owned();
+    deleted_predecessor_mapping.source_permissions =
+        ["job.read"].into_iter().map(str::to_owned).collect();
+    deleted_predecessor_mapping.target_external_subject =
+        Some("jenkins-user-deleted-2041".to_owned());
+    deleted_predecessor_mapping.target_provenance_digest =
+        digest("authz-mig000-deleted-predecessor-provenance");
     let generation_one = policy(
         organization_id,
         project_id,
         1,
         None,
         None,
-        vec![allow_mapping, deny_mapping],
+        vec![allow_mapping, deny_mapping, deleted_predecessor_mapping],
     );
     let receipt = admin
         .install_authorization_policy(&generation_one)
         .await
         .expect("install exact first policy generation");
-    assert_eq!(receipt.mapping_count, 2);
-    assert_eq!(receipt.grant_count, 4);
+    assert_eq!(receipt.mapping_count, 3);
+    assert_eq!(receipt.grant_count, 5);
 
-    let principal = runtime
+    let authenticated = runtime
         .authenticate_api_token(organization_id, first_token, 20_000)
         .await
-        .expect("authenticate first mapped session")
-        .principal;
+        .expect("authenticate first mapped session");
+    let authenticated_identity_id = authenticated.identity_id;
+    assert_eq!(
+        authenticated_identity_id, identity_id,
+        "active authentication resolves to its provisioned immutable identity"
+    );
+    let principal = authenticated.principal;
+    let deleted_predecessor_authenticated = runtime
+        .authenticate_api_token(organization_id, deleted_predecessor_token, 20_000)
+        .await
+        .expect("authenticate the predecessor before deletion");
+    let deleted_predecessor_authenticated_identity_id =
+        deleted_predecessor_authenticated.identity_id;
+    assert_eq!(
+        deleted_predecessor_authenticated_identity_id, deleted_predecessor_identity_id,
+        "predecessor authentication resolves to its provisioned immutable identity"
+    );
+    let deleted_predecessor_principal = deleted_predecessor_authenticated.principal;
+    let deleted_predecessor_decisions =
+        observed_decisions(&deleted_predecessor_principal, organization_id, project_id);
+    assert!(
+        authorize(
+            &deleted_predecessor_principal,
+            organization_id,
+            Some(project_id),
+            Action::ProjectView
+        )
+        .is_ok(),
+        "the predecessor has view authority before deletion"
+    );
+    for action in [
+        Action::BuildTrigger,
+        Action::BuildCancel,
+        Action::ProjectConfigure,
+    ] {
+        assert!(
+            authorize(
+                &deleted_predecessor_principal,
+                organization_id,
+                Some(project_id),
+                action
+            )
+            .is_err(),
+            "the predecessor viewer has no mutating authority"
+        );
+    }
+    let deleted_predecessor_generation = admin
+        .transition_identity_lifecycle(
+            organization_id,
+            deleted_predecessor_identity_id,
+            1,
+            IdentityLifecycle::Deleted,
+            "delete predecessor before same-name replacement",
+            "reviewer:authz-owner",
+        )
+        .await
+        .expect("delete the predecessor identity");
+    assert_eq!(deleted_predecessor_generation, 2);
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, deleted_predecessor_token, 20_001)
+            .await
+            .is_err(),
+        "the deleted predecessor session cannot authenticate"
+    );
+    let deleted_predecessor_post_delete_decisions = observed_token_decisions(
+        &runtime,
+        organization_id,
+        deleted_predecessor_token,
+        20_001,
+        project_id,
+    )
+    .await;
+    assert_eq!(
+        deleted_predecessor_post_delete_decisions,
+        json!({
+            "project_view": "deny",
+            "build_trigger": "deny",
+            "build_cancel": "deny",
+            "project_configure": "deny",
+        })
+    );
+    admin
+        .provision_human_identity(&NewHumanIdentity {
+            organization_id,
+            identity_id: deleted_reuse_identity_id,
+            subject: "principal:authz-deleted-name-reuse".to_owned(),
+            provider_id,
+            external_subject: "jenkins-user-deleted-reuse-2042".to_owned(),
+            source_realm_digest: digest("authz-source-realm-v1"),
+            source_identity_id: "jenkins-user-deleted-reuse-2042".to_owned(),
+            source_membership_generation: 21,
+            alias_history: vec!["alice-reused".to_owned()],
+            provenance_digest: digest("authz-mig000-deleted-reuse-provenance"),
+            actor_subject: "reviewer:authz-owner".to_owned(),
+        })
+        .await
+        .expect("bind a distinct identity after same-name reuse");
+    let deleted_reuse_token = digest("authz-deleted-reuse-token-generation-1");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                organization_id,
+                provider_id,
+                issuer: provider.issuer.clone(),
+                external_subject: "jenkins-user-deleted-reuse-2042".to_owned(),
+                groups: vec!["release-viewers".to_owned()],
+                provider_configuration_generation: 1,
+                provider_jwks_generation: 1,
+                id_token_digest: digest("authz-deleted-reuse-id-token-generation-1"),
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: deleted_reuse_token,
+                refresh_token_digest: None,
+                issued_at_unix_ms: 10_000,
+                expires_at_unix_ms: 100_000,
+                refresh_expires_at_unix_ms: None,
+            },
+        )
+        .await
+        .expect("issue the distinct deleted-name-reuse session");
+    let deleted_reuse_authenticated = runtime
+        .authenticate_api_token(organization_id, deleted_reuse_token, 20_000)
+        .await
+        .expect("authenticate the distinct deleted-name-reuse principal");
+    let deleted_reuse_authenticated_identity_id = deleted_reuse_authenticated.identity_id;
+    assert_eq!(
+        deleted_reuse_authenticated_identity_id, deleted_reuse_identity_id,
+        "replacement authentication resolves to its provisioned immutable identity"
+    );
+    let deleted_reuse_principal = deleted_reuse_authenticated.principal;
     assert!(
         authorize(
             &principal,
@@ -468,6 +759,56 @@ async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
             authorize(&principal, organization_id, Some(project_id), action).is_err(),
             "deny wins and a broader legacy owner role cannot fill missing mapped permission"
         );
+    }
+    for action in [
+        Action::ProjectView,
+        Action::BuildTrigger,
+        Action::BuildCancel,
+        Action::ProjectConfigure,
+    ] {
+        assert!(
+            authorize(
+                &deleted_reuse_principal,
+                organization_id,
+                Some(project_id),
+                action
+            )
+            .is_err(),
+            "the distinct deleted-name-reuse principal has no inherited authority"
+        );
+    }
+    if let Ok(path) = std::env::var("MCLOVING_DIFF002_AUTHZ_OUTPUT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({
+                "schema": "mcloving.diff002.target-authorization/v1",
+                "immutable_id": "jenkins-user-immutable-1042",
+                "authenticated_identity_id": authenticated_identity_id,
+                "policy_generation": receipt.generation,
+                "decisions": observed_decisions(&principal, organization_id, project_id),
+                "deleted_reuse_name": "alice-reused",
+                "deleted_predecessor_immutable_id": "jenkins-user-deleted-2041",
+                "deleted_predecessor_authenticated_identity_id":
+                    deleted_predecessor_authenticated_identity_id,
+                "deleted_predecessor_decisions": deleted_predecessor_decisions,
+                "deleted_predecessor_deleted": deleted_predecessor_generation == 2,
+                "deleted_predecessor_post_delete_decisions":
+                    deleted_predecessor_post_delete_decisions,
+                "deleted_reuse_immutable_id": "jenkins-user-deleted-reuse-2042",
+                "deleted_reuse_authenticated_identity_id":
+                    deleted_reuse_authenticated_identity_id,
+                "deleted_reuse_authentication_changed":
+                    deleted_predecessor_authenticated_identity_id
+                        != deleted_reuse_authenticated_identity_id,
+                "deleted_reuse_decisions": observed_decisions(
+                    &deleted_reuse_principal,
+                    organization_id,
+                    project_id,
+                )
+            }))
+            .expect("serialize DIFF-002 target authorization observation"),
+        )
+        .expect("write DIFF-002 target authorization observation");
     }
 
     let mut substituted = policy(

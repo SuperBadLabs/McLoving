@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -91,6 +94,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         .parse::<u64>()
         .expect("numeric transport capacity");
     let fixture = TempDir::new().expect("contained fixture root");
+    let (acquisition_receipt_sha256, source_tree_sha256) = diff003_source_binding();
     let output_root = fixture.path().join("output");
     create_private_directory(&output_root);
     let credential = b"Bearer contained-dependency-credential".to_vec();
@@ -119,7 +123,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -140,7 +144,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -259,93 +263,138 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         },
         loopback_fixture: true,
     };
-    let mutable_receipts = output_root.join("receipts");
-    create_private_directory(&mutable_receipts);
-    let mutable_receipt = private_file(&mutable_receipts, "mutable.key", &receipt_key);
-    let receipt_alias = private_file(fixture.path(), "bind-receipt.key", b"mount target");
-    let mount_status = Command::new("sudo")
-        .arg("mount")
-        .arg("--bind")
-        .arg(&mutable_receipt)
-        .arg(&receipt_alias)
-        .status()
-        .await
-        .expect("bind authority alias");
-    assert!(mount_status.success(), "bind authority alias");
-    let mut bind_alias_config = config.clone();
-    bind_alias_config.receipt_key_path = path_string(&receipt_alias);
-    let bind_alias_result = LoadedAuthorities::load(&bind_alias_config);
-    let unmount_status = Command::new("sudo")
-        .arg("umount")
-        .arg(&receipt_alias)
-        .status()
-        .await
-        .expect("unmount authority alias");
-    assert!(unmount_status.success(), "unmount authority alias");
-    fs::remove_file(&receipt_alias).expect("remove bind target");
-    fs::remove_file(&mutable_receipt).expect("remove mutable receipt source");
-    fs::remove_dir(&mutable_receipts).expect("remove mutable receipt directory");
-    let bind_alias_error = bind_alias_result.expect_err("bind-mounted mutable authority alias");
-    assert_eq!(
-        bind_alias_error.code,
-        "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
-    );
+    let diff003_direct_mount = std::env::var_os("MCLOVING_DIFF003_MOUNT_DIRECT").is_some();
+    if std::env::var_os("MCLOVING_DIFF003_CONTAINED").is_none() || diff003_direct_mount {
+        let mutable_receipts = output_root.join("receipts");
+        create_private_directory(&mutable_receipts);
+        let mutable_receipt = private_file(&mutable_receipts, "mutable.key", &receipt_key);
+        let receipt_alias = private_file(fixture.path(), "bind-receipt.key", b"mount target");
+        let mut mount_command = Command::new(if diff003_direct_mount {
+            "mount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            mount_command.arg("mount");
+        }
+        let mount_status = mount_command
+            .arg("--bind")
+            .arg(&mutable_receipt)
+            .arg(&receipt_alias)
+            .status()
+            .await
+            .expect("bind authority alias");
+        assert!(mount_status.success(), "bind authority alias");
+        let mut bind_alias_config = config.clone();
+        bind_alias_config.receipt_key_path = path_string(&receipt_alias);
+        let bind_alias_result = LoadedAuthorities::load(&bind_alias_config);
+        let mut unmount_command = Command::new(if diff003_direct_mount {
+            "umount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            unmount_command.arg("umount");
+        }
+        let unmount_status = unmount_command
+            .arg(&receipt_alias)
+            .status()
+            .await
+            .expect("unmount authority alias");
+        assert!(unmount_status.success(), "unmount authority alias");
+        fs::remove_file(&receipt_alias).expect("remove bind target");
+        fs::remove_file(&mutable_receipt).expect("remove mutable receipt source");
+        fs::remove_dir(&mutable_receipts).expect("remove mutable receipt directory");
+        let bind_alias_error = bind_alias_result.expect_err("bind-mounted mutable authority alias");
+        assert_eq!(
+            bind_alias_error.code,
+            "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
+        );
 
-    let topology_alias = output_root.join("topology-alias");
-    let topology_nested = output_root.join("topology-nested");
-    create_private_directory(&topology_alias);
-    create_private_directory(&topology_nested);
-    let topology_mount_status = Command::new("sudo")
-        .arg("mount")
-        .arg("--bind")
-        .arg(&output_root)
-        .arg(&topology_alias)
-        .status()
-        .await
-        .expect("bind mutable root alias");
-    assert!(topology_mount_status.success(), "bind mutable root alias");
-    let nested_authority_path = topology_alias.join("topology-nested");
-    let nested_mount_status = Command::new("sudo")
-        .arg("mount")
-        .arg("--bind")
-        .arg(fixture.path())
-        .arg(&nested_authority_path)
-        .status()
-        .await
-        .expect("bind nested authority topology");
-    assert!(
-        nested_mount_status.success(),
-        "bind nested authority topology"
-    );
-    let nested_topology_result = LoadedAuthorities::load(&config);
-    let nested_unmount_status = Command::new("sudo")
-        .arg("umount")
-        .arg(&nested_authority_path)
-        .status()
-        .await
-        .expect("unmount nested authority topology");
-    assert!(
-        nested_unmount_status.success(),
-        "unmount nested authority topology"
-    );
-    let topology_unmount_status = Command::new("sudo")
-        .arg("umount")
-        .arg(&topology_alias)
-        .status()
-        .await
-        .expect("unmount mutable root alias");
-    assert!(
-        topology_unmount_status.success(),
-        "unmount mutable root alias"
-    );
-    fs::remove_dir(&topology_alias).expect("remove mutable root alias");
-    fs::remove_dir(&topology_nested).expect("remove topology mount point");
-    let nested_topology_error =
-        nested_topology_result.expect_err("path-distinct nested bind topology");
-    assert_eq!(
-        nested_topology_error.code,
-        "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
-    );
+        let topology_alias = output_root.join("topology-alias");
+        let topology_nested = output_root.join("topology-nested");
+        create_private_directory(&topology_alias);
+        create_private_directory(&topology_nested);
+        let mut topology_mount_command = Command::new(if diff003_direct_mount {
+            "mount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            topology_mount_command.arg("mount");
+        }
+        let topology_mount_status = topology_mount_command
+            .arg("--bind")
+            .arg(&output_root)
+            .arg(&topology_alias)
+            .status()
+            .await
+            .expect("bind mutable root alias");
+        assert!(topology_mount_status.success(), "bind mutable root alias");
+        let nested_authority_path = topology_alias.join("topology-nested");
+        let mut nested_mount_command = Command::new(if diff003_direct_mount {
+            "mount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            nested_mount_command.arg("mount");
+        }
+        let nested_mount_status = nested_mount_command
+            .arg("--bind")
+            .arg(fixture.path())
+            .arg(&nested_authority_path)
+            .status()
+            .await
+            .expect("bind nested authority topology");
+        assert!(
+            nested_mount_status.success(),
+            "bind nested authority topology"
+        );
+        let nested_topology_result = LoadedAuthorities::load(&config);
+        let mut nested_unmount_command = Command::new(if diff003_direct_mount {
+            "umount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            nested_unmount_command.arg("umount");
+        }
+        let nested_unmount_status = nested_unmount_command
+            .arg(&nested_authority_path)
+            .status()
+            .await
+            .expect("unmount nested authority topology");
+        assert!(
+            nested_unmount_status.success(),
+            "unmount nested authority topology"
+        );
+        let mut topology_unmount_command = Command::new(if diff003_direct_mount {
+            "umount"
+        } else {
+            "sudo"
+        });
+        if !diff003_direct_mount {
+            topology_unmount_command.arg("umount");
+        }
+        let topology_unmount_status = topology_unmount_command
+            .arg(&topology_alias)
+            .status()
+            .await
+            .expect("unmount mutable root alias");
+        assert!(
+            topology_unmount_status.success(),
+            "unmount mutable root alias"
+        );
+        fs::remove_dir(&topology_alias).expect("remove mutable root alias");
+        fs::remove_dir(&topology_nested).expect("remove topology mount point");
+        let nested_topology_error =
+            nested_topology_result.expect_err("path-distinct nested bind topology");
+        assert_eq!(
+            nested_topology_error.code,
+            "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
+        );
+    }
 
     let config_digest = configuration_sha256(&config).expect("configuration digest");
     let mut request = ResolutionRequest {
@@ -373,8 +422,8 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         expected_resolver_toolchain_id: preliminary_plan.resolver_toolchain_id.clone(),
         expected_resolver_toolchain_sha256: preliminary_plan.resolver_toolchain_sha256.clone(),
         expected_generation: config.generation,
-        acquisition_receipt_sha256: "7".repeat(64),
-        source_tree_sha256: preliminary_plan.source_tree_sha256.clone(),
+        acquisition_receipt_sha256,
+        source_tree_sha256: source_tree_sha256.clone(),
         logical_lock_path: "dependency-locks/maven.json".to_owned(),
         expected_lock_sha256: preliminary_plan.lock_sha256.clone(),
         ecosystem: Ecosystem::Maven,
@@ -429,6 +478,16 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     let right = right.expect("right concurrent receipt");
     assert_eq!(left, right);
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&root).join("DEP-001.json"),
+            diff003::receipt(
+                "DEP-001",
+                serde_json::to_value(&left).expect("encode DIFF-003 dependency receipt"),
+            ),
+        )
+        .expect("write DIFF-003 dependency receipt");
+    }
     drop(resolver);
 
     let mut forged_trusted = frame.clone();
@@ -447,6 +506,19 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(denied["status"], "error");
     assert_eq!(denied["code"], "DEP_REQUEST_SOURCE_PROVENANCE_INVALID");
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let substitution_denied = denied["status"] == "error"
+        && denied["code"] == "DEP_REQUEST_SOURCE_PROVENANCE_INVALID"
+        && requests.load(Ordering::SeqCst) == 1;
+    diff003::record_assertion(
+        "dependency_resolver_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "result_code": denied["code"],
+            "repository_requests": requests.load(Ordering::SeqCst),
+            "substitution": "source_provenance",
+        }),
+        substitution_denied,
+    );
 
     let mut disk_full = frame.clone();
     disk_full.request.resolution_id = Uuid::new_v4().to_string();
@@ -534,6 +606,64 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         "offline restart replay must be byte-equivalent JSON"
     );
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+    let outage_now = unix_ms();
+    let outage_lock = String::from_utf8(lock.clone())
+        .expect("UTF-8 lock")
+        .replace("1.0.0", "2.0.0")
+        .into_bytes();
+    let outage_plan = parse_maven_lock(
+        &outage_lock,
+        &AdapterBindings {
+            adapter_id: "maven-v1".to_owned(),
+            adapter_sha256: "a".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
+            resolver_toolchain_id: "contained-toolchain".to_owned(),
+            resolver_toolchain_sha256: "d".repeat(64),
+            source_trust_class: SourceTrustClass::Trusted,
+            repositories: vec![RepositoryBinding {
+                repository_id: "contained-maven".to_owned(),
+                credentialed: true,
+                permits_untrusted_source: false,
+            }],
+        },
+    )
+    .expect("outage exact plan");
+    let mut outage = frame.clone();
+    outage.request.resolution_id = Uuid::new_v4().to_string();
+    outage.request.build_id = Uuid::new_v4().to_string();
+    outage.request.attempt_id = Uuid::new_v4().to_string();
+    outage.request.requested_at_unix_ms = outage_now;
+    outage.request.expires_at_unix_ms = outage_now + 120_000;
+    outage.request.source_provenance.issued_at_unix_ms = outage_now;
+    outage.request.source_provenance.expires_at_unix_ms = outage_now + 120_000;
+    outage.request.logical_lock_path = "dependency-locks/outage-maven.json".to_owned();
+    outage.request.expected_lock_sha256 = outage_plan.lock_sha256;
+    outage.request.expected_graph_sha256 = outage_plan.graph_sha256;
+    outage.lock_base64 = BASE64.encode(&outage_lock);
+    sign_source_request(&mut outage.request, &source_key);
+    let outage_result = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&outage).expect("outage frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    let outage_denied = outage_result["status"] == "error"
+        && outage_result["code"] == "DEP_TRANSPORT_IO_FAILED"
+        && requests.load(Ordering::SeqCst) == 3;
+    diff003::record_assertion(
+        "dependency_outage_denied",
+        "denied",
+        serde_json::json!({
+            "repository_aborted": true,
+            "repository_requests_before_restart": 3,
+            "repository_requests_after_restart": requests.load(Ordering::SeqCst),
+            "uncached_resolution_id": outage.request.resolution_id,
+            "result_code": outage_result["code"],
+        }),
+        outage_denied,
+    );
 
     let later_lock = String::from_utf8(lock.clone())
         .expect("UTF-8 lock")
@@ -544,7 +674,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &AdapterBindings {
             adapter_id: "maven-v1".to_owned(),
             adapter_sha256: "a".repeat(64),
-            source_tree_sha256: "b".repeat(64),
+            source_tree_sha256: source_tree_sha256.clone(),
             resolver_toolchain_id: "contained-toolchain".to_owned(),
             resolver_toolchain_sha256: "d".repeat(64),
             source_trust_class: SourceTrustClass::Trusted,
@@ -572,6 +702,19 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(denied["status"], "error");
     assert_eq!(denied["code"], "DEP_STORE_RECEIPT_INVALID");
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+    let replay_denied = denied["status"] == "error"
+        && denied["code"] == "DEP_STORE_RECEIPT_INVALID"
+        && requests.load(Ordering::SeqCst) == 3;
+    diff003::record_assertion(
+        "dependency_replay_denied",
+        "denied",
+        serde_json::json!({
+            "result_code": denied["code"],
+            "divergent_lock_sha256": later.request.expected_lock_sha256,
+            "repository_requests": requests.load(Ordering::SeqCst),
+        }),
+        replay_denied,
+    );
 
     assert!(!contains_bytes(
         serde_json::to_vec(&second)
@@ -647,6 +790,21 @@ fn create_private_directory(path: &Path) {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn diff003_source_binding() -> (String, String) {
+    let Some(root) = std::env::var_os("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") else {
+        return ("7".repeat(64), "b".repeat(64));
+    };
+    let source_receipt =
+        fs::read(Path::new(&root).join("SCM-001.json")).expect("read live DIFF-003 source receipt");
+    let source: serde_json::Value =
+        serde_json::from_slice(&source_receipt).expect("parse live DIFF-003 source receipt");
+    let source_tree_sha256 = source["later_revision"]["content_sha256"]
+        .as_str()
+        .expect("live source content digest")
+        .to_owned();
+    (sha256(&source_receipt), source_tree_sha256)
 }
 
 fn sign_source_request(request: &mut ResolutionRequest, key: &Ed25519KeyPair) {

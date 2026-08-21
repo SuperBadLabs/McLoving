@@ -1,3 +1,6 @@
+#[path = "../../test-support/diff003.rs"]
+mod diff003;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
 
@@ -55,6 +58,53 @@ fn cache_key_digest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+struct Diff003DependencyBinding {
+    receipt_sha256: String,
+    resolution_id: String,
+    request_sha256: String,
+    tenant_id: String,
+    project_id: String,
+    pipeline_id: String,
+    trust_class: String,
+    resolver_toolchain_sha256: String,
+    configuration_sha256: String,
+    expected_generation: u64,
+    artifact_node_id: String,
+    artifact_sha256: String,
+}
+
+fn diff003_dependency_binding() -> Option<Diff003DependencyBinding> {
+    let root = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR").ok()?;
+    let bytes = std::fs::read(std::path::Path::new(&root).join("DEP-001.json"))
+        .expect("read live DIFF-003 dependency receipt");
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("parse live DIFF-003 dependency receipt");
+    let text = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("missing dependency receipt field {pointer}"))
+            .to_owned()
+    };
+    Some(Diff003DependencyBinding {
+        receipt_sha256: digest(&bytes),
+        resolution_id: text("/resolution_id"),
+        request_sha256: text("/request_sha256"),
+        tenant_id: text("/request/tenant_id"),
+        project_id: text("/request/project_id"),
+        pipeline_id: text("/request/pipeline_id"),
+        trust_class: text("/request/source_trust_class"),
+        resolver_toolchain_sha256: text("/request/expected_resolver_toolchain_sha256"),
+        configuration_sha256: text("/configuration_sha256"),
+        expected_generation: value
+            .pointer("/request/expected_generation")
+            .and_then(serde_json::Value::as_u64)
+            .expect("dependency expected generation"),
+        artifact_node_id: text("/artifacts/0/node_id"),
+        artifact_sha256: text("/artifacts/0/sha256"),
+    })
 }
 
 fn policy(id: &str, trust: &str, reader: &str, writer: &str) -> CachePolicy {
@@ -129,24 +179,53 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
     let temp = TempDir::new().unwrap();
     let key = [7_u8; 32];
     let clock = Arc::new(ManualClock::new(10_000));
-    let store = open_store(
-        config(
-            &temp,
-            &key,
-            vec![policy("policy-a", "trusted", "reader", "writer")],
-        ),
-        &key,
-        clock,
-    )
-    .unwrap();
-    let request = request(store.generation_sha256(), "policy-a", "trusted", b"one");
+    let dependency_binding = diff003_dependency_binding();
+    let mut dependency_policy = policy("policy-a", "trusted", "reader", "writer");
+    if let Some(binding) = &dependency_binding {
+        dependency_policy.policy_id = "dependency-resolution-v1".to_owned();
+        dependency_policy.tenant_id.clone_from(&binding.tenant_id);
+        dependency_policy.project_id.clone_from(&binding.project_id);
+        dependency_policy
+            .pipeline_id
+            .clone_from(&binding.pipeline_id);
+        dependency_policy
+            .trust_class
+            .clone_from(&binding.trust_class);
+    }
+    dependency_policy.max_entry_bytes = 64;
+    dependency_policy.max_total_bytes = 128;
+    let store = open_store(config(&temp, &key, vec![dependency_policy]), &key, clock).unwrap();
+    let mut request = request(store.generation_sha256(), "policy-a", "trusted", b"one");
+    if let Some(binding) = &dependency_binding {
+        request.policy_id = "dependency-resolution-v1".to_owned();
+        request.tenant_id.clone_from(&binding.tenant_id);
+        request.project_id.clone_from(&binding.project_id);
+        request.pipeline_id.clone_from(&binding.pipeline_id);
+        request.trust_class.clone_from(&binding.trust_class);
+        request.restore_epoch = binding.expected_generation;
+        request
+            .logical_key_sha256
+            .clone_from(&binding.receipt_sha256);
+        request.input_sha256.clone_from(&binding.artifact_sha256);
+        request
+            .toolchain_sha256
+            .clone_from(&binding.resolver_toolchain_sha256);
+        request
+            .platform_sha256
+            .clone_from(&binding.configuration_sha256);
+    }
 
     let cold = store.read("reader", "trusted", &request).unwrap();
     assert_eq!(cold.status, ReadStatus::Miss);
     assert!(cold.content.is_none());
 
     let published = store
-        .publish("writer", "trusted", &request, b"sealed-dependency")
+        .publish(
+            "writer",
+            "trusted",
+            &request,
+            b"standalone contained dependency artifact",
+        )
         .unwrap();
     assert_eq!(published.status, PublishStatus::Published);
 
@@ -154,9 +233,47 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
     assert_eq!(hit.status, ReadStatus::Hit);
     assert_eq!(
         hit.content.as_deref(),
-        Some(b"sealed-dependency".as_slice())
+        Some(b"standalone contained dependency artifact".as_slice())
     );
     assert_eq!(store.verify_audit_chain().unwrap(), 3);
+    if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
+        let dependency = dependency_binding.expect("live dependency binding");
+        let hit_event = &hit.receipts.last().expect("hit receipt").event;
+        std::fs::write(
+            std::path::Path::new(&root).join("CACHE-001.json"),
+            diff003::receipt(
+                "CACHE-001",
+                serde_json::json!({
+                    "dependency_binding": {
+                        "receipt_sha256": dependency.receipt_sha256,
+                        "resolution_id": dependency.resolution_id,
+                        "request_sha256": dependency.request_sha256,
+                        "artifact_node_id": dependency.artifact_node_id,
+                        "artifact_sha256": dependency.artifact_sha256,
+                    },
+                    "cache_binding": {
+                        "request": request,
+                        "namespace_sha256": hit_event.namespace_sha256,
+                        "key_sha256": hit_event.key_sha256,
+                        "policy_sha256": hit_event.policy_sha256,
+                        "generation_sha256": hit_event.generation_sha256,
+                    },
+                    "cold": {"status": cold.status, "receipts": cold.receipts},
+                    "published": {
+                        "status": published.status,
+                        "receipts": published.receipts,
+                    },
+                    "hit": {
+                        "status": hit.status,
+                        "content_sha256": hit.content.as_deref().map(digest),
+                        "receipts": hit.receipts,
+                    },
+                    "audit_events": 3,
+                }),
+            ),
+        )
+        .expect("write DIFF-003 cache receipts");
+    }
 }
 
 #[test]
@@ -282,8 +399,18 @@ fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
         )
         .unwrap();
     let rejected = store.read("reader", "trusted", &request).unwrap();
-    assert_eq!(rejected.status, ReadStatus::CorruptRejected);
-    assert!(rejected.content.is_none());
+    let corrupt_replay_denied =
+        rejected.status == ReadStatus::CorruptRejected && rejected.content.is_none();
+    assert!(corrupt_replay_denied);
+    diff003::record_assertion(
+        "cache_replay_denied",
+        "denied",
+        serde_json::json!({
+            "read_status": format!("{:?}", rejected.status),
+            "content_returned": rejected.content.is_some(),
+        }),
+        corrupt_replay_denied,
+    );
 
     store
         .publish("writer", "trusted", &request, b"original")
@@ -492,10 +619,20 @@ fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
     let mut generation_two = first_config.clone();
     generation_two.cache_generation = 2;
     let rotated = open_store(generation_two, &key, Arc::clone(&clock)).unwrap();
-    assert!(matches!(
-        rotated.read("reader", "trusted", &rotating),
-        Err(CacheError::InvalidRequest)
-    ));
+    let generation_substitution = rotated.read("reader", "trusted", &rotating);
+    let generation_substitution_denied =
+        matches!(generation_substitution, Err(CacheError::InvalidRequest));
+    assert!(generation_substitution_denied);
+    diff003::record_assertion(
+        "cache_generation_substitution_denied",
+        "denied",
+        serde_json::json!({
+            "old_generation_sha256": rotating.generation_sha256,
+            "new_generation_sha256": rotated.generation_sha256(),
+            "result": "invalid_request",
+        }),
+        generation_substitution_denied,
+    );
     let rotated_request = request(
         rotated.generation_sha256(),
         "policy-a",
@@ -636,6 +773,19 @@ fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
     assert_eq!(
         replacement.receipts[0].event.outcome,
         mcloving_cache::CacheOutcome::Expired
+    );
+    let stale_replay_denied = replacement.status == PublishStatus::Published
+        && replacement.receipts.len() == 2
+        && replacement.receipts[0].event.outcome == mcloving_cache::CacheOutcome::Expired;
+    diff003::record_assertion(
+        "cache_stale_denied",
+        "denied",
+        serde_json::json!({
+            "replacement_status": format!("{:?}", replacement.status),
+            "prior_outcome": format!("{:?}", replacement.receipts[0].event.outcome),
+            "receipt_count": replacement.receipts.len(),
+        }),
+        stale_replay_denied,
     );
     assert_eq!(
         store
