@@ -448,6 +448,38 @@ GRAMMAR
   exit 1
 }
 
+# A file that parses partially must not be accepted. The required assignments
+# come first here, so a guard that ignored the parser's status would fill its
+# map, report the contract satisfied, and exit 0 on a malformed file.
+partial_env="${workdir}/partial.env"
+printf 'POSTGRES_USER=x\nPOSTGRES_DB=y\nPOSTGRES_PASSWORD=z\nthis line has no equals\n' \
+  > "${partial_env}"
+if "${libexec}/helpers/mcloving-env-guard" postgres "${partial_env}" >/dev/null 2>&1; then
+  echo "guard accepted a contract whose parse failed after the required values" >&2
+  exit 1
+fi
+
+# A symlink whose target is gone is drift, so the re-read must report it rather
+# than fail trying to hash a missing file.
+ln -s "${workdir}/definitely-absent" "${config_dir}/dangling.env"
+dangling_digests="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")" || {
+  echo "digest re-read failed on a dangling symlink instead of recording it" >&2
+  exit 1
+}
+python3 - "${dangling_digests}" <<'DANGLING'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+contracts = document.get("environment_contracts", [])
+entry = [item for item in contracts if item["path"].endswith("dangling.env")]
+if not entry:
+    raise SystemExit("dangling symlink missing from the re-read")
+if entry[0].get("kind") != "dangling_symlink":
+    raise SystemExit("dangling symlink was not recorded as such")
+DANGLING
+rm -f "${config_dir}/dangling.env"
+
 # Token length is measured in bytes, as the controller measures it. A
 # multi-byte token that satisfies the controller must satisfy the guard, or a
 # valid contract stops a service that could have run it.

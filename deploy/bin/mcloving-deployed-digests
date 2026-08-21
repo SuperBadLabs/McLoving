@@ -61,6 +61,15 @@ def file_record(path: Path, root: Path) -> dict:
     # live target leave this document unchanged — a drift re-read that cannot
     # see the drift. The link target is recorded alongside the digest so a
     # repointed link is itself visible.
+    if path.is_symlink() and not path.exists():
+        # A target that has gone missing is exactly the drift this document
+        # exists to report, so the link is recorded rather than dereferenced.
+        # Hashing it would raise and produce no document at all.
+        return {
+            "path": path.relative_to(root).as_posix(),
+            "symlink_target": os.readlink(path),
+            "kind": "dangling_symlink",
+        }
     if path.is_symlink() and path.is_dir():
         # A directory alias has no bytes of its own; what it names is the
         # configuration fact worth recording.

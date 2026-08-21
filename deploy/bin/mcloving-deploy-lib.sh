@@ -288,11 +288,25 @@ ROLE
 declare -gA MCLOVING_CONTRACT=()
 
 load_environment_file() {
-  local name value
+  local name value parsed status
+  # The parser's exit status has to be checked before any value is accepted.
+  # Reading directly from a process substitution discards it, so a file that
+  # parses partially — its required assignments emitted, then a malformed line
+  # — would fill the map, report success, and defeat the fail-closed contract
+  # this guard exists to enforce. A temporary file is used because values may
+  # contain NUL separators, which command substitution strips.
+  parsed="$(mktemp)" || deploy_fail "cannot create a temporary file for the contract"
+  status=0
+  parse_environment_file "$1" > "${parsed}" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    rm -f "${parsed}"
+    deploy_fail "environment file $1 could not be parsed"
+  fi
   MCLOVING_CONTRACT=()
   while IFS= read -r -d '' name && IFS= read -r -d '' value; do
     MCLOVING_CONTRACT["${name}"]="${value}"
-  done < <(parse_environment_file "$1")
+  done < "${parsed}"
+  rm -f "${parsed}"
 }
 
 # contract_value NAME — the parsed value, or empty when unset.
