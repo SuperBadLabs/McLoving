@@ -25,6 +25,12 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 pub const WORK_DELIVERY_FEATURE: &str = "work-delivery-v1";
 pub const ATTEMPT_CREDENTIALS_FEATURE: &str = "attempt-credentials-v1";
+/// gRPC metadata key on a stale-epoch open-session rejection carrying the
+/// controller's currently stored session epoch. A lagging journal (for
+/// example after a documented journal replacement) reserves past this floor
+/// in one step instead of brute-forcing the epoch space one reconnect at a
+/// time. The rejection itself stays fail-closed.
+pub const CURRENT_SESSION_EPOCH_METADATA: &str = "mcloving-current-session-epoch";
 /// The peer understands `WorkReceipt.published_outcome` and will journal the
 /// terminal the controller actually published.
 ///
@@ -33,6 +39,12 @@ pub const ATTEMPT_CREDENTIALS_FEATURE: &str = "attempt-credentials-v1";
 /// would record the outcome it requested, so the controller must not substitute
 /// for such a peer during a rolling upgrade.
 pub const WORK_COMPLETION_SUBSTITUTION_FEATURE: &str = "work-completion-substitution-v1";
+/// The peer understands `CancellationDisposition::DISCHARGE_RECOVERED`.
+///
+/// A peer without it rejects the unknown enum value as an unsupported
+/// protocol and reconnects, leaving the recovered attempt parked forever, so
+/// the controller must answer such a peer with the previous disposition.
+pub const RECOVERED_DISCHARGE_FEATURE: &str = "recovered-discharge-v1";
 /// Controller lease granted while a retained terminal attempt is replayed.
 pub const RECOVERED_FINALIZATION_LEASE_SECONDS: u64 = 30;
 
