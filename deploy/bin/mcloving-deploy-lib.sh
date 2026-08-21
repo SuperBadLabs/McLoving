@@ -111,7 +111,30 @@ stage_release() {
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
     install -m 0755 "${release_dir}/${binary}" "${target}/${binary}"
   done
+  # Retain the verified digests beside the release. Installation is the only
+  # point at which these binaries are known to match the manifest, so rollback
+  # has nothing else to check a staged release against.
+  (
+    cd "${target}" || exit 1
+    sha256sum "${MCLOVING_DEPLOY_BINARIES[@]}" > SHA256SUMS
+  )
+  chmod 0444 "${target}/SHA256SUMS"
   echo "${target}"
+}
+
+# verify_staged_release RELEASE_PATH
+#
+# Recomputes every binary digest against the checksums retained at
+# installation. A staged release is writable by the service user, so
+# "still executable" is not evidence that it is the release that was verified.
+verify_staged_release() {
+  local release_path="$1"
+  [[ -f "${release_path}/SHA256SUMS" ]] \
+    || deploy_fail "release ${release_path} has no retained checksums; refusing to use it"
+  (
+    cd "${release_path}" || exit 1
+    sha256sum --quiet --check SHA256SUMS
+  ) || deploy_fail "release ${release_path} does not match its retained checksums"
 }
 
 # point_symlink LINK TARGET (atomic replace)

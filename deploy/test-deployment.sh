@@ -376,4 +376,18 @@ second_release="$(readlink "${libexec}/current")"
 }
 "${libexec}/current/mcloving-cli" --help >/dev/null
 
-echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback"
+# A staged release is writable by the service user, so rollback must recompute
+# digests rather than trust that a present, executable binary is the one that
+# was verified at installation.
+printf '\n' >> "${libexec}/${second_release}/mcloving-cli"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${home}" --no-systemd \
+  >/dev/null 2>&1; then
+  echo "rollback accepted a modified previous release" >&2
+  exit 1
+fi
+[[ "$(readlink "${libexec}/current")" == "${first_release}" ]] || {
+  echo "refused rollback must leave the current release untouched" >&2
+  exit 1
+}
+
+echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal"

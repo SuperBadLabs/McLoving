@@ -28,6 +28,13 @@ TimeoutStartSec=120
 # journal, and the nested workspace directory must exist before the agent
 # accepts work (the spawn path refuses a missing workspace root).
 StateDirectory=mcloving-agent mcloving-agent/workspace
+# The agent journal, checked-out source, build outputs, and spool files
+# all live here. StateDirectory would otherwise be 0755 and the files
+# created inside would follow the ambient umask, so on a multi-user host
+# another local user could read private repository contents and
+# execution records.
+StateDirectoryMode=0700
+UMask=0077
 NoNewPrivileges=yes
 
 [Install]

@@ -37,6 +37,10 @@ for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
   [[ -x "${libexec_root}/${previous_target}/${binary}" ]] \
     || deploy_fail "previous release is missing ${binary}; refusing to roll back"
 done
+# Present and executable is not the same as unmodified. Rollback claims to
+# restore the release that was verified at installation, so it recomputes the
+# digests rather than trusting the directory it is about to make current.
+verify_staged_release "${libexec_root}/${previous_target}"
 
 echo "rolling back ${current_target} -> ${previous_target}"
 service_control "${no_systemd}" stop mcloving-agent.service

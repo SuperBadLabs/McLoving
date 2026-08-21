@@ -24,6 +24,11 @@ TimeoutStartSec=120
 # Named state directory: %h/.local/state/mcloving-controller holds the
 # artifact object root and the disabled embedded worker's journal/workspace.
 StateDirectory=mcloving-controller
+# Controller state is private to the service user for the same reason as
+# the agent's: StateDirectory defaults to 0755 and created files would
+# otherwise follow the ambient umask.
+StateDirectoryMode=0700
+UMask=0077
 NoNewPrivileges=yes
 
 [Install]
