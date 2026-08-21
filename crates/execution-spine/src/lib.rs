@@ -179,45 +179,9 @@ struct ProcessSpec {
     timeout_seconds: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectorIntentSpec {
-    pub mapping_id: String,
-    pub mapping_digest: String,
-    pub effect_class: ConnectorEffectClass,
-    pub effect_key_template: String,
-    pub public_input_schema: std::collections::BTreeMap<String, JsonFieldType>,
-    pub protected_secret_ref_schema: std::collections::BTreeMap<String, JsonFieldType>,
-    pub expected_public_result_schema: std::collections::BTreeMap<String, JsonFieldType>,
-    pub timeout_seconds: u64,
-    pub ambiguity_policy: AmbiguityPolicy,
-    pub downstream_control_digest: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectorEffectClass {
-    Idempotent,
-    ExternallyIdempotent,
-    NonIdempotent,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JsonFieldType {
-    Array,
-    Boolean,
-    Null,
-    Number,
-    Object,
-    String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AmbiguityPolicy {
-    ObserveThenReconcile,
-}
+pub use mcloving_domain::{
+    AmbiguityPolicy, ConnectorEffectClass, ConnectorIntentSpec, JsonFieldType,
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]

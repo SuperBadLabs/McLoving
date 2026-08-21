@@ -24,6 +24,7 @@ use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, MAX_ATTEMPT_OUTPUT_BYTES, ProcessIdentity,
     SpoolEntry,
 };
+use mcloving_domain::ConnectorIntentSpec;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -403,7 +404,7 @@ async fn replay_finalization(
                     "result_sha256": hex(&result_entry.digest),
                 }))?
             };
-            require_work_receipt(
+            let published = published_work_outcome(
                 authority_rpc(
                     control,
                     publication.client.complete_work(WorkCompletion {
@@ -415,7 +416,7 @@ async fn replay_finalization(
                 .await?,
                 session_epoch,
             )?;
-            terminal_phase(outcome)
+            terminal_phase(published.unwrap_or(outcome))
         }
         CANCELLATION_COMPLETION_PROTOCOL => {
             if attempt.phase != AttemptPhase::Cancelling || outcome != WorkOutcome::Aborted {
@@ -559,17 +560,35 @@ fn connector_intent_payload(execution_spec_json: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(execution_spec_json) else {
         return false;
     };
-    // Version is part of the routing decision, not a detail. A connector-intent
-    // step under any version but 2 is unrunnable by every runtime, so declining
-    // it would recreate the very claim loop this ticket removes. Field validity
-    // beyond that belongs to the effect runtime, which owns the schema and can
-    // terminalize what it rejects.
+    // Decline only a payload some other runtime can actually execute. Anything
+    // this agent can prove unrunnable it must terminalize itself rather than
+    // return to the queue, because declining only re-offers the work and this
+    // agent may win the claim again — connector nodes carry no runtime
+    // capability constraint until EXEC-002 adds one, so nothing guarantees an
+    // effect worker ever sees it.
+    //
+    // Version is part of that judgement: a connector-intent step under any
+    // version but 2 is runnable by nothing. So is a version-2 intent whose
+    // fields the effect runtime would reject, which is why this decodes the
+    // whole intent through the shared schema rather than checking its shape.
     if value.get("version").and_then(serde_json::Value::as_u64) != Some(2) {
         return false;
     }
-    let steps = value.get("steps").and_then(serde_json::Value::as_array);
-    matches!(steps, Some(steps) if steps.len() == 1
-        && steps[0].get("kind").and_then(serde_json::Value::as_str) == Some("connector_intent"))
+    let Some(steps) = value.get("steps").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let [step] = steps.as_slice() else {
+        return false;
+    };
+    if step.get("kind").and_then(serde_json::Value::as_str) != Some("connector_intent") {
+        return false;
+    }
+    let mut intent = step.clone();
+    let Some(fields) = intent.as_object_mut() else {
+        return false;
+    };
+    fields.remove("kind");
+    serde_json::from_value::<ConnectorIntentSpec>(intent).is_ok()
 }
 
 fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
@@ -1155,14 +1174,15 @@ async fn run_assignment(
             }),
         )
         .await?;
-        require_work_receipt(completion, session_epoch)?;
+        let published = published_work_outcome(completion, session_epoch)?.unwrap_or(terminal);
         crash_after_terminal_commit_for_test();
-        journal.transition(
+        journal_published_terminal(
+            &mut journal,
             &organization,
             &attempt,
             fence,
             session_epoch,
-            terminal_phase(terminal)?,
+            published,
             Some(outcome.process_id),
         )?;
         reclaim_spool_entries(
@@ -2324,7 +2344,7 @@ async fn finalize_without_process(
         logs: &[],
         result: &result,
     })?;
-    require_work_receipt(
+    let published = published_work_outcome(
         authority_rpc(
             control,
             client.complete_work(WorkCompletion {
@@ -2338,13 +2358,15 @@ async fn finalize_without_process(
         )
         .await?,
         session_epoch,
-    )?;
-    journal.transition(
+    )?
+    .unwrap_or(outcome);
+    journal_published_terminal(
+        journal,
         &authority.organization_id,
         &authority.attempt_id,
         authority.fence_token,
         session_epoch,
-        terminal_phase(outcome)?,
+        published,
         None,
     )?;
     reclaim_spool_entries(
@@ -2365,12 +2387,25 @@ fn require_work_receipt(
     receipt: mcloving_agent_protocol::wire::WorkReceipt,
     session_epoch: u64,
 ) -> Result<(), AgentError> {
+    published_work_outcome(receipt, session_epoch).map(|_| ())
+}
+
+/// Returns the terminal the controller actually published, which is not always
+/// the one that was requested: a cancellation committing before the publishing
+/// row lock overrides a non-succeeded terminal. The journal must record what
+/// landed, or durable agent truth disagrees with the controller.
+fn published_work_outcome(
+    receipt: mcloving_agent_protocol::wire::WorkReceipt,
+    session_epoch: u64,
+) -> Result<Option<WorkOutcome>, AgentError> {
     ensure_session(receipt.session_epoch, session_epoch)?;
-    if receipt.accepted {
-        Ok(())
-    } else {
-        Err(AgentError::StaleAuthority)
+    if !receipt.accepted {
+        return Err(AgentError::StaleAuthority);
     }
+    Ok(match WorkOutcome::try_from(receipt.published_outcome) {
+        Ok(WorkOutcome::Unspecified) | Err(_) => None,
+        Ok(outcome) => Some(outcome),
+    })
 }
 
 fn ensure_session(received: u64, expected: u64) -> Result<(), AgentError> {
@@ -2379,6 +2414,43 @@ fn ensure_session(received: u64, expected: u64) -> Result<(), AgentError> {
     } else {
         Err(AgentError::StaleSession)
     }
+}
+
+/// Journals the terminal the controller actually published.
+///
+/// A cancellation committing at the publishing row lock can override a
+/// non-succeeded terminal, and the journal only reaches `Aborted` through
+/// `Cancelling`. An abort published against a `Finalizing` attempt therefore
+/// takes that step first, or durable agent truth would refuse the very outcome
+/// the controller committed. Re-entering `Cancelling` is a no-op.
+fn journal_published_terminal(
+    journal: &mut Journal,
+    organization: &str,
+    attempt: &str,
+    fence: u64,
+    session_epoch: u64,
+    published: WorkOutcome,
+    process_id: Option<u32>,
+) -> Result<(), AgentError> {
+    if published == WorkOutcome::Aborted {
+        journal.transition(
+            organization,
+            attempt,
+            fence,
+            session_epoch,
+            AttemptPhase::Cancelling,
+            process_id,
+        )?;
+    }
+    journal.transition(
+        organization,
+        attempt,
+        fence,
+        session_epoch,
+        terminal_phase(published)?,
+        process_id,
+    )?;
+    Ok(())
 }
 
 fn terminal_phase(outcome: WorkOutcome) -> Result<AttemptPhase, AgentError> {
@@ -2670,13 +2742,20 @@ mod tests {
         assert!(refusal.detail.ends_with("(truncated)"));
     }
 
-    /// A connector-intent step under the wrong version is runnable by nothing,
-    /// so declining it would loop forever. It must take the terminal path.
+    /// A connector-intent payload runnable by nothing — wrong version, or
+    /// fields the effect runtime would reject — must be terminalized here.
+    /// Declining it only re-offers work no runtime can complete.
     #[test]
-    fn version_mismatched_connector_intent_is_terminally_refused() {
-        let spec = br#"{"version":1,"steps":[{"kind":"connector_intent"}]}"#;
-        let refusal = unsupported(validate_assignment(&config(), 4, assignment(spec)).unwrap());
-        assert!(!refusal.detail.is_empty());
+    fn connector_intent_payloads_no_runtime_accepts_are_terminally_refused() {
+        for spec in [
+            br#"{"version":1,"steps":[{"kind":"connector_intent"}]}"#.to_vec(),
+            br#"{"version":2,"steps":[{"kind":"connector_intent"}]}"#.to_vec(),
+            br#"{"version":2,"steps":[{"kind":"connector_intent","mapping_digest":"sha256:aa","effect_class":"idempotent","effect_key_template":"k","public_input_schema":{},"protected_secret_ref_schema":{},"expected_public_result_schema":{},"timeout_seconds":30,"ambiguity_policy":"observe_then_reconcile","downstream_control_digest":"sha256:bb"}]}"#.to_vec(),
+        ] {
+            let refusal =
+                unsupported(validate_assignment(&config(), 4, assignment(&spec)).unwrap());
+            assert!(!refusal.detail.is_empty());
+        }
     }
 
     #[test]

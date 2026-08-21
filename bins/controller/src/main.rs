@@ -955,6 +955,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -986,6 +988,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -1160,6 +1164,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -1192,7 +1198,7 @@ impl AgentControl for ControllerAgentService {
         // time this transaction locks the attempt; the publication re-derives
         // it under the same lock. A genuine success is never overridden: work
         // that completed is reported as completed.
-        let accepted = if matches!(outcome, TerminalOutcome::Succeeded) {
+        let published = if matches!(outcome, TerminalOutcome::Succeeded) {
             self.store
                 .finalize_attempt_in_session(
                     context.organization_id,
@@ -1206,6 +1212,7 @@ impl AgentControl for ControllerAgentService {
                 )
                 .await
                 .map_err(internal_store_error)?
+                .then_some(outcome)
         } else {
             self.store
                 .finalize_attempt_in_session_cancellation_aware(
@@ -1220,11 +1227,16 @@ impl AgentControl for ControllerAgentService {
                 )
                 .await
                 .map_err(internal_store_error)?
-                .is_some()
         };
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
-            accepted,
+            accepted: published.is_some(),
+            published_outcome: match published {
+                Some(TerminalOutcome::Succeeded) => WorkOutcome::Succeeded as i32,
+                Some(TerminalOutcome::Failed) => WorkOutcome::Failed as i32,
+                Some(TerminalOutcome::Aborted) => WorkOutcome::Aborted as i32,
+                None => WorkOutcome::Unspecified as i32,
+            },
         }))
     }
 }
