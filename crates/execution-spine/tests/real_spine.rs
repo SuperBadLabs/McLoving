@@ -1203,6 +1203,134 @@ async fn process_spawn_failure_is_published_as_terminal_failure() {
     );
 }
 
+/// EXEC-001 defense in depth: a multi-step spec injected behind validate
+/// (store-level admission) must die as a named terminal failure at the
+/// embedded worker, never loop as a retryable refusal. The measured defect
+/// produced 1,460+ build events from exactly this shape.
+#[tokio::test]
+async fn unsupported_execution_spec_is_published_as_named_terminal_failure() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let agent_id = "agent-exec001-unsupported-spine";
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "unsupported-spine",
+        )
+        .await
+        .expect("create project");
+    let steps = (0..100)
+        .map(|index| {
+            json!({
+                "kind": "process",
+                "program": "/bin/sh",
+                "args": ["-c", format!("echo step-{index}")],
+                "env": {},
+                "timeout_seconds": 10
+            })
+        })
+        .collect::<Vec<_>>();
+    let admission = admit_bound_test_build(
+        &store,
+        NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "unsupported-spine".into(),
+            pipeline_digest: Sha256::digest("unsupported-spine").into(),
+            node_key: "hundred-steps".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({"version": 1, "steps": steps}),
+        },
+    )
+    .await
+    .expect("admit the unrunnable build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-exec001-unsupported".into(),
+            agent_id: agent_id.into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim")
+        .expect("claim exists");
+    let root = tempfile::tempdir().expect("worker root");
+    let journal_path = root.path().join("agent.db");
+    let receipt = run_claim(
+        &store,
+        &claim,
+        &WorkerConfig {
+            agent_id: agent_id.into(),
+            session_epoch: 1,
+            workspace_root: root.path().to_owned(),
+            journal_path: journal_path.clone(),
+            cancellation_poll: Duration::from_millis(10),
+            lease_seconds: 30,
+            termination_grace: Duration::from_millis(100),
+            // This spec is unrunnable on its own terms, so the terminal
+            // refusal must not depend on an effect runtime being configured.
+            effect_plan: None,
+        },
+    )
+    .await
+    .expect("the permanent refusal becomes a terminal result, not an error");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "failed");
+    assert_eq!(snapshot.attempt_status, "failed");
+    let reason = snapshot
+        .terminal_summary
+        .and_then(|summary| summary["reason"].as_str().map(str::to_owned))
+        .expect("terminal summary names the refusal");
+    assert_eq!(
+        reason,
+        "unsupported_execution_spec: execution spec declares 100 steps (expected exactly 1)"
+    );
+    assert!(
+        Journal::open(journal_path)
+            .expect("reopen journal")
+            .reconcile()
+            .expect("reconcile")
+            .attempts
+            .is_empty(),
+        "the refused attempt must not linger in the journal"
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-exec001-unsupported".into(),
+                agent_id: agent_id.into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("re-poll")
+            .is_none(),
+        "a terminal refusal must never be rescheduled"
+    );
+}
+
 #[tokio::test]
 async fn post_dispatch_timeout_freezes_retry_and_dispatches_exactly_once() {
     let Some(store) = test_store().await else {

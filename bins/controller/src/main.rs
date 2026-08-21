@@ -18,7 +18,7 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
-    WORK_DELIVERY_FEATURE, negotiate,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
@@ -655,6 +655,7 @@ impl AgentControl for ControllerAgentService {
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
+            WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -981,6 +982,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -1012,6 +1015,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -1186,6 +1191,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -1212,23 +1219,63 @@ impl AgentControl for ControllerAgentService {
                 return Err(Status::invalid_argument("work outcome must be explicit"));
             }
         };
-        let accepted = self
+        // A non-succeeded terminal must not outrank a cancellation that
+        // committed while the agent was deciding. The agent reads cancellation
+        // from an earlier lease receipt, so that decision can be stale by the
+        // time this transaction locks the attempt; the publication re-derives
+        // it under the same lock. A genuine success is never overridden: work
+        // that completed is reported as completed.
+        // Substituting a cancellation for the agent's terminal is a wire
+        // semantics change: the agent learns the substituted outcome only from
+        // `published_outcome`. A peer that never negotiated the feature would
+        // ignore it and record what it asked for, so an older agent in a
+        // rolling upgrade keeps the previous behaviour instead of receiving a
+        // completion it cannot record.
+        let substitution_negotiated = self
             .store
-            .finalize_attempt_in_session(
-                context.organization_id,
-                context.attempt_id,
-                context.fence,
-                context.restore_epoch,
-                &authority.agent_id,
-                authority.session_epoch,
-                outcome,
-                summary,
-            )
+            .agent_session_supports(&authority.agent_id, WORK_COMPLETION_SUBSTITUTION_FEATURE)
             .await
             .map_err(internal_store_error)?;
+        let published = if matches!(outcome, TerminalOutcome::Succeeded) || !substitution_negotiated
+        {
+            self.store
+                .finalize_attempt_in_session(
+                    context.organization_id,
+                    context.attempt_id,
+                    context.fence,
+                    context.restore_epoch,
+                    &authority.agent_id,
+                    authority.session_epoch,
+                    outcome,
+                    summary,
+                )
+                .await
+                .map_err(internal_store_error)?
+                .then_some(outcome)
+        } else {
+            self.store
+                .finalize_attempt_in_session_cancellation_aware(
+                    context.organization_id,
+                    context.attempt_id,
+                    context.fence,
+                    context.restore_epoch,
+                    &authority.agent_id,
+                    authority.session_epoch,
+                    outcome,
+                    summary,
+                )
+                .await
+                .map_err(internal_store_error)?
+        };
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
-            accepted,
+            accepted: published.is_some(),
+            published_outcome: match published {
+                Some(TerminalOutcome::Succeeded) => WorkOutcome::Succeeded as i32,
+                Some(TerminalOutcome::Failed) => WorkOutcome::Failed as i32,
+                Some(TerminalOutcome::Aborted) => WorkOutcome::Aborted as i32,
+                None => WorkOutcome::Unspecified as i32,
+            },
         }))
     }
 }
