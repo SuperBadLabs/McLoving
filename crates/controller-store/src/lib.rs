@@ -6650,14 +6650,24 @@ impl Store {
     pub async fn agent_session_supports(
         &self,
         agent_id: &str,
+        session_epoch: u64,
         feature: &str,
     ) -> Result<bool, StoreError> {
+        // Bound to the exact epoch, not just the identity. `agent_sessions` is
+        // keyed by `agent_id` alone, so a replacement session — the very
+        // collision this ticket diagnoses — would otherwise answer for the
+        // older requester and could report a feature that requester never
+        // negotiated.
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
         Ok(sqlx::query_scalar::<_, bool>(
-            "SELECT $2 = ANY(features)
+            "SELECT $3 = ANY(features)
              FROM agent_sessions
-             WHERE agent_id = $1",
+             WHERE agent_id = $1
+               AND session_epoch = $2",
         )
         .bind(agent_id)
+        .bind(session_epoch)
         .bind(feature)
         .fetch_optional(&self.pool)
         .await?

@@ -937,7 +937,11 @@ impl AgentControl for ControllerAgentService {
             .map_err(internal_store_error)?;
         let discharge_negotiated = self
             .store
-            .agent_session_supports(&request.agent_id, RECOVERED_DISCHARGE_FEATURE)
+            .agent_session_supports(
+                &request.agent_id,
+                request.session_epoch,
+                RECOVERED_DISCHARGE_FEATURE,
+            )
             .await
             .map_err(internal_store_error)?;
         Ok(Response::new(CancellationReceipt {
@@ -1340,7 +1344,11 @@ impl AgentControl for ControllerAgentService {
         // completion it cannot record.
         let substitution_negotiated = self
             .store
-            .agent_session_supports(&authority.agent_id, WORK_COMPLETION_SUBSTITUTION_FEATURE)
+            .agent_session_supports(
+                &authority.agent_id,
+                authority.session_epoch,
+                WORK_COMPLETION_SUBSTITUTION_FEATURE,
+            )
             .await
             .map_err(internal_store_error)?;
         let published = if matches!(outcome, TerminalOutcome::Succeeded) || !substitution_negotiated
