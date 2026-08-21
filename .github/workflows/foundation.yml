@@ -121,6 +121,7 @@ jobs:
           bash -n scripts/release-builder-contained.sh
           bash -n scripts/release-build-inner.sh
           bash -n scripts/mario-alpha-demo.sh
+          bash -n scripts/mario-runtime-effect-rehearsal.sh
           bash -n scripts/test-state-policy-differential.sh
           bash -n scripts/test-boundary-differential.sh
           bash -n scripts/verify-boundary-runtime.sh

@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
 use mcloving_controller_api::{
@@ -9,7 +10,20 @@ use mcloving_controller_store::{
     StoreError, TerminalOutcome,
     authz::{Principal, PrincipalKind, ServiceScope},
 };
-use mcloving_execution_spine::{WorkerConfig, run_claim};
+use mcloving_destination_observer::{
+    ActivationMode as ObserverActivationMode, ObservationPhase, ObservationRequest,
+    PROTOCOL_VERSION as OBSERVER_PROTOCOL_V1, REQUEST_SCHEMA_VERSION as OBSERVER_REQUEST_V1,
+    RequestAuthorization as ObserverAuthorization, sign_observation_request,
+};
+use mcloving_execution_spine::{
+    EffectExecutionPlan, EffectRuntimeFreeze, FreshOneActionGrant, PinnedServiceCommand,
+    SpineError, WorkerConfig, preflight_worker, run_claim,
+};
+use mcloving_external_connector::{
+    ActionRequest, IdempotencyClass, PROTOCOL_VERSION as CONNECTOR_PROTOCOL_V1,
+    REQUEST_SCHEMA_VERSION as CONNECTOR_REQUEST_V1, RequestAuthorization, action_request_digest,
+    public_key_from_seed, sign_action_request,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -245,6 +259,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 60,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -576,6 +591,260 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn write_test_pkcs8(path: &Path, seed: &[u8; 32]) {
+    let mut encoded = vec![
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    encoded.extend_from_slice(seed);
+    std::fs::write(path, encoded).expect("write test-only Ed25519 PKCS#8 key");
+}
+
+fn pinned_effect_fixture(root: &Path) -> PinnedServiceCommand {
+    pinned_effect_fixture_scenario(root, "success", 5_000)
+}
+
+fn pinned_effect_fixture_scenario(
+    root: &Path,
+    scenario: &str,
+    timeout_millis: u64,
+) -> PinnedServiceCommand {
+    let fixture = std::fs::canonicalize(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/effect_service.py"),
+    )
+    .expect("canonical effect fixture");
+    let openssl = std::fs::canonicalize("/usr/bin/openssl").expect("canonical openssl");
+    let outcome_key = root.join("outcome-key.pkcs8");
+    let observer_key = root.join("observer-key.pkcs8");
+    let shadow_key = root.join("shadow-key.pkcs8");
+    let observer_request_key = root.join("observer-request-key.pkcs8");
+    let diagnostic = root.join("effect-fixture-error.txt");
+    let scenario_path = root.join("effect-fixture-scenario.txt");
+    let state_path = root.join("effect-fixture-state.json");
+    let dispatch_ledger = root.join("effect-fixture-dispatches.txt");
+    let preflight_ledger = root.join("effect-fixture-preflights.txt");
+    write_test_pkcs8(&outcome_key, &[12_u8; 32]);
+    write_test_pkcs8(&observer_key, &[13_u8; 32]);
+    write_test_pkcs8(&shadow_key, &[14_u8; 32]);
+    write_test_pkcs8(&observer_request_key, &[15_u8; 32]);
+    std::fs::write(&scenario_path, scenario).expect("write effect fixture scenario");
+    let executable_sha256 = hex(&Sha256::digest(
+        std::fs::read(&fixture).expect("read effect fixture"),
+    ));
+    PinnedServiceCommand {
+        executable: fixture,
+        executable_sha256,
+        arguments: vec![
+            openssl,
+            outcome_key,
+            observer_key,
+            shadow_key,
+            observer_request_key,
+            diagnostic,
+            scenario_path,
+            state_path,
+            dispatch_ledger,
+            preflight_ledger,
+        ],
+        timeout_millis,
+    }
+}
+
+fn runtime_effect_spec() -> serde_json::Value {
+    json!({
+        "version": 2,
+        "steps": [{
+            "kind": "connector_intent",
+            "mapping_id": "notification.v1",
+            "mapping_digest": format!("sha256:{}", "a".repeat(64)),
+            "effect_class": "externally_idempotent",
+            "effect_key_template": "build.notification",
+            "public_input_schema": {"message": "string"},
+            "protected_secret_ref_schema": {"token": "string"},
+            "expected_public_result_schema": {"delivery_id": "string"},
+            "timeout_seconds": 30,
+            "ambiguity_policy": "observe_then_reconcile",
+            "downstream_control_digest": format!("sha256:{}", "b".repeat(64)),
+        }]
+    })
+}
+
+fn runtime_effect_plan(
+    root: &Path,
+    organization_id: Uuid,
+    project_id: Uuid,
+    admission: &BuildAdmission,
+    claim: &mcloving_controller_store::ClaimedAttempt,
+    scenario: &str,
+    timeout_millis: u64,
+) -> EffectExecutionPlan {
+    let fence = u64::try_from(claim.fence).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let request_seed = [11_u8; 32];
+    let mut action_request = ActionRequest {
+        schema_version: CONNECTOR_REQUEST_V1.into(),
+        protocol_version: CONNECTOR_PROTOCOL_V1.into(),
+        request_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        effect_key: "build.notification".into(),
+        connector_id: "fixture-connector".into(),
+        expected_implementation_sha256: "1".repeat(64),
+        expected_image_sha256: "2".repeat(64),
+        expected_config_sha256: "3".repeat(64),
+        expected_generation: 1,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        idempotency_class: IdempotencyClass::ExternallyIdempotent,
+        action_name: "notify".into(),
+        action_schema_version: "fixture.notify/v1".into(),
+        request_payload: json!({"message": "hello"}),
+        credential_grant_id: "fixture-grant".into(),
+        credential_grant_version: "v1".into(),
+        credential_grant_scope: "one-notification".into(),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 29_000,
+        audit_provenance: format!("ext-002/{scenario}/request"),
+        authorization: RequestAuthorization {
+            key_id: "request-key".into(),
+            signature_base64: String::new(),
+        },
+    };
+    sign_action_request(&mut action_request, &request_seed).unwrap();
+    let connector_request_sha256 = action_request_digest(&action_request).unwrap();
+    let mut observation_request = ObservationRequest {
+        schema_version: OBSERVER_REQUEST_V1.into(),
+        protocol_version: OBSERVER_PROTOCOL_V1.into(),
+        observation_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        phase: ObservationPhase::PostAction,
+        observer_id: "fixture-observer".into(),
+        request_authority_identity: "controller".into(),
+        expected_implementation_sha256: "4".repeat(64),
+        expected_image_sha256: "5".repeat(64),
+        expected_config_sha256: "6".repeat(64),
+        expected_generation: 1,
+        activation_mode: ObserverActivationMode::Current,
+        previous_generation: None,
+        rollback_from_generation: None,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        read_grant_id: "fixture-read".into(),
+        read_grant_version: "v1".into(),
+        read_grant_scope: "fixture-resource".into(),
+        query: [(
+            "connector_request_sha256".to_owned(),
+            connector_request_sha256,
+        )]
+        .into_iter()
+        .collect(),
+        expected_previous_cursor: None,
+        predecessor_receipt_sha256: Some("a".repeat(64)),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 59_000,
+        audit_provenance: format!("ext-002/{scenario}/observation"),
+        authorization: ObserverAuthorization {
+            key_id: "observer-request-key".into(),
+            signature_base64: "fixture-request-signature".into(),
+        },
+    };
+    sign_observation_request(&mut observation_request, &[15_u8; 32]).unwrap();
+    let service = pinned_effect_fixture_scenario(root, scenario, timeout_millis);
+    EffectExecutionPlan {
+        schema_version: "mcloving.controller-effect-plan/v1".into(),
+        freeze: EffectRuntimeFreeze {
+            mapping_id: "notification.v1".into(),
+            mapping_digest: format!("sha256:{}", "a".repeat(64)),
+            deployment_binding_sha256: "8".repeat(64),
+            runtime_attestation_sha256: "9".repeat(64),
+            credential_mapping_generation: 1,
+            pre_action_observation_sha256: "a".repeat(64),
+            grant: FreshOneActionGrant {
+                grant_sha256: "b".repeat(64),
+                request_id: action_request.request_id,
+                attempt_id: admission.attempt_id,
+                effect_fence: fence,
+                issued_at_unix_ms: now - 2_000,
+                expires_at_unix_ms: now + 60_000,
+                max_actions: 1,
+                consumed_actions: 0,
+            },
+            action_request,
+            request_authority_public_key: public_key_from_seed(&request_seed).unwrap(),
+            connector_outcome_public_key: public_key_from_seed(&[12_u8; 32]).unwrap(),
+            observer_receipt_public_key: public_key_from_seed(&[13_u8; 32]).unwrap(),
+            shadow_replay_public_key: public_key_from_seed(&[14_u8; 32]).unwrap(),
+            expected_observer_id: "fixture-observer".into(),
+            expected_shadow_identity: "fixture-shadow".into(),
+        },
+        connector_service: service.clone(),
+        observer_service: service.clone(),
+        shadow_service: service,
+        observation_request,
+        audit_provenance: format!("ext-002/{scenario}/plan"),
+    }
+}
+
+fn runtime_effect_worker(root: &Path, plan: EffectExecutionPlan) -> WorkerConfig {
+    WorkerConfig {
+        agent_id: "agent-regression".into(),
+        session_epoch: 1,
+        workspace_root: root.join("workspace"),
+        journal_path: root.join("agent.db"),
+        cancellation_poll: Duration::from_millis(10),
+        lease_seconds: 60,
+        termination_grace: Duration::from_millis(100),
+        effect_plan: Some(plan),
+    }
+}
+
+fn dispatch_count(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("effect-fixture-dispatches.txt"))
+        .map(|entries| entries.lines().count())
+        .unwrap_or_default()
+}
+
+fn preflight_count(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("effect-fixture-preflights.txt"))
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|line| !line.starts_with("release:"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn reservation_release_count(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("effect-fixture-preflights.txt"))
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|line| line.starts_with("release:"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 #[tokio::test]
 async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     let Some(store) = test_store().await else {
@@ -683,6 +952,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
         cancellation_poll: Duration::from_millis(5),
         lease_seconds: 60,
         termination_grace: Duration::from_millis(100),
+        effect_plan: None,
     };
     let run_store = store.clone();
     let run_claim_value = claim.clone();
@@ -797,6 +1067,7 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 30,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -854,6 +1125,7 @@ async fn lease_is_renewed_while_a_long_process_runs() {
             cancellation_poll: Duration::from_millis(100),
             lease_seconds: 1,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -902,6 +1174,7 @@ async fn process_spawn_failure_is_published_as_terminal_failure() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 30,
             termination_grace: Duration::from_millis(100),
+            effect_plan: None,
         },
     )
     .await
@@ -1008,6 +1281,9 @@ async fn unsupported_execution_spec_is_published_as_named_terminal_failure() {
             cancellation_poll: Duration::from_millis(10),
             lease_seconds: 30,
             termination_grace: Duration::from_millis(100),
+            // This spec is unrunnable on its own terms, so the terminal
+            // refusal must not depend on an effect runtime being configured.
+            effect_plan: None,
         },
     )
     .await
@@ -1026,7 +1302,7 @@ async fn unsupported_execution_spec_is_published_as_named_terminal_failure() {
         .expect("terminal summary names the refusal");
     assert_eq!(
         reason,
-        "unsupported_execution_spec: execution spec declares 100 steps (expected exactly 1 process step)"
+        "unsupported_execution_spec: execution spec declares 100 steps (expected exactly 1)"
     );
     assert!(
         Journal::open(journal_path)
@@ -1053,6 +1329,1865 @@ async fn unsupported_execution_spec_is_published_as_named_terminal_failure() {
             .is_none(),
         "a terminal refusal must never be rescheduled"
     );
+}
+
+#[tokio::test]
+async fn post_dispatch_timeout_freezes_retry_and_dispatches_exactly_once() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-timeout-after-dispatch",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "timeout_after_dispatch",
+        100,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    assert!(matches!(
+        run_claim(&store, &claim, &config).await,
+        Err(SpineError::EffectReconciliationRequired)
+    ));
+    assert_eq!(dispatch_count(root.path()), 1);
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read timeout reconciliation state");
+    assert_eq!(
+        state,
+        ("reconciliation_required".into(), "uncertain".into(), 0)
+    );
+    assert!(matches!(
+        run_claim(&store, &claim, &config).await,
+        Err(SpineError::StaleAuthority)
+    ));
+    assert_eq!(dispatch_count(root.path()), 1);
+}
+
+#[tokio::test]
+async fn signed_response_substitution_is_uncertain_at_every_post_dispatch_join() {
+    // Each substituted response must be refused at its own join: a connector
+    // receipt rejection persists no evidence, an observer rejection persists
+    // only the validated outcome, and a shadow rejection persists both prior
+    // receipts.
+    for (scenario, persisted_receipts) in [
+        ("substituted_connector_response", 0_i64),
+        ("substituted_outcome_project", 0),
+        ("substituted_outcome_pipeline", 0),
+        ("substituted_outcome_generation", 0),
+        ("substituted_outcome_request_payload", 0),
+        ("substituted_observer_response", 1),
+        ("substituted_observer_binding", 1),
+        // Not a substitution but the same disposition: an observation whose
+        // publication deadline was already spent when it was captured must not
+        // be joined against expired read authority.
+        ("stale_publication_deadline", 1),
+        ("substituted_shadow_response", 2),
+    ] {
+        let Some(store) = test_store().await else {
+            eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+            return;
+        };
+        let (organization_id, project_id, admission, claim) = admitted_claim(
+            &store,
+            runtime_effect_spec(),
+            &format!("effect-{scenario}"),
+            60,
+        )
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let plan = runtime_effect_plan(
+            root.path(),
+            organization_id,
+            project_id,
+            &admission,
+            &claim,
+            scenario,
+            5_000,
+        );
+        let config = runtime_effect_worker(root.path(), plan);
+        assert!(matches!(
+            run_claim(&store, &claim, &config).await,
+            Err(SpineError::EffectReconciliationRequired)
+        ));
+        assert_eq!(dispatch_count(root.path()), 1, "scenario {scenario}");
+        let state: (String, String, i64) = sqlx::query_as(
+            "SELECT a.status, e.status,
+                    ((e.outcome_receipt IS NOT NULL)::int
+                     + (e.reconciliation_receipt IS NOT NULL)::int
+                     + (e.observation_receipt IS NOT NULL)::int
+                     + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+             FROM attempts AS a
+             JOIN attempt_effects AS e
+               ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read response-substitution state");
+        assert_eq!(
+            state,
+            (
+                "reconciliation_required".into(),
+                "uncertain".into(),
+                persisted_receipts
+            ),
+            "scenario {scenario}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_publication_deadline_inside_the_request_window_still_joins() {
+    // The shipped observer publishes the earliest of its freshness limit, the
+    // request expiry, and the read-grant expiry. A read grant that outlives the
+    // verified connector-plus-observer window but expires before the request
+    // does therefore yields a deadline strictly inside the window — a valid
+    // signed receipt that must join, not route an already-performed action to
+    // reconciliation.
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-tight-publication-deadline",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "tight_publication_deadline",
+        5_000,
+    );
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("a deadline bounded by the request must still join");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    assert_eq!(dispatch_count(root.path()), 1);
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read tight-deadline effect state");
+    assert_eq!(state, ("succeeded".into(), "confirmed".into(), 3));
+}
+
+#[tokio::test]
+async fn a_malformed_effect_plan_is_refused_before_any_work_is_claimed() {
+    // A deployment-owned plan this worker cannot execute is a permanent error
+    // for every connector-intent build it matches. Caught only at run time it
+    // would return before `accept_offer`, letting the offered lease expire into
+    // `requeue_one_expired` and repeat forever, so startup must refuse it.
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) =
+        admitted_claim(&store, runtime_effect_spec(), "effect-malformed-plan", 60).await;
+    let root = tempfile::tempdir().unwrap();
+    let template = runtime_effect_worker(
+        root.path(),
+        runtime_effect_plan(
+            root.path(),
+            organization_id,
+            project_id,
+            &admission,
+            &claim,
+            "success",
+            5_000,
+        ),
+    );
+    preflight_worker(&template)
+        .await
+        .expect("a well-formed plan preflights");
+    for mutate in [
+        (|plan: &mut EffectExecutionPlan| {
+            plan.schema_version = "mcloving.controller-effect-plan/v2".into();
+        }) as fn(&mut EffectExecutionPlan),
+        |plan: &mut EffectExecutionPlan| plan.audit_provenance.clear(),
+    ] {
+        let mut config = template.clone();
+        mutate(config.effect_plan.as_mut().expect("plan is configured"));
+        assert!(matches!(
+            preflight_worker(&config).await,
+            Err(SpineError::EffectRuntimeUnavailable)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn signed_runtime_scope_must_match_the_durable_build_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-durable-scope",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    plan.freeze.action_request.project_id = Uuid::new_v4();
+    plan.freeze.action_request.pipeline_id = Uuid::new_v4();
+    sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("scope mismatch is durably terminalized before dispatch");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read scope-mismatch build")
+        .expect("scope-mismatch build exists");
+    assert_eq!(snapshot.build_status, "failed");
+    assert_eq!(snapshot.attempt_status, "failed");
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at=NOW() - INTERVAL '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("force the old lease timestamp behind the requeue boundary");
+    assert!(
+        !store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("terminal mismatch must not requeue")
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-after-scope-mismatch".into(),
+                agent_id: "agent-after-scope-mismatch".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim after terminal scope mismatch")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn mismatched_one_action_plan_binding_is_terminal_without_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-plan-binding",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    // Same project and pipeline, but the frozen one-action grant belongs to a
+    // different build, attempt, fence, and effect key. The claim gate must
+    // terminalize the mismatch instead of leaving a checkpoint-free running
+    // attempt whose lease expiry would requeue it for the same losing race.
+    plan.freeze.action_request.build_id = Uuid::new_v4();
+    plan.freeze.action_request.attempt_id = Uuid::new_v4();
+    plan.freeze.action_request.effect_fence += 7;
+    plan.freeze.action_request.effect_key = "build.other-notification".into();
+    sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("plan binding mismatch is durably terminalized before dispatch");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(preflight_count(root.path()), 0);
+    let effect_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attempt_effects WHERE organization_id=$1 AND attempt_id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count plan-mismatch effects");
+    assert_eq!(effect_count, 0);
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT terminal_summary FROM attempts WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the plan-mismatch terminal summary");
+    assert_eq!(
+        summary["reason"], "effect_plan_scope_mismatch",
+        "unexpected terminal summary: {summary}"
+    );
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at=NOW() - INTERVAL '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("force the mismatch lease timestamp behind the requeue boundary");
+    assert!(
+        !store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("terminal plan mismatch must not requeue")
+    );
+}
+
+#[tokio::test]
+async fn observer_predecessor_must_match_the_frozen_pre_action_receipt_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-observer-predecessor",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    plan.observation_request.predecessor_receipt_sha256 = Some("f".repeat(64));
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("invalid observer predecessor fails as a terminal preflight error");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read predecessor-preflight effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
+}
+
+#[tokio::test]
+async fn observer_request_must_bind_the_frozen_action_before_verification() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-wrong-observer-binding",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    // The signed observation request targets a different destination and a
+    // different connector request digest than the frozen action. Observer
+    // Verify would still approve it (the observer checks only its own
+    // deployment binding), so the runtime must refuse before verification
+    // reserves the mismatched observation and before any dispatch.
+    plan.observation_request.endpoint_identity = "other-endpoint".into();
+    plan.observation_request
+        .query
+        .insert("connector_request_sha256".to_owned(), "0".repeat(64));
+    sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("mismatched observer binding fails as a terminal preflight error");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        preflight_count(root.path()),
+        0,
+        "the mismatched observation request must never reach observer Verify"
+    );
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read observer-binding preflight effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT terminal_summary FROM attempts WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the observer-binding terminal summary");
+    assert_eq!(
+        summary["reason"], "effect_observation_request_preflight_failed",
+        "unexpected terminal summary: {summary}"
+    );
+}
+
+#[tokio::test]
+async fn signed_effect_requests_must_be_fully_admissible_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    for case in [
+        "bad_signature",
+        "expired",
+        "insufficient_action_validity",
+        "insufficient_validity",
+        "wrong_protocol",
+        "wrong_binding",
+    ] {
+        let (organization_id, project_id, admission, claim) = admitted_claim(
+            &store,
+            runtime_effect_spec(),
+            &format!("effect-observer-request-{case}"),
+            60,
+        )
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = runtime_effect_plan(
+            root.path(),
+            organization_id,
+            project_id,
+            &admission,
+            &claim,
+            "success",
+            5_000,
+        );
+        match case {
+            "insufficient_action_validity" => {
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap();
+                plan.freeze.action_request.requested_at_unix_ms = now - 1_000;
+                plan.freeze.action_request.expires_at_unix_ms = now + 1_000;
+                sign_action_request(&mut plan.freeze.action_request, &[11_u8; 32]).unwrap();
+            }
+            "bad_signature" => {
+                plan.observation_request.authorization.signature_base64 = "AAAA".into();
+            }
+            "expired" => {
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap();
+                plan.observation_request.requested_at_unix_ms = now - 10_000;
+                plan.observation_request.expires_at_unix_ms = now - 1;
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            "insufficient_validity" => {
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap();
+                plan.observation_request.requested_at_unix_ms = now - 1_000;
+                plan.observation_request.expires_at_unix_ms = now + 1_000;
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            "wrong_protocol" => {
+                plan.observation_request.protocol_version =
+                    "mcloving.destination-observer/substituted".into();
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            "wrong_binding" => {
+                plan.observation_request.expected_config_sha256 = "f".repeat(64);
+                sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let result = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan)).await;
+        assert_eq!(dispatch_count(root.path()), 0, "case={case}");
+        if case == "insufficient_action_validity" {
+            let receipt = result.expect("locally expired action authority is terminal");
+            assert_eq!(receipt.outcome, TerminalOutcome::Failed, "case={case}");
+            let effect_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM attempt_effects
+                 WHERE organization_id = $1 AND attempt_id = $2",
+            )
+            .bind(organization_id)
+            .bind(admission.attempt_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("count action-authority effects");
+            assert_eq!(effect_count, 0, "case={case}");
+            continue;
+        }
+        assert!(
+            matches!(result, Err(SpineError::EffectReconciliationRequired)),
+            "observer transport closure after a potentially delivered verify is ambiguous: case={case}"
+        );
+        let effect: (String, i64) = sqlx::query_as(
+            "SELECT status,
+                    ((outcome_receipt IS NOT NULL)::int
+                     + (observation_receipt IS NOT NULL)::int
+                     + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+             FROM attempt_effects
+             WHERE organization_id = $1 AND attempt_id = $2",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read rejected observation-request effect");
+        assert_eq!(effect, ("release_pending".into(), 0), "case={case}");
+    }
+}
+
+#[tokio::test]
+async fn exhausted_effect_timeout_budget_is_terminal_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-timeout-budget-exhausted",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    plan.observer_service.timeout_millis = 30_000;
+    let config = runtime_effect_worker(root.path(), plan);
+
+    let receipt = run_claim(&store, &claim, &config)
+        .await
+        .expect("deterministic timeout exhaustion is terminal");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(preflight_count(root.path()), 0);
+    let effect_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attempt_effects WHERE organization_id=$1 AND attempt_id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count timeout-budget effects");
+    assert_eq!(effect_count, 0);
+
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at=NOW() - INTERVAL '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("force timeout lease timestamp behind the requeue boundary");
+    assert!(
+        !store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("terminal timeout failure must not requeue")
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-after-timeout-exhaustion".into(),
+                agent_id: "agent-after-timeout-exhaustion".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim after timeout terminalization")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn expired_observer_join_window_is_terminal_before_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-observer-window-expired",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "lenient_verify_window",
+        5_000,
+    );
+    // The observation request no longer covers the connector-plus-observer
+    // window, while the lenient fixture observer still approves Verify. The
+    // runtime's own final dispatch decision must refuse to invoke the
+    // connector rather than dispatch an action whose post-action observation
+    // can no longer be covered.
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    plan.observation_request.expires_at_unix_ms = now + 2_000;
+    sign_observation_request(&mut plan.observation_request, &[15_u8; 32]).unwrap();
+    let config = runtime_effect_worker(root.path(), plan);
+
+    let receipt = run_claim(&store, &claim, &config)
+        .await
+        .expect("expired observer join window is terminal before dispatch");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(
+        dispatch_count(root.path()),
+        0,
+        "the connector must never be invoked once the observer join window is gone"
+    );
+    assert_eq!(preflight_count(root.path()), 1);
+    assert_eq!(reservation_release_count(root.path()), 1);
+    let effect: (String, bool) = sqlx::query_as(
+        "SELECT status, dispatch_committed_at IS NOT NULL
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the refused-dispatch effect");
+    assert_eq!(effect, ("abandoned".into(), false));
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT terminal_summary FROM attempts WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the terminal summary");
+    assert_eq!(
+        summary["reason"], "effect_observation_request_preflight_failed",
+        "unexpected terminal summary: {summary}"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-cancel-during-preflight",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_preflight_release_failure_once",
+        5_000,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if preflight_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(preflight_count(root.path()), 1);
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request cancellation during observer preflight")
+    );
+    let receipt = execution
+        .await
+        .expect("worker task")
+        .expect("pre-dispatch cancellation outcome");
+    assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        reservation_release_count(root.path()),
+        2,
+        "the attempt must remain non-terminal until idempotent release succeeds"
+    );
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read cancelled preflight effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
+}
+
+#[tokio::test]
+async fn dead_observer_release_session_routes_to_durable_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-dead-observer-release",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_preflight_release_session_exit",
+        5_000,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if preflight_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(preflight_count(root.path()), 1);
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request cancellation during observer preflight")
+    );
+    let result = tokio::time::timeout(Duration::from_secs(2), execution)
+        .await
+        .expect("dead observer release must not pin the worker or lease")
+        .expect("worker task");
+    assert!(matches!(
+        result,
+        Err(SpineError::EffectReconciliationRequired)
+    ));
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        reservation_release_count(root.path()),
+        1,
+        "the dead retained session cannot accept a second release command"
+    );
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read observer-release reconciliation state");
+    assert_eq!(
+        state,
+        (
+            "reconciliation_required".into(),
+            "release_pending".into(),
+            0
+        )
+    );
+}
+
+#[tokio::test]
+async fn definitive_observer_verify_rejection_is_terminal_without_release() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-definitive-observer-verify-rejection",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "verify_rejected",
+        5_000,
+    );
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("acknowledged observer rejection is terminal");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(preflight_count(root.path()), 1);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(reservation_release_count(root.path()), 0);
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read definitive observer rejection state");
+    assert_eq!(state, ("failed".into(), "abandoned".into(), 0));
+}
+
+#[tokio::test]
+async fn ambiguous_observer_verify_failure_retains_release_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-ambiguous-observer-verify",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "verify_session_exit",
+        5_000,
+    );
+    let result = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan)).await;
+    assert!(matches!(
+        result,
+        Err(SpineError::EffectReconciliationRequired)
+    ));
+    assert_eq!(preflight_count(root.path()), 1);
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(
+        reservation_release_count(root.path()),
+        0,
+        "the dead observer session cannot consume the idempotent release command"
+    );
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.reconciliation_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read ambiguous observer verification state");
+    assert_eq!(
+        state,
+        (
+            "reconciliation_required".into(),
+            "release_pending".into(),
+            0
+        )
+    );
+}
+
+#[tokio::test]
+async fn authority_loss_after_observer_verification_records_release_pending() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-authority-loss-after-observer-verification",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_preflight_release_session_exit",
+        5_000,
+    );
+    let mut config = runtime_effect_worker(root.path(), plan);
+    config.lease_seconds = 1;
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if preflight_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(preflight_count(root.path()), 1);
+    let mut authority_loss = store.pool().begin().await.expect("begin renewal race");
+    let authority_loss_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *authority_loss)
+        .await
+        .expect("read renewal-race blocker backend PID");
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at=clock_timestamp() - interval '1 second'
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(&mut *authority_loss)
+    .await
+    .expect("stage authority expiry while observer verification is in flight");
+    let mut renewal_blocked = false;
+    for _ in 0..200 {
+        renewal_blocked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid))
+             )",
+        )
+        .bind(authority_loss_backend_pid)
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect lease-renewal waiter");
+        if renewal_blocked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        renewal_blocked,
+        "lease renewal must be in flight behind the held authority row"
+    );
+    authority_loss
+        .commit()
+        .await
+        .expect("commit authority expiry before the dispatch gate");
+    let result = tokio::time::timeout(Duration::from_secs(2), execution)
+        .await
+        .expect("authority-loss cleanup must not pin the worker")
+        .expect("worker task");
+    assert!(matches!(result, Err(SpineError::StaleAuthority)));
+    assert_eq!(dispatch_count(root.path()), 0);
+    assert_eq!(reservation_release_count(root.path()), 1);
+    let effect_state = sqlx::query_as::<_, (String, bool)>(
+        "SELECT status, dispatch_committed_at IS NOT NULL FROM attempt_effects
+         WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read authority-loss release state");
+    assert_eq!(effect_state, ("release_pending".into(), false));
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route expired release-pending attempt")
+    );
+    let state: (String, String) = sqlx::query_as(
+        "SELECT a.status, e.status
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id=a.organization_id AND e.attempt_id=a.id
+         WHERE a.organization_id=$1 AND a.id=$2 AND e.fence=$3",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read expired release-pending reconciliation state");
+    assert_eq!(
+        state,
+        ("reconciliation_required".into(), "release_pending".into())
+    );
+}
+
+#[tokio::test]
+async fn effect_path_renews_a_short_lease_until_all_joins_are_durable() {
+    // The lease must be short enough that the fixture's `slow_success` dispatch
+    // outlives it, otherwise nothing forces a renewal and the test proves
+    // nothing. But the renewal tick is derived as lease/3, so an aggressively
+    // short lease also leaves very little slack for any single renewal to land.
+    // At the original 1s lease that slack was ~667ms, and one renewal delayed
+    // past it under host load lost the fence and failed the run with
+    // StaleAuthority. A 3s lease against a 4.5s dispatch holds the same 1:1.5
+    // ratio, so a renewal is still mandatory before the connector even answers
+    // and more are required across the observer and shadow joins, while
+    // widening per-tick slack to ~2s: two fully starved ticks still keep the
+    // fence.
+    const LEASE_SECONDS: i32 = 3;
+    // Per-service-call budget. It has to clear the 4.5s dispatch with room to
+    // spare, and stay under half the action request's ~29s remaining authority,
+    // because the connector budget is that authority minus the observer timeout
+    // and preflight then demands `connector + observer` of continuous validity.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 10_000;
+
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-short-lease-renewal",
+        LEASE_SECONDS,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "slow_success",
+        SERVICE_TIMEOUT_MILLIS,
+    );
+    let mut config = runtime_effect_worker(root.path(), plan);
+    config.lease_seconds = LEASE_SECONDS;
+    let receipt = run_claim(&store, &claim, &config)
+        .await
+        .expect("renew short lease through connector, observer, and shadow joins");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    assert_eq!(dispatch_count(root.path()), 1);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT dispatch_committed_at IS NOT NULL
+             FROM attempt_effects
+             WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .bind(claim.fence)
+        .fetch_one(store.pool())
+        .await
+        .expect("read durable dispatch marker")
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_outcome_reconciles_without_a_second_dispatch() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-ambiguous-reconcile",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "ambiguous_then_reconcile",
+        5_000,
+    );
+    let receipt = run_claim(&store, &claim, &runtime_effect_worker(root.path(), plan))
+        .await
+        .expect("ambiguous outcome reconciles through independent observation");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    assert_eq!(dispatch_count(root.path()), 1);
+    let state: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (reconciliation_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read reconciled effect join");
+    assert_eq!(state, ("confirmed".into(), 4));
+}
+
+#[tokio::test]
+async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_effect() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-crash-after-dispatch",
+        1,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "crash_after_dispatch",
+        10_000,
+    );
+    let mut config = runtime_effect_worker(root.path(), plan);
+    config.lease_seconds = 1;
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if dispatch_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(dispatch_count(root.path()), 1);
+    execution.abort();
+    let _ = execution.await;
+    drop(store);
+    let restarted = test_store().await.expect("reconnect controller store");
+    let mut expired_effect_routed = false;
+    for _ in 0..40 {
+        if restarted
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route expired runtime effect")
+        {
+            expired_effect_routed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !expired_effect_routed {
+        let state: (String, Option<String>, String, String) = sqlx::query_as(
+            "SELECT a.status, a.lease_expires_at::text, clock_timestamp()::text, e.status
+             FROM attempts AS a
+             JOIN attempt_effects AS e
+               ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(admission.attempt_id)
+        .fetch_one(restarted.pool())
+        .await
+        .expect("inspect non-expiring runtime effect lease");
+        panic!("runtime effect lease did not expire: {state:?}");
+    }
+    let state: (String, String) = sqlx::query_as(
+        "SELECT a.status, e.status
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(restarted.pool())
+    .await
+    .expect("read restarted controller state");
+    assert_eq!(
+        state,
+        ("reconciliation_required".into(), "uncertain".into())
+    );
+    assert!(
+        restarted
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-after-crash".into(),
+                agent_id: "agent-after-crash".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 60,
+                fairness_seed: 2,
+            })
+            .await
+            .expect("look for reoffered work")
+            .is_none()
+    );
+    assert_eq!(dispatch_count(root.path()), 1);
+}
+
+#[tokio::test]
+async fn cancellation_after_dispatch_joins_evidence_then_aborts_without_duplicate_effect() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        runtime_effect_spec(),
+        "effect-cancel-after-dispatch",
+        60,
+    )
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let plan = runtime_effect_plan(
+        root.path(),
+        organization_id,
+        project_id,
+        &admission,
+        &claim,
+        "success",
+        5_000,
+    );
+    let config = runtime_effect_worker(root.path(), plan);
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let execution =
+        tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    for _ in 0..200 {
+        if dispatch_count(root.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(dispatch_count(root.path()), 1);
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request cancellation after dispatch")
+    );
+    let receipt = execution
+        .await
+        .expect("worker task")
+        .expect("joined cancellation outcome");
+    assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
+    assert_eq!(dispatch_count(root.path()), 1);
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT a.status, e.status,
+                ((e.outcome_receipt IS NOT NULL)::int
+                 + (e.observation_receipt IS NOT NULL)::int
+                 + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempts AS a
+         JOIN attempt_effects AS e
+           ON e.organization_id = a.organization_id AND e.attempt_id = a.id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read post-dispatch cancellation join");
+    assert_eq!(state, ("aborted".into(), "confirmed".into(), 3));
+}
+
+#[tokio::test]
+async fn signed_effect_join_withholds_terminal_until_shadow_is_durable() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let mapping_digest = format!("sha256:{}", "a".repeat(64));
+    let downstream_digest = format!("sha256:{}", "b".repeat(64));
+    let execution_spec = json!({
+        "version": 2,
+        "steps": [{
+            "kind": "connector_intent",
+            "mapping_id": "notification.v1",
+            "mapping_digest": mapping_digest,
+            "effect_class": "externally_idempotent",
+            "effect_key_template": "build.notification",
+            "public_input_schema": {"message": "string"},
+            "protected_secret_ref_schema": {"token": "string"},
+            "expected_public_result_schema": {"delivery_id": "string"},
+            "timeout_seconds": 30,
+            "ambiguity_policy": "observe_then_reconcile",
+            "downstream_control_digest": downstream_digest,
+        }]
+    });
+    let (organization_id, project_id, admission, claim) =
+        admitted_claim(&store, execution_spec, "effect-plan-positive", 60).await;
+    let fence = u64::try_from(claim.fence).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let request_seed = [11_u8; 32];
+    let request_key = public_key_from_seed(&request_seed).unwrap();
+    let mut action_request = ActionRequest {
+        schema_version: CONNECTOR_REQUEST_V1.into(),
+        protocol_version: CONNECTOR_PROTOCOL_V1.into(),
+        request_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        effect_key: "build.notification".into(),
+        connector_id: "fixture-connector".into(),
+        expected_implementation_sha256: "1".repeat(64),
+        expected_image_sha256: "2".repeat(64),
+        expected_config_sha256: "3".repeat(64),
+        expected_generation: 1,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        idempotency_class: IdempotencyClass::ExternallyIdempotent,
+        action_name: "notify".into(),
+        action_schema_version: "fixture.notify/v1".into(),
+        request_payload: json!({"message": "hello"}),
+        credential_grant_id: "fixture-grant".into(),
+        credential_grant_version: "v1".into(),
+        credential_grant_scope: "one-notification".into(),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 20_000,
+        audit_provenance: "effect-free-positive-test".into(),
+        authorization: RequestAuthorization {
+            key_id: "request-key".into(),
+            signature_base64: String::new(),
+        },
+    };
+    sign_action_request(&mut action_request, &request_seed).unwrap();
+    let connector_request_sha256 = action_request_digest(&action_request).unwrap();
+    let mut observation_request = ObservationRequest {
+        schema_version: OBSERVER_REQUEST_V1.into(),
+        protocol_version: OBSERVER_PROTOCOL_V1.into(),
+        observation_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        phase: ObservationPhase::PostAction,
+        observer_id: "fixture-observer".into(),
+        request_authority_identity: "controller".into(),
+        expected_implementation_sha256: "4".repeat(64),
+        expected_image_sha256: "5".repeat(64),
+        expected_config_sha256: "6".repeat(64),
+        expected_generation: 1,
+        activation_mode: ObserverActivationMode::Current,
+        previous_generation: None,
+        rollback_from_generation: None,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        read_grant_id: "fixture-read".into(),
+        read_grant_version: "v1".into(),
+        read_grant_scope: "fixture-resource".into(),
+        query: [(
+            "connector_request_sha256".to_owned(),
+            connector_request_sha256,
+        )]
+        .into_iter()
+        .collect(),
+        expected_previous_cursor: None,
+        predecessor_receipt_sha256: Some("a".repeat(64)),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 20_000,
+        audit_provenance: "effect-free-positive-test".into(),
+        authorization: ObserverAuthorization {
+            key_id: "observer-request-key".into(),
+            signature_base64: "fixture-request-signature".into(),
+        },
+    };
+    sign_observation_request(&mut observation_request, &[15_u8; 32]).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let service = pinned_effect_fixture(root.path());
+    let plan = EffectExecutionPlan {
+        schema_version: "mcloving.controller-effect-plan/v1".into(),
+        freeze: EffectRuntimeFreeze {
+            mapping_id: "notification.v1".into(),
+            mapping_digest,
+            deployment_binding_sha256: "8".repeat(64),
+            runtime_attestation_sha256: "9".repeat(64),
+            credential_mapping_generation: 1,
+            pre_action_observation_sha256: "a".repeat(64),
+            grant: FreshOneActionGrant {
+                grant_sha256: "b".repeat(64),
+                request_id: action_request.request_id,
+                attempt_id: admission.attempt_id,
+                effect_fence: fence,
+                issued_at_unix_ms: now - 2_000,
+                expires_at_unix_ms: now + 60_000,
+                max_actions: 1,
+                consumed_actions: 0,
+            },
+            action_request,
+            request_authority_public_key: request_key,
+            connector_outcome_public_key: public_key_from_seed(&[12_u8; 32]).unwrap(),
+            observer_receipt_public_key: public_key_from_seed(&[13_u8; 32]).unwrap(),
+            shadow_replay_public_key: public_key_from_seed(&[14_u8; 32]).unwrap(),
+            expected_observer_id: "fixture-observer".into(),
+            expected_shadow_identity: "fixture-shadow".into(),
+        },
+        connector_service: service.clone(),
+        observer_service: service.clone(),
+        shadow_service: service,
+        observation_request,
+        audit_provenance: "effect-free-positive-test".into(),
+    };
+    let config = WorkerConfig {
+        agent_id: "agent-regression".into(),
+        session_epoch: 1,
+        workspace_root: root.path().join("workspace"),
+        journal_path: root.path().join("agent.db"),
+        cancellation_poll: Duration::from_millis(10),
+        lease_seconds: 60,
+        termination_grace: Duration::from_millis(100),
+        effect_plan: Some(plan),
+    };
+    let mut execution = Box::pin(run_claim(&store, &claim, &config));
+    let before_shadow = loop {
+        tokio::select! {
+            result = &mut execution => {
+                let state: Option<(String, i64)> = sqlx::query_as(
+                    "SELECT e.status,
+                            ((e.outcome_receipt IS NOT NULL)::int
+                             + (e.observation_receipt IS NOT NULL)::int
+                             + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+                     FROM attempt_effects AS e
+                     WHERE e.organization_id = $1 AND e.attempt_id = $2",
+                )
+                .bind(organization_id)
+                .bind(admission.attempt_id)
+                .fetch_optional(store.pool())
+                .await
+                .expect("read early effect termination state");
+                let diagnostic = std::fs::read_to_string(root.path().join("effect-fixture-error.txt"))
+                    .unwrap_or_else(|_| "no fixture diagnostic".into());
+                panic!(
+                    "effect execution terminated before the shadow join checkpoint: {result:?}; durable state: {state:?}; fixture: {diagnostic}"
+                );
+            },
+            () = tokio::time::sleep(Duration::from_millis(10)) => {
+            let state: Option<(String, i64)> = sqlx::query_as(
+                "SELECT a.status,
+                        ((e.outcome_receipt IS NOT NULL)::int
+                         + (e.observation_receipt IS NOT NULL)::int
+                         + (e.shadow_replay_receipt IS NOT NULL)::int)::bigint
+                 FROM attempts AS a
+                 JOIN attempt_effects AS e
+                   ON e.organization_id = a.organization_id
+                  AND e.attempt_id = a.id
+                 WHERE a.organization_id = $1 AND a.id = $2",
+            )
+            .bind(organization_id)
+            .bind(admission.attempt_id)
+            .fetch_optional(store.pool())
+            .await
+            .expect("observe effect join before shadow");
+            if state.as_ref().is_some_and(|(_, evidence)| *evidence == 2) {
+                    break state.unwrap();
+                }
+            }
+        }
+    };
+    assert_eq!(before_shadow, ("running".into(), 2));
+    let receipt = execution.await.expect("signed effect join completes");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    let joined: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read complete effect join");
+    assert_eq!(joined, ("confirmed".into(), 3));
+    let summaries = store
+        .effect_evidence_summaries(organization_id, admission.attempt_id)
+        .await
+        .expect("read redacted public effect evidence");
+    assert_eq!(summaries.len(), 1);
+    let summary = &summaries[0];
+    assert_eq!(summary.fence, claim.fence);
+    assert_eq!(summary.effect_key, "build.notification");
+    assert_eq!(summary.status, "confirmed");
+    assert!(summary.payload_digest.iter().any(|byte| *byte != 0));
+    assert!(summary.outcome_receipt_digest.is_some());
+    assert!(summary.reconciliation_receipt_digest.is_none());
+    assert!(summary.observation_receipt_digest.is_some());
+    assert!(summary.shadow_replay_receipt_digest.is_some());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind API");
+    let address = listener.local_addr().expect("read API address");
+    let server = tokio::spawn(
+        axum::serve(listener, router(api_state(store.clone(), organization_id))).into_future(),
+    );
+    let status = Client::new(&format!("http://{address}"), TOKEN)
+        .status(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read redacted effect evidence through HTTP");
+    assert_eq!(status.effects.len(), 1);
+    let effect = &status.effects[0];
+    assert_eq!(effect.fence, claim.fence);
+    assert_eq!(effect.effect_key, "build.notification");
+    assert_eq!(effect.status, "confirmed");
+    assert_eq!(effect.payload_sha256.len(), 64);
+    assert!(effect.outcome_receipt_sha256.is_some());
+    assert!(effect.reconciliation_receipt_sha256.is_none());
+    assert!(effect.observation_receipt_sha256.is_some());
+    assert!(effect.shadow_replay_receipt_sha256.is_some());
+    server.abort();
+}
+
+#[tokio::test]
+async fn connector_plan_preflight_failure_abandons_without_dispatch_or_downstream_release() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let mapping_digest = format!("sha256:{}", "a".repeat(64));
+    let downstream_digest = format!("sha256:{}", "b".repeat(64));
+    let execution_spec = json!({
+        "version": 2,
+        "steps": [{
+            "kind": "connector_intent",
+            "mapping_id": "notification.v1",
+            "mapping_digest": mapping_digest,
+            "effect_class": "externally_idempotent",
+            "effect_key_template": "build.notification",
+            "public_input_schema": {"message": "string"},
+            "protected_secret_ref_schema": {"token": "string"},
+            "expected_public_result_schema": {"delivery_id": "string"},
+            "timeout_seconds": 30,
+            "ambiguity_policy": "observe_then_reconcile",
+            "downstream_control_digest": downstream_digest,
+        }]
+    });
+    let (organization_id, project_id, admission, claim) =
+        admitted_claim(&store, execution_spec, "effect-plan-preflight", 60).await;
+    let fence = u64::try_from(claim.fence).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let request_seed = [11_u8; 32];
+    let request_key = public_key_from_seed(&request_seed).unwrap();
+    let mut action_request = ActionRequest {
+        schema_version: CONNECTOR_REQUEST_V1.into(),
+        protocol_version: CONNECTOR_PROTOCOL_V1.into(),
+        request_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        effect_key: "build.notification".into(),
+        connector_id: "fixture-connector".into(),
+        expected_implementation_sha256: "1".repeat(64),
+        expected_image_sha256: "2".repeat(64),
+        expected_config_sha256: "3".repeat(64),
+        expected_generation: 1,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        idempotency_class: IdempotencyClass::ExternallyIdempotent,
+        action_name: "notify".into(),
+        action_schema_version: "fixture.notify/v1".into(),
+        request_payload: json!({"message": "hello"}),
+        credential_grant_id: "fixture-grant".into(),
+        credential_grant_version: "v1".into(),
+        credential_grant_scope: "one-notification".into(),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 20_000,
+        audit_provenance: "effect-free-preflight-test".into(),
+        authorization: RequestAuthorization {
+            key_id: "request-key".into(),
+            signature_base64: String::new(),
+        },
+    };
+    sign_action_request(&mut action_request, &request_seed).unwrap();
+    let connector_request_sha256 = action_request_digest(&action_request).unwrap();
+    let observation_request = ObservationRequest {
+        schema_version: OBSERVER_REQUEST_V1.into(),
+        protocol_version: OBSERVER_PROTOCOL_V1.into(),
+        observation_id: Uuid::new_v4(),
+        tenant_id: organization_id,
+        project_id,
+        pipeline_id: project_id,
+        build_id: admission.build_id,
+        attempt_id: admission.attempt_id,
+        effect_fence: fence,
+        phase: ObservationPhase::PostAction,
+        observer_id: "fixture-observer".into(),
+        request_authority_identity: "controller".into(),
+        expected_implementation_sha256: "4".repeat(64),
+        expected_image_sha256: "5".repeat(64),
+        expected_config_sha256: "6".repeat(64),
+        expected_generation: 1,
+        activation_mode: ObserverActivationMode::Current,
+        previous_generation: None,
+        rollback_from_generation: None,
+        endpoint_identity: "fixture-endpoint".into(),
+        account_identity: "fixture-account".into(),
+        resource_identity: "fixture-resource".into(),
+        effect_class: "notification".into(),
+        read_grant_id: "fixture-read".into(),
+        read_grant_version: "v1".into(),
+        read_grant_scope: "fixture-resource".into(),
+        query: [(
+            "connector_request_sha256".to_owned(),
+            connector_request_sha256,
+        )]
+        .into_iter()
+        .collect(),
+        expected_previous_cursor: None,
+        predecessor_receipt_sha256: Some("a".repeat(64)),
+        requested_at_unix_ms: now - 1_000,
+        expires_at_unix_ms: now + 60_000,
+        audit_provenance: "effect-free-preflight-test".into(),
+        authorization: ObserverAuthorization {
+            key_id: "observer-request-key".into(),
+            signature_base64: "not-reached".into(),
+        },
+    };
+    let root = tempfile::tempdir().unwrap();
+    let valid_service = pinned_effect_fixture(root.path());
+    let mut unavailable_observer = valid_service.clone();
+    unavailable_observer.executable_sha256 = "0".repeat(64);
+    let plan = EffectExecutionPlan {
+        schema_version: "mcloving.controller-effect-plan/v1".into(),
+        freeze: EffectRuntimeFreeze {
+            mapping_id: "notification.v1".into(),
+            mapping_digest,
+            deployment_binding_sha256: "8".repeat(64),
+            runtime_attestation_sha256: "9".repeat(64),
+            credential_mapping_generation: 1,
+            pre_action_observation_sha256: "a".repeat(64),
+            grant: FreshOneActionGrant {
+                grant_sha256: "b".repeat(64),
+                request_id: action_request.request_id,
+                attempt_id: admission.attempt_id,
+                effect_fence: fence,
+                issued_at_unix_ms: now - 2_000,
+                expires_at_unix_ms: now + 60_000,
+                max_actions: 1,
+                consumed_actions: 0,
+            },
+            action_request,
+            request_authority_public_key: request_key,
+            connector_outcome_public_key: public_key_from_seed(&[12_u8; 32]).unwrap(),
+            observer_receipt_public_key: public_key_from_seed(&[13_u8; 32]).unwrap(),
+            shadow_replay_public_key: public_key_from_seed(&[14_u8; 32]).unwrap(),
+            expected_observer_id: "fixture-observer".into(),
+            expected_shadow_identity: "fixture-shadow".into(),
+        },
+        connector_service: valid_service.clone(),
+        observer_service: unavailable_observer,
+        shadow_service: valid_service,
+        observation_request,
+        audit_provenance: "effect-free-preflight-test".into(),
+    };
+    let receipt = run_claim(
+        &store,
+        &claim,
+        &WorkerConfig {
+            agent_id: "agent-regression".into(),
+            session_epoch: 1,
+            workspace_root: root.path().to_owned(),
+            journal_path: root.path().join("agent.db"),
+            cancellation_poll: Duration::from_millis(10),
+            lease_seconds: 60,
+            termination_grace: Duration::from_millis(100),
+            effect_plan: Some(plan),
+        },
+    )
+    .await
+    .expect("pre-dispatch service substitution becomes a terminal failure");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    assert_eq!(dispatch_count(root.path()), 0);
+    let effect: (String, i64) = sqlx::query_as(
+        "SELECT status,
+                ((outcome_receipt IS NOT NULL)::int
+                 + (observation_receipt IS NOT NULL)::int
+                 + (shadow_replay_receipt IS NOT NULL)::int)::bigint
+         FROM attempt_effects
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read abandoned effect");
+    assert_eq!(effect, ("abandoned".into(), 0));
 }
 
 async fn admitted_claim(

@@ -1,6 +1,6 @@
 # Canary qualification v1
 
-Status: CANARY-001 effect-free qualification foundation; production ceremony pending an eligible case
+Status: CANARY-000 effect-free qualification foundation; CANARY-001 production ceremony pending an eligible integrated case
 
 ## Purpose and authority boundary
 
