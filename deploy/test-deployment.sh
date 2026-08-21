@@ -505,6 +505,31 @@ if "${libexec}/helpers/mcloving-env-guard" controller "${equivalent_env}" >/dev/
   exit 1
 fi
 
+# Only systemd's ASCII whitespace is padding. A non-breaking space is part of
+# the value, so trimming it would validate a different value from the one the
+# service receives.
+nbsp_env="${workdir}/nbsp.env"
+python3 - "${nbsp_env}" <<'NBSP'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text("MCLOVING_NBSP=\u00a0value\u00a0\nMCLOVING_PLAIN=  plain  \n")
+NBSP
+(
+  # shellcheck source=/dev/null
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  load_environment_file "${nbsp_env}"
+  expected_nbsp="$(python3 -c "print('\u00a0value\u00a0')")"
+  [[ "$(contract_value MCLOVING_NBSP)" == "${expected_nbsp}" ]] || {
+    echo "non-ASCII whitespace was trimmed as padding" >&2
+    exit 1
+  }
+  [[ "$(contract_value MCLOVING_PLAIN)" == "plain" ]] || {
+    echo "ASCII padding was not trimmed" >&2
+    exit 1
+  }
+)
+
 # A contract-supplied name must not reach a helper's own control variables:
 # Bash is dynamically scoped, so an assignment named `service` could otherwise
 # rewrite the guard's dispatch selector and validate the wrong service.

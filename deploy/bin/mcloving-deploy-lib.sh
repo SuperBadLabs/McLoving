@@ -125,6 +125,12 @@ import sys
 path = sys.argv[1]
 out = sys.stdout.buffer
 
+# systemd's WHITESPACE set, exactly. Python's str.isspace() and str.strip()
+# also treat U+00A0, U+2028 and others as whitespace, so using them would trim
+# characters systemd keeps — the guard would then validate a different value
+# from the one the service receives.
+WHITESPACE = " \t\n\r\v\f"
+
 
 def parse_value(text, handle):
     # `protected` marks characters that were quoted or escaped, so trailing
@@ -230,10 +236,10 @@ def parse_value(text, handle):
             for chunk, guard in zip(result, protected):
                 flags.extend([guard] * len(chunk))
             end = len(text_out)
-            while end > 0 and text_out[end - 1].isspace() and not flags[end - 1]:
+            while end > 0 and text_out[end - 1] in WHITESPACE and not flags[end - 1]:
                 end -= 1
             start = 0
-            while start < end and text_out[start].isspace() and not flags[start]:
+            while start < end and text_out[start] in WHITESPACE and not flags[start]:
                 start += 1
             return text_out[start:end]
 
@@ -246,7 +252,7 @@ with open(path, "r", encoding="utf-8") as handle:
         # Only the newline is removed. Stripping the line would delete an
         # escaped trailing space before the parser could see it was escaped,
         # leaving a dangling backslash that reads as a line continuation.
-        probe = raw.strip()
+        probe = raw.strip(WHITESPACE)
         if not probe or probe.startswith("#") or probe.startswith(";"):
             continue
         line = raw.rstrip("\n")
@@ -254,7 +260,7 @@ with open(path, "r", encoding="utf-8") as handle:
         if not separator:
             sys.stderr.write("environment file line is not NAME=VALUE\n")
             raise SystemExit(1)
-        name = name.strip()
+        name = name.strip(WHITESPACE)
         out.write(name.encode() + b"\0" + parse_value(value, handle).encode() + b"\0")
 PARSE
 }
