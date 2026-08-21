@@ -48,7 +48,6 @@ cargo +1.97.1 build --locked --offline --release \
   -p mcloving-agent \
   -p mcloving-cli \
   -p mcloving-controller \
-  -p mcloving-identity-admin \
   -p mcloving-release-provenance \
   --bin mcloving-agent \
   --bin mcloving-cli \
@@ -74,7 +73,7 @@ cli_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-cli")"
 controller_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-controller")"
 identity_admin_digest="$(sha256sum "${OUTPUT_ROOT}/components/bin/mcloving-identity-admin" | cut -d' ' -f1)"
 identity_admin_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-identity-admin")"
-printf '%s' "[{\"path\":\"bin/mcloving-agent\",\"role\":\"agent\",\"sha256\":\"${agent_digest}\",\"size_bytes\":${agent_size},\"executable\":true},{\"path\":\"bin/mcloving-cli\",\"role\":\"cli\",\"sha256\":\"${cli_digest}\",\"size_bytes\":${cli_size},\"executable\":true},{\"path\":\"bin/mcloving-controller\",\"role\":\"controller\",\"sha256\":\"${controller_digest}\",\"size_bytes\":${controller_size},\"executable\":true},{\"path\":\"bin/mcloving-identity-admin\",\"role\":\"identity-admin\",\"sha256\":\"${identity_admin_digest}\",\"size_bytes\":${identity_admin_size},\"executable\":true}]" >"${OUTPUT_ROOT}/components.json"
+printf '%s' "[{\"path\":\"bin/mcloving-agent\",\"role\":\"agent\",\"sha256\":\"${agent_digest}\",\"size_bytes\":${agent_size},\"executable\":true},{\"path\":\"bin/mcloving-cli\",\"role\":\"cli\",\"sha256\":\"${cli_digest}\",\"size_bytes\":${cli_size},\"executable\":true},{\"path\":\"bin/mcloving-controller\",\"role\":\"controller\",\"sha256\":\"${controller_digest}\",\"size_bytes\":${controller_size},\"executable\":true},{\"path\":\"bin/mcloving-identity-admin\",\"role\":\"migration_tool\",\"sha256\":\"${identity_admin_digest}\",\"size_bytes\":${identity_admin_size},\"executable\":true}]" >"${OUTPUT_ROOT}/components.json"
 chmod 0600 "${OUTPUT_ROOT}/components.json"
 
 release_tool="${TARGET_ROOT}/mcloving-release-provenance"

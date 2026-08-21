@@ -412,6 +412,25 @@ GRAMMAR
   }
 )
 
+# A single-quoted value may span physical lines; systemd loads it, so the
+# guard must too rather than refusing a valid contract at ExecStartPre.
+multiline_env="${workdir}/multiline.env"
+printf "MCLOVING_SPAN='line one\nline two'\nMCLOVING_AFTER=tail\n" > "${multiline_env}"
+(
+  # shellcheck source=/dev/null
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  load_environment_file "${multiline_env}"
+  expected_span="$(printf 'line one\nline two')"
+  [[ "${MCLOVING_SPAN}" == "${expected_span}" ]] || {
+    echo "multiline single-quoted value was not read: [${MCLOVING_SPAN}]" >&2
+    exit 1
+  }
+  [[ "${MCLOVING_AFTER}" == "tail" ]] || {
+    echo "parsing did not resume after a multiline value: [${MCLOVING_AFTER}]" >&2
+    exit 1
+  }
+)
+
 # Configuration reached through a symlink is consumed by the services, so the
 # drift re-read must cover it.
 config_dir="${home}/.config/mcloving"
@@ -458,4 +477,4 @@ mv "${config_dir}/pki.real" "${config_dir}/pki"
   exit 1
 }
 
-echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar -> symlinked contract -> symlinked pki -> rollback helper"
+echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar (incl. multiline) -> symlinked contract -> symlinked pki -> rollback helper"

@@ -145,11 +145,24 @@ def parse_value(text, handle):
                 index += 2
                 continue
             if char == "'":
-                closing = text.find("'", index + 1)
-                if closing == -1:
-                    raise SystemExit("unterminated single quote")
-                result.append(text[index + 1 : closing])
-                index = closing + 1
+                # A single-quoted value may span physical lines, exactly as the
+                # double-quoted branch below allows. Reporting an unterminated
+                # quote here would refuse a contract systemd loads happily and
+                # stop the service at ExecStartPre.
+                index += 1
+                while True:
+                    closing = text.find("'", index)
+                    if closing != -1:
+                        result.append(text[index:closing])
+                        index = closing + 1
+                        break
+                    result.append(text[index:])
+                    following = handle.readline()
+                    if not following:
+                        raise SystemExit("unterminated single quote")
+                    result.append("\n")
+                    text = following.rstrip("\n")
+                    index = 0
                 continue
             if char == '"':
                 index += 1
