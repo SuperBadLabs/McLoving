@@ -379,7 +379,9 @@ second_release="$(readlink "${libexec}/current")"
 # A staged release is writable by the service user, so rollback must recompute
 # digests rather than trust that a present, executable binary is the one that
 # was verified at installation.
-printf '\n' >> "${libexec}/${second_release}/mcloving-cli"
+tampered="${libexec}/${second_release}/mcloving-cli"
+cp "${tampered}" "${workdir}/untampered-cli"
+printf '\n' >> "${tampered}"
 if "${repo_root}/deploy/bin/mcloving-rollback" --home "${home}" --no-systemd \
   >/dev/null 2>&1; then
   echo "rollback accepted a modified previous release" >&2
@@ -389,6 +391,10 @@ fi
   echo "refused rollback must leave the current release untouched" >&2
   exit 1
 }
+# Restore the release so the later gates run against an intact tree; the
+# refusal above is the assertion, not a lasting state.
+cp "${workdir}/untampered-cli" "${tampered}"
+chmod 0755 "${tampered}"
 
 # systemd's environment grammar, not Bash's: a partially quoted value is one
 # value, and a value that is literal to systemd must not be executed.
@@ -471,10 +477,25 @@ LINKEDDIR
 rm -f "${config_dir}/pki"
 mv "${config_dir}/pki.real" "${config_dir}/pki"
 
-# The recovery command the upgrade path prints must exist on the host.
+# The recovery command the upgrade path prints must actually run from where it
+# is installed. Checking only that the file exists proved nothing: the helper
+# resolved its shared library against the repository layout and exited before
+# touching anything.
 [[ -x "${libexec}/helpers/mcloving-rollback" ]] || {
   echo "rollback helper is not installed; the printed recovery command would not resolve" >&2
   exit 1
 }
+"${libexec}/helpers/mcloving-rollback" --home "${home}" --no-systemd >/dev/null || {
+  echo "installed rollback helper is not runnable from its installed location" >&2
+  exit 1
+}
+"${libexec}/helpers/mcloving-rollback" --home "${home}" --no-systemd >/dev/null || {
+  echo "installed rollback helper is not runnable on the return swap" >&2
+  exit 1
+}
+[[ "$(readlink "${libexec}/current")" == "${first_release}" ]] || {
+  echo "paired installed rollbacks did not return to the original release" >&2
+  exit 1
+}
 
-echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar (incl. multiline) -> symlinked contract -> symlinked pki -> rollback helper"
+echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar (incl. multiline) -> symlinked contract -> symlinked pki -> installed rollback runs"

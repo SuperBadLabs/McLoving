@@ -174,8 +174,26 @@ def parse_value(text, handle):
                         text += "\n" + following.rstrip("\n")
                         continue
                     char = text[index]
-                    if char == "\\" and index + 1 < len(text):
-                        result.append(text[index + 1])
+                    if char == "\\":
+                        if index + 1 >= len(text):
+                            # Backslash-newline continues the line and produces
+                            # nothing, as it does outside quotes.
+                            following = handle.readline()
+                            if not following:
+                                raise SystemExit("unterminated double quote")
+                            text = following.rstrip("\n")
+                            index = 0
+                            continue
+                        following_char = text[index + 1]
+                        # systemd only treats a backslash as an escape before a
+                        # character that is special inside double quotes.
+                        # Anything else keeps the backslash, so a path such as
+                        # "/tmp/key\\q.pem" survives intact rather than losing it.
+                        if following_char in ('"', "\\", "$", "`"):
+                            result.append(following_char)
+                        else:
+                            result.append(char)
+                            result.append(following_char)
                         index += 2
                         continue
                     if char == '"':
@@ -217,13 +235,34 @@ load_environment_file() {
 }
 
 # stage_release LIBEXEC_ROOT RELEASE_DIR RELEASE_ID
+#
+# Copies first, then verifies the copy, then publishes it under its identity.
+# Verifying the source directory and copying afterwards leaves a window in
+# which the source can change between the two, so the bytes that become
+# current would never have been the bytes that were verified. The snapshot
+# this function activates is the one it checked.
 stage_release() {
-  local libexec_root="$1" release_dir="$2" id="$3" binary target
+  local libexec_root="$1" release_dir="$2" id="$3" binary target staging actual
   target="${libexec_root}/releases/${id}"
-  mkdir -p "${target}"
+  if [[ -d "${target}" ]]; then
+    verify_staged_release "${target}"
+    echo "${target}"
+    return 0
+  fi
+  mkdir -p "${libexec_root}/releases"
+  staging="${libexec_root}/releases/.staging.$$"
+  rm -rf "${staging}"
+  mkdir -p "${staging}"
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
-    install -m 0755 "${release_dir}/${binary}" "${target}/${binary}"
+    install -m 0755 "${release_dir}/${binary}" "${staging}/${binary}"
   done
+  # The identity of what was actually copied, not of what the source now holds.
+  actual="$(release_id "${staging}")"
+  if [[ "${actual}" != "${id}" ]]; then
+    rm -rf "${staging}"
+    deploy_fail "release directory changed while staging: expected ${id}, copied ${actual}"
+  fi
+  mv -T "${staging}" "${target}"
   echo "${target}"
 }
 

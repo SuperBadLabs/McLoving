@@ -19,8 +19,19 @@
 set -euo pipefail
 
 deploy_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Locate the shared library beside this script when installed as a helper, and
+# under bin/ when run from the repository. The installer places helpers and the
+# library together, so a repository-only assumption makes the installed
+# recovery command exit before it touches anything.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${script_dir}/mcloving-deploy-lib.sh" ]]; then
+  deploy_lib="${script_dir}/mcloving-deploy-lib.sh"
+else
+  deploy_lib="$(cd "${script_dir}/.." && pwd)/bin/mcloving-deploy-lib.sh"
+fi
 # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
-source "${deploy_root}/bin/mcloving-deploy-lib.sh"
+source "${deploy_lib}"
+
 
 release_dir=""
 manifest=""
