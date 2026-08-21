@@ -160,11 +160,11 @@ def parse_value(text, handle):
                     closing = text.find("'", index)
                     if closing != -1:
                         result.append(text[index:closing])
-                        protected.extend([True] * (closing - index))
+                        protected.append(True)
                         index = closing + 1
                         break
                     result.append(text[index:])
-                    protected.extend([True] * (len(text) - index))
+                    protected.append(True)
                     following = handle.readline()
                     if not following:
                         raise SystemExit("unterminated single quote")
@@ -203,8 +203,9 @@ def parse_value(text, handle):
                             protected.append(True)
                         else:
                             result.append(char)
+                            protected.append(True)
                             result.append(following_char)
-                            protected.extend([True, True])
+                            protected.append(True)
                         index += 2
                         continue
                     if char == '"':
@@ -220,6 +221,11 @@ def parse_value(text, handle):
         else:
             # Trim only whitespace that is neither quoted nor escaped.
             text_out = "".join(result)
+            # One flag per appended chunk, expanded to per-character here.
+            # Anything else silently misaligns the two lists and misclassifies
+            # every character after the first multi-character run.
+            if len(result) != len(protected):
+                raise SystemExit("internal parser error: protection flags misaligned")
             flags = []
             for chunk, guard in zip(result, protected):
                 flags.extend([guard] * len(chunk))
@@ -251,6 +257,24 @@ with open(path, "r", encoding="utf-8") as handle:
         name = name.strip()
         out.write(name.encode() + b"\0" + parse_value(value, handle).encode() + b"\0")
 PARSE
+}
+
+# database_url_role URL -> the role a PostgreSQL URL authenticates as.
+#
+# Compares roles rather than URL text, so two spellings of one role do not read
+# as two roles.
+database_url_role() {
+  python3 - "$1" <<'ROLE'
+import sys
+from urllib.parse import unquote, urlsplit
+
+url = sys.argv[1]
+if not url:
+    raise SystemExit(0)
+parts = urlsplit(url)
+if parts.username:
+    print(unquote(parts.username))
+ROLE
 }
 
 # load_environment_file ENV_FILE — parse the contract into MCLOVING_CONTRACT.

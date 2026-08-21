@@ -61,6 +61,14 @@ def file_record(path: Path, root: Path) -> dict:
     # live target leave this document unchanged — a drift re-read that cannot
     # see the drift. The link target is recorded alongside the digest so a
     # repointed link is itself visible.
+    if path.is_symlink() and path.is_dir():
+        # A directory alias has no bytes of its own; what it names is the
+        # configuration fact worth recording.
+        return {
+            "path": path.relative_to(root).as_posix(),
+            "symlink_target": os.readlink(path),
+            "kind": "directory_symlink",
+        }
     record = {
         "path": path.relative_to(root).as_posix(),
         "sha256": sha256_file(path),
@@ -108,6 +116,13 @@ def walk(root: Path) -> list[Path]:
                 found.append(entry)
                 continue
             if is_directory:
+                if entry.is_symlink():
+                    # Record the alias itself before deduplication can suppress
+                    # it. Two links to one target are two pieces of live
+                    # configuration: repointing or deleting either changes what
+                    # the services read, and a re-read that reported only the
+                    # first would be byte-identical across that change.
+                    found.append(entry)
                 descend(entry)
             elif is_file:
                 found.append(entry)

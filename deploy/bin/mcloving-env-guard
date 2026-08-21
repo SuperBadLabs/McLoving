@@ -97,11 +97,22 @@ case "${service}" in
     require_uuid MCLOVING_ORGANIZATION_ID
     require_min_bytes MCLOVING_API_TOKEN 32
     require_min_bytes MCLOVING_ARTIFACT_AGENT_TOKEN 32
-    if [[ "${MCLOVING_API_TOKEN}" == "${MCLOVING_ARTIFACT_AGENT_TOKEN}" ]]; then
+    if [[ "$(contract_value MCLOVING_API_TOKEN)" \
+      == "$(contract_value MCLOVING_ARTIFACT_AGENT_TOKEN)" ]]; then
       fail "MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct"
     fi
-    if [[ "${MCLOVING_MIGRATION_DATABASE_URL}" == "${MCLOVING_DATABASE_URL}" ]]; then
-      fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must use distinct roles"
+    # Compare the roles the URLs authenticate as, not the URL text. Two
+    # spellings of one role — a default port written out in one and omitted in
+    # the other — would otherwise pass as distinct, and the controller would
+    # run its runtime pool as the migration role, which is exactly what this
+    # check exists to prevent.
+    migration_role="$(database_url_role "$(contract_value MCLOVING_MIGRATION_DATABASE_URL)")"
+    runtime_role="$(database_url_role "$(contract_value MCLOVING_DATABASE_URL)")"
+    if [[ -z "${migration_role}" || -z "${runtime_role}" ]]; then
+      fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must each name a role"
+    fi
+    if [[ "${migration_role}" == "${runtime_role}" ]]; then
+      fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must use distinct roles, both are ${runtime_role}"
     fi
     require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
       MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
@@ -118,8 +129,9 @@ case "${service}" in
       MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
     # The agent refuses to spawn work into a missing workspace root; require
     # it up front so the unit fails at start, not at first assignment.
-    if [[ ! -d "${MCLOVING_AGENT_WORKSPACE_ROOT}" ]]; then
-      fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${MCLOVING_AGENT_WORKSPACE_ROOT}"
+    workspace_root="$(contract_value MCLOVING_AGENT_WORKSPACE_ROOT)"
+    if [[ ! -d "${workspace_root}" ]]; then
+      fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${workspace_root}"
     fi
     ;;
   *)

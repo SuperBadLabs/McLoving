@@ -95,6 +95,7 @@ echo "== [3/9] verified install"
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
   --no-systemd
 libexec="${home}/.local/libexec/mcloving"
+config_dir="${home}/.config/mcloving"
 config="${home}/.config/mcloving"
 unit_command="${libexec}/helpers/mcloving-unit-command"
 
@@ -435,6 +436,29 @@ GRAMMAR
   }
 )
 
+# The guards must accept the contracts this install actually wrote. Every other
+# guard assertion here is a refusal, so a regression that broke acceptance —
+# an unset variable, a renamed lookup — would pass unnoticed.
+"${libexec}/helpers/mcloving-env-guard" controller "${config_dir}/controller.env" >/dev/null || {
+  echo "controller guard rejected the contract this install wrote" >&2
+  exit 1
+}
+"${libexec}/helpers/mcloving-env-guard" agent "${config_dir}/agent.env" >/dev/null || {
+  echo "agent guard rejected the contract this install wrote" >&2
+  exit 1
+}
+
+# Two spellings of one database role are one role. Comparing URL text would
+# accept them as distinct and let the controller run as the migration role.
+equivalent_env="${workdir}/equivalent.env"
+sed -e 's|^MCLOVING_DATABASE_URL=.*|MCLOVING_DATABASE_URL=postgres://mcloving_migration@127.0.0.1:5432/mcloving|' \
+    -e 's|^MCLOVING_MIGRATION_DATABASE_URL=.*|MCLOVING_MIGRATION_DATABASE_URL=postgres://mcloving_migration@127.0.0.1/mcloving|' \
+    "${config_dir}/controller.env" > "${equivalent_env}"
+if "${libexec}/helpers/mcloving-env-guard" controller "${equivalent_env}" >/dev/null 2>&1; then
+  echo "guard accepted two spellings of one database role as distinct" >&2
+  exit 1
+fi
+
 # A contract-supplied name must not reach a helper's own control variables:
 # Bash is dynamically scoped, so an assignment named `service` could otherwise
 # rewrite the guard's dispatch selector and validate the wrong service.
@@ -488,7 +512,6 @@ printf "MCLOVING_SPAN='line one\nline two'\nMCLOVING_AFTER=tail\n" > "${multilin
 
 # Configuration reached through a symlink is consumed by the services, so the
 # drift re-read must cover it.
-config_dir="${home}/.config/mcloving"
 ln -s "${config_dir}/controller.env" "${config_dir}/controller-linked.env"
 linked_digests="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
 python3 - "${linked_digests}" <<'LINKED'

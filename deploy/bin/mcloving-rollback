@@ -34,6 +34,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# systemd units resolve %h to the service account's real home and the manager
+# acted on below is this user's, so operating on a different tree while
+# expecting systemd to follow would stop and start units that point elsewhere.
+if [[ "${no_systemd}" != "1" && "${home_dir}" != "${HOME}" ]]; then
+  deploy_fail "--home ${home_dir} differs from ${HOME}; systemd units resolve %h to ${HOME}, so pass --no-systemd for an alternate tree"
+fi
+
 libexec_root="${home_dir}/.local/libexec/mcloving"
 config_root="${home_dir}/.config/mcloving"
 [[ -L "${libexec_root}/current" ]] || deploy_fail "no installed release; nothing to roll back"
