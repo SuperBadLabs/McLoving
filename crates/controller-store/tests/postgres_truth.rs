@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, BuildAdmission, ClaimRequest, ComponentPutOutcome,
-    ComponentWrite, DagAdmission, DagDependency, DagNodeKind, DependencyCondition, EffectClass,
-    EffectEvidenceKind, EffectStatus, JunitLimits, LeaseRenewalDisposition,
-    MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus, OutboxBacklog,
-    PipelinePutOutcome, PipelineRecord, PipelineWrite, ReconciliationTrustPoolAuthorization,
-    RetryDecision, Store, StoreError, TerminalOutcome, TestOutcome, TestReportSource, WaitReason,
-    parse_junit, verify_audit_page,
+    AgentReconciliationDisposition, BuildAdmission, CancellationDecision, ClaimRequest,
+    ComponentPutOutcome, ComponentWrite, DagAdmission, DagDependency, DagNodeKind,
+    DependencyCondition, EffectClass, EffectEvidenceKind, EffectStatus, JunitLimits,
+    LeaseRenewalDisposition, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
+    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
+    ObjectStatus, OutboxBacklog, PipelinePutOutcome, PipelineRecord, PipelineWrite,
+    ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
+    TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use mcloving_state_transfer::{
     BuildResult as TransferBuildResult, BuildState as TransferBuildState, ConflictPolicy,
@@ -2766,6 +2766,306 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(re_enrolled_snapshot.build_status, "running");
     assert_eq!(re_enrolled_snapshot.attempt_status, "cancelling");
     assert_eq!(re_enrolled_snapshot.terminal_summary, None);
+}
+
+#[tokio::test]
+async fn recovered_discharge_is_authorized_only_when_the_fence_is_disowned() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("exec003-discharge-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "recovered-discharge",
+        )
+        .await
+        .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                1,
+                0,
+                &["journal-v1".to_owned()],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("open agent session")
+    );
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "recovered-discharge-parked".into(),
+            pipeline_digest: [0xD1; 32],
+            node_key: "stage-parked".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit parked build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: agent_id.clone(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim parked work")
+        .expect("parked claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+            )
+            .await
+            .expect("accept parked offer")
+    );
+
+    // An interrupted execution that cannot prove containment parks the
+    // attempt; while the controller-side reconciliation is unresolved the
+    // report stays parked and is never discharged.
+    let completion = AgentCancellationCompletion {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        session_epoch: 1,
+        outcome: AgentCancellationOutcome::ReconciliationRequired,
+    };
+    for label in ["park recovered attempt", "replay parked recovered attempt"] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(completion)
+                .await
+                .expect(label),
+            AgentCancellationDisposition::ReconciliationRequired
+        );
+    }
+    let parked = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read parked build")
+        .expect("parked build exists");
+    assert_eq!(parked.build_status, "reconciliation_required");
+    assert_eq!(parked.attempt_status, "reconciliation_required");
+
+    // Cancelling the parked build is refused with its exact state instead of
+    // a bare conflict.
+    assert_eq!(
+        store
+            .request_cancellation_decision_as(
+                organization_id,
+                project_id,
+                admission.build_id,
+                "oidc:operator",
+            )
+            .await
+            .expect("decide parked cancellation"),
+        CancellationDecision::NotCancellable {
+            build_status: Some("reconciliation_required".to_owned()),
+        }
+    );
+    assert_eq!(
+        store
+            .request_cancellation_decision_as(
+                organization_id,
+                project_id,
+                Uuid::new_v4(),
+                "oidc:operator",
+            )
+            .await
+            .expect("decide unknown cancellation"),
+        CancellationDecision::NotCancellable { build_status: None }
+    );
+
+    // A stale session can never obtain a discharge authorization.
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                session_epoch: 999,
+                ..completion
+            })
+            .await
+            .expect("reject stale-session discharge"),
+        AgentCancellationDisposition::RetireStale
+    );
+
+    // The explicit operator retry supersedes the parked fence, and only then
+    // is the recovered report authorized to discharge.
+    assert!(matches!(
+        store
+            .schedule_retry_as(
+                organization_id,
+                claim.attempt_id,
+                3,
+                "operator resolves the recovered attempt",
+                "oidc:operator",
+            )
+            .await
+            .expect("schedule operator retry"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    for label in ["authorize discharge", "replay discharge authorization"] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(completion)
+                .await
+                .expect(label),
+            AgentCancellationDisposition::DischargeRecovered
+        );
+    }
+    let discharge_events = sqlx::query_as::<_, (i64, Value)>(
+        "SELECT count(*), min(payload::text)::jsonb
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.recovered_discharge_authorized'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count discharge authorizations");
+    assert_eq!(discharge_events.0, 1, "discharge replay emits one event");
+    assert_eq!(
+        discharge_events.1.get("reason").and_then(Value::as_str),
+        Some("operator_retry_superseded")
+    );
+    assert_eq!(
+        discharge_events.1.get("agent_id").and_then(Value::as_str),
+        Some(agent_id.as_str())
+    );
+
+    // A fence that finished as terminal truth also discharges a late
+    // recovered report — the collision-twin case.
+    let terminal = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "recovered-discharge-terminal".into(),
+            pipeline_digest: [0xD2; 32],
+            node_key: "stage-terminal".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            // Outranks the operator-retry child queued above so this claim is
+            // deterministic.
+            priority: 100,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit terminal build");
+    let terminal_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: agent_id.clone(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 2,
+        })
+        .await
+        .expect("claim terminal work")
+        .expect("terminal claim exists");
+    assert_eq!(terminal_claim.build_id, terminal.build_id);
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                terminal_claim.attempt_id,
+                terminal_claim.fence,
+                terminal_claim.restore_epoch,
+                &agent_id,
+            )
+            .await
+            .expect("accept terminal offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, terminal.build_id)
+            .await
+            .expect("request terminal cancellation")
+    );
+    let terminal_completion = AgentCancellationCompletion {
+        organization_id,
+        attempt_id: terminal_claim.attempt_id,
+        fence: terminal_claim.fence,
+        restore_epoch: terminal_claim.restore_epoch,
+        agent_id: &agent_id,
+        session_epoch: 1,
+        outcome: AgentCancellationOutcome::Terminated,
+    };
+    assert_eq!(
+        store
+            .complete_agent_cancellation(terminal_completion)
+            .await
+            .expect("complete terminal cancellation"),
+        AgentCancellationDisposition::Completed
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                outcome: AgentCancellationOutcome::ReconciliationRequired,
+                ..terminal_completion
+            })
+            .await
+            .expect("discharge late recovered report for terminal fence"),
+        AgentCancellationDisposition::DischargeRecovered
+    );
+
+    // A fence this controller does not know at all discharges a recovered
+    // report, while every other outcome keeps the stale-retirement contract.
+    let unknown = AgentCancellationCompletion {
+        organization_id,
+        attempt_id: Uuid::new_v4(),
+        fence: 7,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        session_epoch: 1,
+        outcome: AgentCancellationOutcome::ReconciliationRequired,
+    };
+    assert_eq!(
+        store
+            .complete_agent_cancellation(unknown)
+            .await
+            .expect("discharge unknown recovered report"),
+        AgentCancellationDisposition::DischargeRecovered
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                outcome: AgentCancellationOutcome::Terminated,
+                ..unknown
+            })
+            .await
+            .expect("retire unknown terminated report"),
+        AgentCancellationDisposition::RetireStale
+    );
 }
 
 #[tokio::test]
