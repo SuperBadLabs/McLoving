@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use mcloving_domain::capability::{PLATFORM_CAPABILITY_PREFIX, platform_capability};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -381,7 +382,7 @@ pub(crate) async fn admit_dag_transaction(
             "blocked"
         };
         let mut capabilities = node.required_capabilities.clone();
-        capabilities.push(format!("platform:{}", node.required_platform));
+        capabilities.push(platform_capability(&node.required_platform));
         capabilities.sort();
         capabilities.dedup();
         sqlx::query(
@@ -1205,7 +1206,7 @@ fn normalized_dag_contract(input: &NewDagBuild) -> Value {
                 })
                 .collect::<Vec<_>>();
             let mut capabilities = node.required_capabilities.clone();
-            capabilities.push(format!("platform:{}", node.required_platform));
+            capabilities.push(platform_capability(&node.required_platform));
             capabilities.sort();
             capabilities.dedup();
             json!({
@@ -1307,9 +1308,10 @@ pub fn validate_dag_contract(input: &NewDagBuild) -> Result<(), DagContractError
                 format!("execution specification exceeds {MAX_EXECUTION_SPEC_BYTES} bytes"),
             ));
         }
-        let platform_capability = format!("platform:{}", node.required_platform);
+        let node_platform_capability = platform_capability(&node.required_platform);
         if node.required_capabilities.iter().any(|capability| {
-            capability.starts_with("platform:") && capability != &platform_capability
+            capability.starts_with(PLATFORM_CAPABILITY_PREFIX)
+                && capability != &node_platform_capability
         }) {
             return Err(DagContractError::new(
                 DagContractErrorCode::PlatformMismatch,

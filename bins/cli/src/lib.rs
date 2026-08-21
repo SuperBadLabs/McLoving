@@ -85,7 +85,13 @@ pub enum Command {
         parameters: Vec<String>,
         #[arg(long, default_value = "trusted-linux")]
         trust_pool: String,
-        #[arg(long, default_value = "linux", value_parser = ["linux", "windows"])]
+        #[arg(
+            long,
+            default_value = mcloving_domain::capability::DEFAULT_PLATFORM,
+            value_parser = clap::builder::PossibleValuesParser::new(
+                mcloving_domain::capability::SUPPORTED_PLATFORMS
+            )
+        )]
         platform: String,
     },
     PipelineState {
