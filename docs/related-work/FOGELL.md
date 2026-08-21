@@ -16,7 +16,8 @@ owned by the same owner, developed privately, and named for the character
 whose real identity sits behind the McLovin fake ID; the naming is not a
 coincidence and neither is the relationship.
 
-- Checkouts: local on the owner's development machine; board records HeMan as the canonical private repository.
+- Checkouts: local on the owner's development machine; the board records which
+  host holds the canonical private repository.
 - (Intentionally location-agnostic: do not record hostnames or filesystem paths here.)
 - Command center: `docs/EXECUTION_BOARD.md` (waves 0–8, `FG-xxx` tickets),
   `docs/adr/` for decisions, `evidence/` for sealed receipts.
@@ -49,10 +50,10 @@ Both projects measure against the same oracle lineage:
   scorecard and McLoving's `MIG-002` corpus report identical oracle signals:
   80 Declarative-valid, 199 compile/CPS entry, 119 reached agent scheduling
   (the only scoring denominator both boards accept).
-- A pinned Jenkins 2.568.1 oracle. Fogell measured on luigi; McLoving's
-  sealed inventory came from the Mario `jenkins-oracle-228` population.
-  Same version, different hosts and plugin provenance — receipts are
-  therefore comparable in SHAPE but never interchangeable.
+- A pinned Jenkins 2.568.1 oracle. Fogell measured on its own host; McLoving's
+  sealed inventory came from the `jenkins-oracle-228` population on a
+  different one. Same version, different hosts and plugin provenance —
+  receipts are therefore comparable in SHAPE but never interchangeable.
 
 ## What Fogell has that McLoving can use
 
