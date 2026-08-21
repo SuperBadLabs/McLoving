@@ -1469,6 +1469,7 @@ dependencies = [
  "base64",
  "http",
  "jsonwebtoken",
+ "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-domain",
  "mcloving-object-store",
@@ -1845,10 +1846,6 @@ dependencies = [
  "url",
  "uuid",
 ]
-
-[[package]]
-name = "mcloving-state-machine"
-version = "0.0.0"
 
 [[package]]
 name = "mcloving-state-policy-differential"

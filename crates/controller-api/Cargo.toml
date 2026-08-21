@@ -25,7 +25,15 @@ sha2 = "=0.10.9"
 thiserror = "=2.0.17"
 uuid = { version = "=1.18.1", features = ["serde", "v4"] }
 
+[features]
+# Compiles the test-only constructor for the plain-HTTP loopback policy.
+# Enabled solely by this crate's dev-dependency on itself so integration
+# tests can exercise a loopback identity provider; release builds of the
+# controller never enable it.
+insecure-loopback-tests = []
+
 [dev-dependencies]
+mcloving-controller-api = { path = ".", features = ["insecure-loopback-tests"] }
 sqlx = { version = "=0.8.6", default-features = false, features = [
   "postgres",
   "runtime-tokio",
