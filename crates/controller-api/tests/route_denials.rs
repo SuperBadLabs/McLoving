@@ -732,6 +732,51 @@ stages:
             .all(|delivery| delivery.delivery_id != "invalid-parameters-delivery")
     );
 
+    // The platform arrives in the request body, where the OpenAPI enum is
+    // documentation rather than enforcement. Such a delivery is captured so
+    // that an exact retry stays readable, then dead-lettered with a named
+    // reason rather than queued against a capability no valid worker can
+    // advertise under the sealed vocabulary.
+    let unsupported_platform = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "trigger_generation": 1,
+                        "delivery_id": "unsupported-platform-delivery",
+                        "event_id": "unsupported-platform-event",
+                        "event_kind": "push",
+                        "event_time_unix_ms": now,
+                        "payload": {
+                            "repository_identity": "github:superbadlabs/mcloving",
+                            "revision": "0123456789abcdef",
+                            "branch": "main",
+                            "paths": ["src/lib.rs"]
+                        },
+                        "platform": "macos",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("dead-letter an unsupported trigger platform");
+    assert_eq!(
+        unsupported_platform.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(
+        store
+            .due_trigger_deliveries(organization_id, now + 1, 128)
+            .await
+            .unwrap()
+            .iter()
+            .all(|delivery| delivery.delivery_id != "unsupported-platform-delivery")
+    );
+
     let malformed_paths = app
         .clone()
         .oneshot(

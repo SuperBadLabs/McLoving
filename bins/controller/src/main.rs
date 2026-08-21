@@ -32,6 +32,9 @@ use mcloving_controller_store::{
     NewLogChunk, NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization,
     Store, StoreError, TerminalOutcome, authz::ServiceScope,
 };
+use mcloving_domain::capability::{
+    EmbeddedWorkerCapabilities, classify_embedded_worker_capabilities,
+};
 use mcloving_execution_spine::{EffectExecutionPlan, WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
@@ -1771,6 +1774,9 @@ struct EmbeddedWorker {
     organization_id: Uuid,
     scheduler_id: String,
     capabilities: Vec<String>,
+    /// The exact documented sentinel (`MCLOVING_AGENT_CAPABILITIES=disabled`)
+    /// was declared: the worker reconciles expired leases but never claims.
+    disabled: bool,
     trust_pool: String,
     lease_seconds: i32,
     poll_interval: Duration,
@@ -1789,9 +1795,13 @@ impl EmbeddedWorker {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        if capabilities.is_empty() {
-            bail!("MCLOVING_AGENT_CAPABILITIES must not be empty");
-        }
+        let disabled = match classify_embedded_worker_capabilities(&capabilities).context(
+            "MCLOVING_AGENT_CAPABILITIES violates the capability vocabulary \
+             (docs/architecture/CAPABILITY_VOCABULARY_V1.md)",
+        )? {
+            EmbeddedWorkerCapabilities::Disabled => true,
+            EmbeddedWorkerCapabilities::Schedulable(_) => false,
+        };
         let trust_pool = required("MCLOVING_AGENT_TRUST_POOL")?;
         let lease_seconds = parse_positive::<i32>("MCLOVING_LEASE_SECONDS")?;
         let poll_milliseconds = parse_positive::<u64>("MCLOVING_POLL_MILLISECONDS")?;
@@ -1803,6 +1813,7 @@ impl EmbeddedWorker {
             organization_id,
             scheduler_id: format!("embedded:{agent_id}"),
             capabilities,
+            disabled,
             trust_pool,
             lease_seconds,
             poll_interval: Duration::from_millis(poll_milliseconds),
@@ -1824,6 +1835,12 @@ async fn run_embedded_worker(store: Store, worker: EmbeddedWorker) -> Result<()>
     loop {
         if let Err(error) = store.requeue_one_expired(worker.organization_id).await {
             eprintln!("expired-lease reconciliation failed: {error}");
+        }
+        // A disabled embedded worker keeps the expired-lease reconciliation
+        // duty above but must never claim work.
+        if worker.disabled {
+            tokio::time::sleep(worker.poll_interval).await;
+            continue;
         }
         match store
             .claim_next(&ClaimRequest {
