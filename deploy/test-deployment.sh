@@ -390,4 +390,45 @@ fi
   exit 1
 }
 
-echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal"
+# systemd's environment grammar, not Bash's: a partially quoted value is one
+# value, and a value that is literal to systemd must not be executed.
+guard_env="${workdir}/grammar.env"
+cat > "${guard_env}" <<'GRAMMAR'
+MCLOVING_CONTROLLER_ENDPOINT=https://controller.example.test:8443
+MCLOVING_AGENT_ID=/tmp/'agent id'
+MCLOVING_TRUST_POOL=p&ss w$rd
+GRAMMAR
+(
+  # shellcheck source=/dev/null
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  load_environment_file "${guard_env}"
+  [[ "${MCLOVING_AGENT_ID}" == "/tmp/agent id" ]] || {
+    echo "partially quoted value was not concatenated: [${MCLOVING_AGENT_ID}]" >&2
+    exit 1
+  }
+  [[ "${MCLOVING_TRUST_POOL}" == 'p&ss w$rd' ]] || {
+    echo "literal value was altered or executed: [${MCLOVING_TRUST_POOL}]" >&2
+    exit 1
+  }
+)
+
+# Configuration reached through a symlink is consumed by the services, so the
+# drift re-read must cover it.
+config_dir="${home}/.config/mcloving"
+ln -s "${config_dir}/controller.env" "${config_dir}/controller-linked.env"
+linked_digests="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${linked_digests}" <<'LINKED'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+contracts = document.get("environment_contracts", [])
+linked = [entry for entry in contracts if entry["path"].endswith("controller-linked.env")]
+if not linked:
+    raise SystemExit("symlinked contract missing from the deployed-digest re-read")
+if "symlink_target" not in linked[0]:
+    raise SystemExit("symlinked contract recorded without its target")
+LINKED
+rm -f "${config_dir}/controller-linked.env"
+
+echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar -> symlinked contract"

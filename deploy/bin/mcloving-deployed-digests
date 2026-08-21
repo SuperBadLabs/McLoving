@@ -34,6 +34,7 @@ python3 - "${home_dir}" <<'PY'
 import hashlib
 import json
 import sys
+import os
 from pathlib import Path
 
 home = Path(sys.argv[1])
@@ -54,19 +55,37 @@ def sha256_file(path: Path) -> str:
 
 
 def file_record(path: Path, root: Path) -> dict:
-    return {
+    # The services and the environment guard follow symlinks, so the re-read
+    # must describe the content they actually consume. Skipping a symlinked
+    # certificate, key, or contract would let a rotation or substitution of the
+    # live target leave this document unchanged — a drift re-read that cannot
+    # see the drift. The link target is recorded alongside the digest so a
+    # repointed link is itself visible.
+    record = {
         "path": path.relative_to(root).as_posix(),
         "sha256": sha256_file(path),
         "size_bytes": path.stat().st_size,
     }
+    if path.is_symlink():
+        record["symlink_target"] = os.readlink(path)
+    return record
 
 
 def walk(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
-    return sorted(
-        path for path in root.rglob("*") if path.is_file() and not path.is_symlink()
-    )
+    resolved: list[Path] = []
+    for path in root.rglob("*"):
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            # A dangling symlink is configuration the services would fail on;
+            # it is reported rather than silently dropped.
+            resolved.append(path)
+            continue
+        resolved.append(path)
+    return sorted(resolved)
 
 
 document = {

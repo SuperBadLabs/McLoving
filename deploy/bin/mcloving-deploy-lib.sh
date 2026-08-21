@@ -115,23 +115,82 @@ parse_environment_file() {
   python3 - "$1" <<'PARSE'
 import sys
 
+# systemd's EnvironmentFile= grammar, not Bash's. A value is a concatenation of
+# unquoted runs, single-quoted runs, and double-quoted runs, so
+# `/tmp/'agent key.pem'` is the single value `/tmp/agent key.pem` — stripping
+# only fully surrounding quotes would keep the quote characters and reject a
+# valid contract. Backslash continues a line; inside double quotes and
+# unquoted runs it also escapes the next character. Single quotes are literal.
+
 path = sys.argv[1]
 out = sys.stdout.buffer
+
+
+def parse_value(text, handle):
+    result = []
+    index = 0
+    while True:
+        while index < len(text):
+            char = text[index]
+            if char == "\\":
+                if index + 1 == len(text):
+                    # Line continuation: pull the next physical line.
+                    following = handle.readline()
+                    if not following:
+                        raise SystemExit("environment file ends with a continuation")
+                    text = following.rstrip("\n")
+                    index = 0
+                    break
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == "'":
+                closing = text.find("'", index + 1)
+                if closing == -1:
+                    raise SystemExit("unterminated single quote")
+                result.append(text[index + 1 : closing])
+                index = closing + 1
+                continue
+            if char == '"':
+                index += 1
+                while True:
+                    if index >= len(text):
+                        following = handle.readline()
+                        if not following:
+                            raise SystemExit("unterminated double quote")
+                        text += "\n" + following.rstrip("\n")
+                        continue
+                    char = text[index]
+                    if char == "\\" and index + 1 < len(text):
+                        result.append(text[index + 1])
+                        index += 2
+                        continue
+                    if char == '"':
+                        index += 1
+                        break
+                    result.append(char)
+                    index += 1
+                continue
+            result.append(char)
+            index += 1
+        else:
+            return "".join(result).strip() if not result else "".join(result)
+
+
 with open(path, "r", encoding="utf-8") as handle:
-    for number, raw in enumerate(handle, start=1):
+    while True:
+        raw = handle.readline()
+        if not raw:
+            break
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith(";"):
             continue
         name, separator, value = line.partition("=")
         if not separator:
-            sys.stderr.write(f"line {number} is not NAME=VALUE\n")
+            sys.stderr.write("environment file line is not NAME=VALUE\n")
             raise SystemExit(1)
         name = name.strip()
-        value = value.strip()
-        # A matching pair of surrounding quotes is a delimiter, not content.
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        out.write(name.encode() + b"\0" + value.encode() + b"\0")
+        out.write(name.encode() + b"\0" + parse_value(value.strip(), handle).encode() + b"\0")
 PARSE
 }
 
