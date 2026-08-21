@@ -245,6 +245,24 @@ enum RunnableSpec {
 /// distinction is the whole ticket: the measured defect was a refusal raised as
 /// a transient error, which the agent retried into an unbounded claim loop
 /// while the build reported `running` forever.
+/// Refusal details are published into durable truth and into the completion
+/// summary, which the controller caps at 64 KiB, while an execution spec may
+/// approach the store's far larger limit. An unbounded detail would therefore
+/// fail the summary check and leave the attempt unfinalized, turning a terminal
+/// refusal back into the wedge this ticket removes.
+const MAX_REFUSAL_DETAIL_BYTES: usize = 512;
+
+fn bounded_refusal_detail(detail: String) -> String {
+    if detail.len() <= MAX_REFUSAL_DETAIL_BYTES {
+        return detail;
+    }
+    let mut cut = MAX_REFUSAL_DETAIL_BYTES;
+    while !detail.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{} (truncated)", &detail[..cut])
+}
+
 fn supported_spec(value: serde_json::Value) -> Result<RunnableSpec, String> {
     let spec: ExecutionSpec = match serde_json::from_value(value) {
         Ok(spec) => spec,
@@ -312,17 +330,18 @@ pub async fn run_claim(
     // below instead of erroring into an infinite reschedule loop. A connector
     // intent is not a refusal — it is runnable by the effect runtime, which
     // takes the claim from here with its own acceptance.
-    let supported_process = match supported_spec(execution.execution_spec) {
-        Ok(RunnableSpec::Process(process)) => Ok(process),
-        Ok(RunnableSpec::ConnectorIntent(intent)) => match &config.effect_plan {
-            Some(plan) => return run_effect_claim(store, claim, config, &intent, plan).await,
-            // Permanent for THIS worker but not for the payload: an agent
-            // configured with an effect runtime can still run it, so this stays
-            // a retryable refusal rather than a terminal publication.
-            None => return Err(SpineError::EffectRuntimeUnavailable),
-        },
-        Err(detail) => Err(detail),
-    };
+    let supported_process =
+        match supported_spec(execution.execution_spec).map_err(bounded_refusal_detail) {
+            Ok(RunnableSpec::Process(process)) => Ok(process),
+            Ok(RunnableSpec::ConnectorIntent(intent)) => match &config.effect_plan {
+                Some(plan) => return run_effect_claim(store, claim, config, &intent, plan).await,
+                // Permanent for THIS worker but not for the payload: an agent
+                // configured with an effect runtime can still run it, so this stays
+                // a retryable refusal rather than a terminal publication.
+                None => return Err(SpineError::EffectRuntimeUnavailable),
+            },
+            Err(detail) => Err(detail),
+        };
     let database_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
     let journal_fence = journal_authority_token(claim.restore_epoch, claim.fence)?;
     let organization = claim.organization_id.to_string();
@@ -1696,8 +1715,13 @@ async fn finalize_without_process(
         preparing,
         None,
     )?;
-    if !store
-        .finalize_attempt(
+    // Nothing ran here, and the caller's cancellation read happened in an
+    // earlier transaction, so cancellation can commit before this publication
+    // locks the attempt. Derive the terminal under that same lock and journal
+    // what was actually published, so the embedded worker cannot report a
+    // cancelled build as an execution-spec failure.
+    let Some(terminal) = store
+        .finalize_attempt_cancellation_aware(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
@@ -1707,9 +1731,9 @@ async fn finalize_without_process(
             json!({"reason": reason}),
         )
         .await?
-    {
+    else {
         return Err(SpineError::StaleAuthority);
-    }
+    };
     journal.transition(
         organization,
         attempt,

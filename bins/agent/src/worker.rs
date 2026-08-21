@@ -580,8 +580,27 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
     }
     match supported_process_spec(execution_spec_json) {
         Ok(process) => SpecClassification::Process(process),
-        Err(detail) => SpecClassification::Unsupported(detail),
+        Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
     }
+}
+
+/// The refusal reason is written twice into the durable result and sent as the
+/// completion summary, which the controller caps at 64 KiB, while an execution
+/// spec may approach the store's far larger limit. An unbounded reason built
+/// from an attacker-controlled field would fail that check, leave the attempt
+/// unfinalized, and wedge the journal on an oversized spool — turning the
+/// terminal refusal this ticket introduces back into the loop it removes.
+const MAX_REFUSAL_DETAIL_BYTES: usize = 512;
+
+fn bounded_refusal_detail(detail: String) -> String {
+    if detail.len() <= MAX_REFUSAL_DETAIL_BYTES {
+        return detail;
+    }
+    let mut cut = MAX_REFUSAL_DETAIL_BYTES;
+    while !detail.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{} (truncated)", &detail[..cut])
 }
 
 /// Classifies the digest-verified execution payload against the only contract
@@ -2632,6 +2651,23 @@ mod tests {
             validate_assignment(&config(), 4, assignment(spec)).unwrap(),
             AssignmentDisposition::ForAnotherRuntime(_)
         ));
+    }
+
+    /// An unknown step kind is attacker-controlled and can be far larger than
+    /// the controller's 64 KiB summary limit. The refusal reason must stay
+    /// publishable, or the attempt never terminalizes at all.
+    #[test]
+    fn an_oversized_refusal_reason_stays_publishable() {
+        let kind = "k".repeat(200_000);
+        let spec = format!(r#"{{"version":1,"steps":[{{"kind":"{kind}","program":"true"}}]}}"#);
+        let refusal =
+            unsupported(validate_assignment(&config(), 4, assignment(spec.as_bytes())).unwrap());
+        assert!(
+            refusal.detail.len() < 1_024,
+            "detail: {}",
+            refusal.detail.len()
+        );
+        assert!(refusal.detail.ends_with("(truncated)"));
     }
 
     /// A connector-intent step under the wrong version is runnable by nothing,
