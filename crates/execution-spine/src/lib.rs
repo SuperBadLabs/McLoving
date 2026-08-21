@@ -1698,6 +1698,21 @@ async fn finalize_without_process(
     else {
         return Err(SpineError::StaleAuthority);
     };
+    // The journal reaches Aborted only through Cancelling. A refusal prepared
+    // as Finalizing that the store substituted to Aborted must take that step,
+    // or the journal refuses the outcome the controller already committed and
+    // this attempt is left nonterminal locally. Re-entering Cancelling is a
+    // no-op when the refusal was already a cancellation.
+    if terminal == TerminalOutcome::Aborted {
+        journal.transition(
+            organization,
+            attempt,
+            fence,
+            config.session_epoch,
+            AttemptPhase::Cancelling,
+            None,
+        )?;
+    }
     journal.transition(
         organization,
         attempt,

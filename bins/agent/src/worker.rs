@@ -327,7 +327,22 @@ async fn commit_replayed_phase(
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
     phase: AttemptPhase,
 ) -> Result<(), AgentError> {
-    Journal::open(&config.journal_path)?.transition(
+    let mut journal = Journal::open(&config.journal_path)?;
+    // Replay can learn that a cancellation overrode the terminal this attempt
+    // was finalizing, and the journal reaches Aborted only through Cancelling.
+    // Without that step recovery cannot clear the finalization at all, and the
+    // agent stops polling for work entirely.
+    if phase == AttemptPhase::Aborted {
+        journal.transition(
+            &attempt.organization_id,
+            &attempt.attempt_id,
+            attempt.fence_token,
+            attempt.session_epoch,
+            AttemptPhase::Cancelling,
+            attempt.process_id,
+        )?;
+    }
+    journal.transition(
         &attempt.organization_id,
         &attempt.attempt_id,
         attempt.fence_token,
