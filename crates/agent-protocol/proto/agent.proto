@@ -204,4 +204,8 @@ enum WorkOutcome {
 message WorkReceipt {
   uint64 session_epoch = 1;
   bool accepted = 2;
+  // What the controller actually published. A committed cancellation can
+  // override a non-succeeded terminal at the publishing row lock, and the
+  // agent must journal what landed, not what it asked for.
+  WorkOutcome published_outcome = 3;
 }
