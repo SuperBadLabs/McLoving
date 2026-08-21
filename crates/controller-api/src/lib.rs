@@ -4400,11 +4400,12 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
     }
 }
 
-/// The execution machinery runs exactly one bounded process step per scheduled
-/// node (`bins/agent` `validate_assignment` and the embedded execution spine
-/// both refuse anything else at claim time). Validation, planning, storage, and
-/// admission all compile through [`compile_source_with_parameters`], so this
-/// single check keeps "validate accepted" equivalent to "runnable".
+/// The execution machinery runs exactly one bounded step per scheduled node,
+/// and that step is either a process or a connector intent (`bins/agent`
+/// `validate_assignment` and the embedded execution spine both refuse anything
+/// else at claim time). Validation, planning, storage, and admission all
+/// compile through [`compile_source_with_parameters`], so this single check
+/// keeps "validate accepted" equivalent to "runnable".
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
@@ -4414,7 +4415,7 @@ fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unsupported_execution_spec",
                 format!(
-                    "stage {} declares {} steps; the execution machinery runs exactly one process step per stage",
+                    "stage {} declares {} steps; the execution machinery runs exactly one step per stage",
                     stage.id,
                     stage.steps.len()
                 ),
@@ -7624,7 +7625,7 @@ stages:
         assert_eq!(error.code, "unsupported_execution_spec");
         assert_eq!(
             error.message,
-            "stage build declares 100 steps; the execution machinery runs exactly one process step per stage"
+            "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
         );
 
         let error = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())

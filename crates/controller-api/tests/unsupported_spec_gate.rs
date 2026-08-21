@@ -101,7 +101,7 @@ async fn validate_and_admission_reject_the_hundred_step_stage_with_one_named_dia
     assert_eq!(body["code"], "unsupported_execution_spec");
     assert_eq!(
         body["message"],
-        "stage build declares 100 steps; the execution machinery runs exactly one process step per stage"
+        "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
     );
 
     // 2. Storage through the API must refuse it identically.
@@ -166,7 +166,7 @@ async fn validate_and_admission_reject_the_hundred_step_stage_with_one_named_dia
     assert_eq!(body["code"], "unsupported_execution_spec");
     assert_eq!(
         body["message"],
-        "stage build declares 100 steps; the execution machinery runs exactly one process step per stage"
+        "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
     );
 
     // 4. The single-step shape of the same pipeline remains admissible, so the

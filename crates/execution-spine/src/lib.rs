@@ -268,10 +268,10 @@ fn supported_spec(value: serde_json::Value) -> Result<RunnableSpec, String> {
         (1, ExecutionStep::Process(process)) => Ok(RunnableSpec::Process(process)),
         (2, ExecutionStep::ConnectorIntent(intent)) => Ok(RunnableSpec::ConnectorIntent(intent)),
         (version, ExecutionStep::Process(_)) => Err(format!(
-            "execution spec version {version} does not carry a process step (expected version 1)"
+            "execution spec version {version} does not support a process step (expected version 1)"
         )),
         (version, ExecutionStep::ConnectorIntent(_)) => Err(format!(
-            "execution spec version {version} does not carry a connector-intent step \
+            "execution spec version {version} does not support a connector-intent step \
              (expected version 2)"
         )),
     }

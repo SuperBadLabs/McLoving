@@ -108,6 +108,10 @@ struct ValidatedAssignment {
 /// controller reschedules it forever while the build reports progress.
 enum AssignmentDisposition {
     Runnable(Box<ValidatedAssignment>),
+    /// A well-formed payload this agent cannot execute, which another agent
+    /// can. Never terminal: the claim is declined so the lease lapses and the
+    /// work returns to the queue for a runtime that matches it.
+    ForAnotherRuntime(&'static str),
     Unsupported(UnsupportedAssignment),
 }
 
@@ -220,6 +224,12 @@ pub(super) async fn poll_and_run_one(
     match validate_assignment(config, session_epoch, assignment)? {
         AssignmentDisposition::Runnable(assignment) => {
             run_assignment(config, client, session_epoch, *assignment, stop).await
+        }
+        AssignmentDisposition::ForAnotherRuntime(reason) => {
+            // Decline without terminalizing. The lease lapses, the controller
+            // requeues, and an agent with the matching runtime claims it.
+            eprintln!("declining_assignment: {reason}");
+            Ok(())
         }
         AssignmentDisposition::Unsupported(refusal) => {
             refuse_unsupported_assignment(config, client, session_epoch, refusal, stop).await
@@ -505,21 +515,65 @@ fn validate_assignment(
         fence_token: assignment.fence_token,
     };
     Ok(
-        match supported_process_spec(&assignment.execution_spec_json) {
-            Ok(process) => AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
-                authority,
-                workspace,
-                payload_digest,
-                process,
-            })),
-            Err(detail) => AssignmentDisposition::Unsupported(UnsupportedAssignment {
-                authority,
-                workspace,
-                payload_digest,
-                detail,
-            }),
+        match classify_assignment_spec(&assignment.execution_spec_json) {
+            SpecClassification::Process(process) => {
+                AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                    authority,
+                    workspace,
+                    payload_digest,
+                    process,
+                }))
+            }
+            SpecClassification::ForAnotherRuntime(reason) => {
+                AssignmentDisposition::ForAnotherRuntime(reason)
+            }
+            SpecClassification::Unsupported(detail) => {
+                AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                    authority,
+                    workspace,
+                    payload_digest,
+                    detail,
+                })
+            }
         },
     )
+}
+
+/// What this agent can make of a digest-verified execution payload.
+enum SpecClassification {
+    Process(ProcessSpec),
+    ForAnotherRuntime(&'static str),
+    Unsupported(String),
+}
+
+/// Separates a payload that is unrunnable anywhere from one that merely needs a
+/// different runtime, before the strict process decode that cannot tell them
+/// apart.
+///
+/// A connector-intent step carries no `program`, so decoding it as a process
+/// spec fails exactly like malformed input. Terminalizing on that would
+/// permanently fail work an effect-runtime worker could have run, and those
+/// nodes are admitted with no required capability, so they do reach
+/// process-only agents until capability routing prevents it.
+fn connector_intent_payload(execution_spec_json: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(execution_spec_json) else {
+        return false;
+    };
+    let steps = value.get("steps").and_then(serde_json::Value::as_array);
+    matches!(steps, Some(steps) if steps.len() == 1
+        && steps[0].get("kind").and_then(serde_json::Value::as_str) == Some("connector_intent"))
+}
+
+fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
+    if connector_intent_payload(execution_spec_json) {
+        return SpecClassification::ForAnotherRuntime(
+            "connector-intent work requires a controller-owned effect runtime",
+        );
+    }
+    match supported_process_spec(execution_spec_json) {
+        Ok(process) => SpecClassification::Process(process),
+        Err(detail) => SpecClassification::Unsupported(detail),
+    }
 }
 
 /// Classifies the digest-verified execution payload against the only contract
@@ -636,6 +690,21 @@ async fn refuse_unsupported_assignment(
             loss_reason: Arc::new(OnceLock::new()),
         },
     ));
+    // Cancellation can already have committed before this immediate renewal
+    // answered. The normal assignment path publishes that as aborted, and a
+    // cancelled build must not be reported as an execution-spec failure
+    // instead, so the refusal yields to it.
+    let (outcome, reason) = if lease.cancellation_requested {
+        (
+            WorkOutcome::Aborted,
+            "cancelled_before_process_spawn".to_owned(),
+        )
+    } else {
+        (
+            WorkOutcome::Failed,
+            format!("unsupported_execution_spec: {}", refusal.detail),
+        )
+    };
     let completion_result = finalize_without_process(
         config,
         client,
@@ -644,8 +713,8 @@ async fn refuse_unsupported_assignment(
             authority: &refusal.authority,
             workspace: &refusal.workspace,
             session_epoch,
-            outcome: WorkOutcome::Failed,
-            reason: format!("unsupported_execution_spec: {}", refusal.detail),
+            outcome,
+            reason,
         },
         AuthorityRpcControl {
             authority_lost: &authority_lost,
@@ -2527,6 +2596,9 @@ mod tests {
             AssignmentDisposition::Unsupported(refusal) => {
                 panic!("assignment must be runnable, refused: {}", refusal.detail)
             }
+            AssignmentDisposition::ForAnotherRuntime(reason) => {
+                panic!("assignment must be runnable, declined: {reason}")
+            }
         }
     }
 
@@ -2536,7 +2608,22 @@ mod tests {
             AssignmentDisposition::Runnable(_) => {
                 panic!("assignment must be refused as unsupported")
             }
+            AssignmentDisposition::ForAnotherRuntime(reason) => {
+                panic!("assignment must be refused as unsupported, declined: {reason}")
+            }
         }
+    }
+
+    /// A connector intent is runnable by an effect-runtime worker, so a
+    /// process-only agent must decline it rather than permanently fail work
+    /// another agent could complete.
+    #[test]
+    fn connector_intent_work_is_declined_not_terminally_refused() {
+        let spec = br#"{"version":2,"steps":[{"kind":"connector_intent","mapping_id":"notification.v1","mapping_digest":"sha256:aa","effect_class":"idempotent","effect_key_template":"k","public_input_schema":{},"protected_secret_ref_schema":{},"expected_public_result_schema":{},"timeout_seconds":30,"ambiguity_policy":"observe_then_reconcile","downstream_control_digest":"sha256:bb"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 4, assignment(spec)).unwrap(),
+            AssignmentDisposition::ForAnotherRuntime(_)
+        ));
     }
 
     #[test]
