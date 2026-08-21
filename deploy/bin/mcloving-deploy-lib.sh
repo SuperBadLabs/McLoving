@@ -234,21 +234,20 @@ load_environment_file() {
   done < <(parse_environment_file "$1")
 }
 
-# stage_release LIBEXEC_ROOT RELEASE_DIR RELEASE_ID
+# stage_release LIBEXEC_ROOT RELEASE_DIR MANIFEST CHECKSUMS
 #
-# Copies first, then verifies the copy, then publishes it under its identity.
-# Verifying the source directory and copying afterwards leaves a window in
-# which the source can change between the two, so the bytes that become
-# current would never have been the bytes that were verified. The snapshot
-# this function activates is the one it checked.
+# Copies the release, verifies the copy against the operator-supplied digest
+# source, and only then publishes it under the identity of those exact bytes.
+#
+# The verification has to run against the staged copy, not the source. Anything
+# derived from the source — including its identity — describes whatever the
+# source holds at the moment it is read, so a source that changes after
+# verification would simply be re-measured and agree with itself. The manifest
+# or checksums file is the only fixed reference here, so that is what the
+# copied bytes are checked against. Echoes the published path.
 stage_release() {
-  local libexec_root="$1" release_dir="$2" id="$3" binary target staging actual
-  target="${libexec_root}/releases/${id}"
-  if [[ -d "${target}" ]]; then
-    verify_staged_release "${target}"
-    echo "${target}"
-    return 0
-  fi
+  local libexec_root="$1" release_dir="$2" manifest="$3" checksums="$4"
+  local binary target staging id
   mkdir -p "${libexec_root}/releases"
   staging="${libexec_root}/releases/.staging.$$"
   rm -rf "${staging}"
@@ -256,13 +255,18 @@ stage_release() {
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
     install -m 0755 "${release_dir}/${binary}" "${staging}/${binary}"
   done
-  # The identity of what was actually copied, not of what the source now holds.
-  actual="$(release_id "${staging}")"
-  if [[ "${actual}" != "${id}" ]]; then
+  if ! verify_release_dir "${staging}" "${manifest}" "${checksums}"; then
     rm -rf "${staging}"
-    deploy_fail "release directory changed while staging: expected ${id}, copied ${actual}"
+    deploy_fail "staged copy does not match the supplied digest source"
   fi
-  mv -T "${staging}" "${target}"
+  id="$(release_id "${staging}")"
+  target="${libexec_root}/releases/${id}"
+  if [[ -d "${target}" ]]; then
+    rm -rf "${staging}"
+    verify_staged_release "${target}"
+  else
+    mv -T "${staging}" "${target}"
+  fi
   echo "${target}"
 }
 

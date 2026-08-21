@@ -379,6 +379,23 @@ second_release="$(readlink "${libexec}/current")"
 # A staged release is writable by the service user, so rollback must recompute
 # digests rather than trust that a present, executable binary is the one that
 # was verified at installation.
+# Staging must check the copied bytes against the supplied digest source, not
+# against a second measurement of the same mutable directory. A release
+# directory whose contents disagree with its checksums file must be refused
+# even though the directory is internally self-consistent.
+mismatch_dir="${workdir}/mismatch-release"
+rm -rf "${mismatch_dir}"
+cp -r "${release_dir}" "${mismatch_dir}"
+(cd "${mismatch_dir}" && sha256sum mcloving-controller mcloving-agent \
+  mcloving-cli mcloving-identity-admin > "${workdir}/mismatch.sha256")
+printf '\n' >> "${mismatch_dir}/mcloving-cli"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${home}" \
+  --release-dir "${mismatch_dir}" --checksums "${workdir}/mismatch.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "staging accepted bytes that do not match the supplied checksums" >&2
+  exit 1
+fi
+
 tampered="${libexec}/${second_release}/mcloving-cli"
 cp "${tampered}" "${workdir}/untampered-cli"
 printf '\n' >> "${tampered}"

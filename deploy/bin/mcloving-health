@@ -35,7 +35,10 @@ case "${service}" in
   controller)
     listen="${MCLOVING_LISTEN:?MCLOVING_LISTEN is required}"
     for _ in $(seq 1 120); do
-      if curl --silent --show-error --fail --max-time 3 \
+      # --noproxy '*': this probe targets the local listener, so a proxy in
+      # the environment would either break a healthy controller's gate or let
+      # an unrelated proxy response satisfy it.
+      if curl --silent --show-error --fail --max-time 3 --noproxy '*' \
         "http://${listen}/openapi.json" >/dev/null 2>&1; then
         echo "mcloving-health[controller]: public API answers on ${listen}"
         exit 0
