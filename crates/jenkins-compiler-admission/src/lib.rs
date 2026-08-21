@@ -475,7 +475,12 @@ fn validate_pipeline_result(
             "admitted stage semantics changed",
         ));
     }
-    let Step::Process(process) = &stage.steps[0];
+    let Step::Process(process) = &stage.steps[0] else {
+        return Err(AdmissionError::new(
+            "E_PIPELINE_SEMANTICS",
+            "Jenkins compiler admission cannot produce connector intents",
+        ));
+    };
     if process.program != "/bin/sh"
         || process.args != ["-xe", "-c", "echo \"Hello World\""]
         || !process.env.is_empty()
@@ -507,7 +512,9 @@ fn render_pipeline_yaml(pipeline: &PipelineIr) -> String {
             yaml_string(&stage.name)
         ));
         for step in &stage.steps {
-            let Step::Process(process) = step;
+            let Step::Process(process) = step else {
+                continue;
+            };
             let arguments = process
                 .args
                 .iter()
