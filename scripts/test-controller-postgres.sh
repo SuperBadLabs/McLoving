@@ -60,6 +60,7 @@ podman run --rm \
    cargo test --locked -p mcloving-execution-spine --test real_spine -- --test-threads=1 &&
    cargo test --locked -p mcloving-controller --test deployable_runtime &&
    cargo test --locked -p mcloving-controller --test diff_001 &&
+   cargo test --locked -p mcloving-controller --test capability_vocabulary &&
    cargo build --locked -p mcloving-controller &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
      cargo test --locked -p mcloving-agent --test remote_work &&
