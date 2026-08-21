@@ -137,6 +137,95 @@ If renewal, session, or fence authority is lost, in-flight log and terminal
 publication are interrupted rather than being allowed to complete under stale
 authority.
 
+## Identity-collision diagnostics
+
+`agent_sessions` is keyed by agent ID alone, so two executors misconfigured
+with one identity fight a session-epoch war: each successful `OpenSession`
+fences the other, and the loser's next fenced RPC is rejected with
+`stale agent session epoch`. The rejection itself is never weakened; both
+sides name the suspected cause instead:
+
+- The controller tracks committed session-epoch advances per agent identity
+  in a sliding window (three or more advances within sixty seconds). While
+  churn is that high, every stale-epoch rejection — enrollment and fenced
+  RPCs alike — carries and logs
+  `agent identity collision suspected for <agent_id>: session epoch advanced
+  N times in 60 seconds; a second executor may be sharing this agent
+  identity`.
+- The agent counts consecutive sessions that ended with a stale-epoch
+  rejection. From the second one onward the retry log adds
+  `agent identity collision suspected: N consecutive stale session epoch
+  rejections for agent <agent_id>; a second executor may be sharing this
+  agent identity (verify MCLOVING_AGENT_ID and its certificate binding are
+  unique)`.
+
+A single healthy agent never triggers either diagnostic: a stale-epoch
+`OpenSession` rejection carries the controller's stored epoch in the
+`mcloving-current-session-epoch` response metadata, and the agent reserves
+past that floor in one durable step and re-offers once, silently. A journal
+that lags the controller (for example after a documented journal
+replacement) therefore enrolls without emitting the stale-epoch retry line;
+only a competitor that keeps advancing the epoch can produce repeated
+rejections.
+
+## Recovered-attempt discharge
+
+A journal attempt parked in `reconciliation_required` fail-closed stops the
+agent from polling: every reconciliation reports it, and while it is
+unresolved the session ends with
+`agent has an unresolved recovered attempt and will not poll for more work`.
+The agent never self-discharges that record on suspicion (AGENT-005/006
+discipline). Discharge requires an explicit fenced controller confirmation,
+delivered through the existing reconciliation machinery:
+
+1. Each reconciliation reports the parked attempt with its
+   `reconciliation_required` phase, and the directive returns it as retained
+   or cancelled; either way the agent sends a fenced
+   `CompleteCancellation` with the `reconciliation_required` outcome.
+2. The controller, under the exact current agent session, answers with the
+   `CANCELLATION_DISPOSITION_DISCHARGE_RECOVERED` disposition only when that
+   fence is disowned in durable truth: the attempt was requeued under a newer
+   fence, is terminal, was superseded by an explicit operator retry, is
+   unknown to this controller, or belongs to a fenced-out restore epoch.
+   While the controller-side attempt is itself still parked in
+   `reconciliation_required` with no successor, the report stays parked. A
+   stale session always receives `RETIRE_STALE` and never a discharge.
+3. On discharge the agent transitions the journal attempt
+   `reconciliation_required -> aborted` (an ordinary validated journal
+   transition — no schema change), which preserves the attempt row as
+   terminal history together with its log/result spool descriptors; the
+   existing terminal spool reclaim then removes the spool files and retires
+   the descriptors. The agent resumes polling in the same session.
+
+Both sides record the decision: the controller appends one idempotent
+`attempt.recovered_discharge_authorized` build event (when the attempt maps
+to a build) plus an `agent-control:` log line, and the agent logs
+`discharged recovered attempt <org>/<attempt> fence <fence>: the controller
+confirmed its fenced authority is disowned; ...`.
+
+### Operator runbook: a build parked in `reconciliation_required`
+
+Symptoms: the build reports `reconciliation_required`, the owning agent
+loops with `agent has an unresolved recovered attempt and will not poll for
+more work`, and CLI cancellation is refused with HTTP 409
+`build_reconciliation_required` naming this exact state (cancellation cannot
+discharge a parked reconciliation).
+
+1. If the collision diagnostic above is present, first fix the identity
+   misconfiguration: exactly one executor may use each `MCLOVING_AGENT_ID`
+   and certificate binding. The war must stop before reconciliation can
+   settle.
+2. Confirm any uncertain external effects for the parked attempt
+   (`confirm_uncertain_effect`), then resolve it controller-side with an
+   explicit operator decision: schedule a retry of the attempt (the public
+   retry API accepts `failed` and `reconciliation_required` attempts) or
+   finalize the reconciled attempt to a terminal outcome
+   (`finalize_reconciled_attempt`).
+3. No agent-side action is required. On its next reconciliation cycle the
+   owning agent's parked report receives the discharge disposition, retires
+   the journal record with its evidence, and resumes polling. Journal
+   replacement is no longer part of this procedure.
+
 ## Portable execution boundary
 
 - Each attempt receives one new normalized workspace beneath a configured

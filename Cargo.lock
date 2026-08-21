@@ -1431,6 +1431,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "mcloving-controller-api",
+ "mcloving-domain",
  "serde",
  "serde_json",
  "tokio",
@@ -1446,6 +1447,7 @@ dependencies = [
  "mcloving-agent-protocol",
  "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-domain",
  "mcloving-execution-spine",
  "mcloving-external-connector",
  "mcloving-object-store",
@@ -1467,7 +1469,9 @@ dependencies = [
  "base64",
  "http",
  "jsonwebtoken",
+ "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-domain",
  "mcloving-object-store",
  "mcloving-pipeline-ir",
  "rand 0.8.7",
@@ -1488,6 +1492,7 @@ version = "0.0.0"
 dependencies = [
  "aho-corasick",
  "hex",
+ "mcloving-domain",
  "mcloving-state-transfer",
  "quick-xml",
  "serde",
@@ -1564,6 +1569,9 @@ dependencies = [
 [[package]]
 name = "mcloving-domain"
 version = "0.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "mcloving-execution-spine"
@@ -1574,6 +1582,7 @@ dependencies = [
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-destination-observer",
+ "mcloving-domain",
  "mcloving-external-connector",
  "nix",
  "reqwest",
@@ -1837,10 +1846,6 @@ dependencies = [
  "url",
  "uuid",
 ]
-
-[[package]]
-name = "mcloving-state-machine"
-version = "0.0.0"
 
 [[package]]
 name = "mcloving-state-policy-differential"

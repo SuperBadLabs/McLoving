@@ -32,6 +32,34 @@ pub const MAX_OIDC_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_OIDC_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 pub const MAX_OIDC_JWKS_BYTES: usize = 4 * 1024 * 1024;
 
+/// Compile-time policy for the plain-HTTP loopback escape hatch.
+///
+/// The only permissive constructor, [`InsecureLoopbackPolicy::allow_for_tests`],
+/// is compiled solely for this crate's own tests and for builds that enable the
+/// `insecure-loopback-tests` feature, which only this crate's dev-dependency on
+/// itself turns on. Release builds of the controller compile this crate without
+/// that feature, so no production code path, configuration value, or
+/// environment variable can construct anything but [`InsecureLoopbackPolicy::DENY`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InsecureLoopbackPolicy(bool);
+
+impl InsecureLoopbackPolicy {
+    /// Rejects every non-HTTPS URL. The only policy production code can name.
+    pub const DENY: Self = Self(false);
+
+    /// Permits plain-HTTP loopback URLs so hermetic tests can run an identity
+    /// provider without provisioning TLS.
+    #[cfg(any(test, feature = "insecure-loopback-tests"))]
+    pub fn allow_for_tests() -> Self {
+        Self(true)
+    }
+
+    /// Whether plain-HTTP loopback URLs are admitted.
+    pub fn is_allowed(self) -> bool {
+        self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct OidcClientConfig {
     pub organization_id: Uuid,
@@ -45,7 +73,7 @@ pub struct OidcClientConfig {
     pub request_timeout: Duration,
     pub clock_skew: Duration,
     pub max_jwks_bytes: usize,
-    pub allow_insecure_loopback_for_tests: bool,
+    pub insecure_loopback: InsecureLoopbackPolicy,
 }
 
 impl OidcClientConfig {
@@ -66,7 +94,7 @@ impl OidcClientConfig {
             &provider.authorization_endpoint,
             &provider.token_endpoint,
             &provider.jwks_uri,
-            self.allow_insecure_loopback_for_tests,
+            self.insecure_loopback.is_allowed(),
         )?;
         OidcClient::new(self.clone()).map(|_| ())
     }
@@ -110,7 +138,7 @@ impl OidcClient {
             secure_url(
                 redirect,
                 "OIDC redirect URI",
-                config.allow_insecure_loopback_for_tests,
+                config.insecure_loopback.is_allowed(),
             )?;
         }
         let http = Client::builder()
@@ -236,7 +264,7 @@ pub(crate) async fn start(
             "redirect URI is not in the exact OIDC allowlist",
         ));
     }
-    validate_provider_urls(&provider, client.config.allow_insecure_loopback_for_tests)?;
+    validate_provider_urls(&provider, client.config.insecure_loopback.is_allowed())?;
     let state_token = random_token();
     let nonce = random_token();
     let verifier = random_token();
@@ -308,7 +336,7 @@ pub(crate) async fn callback(
             "OIDC state is bound to another provider",
         ));
     }
-    validate_provider_urls(&provider, client.config.allow_insecure_loopback_for_tests)?;
+    validate_provider_urls(&provider, client.config.insecure_loopback.is_allowed())?;
     let mut token_request = client.http.post(&provider.token_endpoint).form(&[
         ("grant_type", "authorization_code"),
         ("code", query.code.as_str()),
@@ -839,7 +867,7 @@ mod tests {
                 request_timeout: Duration::from_secs(10),
                 clock_skew: Duration::from_secs(60),
                 max_jwks_bytes: 256 * 1024,
-                allow_insecure_loopback_for_tests: false,
+                insecure_loopback: InsecureLoopbackPolicy::DENY,
             },
             IdentityProviderWrite {
                 organization_id,

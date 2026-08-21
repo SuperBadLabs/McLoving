@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
@@ -17,19 +17,23 @@ use mcloving_agent_protocol::wire::{
     WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
-    ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
-    WORK_DELIVERY_FEATURE, negotiate,
+    ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, ProtocolRange,
+    RECOVERED_DISCHARGE_FEATURE, RECOVERED_FINALIZATION_LEASE_SECONDS,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
-    ApiState, ConnectorMappingCatalog, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
-    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
-    OidcClientConfig, router,
+    ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
+    MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
+    MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, LeaseRenewalDisposition,
     NewLogChunk, NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization,
     Store, StoreError, TerminalOutcome, authz::ServiceScope,
+};
+use mcloving_domain::capability::{
+    EmbeddedWorkerCapabilities, classify_embedded_worker_capabilities,
 };
 use mcloving_execution_spine::{EffectExecutionPlan, WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -289,9 +293,35 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Environment lookup threaded through configuration parsing so tests can
+/// prove parsing properties against a fully synthetic hostile environment.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
+fn process_environment(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name)
+}
+
+fn environment_string(env: EnvLookup, name: &str) -> Result<Option<String>> {
+    match env(name) {
+        None => Ok(None),
+        Some(value) => value
+            .into_string()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("{name} must contain valid Unicode")),
+    }
+}
+
 fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
-    match std::env::var(name) {
-        Ok(value) => {
+    bounded_u64_from(&process_environment, name, default)
+}
+
+fn bounded_u64_environment_at_most(name: &str, default: u64, maximum: u64) -> Result<u64> {
+    bounded_u64_from_at_most(&process_environment, name, default, maximum)
+}
+
+fn bounded_u64_from(env: EnvLookup, name: &str, default: u64) -> Result<u64> {
+    match environment_string(env, name)? {
+        Some(value) => {
             let parsed = value
                 .parse::<u64>()
                 .with_context(|| format!("{name} must be an unsigned integer"))?;
@@ -300,13 +330,12 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
             }
             Ok(parsed)
         }
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(error) => Err(error).with_context(|| format!("read {name}")),
+        None => Ok(default),
     }
 }
 
-fn bounded_u64_environment_at_most(name: &str, default: u64, maximum: u64) -> Result<u64> {
-    let value = bounded_u64_environment(name, default)?;
+fn bounded_u64_from_at_most(env: EnvLookup, name: &str, default: u64, maximum: u64) -> Result<u64> {
+    let value = bounded_u64_from(env, name, default)?;
     bounded_u64_at_most(name, value, maximum)
 }
 
@@ -323,11 +352,15 @@ struct OidcEnvironment {
 }
 
 fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
-    let provider_id = match std::env::var("MCLOVING_OIDC_PROVIDER_ID") {
-        Ok(value) => value
+    oidc_environment_from(organization_id, &process_environment)
+}
+
+fn oidc_environment_from(organization_id: Uuid, env: EnvLookup) -> Result<Option<OidcEnvironment>> {
+    let provider_id = match environment_string(env, "MCLOVING_OIDC_PROVIDER_ID")? {
+        Some(value) => value
             .parse::<Uuid>()
             .context("MCLOVING_OIDC_PROVIDER_ID must be a UUID")?,
-        Err(std::env::VarError::NotPresent) => {
+        None => {
             const OIDC_ENVIRONMENT: &[&str] = &[
                 "MCLOVING_OIDC_ISSUER",
                 "MCLOVING_OIDC_AUDIENCE",
@@ -347,60 +380,57 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
                 "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
                 "MCLOVING_OIDC_MAX_JWKS_BYTES",
             ];
-            if let Some(name) = OIDC_ENVIRONMENT
-                .iter()
-                .find(|name| std::env::var_os(name).is_some())
-            {
+            if let Some(name) = OIDC_ENVIRONMENT.iter().find(|name| env(name).is_some()) {
                 bail!("{name} requires MCLOVING_OIDC_PROVIDER_ID");
             }
             return Ok(None);
         }
-        Err(error) => return Err(error).context("read MCLOVING_OIDC_PROVIDER_ID"),
     };
-    let issuer = required("MCLOVING_OIDC_ISSUER")?;
-    let audience = required("MCLOVING_OIDC_AUDIENCE")?;
-    let authorization_endpoint = required("MCLOVING_OIDC_AUTHORIZATION_ENDPOINT")?;
-    let token_endpoint = required("MCLOVING_OIDC_TOKEN_ENDPOINT")?;
-    let jwks_uri = required("MCLOVING_OIDC_JWKS_URI")?;
-    let client_id = required("MCLOVING_OIDC_CLIENT_ID")?;
-    let client_secret = match std::env::var("MCLOVING_OIDC_CLIENT_SECRET") {
-        Ok(secret) => Some(secret),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(error).context("read MCLOVING_OIDC_CLIENT_SECRET"),
-    };
-    let group_claim = required("MCLOVING_OIDC_GROUP_CLAIM")?;
+    let issuer = required_from(env, "MCLOVING_OIDC_ISSUER")?;
+    let audience = required_from(env, "MCLOVING_OIDC_AUDIENCE")?;
+    let authorization_endpoint = required_from(env, "MCLOVING_OIDC_AUTHORIZATION_ENDPOINT")?;
+    let token_endpoint = required_from(env, "MCLOVING_OIDC_TOKEN_ENDPOINT")?;
+    let jwks_uri = required_from(env, "MCLOVING_OIDC_JWKS_URI")?;
+    let client_id = required_from(env, "MCLOVING_OIDC_CLIENT_ID")?;
+    let client_secret = environment_string(env, "MCLOVING_OIDC_CLIENT_SECRET")?;
+    let group_claim = required_from(env, "MCLOVING_OIDC_GROUP_CLAIM")?;
     let configuration_generation =
-        bounded_u64_environment("MCLOVING_OIDC_CONFIGURATION_GENERATION", 1)?;
-    let jwks_generation = bounded_u64_environment("MCLOVING_OIDC_JWKS_GENERATION", 1)?;
-    let jwks_digest = parse_sha256_environment("MCLOVING_OIDC_JWKS_SHA256")?;
-    let allowed_redirect_uris = required("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS")?
+        bounded_u64_from(env, "MCLOVING_OIDC_CONFIGURATION_GENERATION", 1)?;
+    let jwks_generation = bounded_u64_from(env, "MCLOVING_OIDC_JWKS_GENERATION", 1)?;
+    let jwks_digest = parse_sha256_from(env, "MCLOVING_OIDC_JWKS_SHA256")?;
+    let allowed_redirect_uris = required_from(env, "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS")?
         .split(',')
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     if allowed_redirect_uris.iter().any(|uri| uri.trim() != uri) {
         bail!("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS entries must be canonical");
     }
-    let session_ttl_seconds = bounded_u64_environment_at_most(
+    let session_ttl_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_SESSION_TTL_SECONDS",
         15 * 60,
         MAX_OIDC_SESSION_TTL_SECONDS,
     )?;
-    let refresh_ttl_seconds = bounded_u64_environment_at_most(
+    let refresh_ttl_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
         8 * 60 * 60,
         MAX_OIDC_REFRESH_TTL_SECONDS,
     )?;
-    let request_timeout_seconds = bounded_u64_environment_at_most(
+    let request_timeout_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
         10,
         MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
     )?;
-    let clock_skew_seconds = bounded_u64_environment_at_most(
+    let clock_skew_seconds = bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
         60,
         MAX_OIDC_CLOCK_SKEW_SECONDS,
     )?;
-    let max_jwks_bytes = usize::try_from(bounded_u64_environment_at_most(
+    let max_jwks_bytes = usize::try_from(bounded_u64_from_at_most(
+        env,
         "MCLOVING_OIDC_MAX_JWKS_BYTES",
         256 * 1024,
         MAX_OIDC_JWKS_BYTES as u64,
@@ -458,7 +488,7 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
         request_timeout: Duration::from_secs(request_timeout_seconds),
         clock_skew: Duration::from_secs(clock_skew_seconds),
         max_jwks_bytes,
-        allow_insecure_loopback_for_tests: false,
+        insecure_loopback: InsecureLoopbackPolicy::DENY,
     };
     client
         .validate_with_provider(&provider)
@@ -508,8 +538,8 @@ fn hash_oidc_configuration_field(hash: &mut Sha256, value: &[u8]) {
     hash.update(value);
 }
 
-fn parse_sha256_environment(name: &str) -> Result<[u8; 32]> {
-    let value = required(name)?;
+fn parse_sha256_from(env: EnvLookup, name: &str) -> Result<[u8; 32]> {
+    let value = required_from(env, name)?;
     if value.len() != 64 {
         bail!("{name} must contain exactly 64 lowercase hexadecimal characters");
     }
@@ -544,10 +574,85 @@ fn unix_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
+/// Sliding-window record of committed session-epoch advances per agent
+/// identity.
+///
+/// One healthy executor advances its epoch once per service session. Two
+/// executors misconfigured with a single agent identity fight a session-epoch
+/// war: each reconnect fences the other, so the stored epoch advances every
+/// few seconds. Rejections issued while that churn is high name the suspected
+/// identity collision instead of only reporting a bare stale epoch.
+#[derive(Debug, Default)]
+struct SessionEpochChurn {
+    advances_by_agent: Mutex<BTreeMap<String, VecDeque<Instant>>>,
+}
+
+const SESSION_CHURN_WINDOW: Duration = Duration::from_secs(60);
+const SESSION_CHURN_COLLISION_THRESHOLD: usize = 3;
+const MAX_TRACKED_SESSION_ADVANCES: usize = 32;
+
+impl SessionEpochChurn {
+    fn record_advance(&self, agent_id: &str) {
+        let mut advances_by_agent = self
+            .advances_by_agent
+            .lock()
+            .expect("session churn lock is never poisoned");
+        let advances = advances_by_agent.entry(agent_id.to_owned()).or_default();
+        let now = Instant::now();
+        advances.push_back(now);
+        while advances.len() > MAX_TRACKED_SESSION_ADVANCES
+            || advances
+                .front()
+                .is_some_and(|advance| now.duration_since(*advance) > SESSION_CHURN_WINDOW)
+        {
+            advances.pop_front();
+        }
+    }
+
+    /// Names the suspected collision when this identity's stored epoch has
+    /// advanced repeatedly within the sliding window.
+    fn suspected_collision(&self, agent_id: &str) -> Option<String> {
+        let mut advances_by_agent = self
+            .advances_by_agent
+            .lock()
+            .expect("session churn lock is never poisoned");
+        let now = Instant::now();
+        // Prune while reading, and drop identities whose window has emptied.
+        // Recording alone would only ever age out agents that keep coming
+        // back, so an agent that connects once would hold its deque for the
+        // controller's lifetime and the map would grow without bound.
+        advances_by_agent.retain(|_, advances| {
+            advances.retain(|advance| now.duration_since(*advance) <= SESSION_CHURN_WINDOW);
+            !advances.is_empty()
+        });
+        let advances = advances_by_agent.get(agent_id)?.len();
+        if advances < SESSION_CHURN_COLLISION_THRESHOLD {
+            return None;
+        }
+        Some(format!(
+            "agent identity collision suspected for {agent_id}: session epoch advanced \
+             {advances} times in {} seconds; a second executor may be sharing this \
+             agent identity",
+            SESSION_CHURN_WINDOW.as_secs()
+        ))
+    }
+}
+
+/// Builds the fail-closed stale-epoch rejection, naming the suspected
+/// identity collision when the stored epoch is churning.
+fn stale_session_status(churn: &SessionEpochChurn, agent_id: &str) -> Status {
+    if let Some(collision) = churn.suspected_collision(agent_id) {
+        eprintln!("agent-control: {collision}");
+        return Status::failed_precondition(format!("stale agent session epoch; {collision}"));
+    }
+    Status::failed_precondition("stale agent session epoch")
+}
+
 #[derive(Clone)]
 struct ControllerAgentService {
     store: Store,
     identities: Arc<AgentIdentityBindings>,
+    session_churn: Arc<SessionEpochChurn>,
     #[cfg(debug_assertions)]
     drop_start_response_once: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
@@ -629,6 +734,8 @@ impl AgentControl for ControllerAgentService {
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
+            WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
+            RECOVERED_DISCHARGE_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -645,8 +752,26 @@ impl AgentControl for ControllerAgentService {
             .await
             .map_err(internal_store_error)?
         {
-            return Err(Status::failed_precondition("stale agent session epoch"));
+            let mut status = stale_session_status(&self.session_churn, &request.agent_id);
+            // The rejection itself carries the stored epoch so a lagging
+            // journal (for example after a documented journal replacement)
+            // can reserve past this floor in one step instead of brute
+            // forcing the epoch space one retry at a time. The fence itself
+            // is not weakened: this offer stays rejected.
+            if let Some(stored_epoch) = self
+                .store
+                .agent_session_epoch(&request.agent_id)
+                .await
+                .map_err(internal_store_error)?
+                && let Ok(value) = stored_epoch.to_string().parse()
+            {
+                status
+                    .metadata_mut()
+                    .insert(CURRENT_SESSION_EPOCH_METADATA, value);
+            }
+            return Err(status);
         }
+        self.session_churn.record_advance(&request.agent_id);
         Ok(Response::new(OpenSessionResponse {
             session_epoch: request.session_epoch,
             protocol_minor: u32::from(negotiated.minor),
@@ -681,7 +806,7 @@ impl AgentControl for ControllerAgentService {
             .await
             .map_err(internal_store_error)?
         {
-            return Err(Status::failed_precondition("stale agent session epoch"));
+            return Err(stale_session_status(&self.session_churn, &request.agent_id));
         }
         let mut retained = BTreeSet::new();
         let mut cancelled = BTreeSet::new();
@@ -805,7 +930,7 @@ impl AgentControl for ControllerAgentService {
             .await
             .map_err(internal_store_error)?
         {
-            return Err(Status::failed_precondition("stale agent session epoch"));
+            return Err(stale_session_status(&self.session_churn, &request.agent_id));
         }
         let organization_id = authenticated_organization(identity, &request.organization_id)?;
         let attempt_id = request
@@ -839,6 +964,15 @@ impl AgentControl for ControllerAgentService {
             })
             .await
             .map_err(internal_store_error)?;
+        let discharge_negotiated = self
+            .store
+            .agent_session_supports(
+                &request.agent_id,
+                request.session_epoch,
+                RECOVERED_DISCHARGE_FEATURE,
+            )
+            .await
+            .map_err(internal_store_error)?;
         Ok(Response::new(CancellationReceipt {
             session_epoch: request.session_epoch,
             disposition: match disposition {
@@ -851,6 +985,25 @@ impl AgentControl for ControllerAgentService {
                 AgentCancellationDisposition::ReconciliationRequired => {
                     CancellationDisposition::ReconciliationRequired as i32
                 }
+                // A wire-semantics change: a peer that never negotiated the
+                // discharge cannot parse this enum value, rejects the response
+                // as an unsupported protocol, reconnects, and stays parked
+                // forever — the exact wedge this ticket removes. Such a peer
+                // keeps the previous fail-closed disposition instead.
+                AgentCancellationDisposition::DischargeRecovered if !discharge_negotiated => {
+                    CancellationDisposition::ReconciliationRequired as i32
+                }
+                AgentCancellationDisposition::DischargeRecovered => {
+                    eprintln!(
+                        "agent-control: authorized discharge of recovered attempt {}/{} \
+                         fence {} reported by agent {}: fenced authority is disowned",
+                        request.organization_id,
+                        request.attempt_id,
+                        request.fence_token,
+                        request.agent_id,
+                    );
+                    CancellationDisposition::DischargeRecovered as i32
+                }
             },
         }))
     }
@@ -860,6 +1013,7 @@ impl AgentControl for ControllerAgentService {
         let request = request.into_inner();
         authorize_work_session(
             &self.store,
+            &self.session_churn,
             &identity,
             &request.agent_id,
             request.session_epoch,
@@ -878,7 +1032,7 @@ impl AgentControl for ControllerAgentService {
             .agent_session_capabilities(&request.agent_id, request.session_epoch)
             .await
             .map_err(internal_store_error)?
-            .ok_or_else(|| Status::failed_precondition("stale agent session epoch"))?;
+            .ok_or_else(|| stale_session_status(&self.session_churn, &request.agent_id))?;
         self.store
             .requeue_one_expired(identity.organization_id)
             .await
@@ -939,7 +1093,9 @@ impl AgentControl for ControllerAgentService {
     ) -> Result<Response<WorkReceipt>, Status> {
         let identity = self.identities.authenticate(&request)?.clone();
         let authority = request.into_inner();
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let accepted = self
             .store
             .accept_offer_in_session(
@@ -955,6 +1111,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -964,7 +1122,9 @@ impl AgentControl for ControllerAgentService {
     ) -> Result<Response<WorkReceipt>, Status> {
         let identity = self.identities.authenticate(&request)?.clone();
         let authority = request.into_inner();
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let accepted = self
             .store
             .mark_attempt_running_in_session(
@@ -986,6 +1146,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -998,7 +1160,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         let deliveries = self
             .store
             .redeem_credential_grants(
@@ -1038,35 +1202,38 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = match authorize_work_authority(&self.store, &identity, &authority).await {
-            Ok(context) => context,
-            Err(status) => {
-                // A session-epoch conflict rejects the renewal here, before the
-                // store's renewal path runs, so the named controller-side event
-                // must be recorded at this boundary or the motivating collision
-                // stays invisible. Best effort under the authenticated tenant;
-                // the original rejection is returned unchanged.
-                if status.code() == tonic::Code::FailedPrecondition
-                    && status.message().contains("stale agent session epoch")
-                    && let Ok(organization_id) =
-                        authenticated_organization(&identity, &authority.organization_id)
-                    && let Ok(attempt_id) = authority.attempt_id.parse()
-                {
-                    let (_, fence) = decode_authority_token(authority.fence_token);
-                    let _ = self
-                        .store
-                        .record_lease_renewal_rejection(
-                            organization_id,
-                            attempt_id,
-                            fence,
-                            &authority.agent_id,
-                            "agent_session_stale",
-                        )
-                        .await;
+        let context =
+            match authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await
+            {
+                Ok(context) => context,
+                Err(status) => {
+                    // A session-epoch conflict rejects the renewal here, before the
+                    // store's renewal path runs, so the named controller-side event
+                    // must be recorded at this boundary or the motivating collision
+                    // stays invisible. Best effort under the authenticated tenant;
+                    // the original rejection is returned unchanged.
+                    if status.code() == tonic::Code::FailedPrecondition
+                        && status.message().contains("stale agent session epoch")
+                        && let Ok(organization_id) =
+                            authenticated_organization(&identity, &authority.organization_id)
+                        && let Ok(attempt_id) = authority.attempt_id.parse()
+                    {
+                        let (_, fence) = decode_authority_token(authority.fence_token);
+                        let _ = self
+                            .store
+                            .record_lease_renewal_rejection(
+                                organization_id,
+                                attempt_id,
+                                fence,
+                                &authority.agent_id,
+                                "agent_session_stale",
+                            )
+                            .await;
+                    }
+                    return Err(status);
                 }
-                return Err(status);
-            }
-        };
+            };
         let lease_seconds = i32::try_from(request.lease_seconds)
             .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
         if !(5..=300).contains(&lease_seconds) {
@@ -1130,7 +1297,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         if !matches!(request.stream.as_str(), "stdout" | "stderr")
             || request.content.len() > 1_048_576
         {
@@ -1160,6 +1329,8 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+            // Not a terminal publication, so there is no published outcome.
+            published_outcome: WorkOutcome::Unspecified as i32,
         }))
     }
 
@@ -1172,7 +1343,9 @@ impl AgentControl for ControllerAgentService {
         let authority = request
             .authority
             .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
-        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
         if request.summary_json.len() > 65_536 {
             return Err(Status::invalid_argument("terminal summary exceeds 64 KiB"));
         }
@@ -1186,23 +1359,67 @@ impl AgentControl for ControllerAgentService {
                 return Err(Status::invalid_argument("work outcome must be explicit"));
             }
         };
-        let accepted = self
+        // A non-succeeded terminal must not outrank a cancellation that
+        // committed while the agent was deciding. The agent reads cancellation
+        // from an earlier lease receipt, so that decision can be stale by the
+        // time this transaction locks the attempt; the publication re-derives
+        // it under the same lock. A genuine success is never overridden: work
+        // that completed is reported as completed.
+        // Substituting a cancellation for the agent's terminal is a wire
+        // semantics change: the agent learns the substituted outcome only from
+        // `published_outcome`. A peer that never negotiated the feature would
+        // ignore it and record what it asked for, so an older agent in a
+        // rolling upgrade keeps the previous behaviour instead of receiving a
+        // completion it cannot record.
+        let substitution_negotiated = self
             .store
-            .finalize_attempt_in_session(
-                context.organization_id,
-                context.attempt_id,
-                context.fence,
-                context.restore_epoch,
+            .agent_session_supports(
                 &authority.agent_id,
                 authority.session_epoch,
-                outcome,
-                summary,
+                WORK_COMPLETION_SUBSTITUTION_FEATURE,
             )
             .await
             .map_err(internal_store_error)?;
+        let published = if matches!(outcome, TerminalOutcome::Succeeded) || !substitution_negotiated
+        {
+            self.store
+                .finalize_attempt_in_session(
+                    context.organization_id,
+                    context.attempt_id,
+                    context.fence,
+                    context.restore_epoch,
+                    &authority.agent_id,
+                    authority.session_epoch,
+                    outcome,
+                    summary,
+                )
+                .await
+                .map_err(internal_store_error)?
+                .then_some(outcome)
+        } else {
+            self.store
+                .finalize_attempt_in_session_cancellation_aware(
+                    context.organization_id,
+                    context.attempt_id,
+                    context.fence,
+                    context.restore_epoch,
+                    &authority.agent_id,
+                    authority.session_epoch,
+                    outcome,
+                    summary,
+                )
+                .await
+                .map_err(internal_store_error)?
+        };
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
-            accepted,
+            accepted: published.is_some(),
+            published_outcome: match published {
+                Some(TerminalOutcome::Succeeded) => WorkOutcome::Succeeded as i32,
+                Some(TerminalOutcome::Failed) => WorkOutcome::Failed as i32,
+                Some(TerminalOutcome::Aborted) => WorkOutcome::Aborted as i32,
+                None => WorkOutcome::Unspecified as i32,
+            },
         }))
     }
 }
@@ -1217,6 +1434,7 @@ struct WorkContext {
 
 async fn authorize_work_session(
     store: &Store,
+    session_churn: &SessionEpochChurn,
     identity: &AgentIdentity,
     agent_id: &str,
     session_epoch: u64,
@@ -1234,18 +1452,20 @@ async fn authorize_work_session(
         .await
         .map_err(internal_store_error)?
     {
-        return Err(Status::failed_precondition("stale agent session epoch"));
+        return Err(stale_session_status(session_churn, agent_id));
     }
     Ok(())
 }
 
 async fn authorize_work_authority(
     store: &Store,
+    session_churn: &SessionEpochChurn,
     identity: &AgentIdentity,
     authority: &WorkAuthority,
 ) -> Result<WorkContext, Status> {
     authorize_work_session(
         store,
+        session_churn,
         identity,
         &authority.agent_id,
         authority.session_epoch,
@@ -1429,6 +1649,7 @@ async fn run_agent_control_server(
     let service = ControllerAgentService {
         store,
         identities: Arc::new(environment.identities),
+        session_churn: Arc::new(SessionEpochChurn::default()),
         #[cfg(debug_assertions)]
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
         #[cfg(debug_assertions)]
@@ -1579,6 +1800,9 @@ struct EmbeddedWorker {
     organization_id: Uuid,
     scheduler_id: String,
     capabilities: Vec<String>,
+    /// The exact documented sentinel (`MCLOVING_AGENT_CAPABILITIES=disabled`)
+    /// was declared: the worker reconciles expired leases but never claims.
+    disabled: bool,
     trust_pool: String,
     lease_seconds: i32,
     poll_interval: Duration,
@@ -1597,9 +1821,13 @@ impl EmbeddedWorker {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        if capabilities.is_empty() {
-            bail!("MCLOVING_AGENT_CAPABILITIES must not be empty");
-        }
+        let disabled = match classify_embedded_worker_capabilities(&capabilities).context(
+            "MCLOVING_AGENT_CAPABILITIES violates the capability vocabulary \
+             (docs/architecture/CAPABILITY_VOCABULARY_V1.md)",
+        )? {
+            EmbeddedWorkerCapabilities::Disabled => true,
+            EmbeddedWorkerCapabilities::Schedulable(_) => false,
+        };
         let trust_pool = required("MCLOVING_AGENT_TRUST_POOL")?;
         let lease_seconds = parse_positive::<i32>("MCLOVING_LEASE_SECONDS")?;
         let poll_milliseconds = parse_positive::<u64>("MCLOVING_POLL_MILLISECONDS")?;
@@ -1611,6 +1839,7 @@ impl EmbeddedWorker {
             organization_id,
             scheduler_id: format!("embedded:{agent_id}"),
             capabilities,
+            disabled,
             trust_pool,
             lease_seconds,
             poll_interval: Duration::from_millis(poll_milliseconds),
@@ -1632,6 +1861,12 @@ async fn run_embedded_worker(store: Store, worker: EmbeddedWorker) -> Result<()>
     loop {
         if let Err(error) = store.requeue_one_expired(worker.organization_id).await {
             eprintln!("expired-lease reconciliation failed: {error}");
+        }
+        // A disabled embedded worker keeps the expired-lease reconciliation
+        // duty above but must never claim work.
+        if worker.disabled {
+            tokio::time::sleep(worker.poll_interval).await;
+            continue;
         }
         match store
             .claim_next(&ClaimRequest {
@@ -1736,7 +1971,11 @@ async fn run_outbox_reaper(
 }
 
 fn required(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("{name} is required"))
+    required_from(&process_environment, name)
+}
+
+fn required_from(env: EnvLookup, name: &str) -> Result<String> {
+    environment_string(env, name)?.with_context(|| format!("{name} is required"))
 }
 
 fn effect_plan_from_environment() -> Result<Option<EffectExecutionPlan>> {
@@ -1841,6 +2080,145 @@ where
 mod tests {
     use super::*;
 
+    /// A complete, valid OIDC environment whose every URL is HTTPS.
+    fn valid_oidc_environment() -> BTreeMap<&'static str, &'static str> {
+        BTreeMap::from([
+            (
+                "MCLOVING_OIDC_PROVIDER_ID",
+                "9e9c4c05-95cf-4a4b-8e0d-3f2d55e2a501",
+            ),
+            ("MCLOVING_OIDC_ISSUER", "https://identity.example.test"),
+            ("MCLOVING_OIDC_AUDIENCE", "mcloving"),
+            (
+                "MCLOVING_OIDC_AUTHORIZATION_ENDPOINT",
+                "https://identity.example.test/authorize",
+            ),
+            (
+                "MCLOVING_OIDC_TOKEN_ENDPOINT",
+                "https://identity.example.test/token",
+            ),
+            (
+                "MCLOVING_OIDC_JWKS_URI",
+                "https://identity.example.test/jwks",
+            ),
+            ("MCLOVING_OIDC_CLIENT_ID", "mcloving-controller"),
+            ("MCLOVING_OIDC_CLIENT_SECRET", "contained-client-secret"),
+            ("MCLOVING_OIDC_GROUP_CLAIM", "groups"),
+            ("MCLOVING_OIDC_CONFIGURATION_GENERATION", "2"),
+            ("MCLOVING_OIDC_JWKS_GENERATION", "3"),
+            (
+                "MCLOVING_OIDC_JWKS_SHA256",
+                "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
+            ),
+            (
+                "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS",
+                "https://controller.example.test/oidc/callback",
+            ),
+            ("MCLOVING_OIDC_SESSION_TTL_SECONDS", "900"),
+            ("MCLOVING_OIDC_REFRESH_TTL_SECONDS", "28800"),
+            ("MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS", "10"),
+            ("MCLOVING_OIDC_CLOCK_SKEW_SECONDS", "60"),
+            ("MCLOVING_OIDC_MAX_JWKS_BYTES", "262144"),
+        ])
+    }
+
+    /// Every truthy spelling an operator might reach for.
+    const HOSTILE_FLAG_VALUES: [&str; 5] = ["1", "true", "TRUE", "yes", "on"];
+
+    /// Every plausible spelling of an insecure-loopback opt-in, all set to one
+    /// truthy value. Callers run the battery once per value, so every name is
+    /// tried at every value rather than each name at a single one — a parser
+    /// that recognised one spelling only for one representation would
+    /// otherwise slip through. None of these names exist: the deployed
+    /// configuration surface has no input mapped to the policy at all.
+    fn hostile_flag_battery(value: &str) -> Vec<(String, String)> {
+        let names = [
+            "MCLOVING_OIDC_ALLOW_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_OIDC_ALLOW_INSECURE_LOOPBACK",
+            "MCLOVING_OIDC_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_OIDC_INSECURE_LOOPBACK",
+            "MCLOVING_OIDC_INSECURE",
+            "MCLOVING_OIDC_ALLOW_HTTP",
+            "MCLOVING_OIDC_ALLOW_INSECURE",
+            "MCLOVING_OIDC_DISABLE_TLS",
+            "MCLOVING_OIDC_DISABLE_TLS_VALIDATION",
+            "MCLOVING_OIDC_LOOPBACK_FOR_TESTS",
+            "MCLOVING_OIDC_TEST_MODE",
+            "MCLOVING_OIDC_DEV_MODE",
+            "MCLOVING_ALLOW_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_ALLOW_INSECURE_LOOPBACK",
+            "MCLOVING_INSECURE_LOOPBACK_FOR_TESTS",
+            "MCLOVING_TEST_MODE",
+        ];
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn hostile_environment_cannot_enable_insecure_loopback() {
+        for hostile_value in HOSTILE_FLAG_VALUES {
+            let mut variables = valid_oidc_environment()
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect::<BTreeMap<_, _>>();
+            variables.extend(hostile_flag_battery(hostile_value));
+            let lookup = |name: &str| variables.get(name).map(std::ffi::OsString::from);
+
+            let oidc = oidc_environment_from(Uuid::new_v4(), &lookup)
+                .expect("hostile extras must not break parsing")
+                .expect("OIDC must be configured");
+            assert_eq!(oidc.client.insecure_loopback, InsecureLoopbackPolicy::DENY);
+            assert!(!oidc.client.insecure_loopback.is_allowed());
+            // The digest binds the deny policy, so a permissive client could not
+            // even validate against the provider generation this digest names.
+            assert_eq!(
+                oidc.provider.configuration_digest,
+                oidc.client.configuration_digest
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_http_oidc_configuration_is_rejected_not_downgraded() {
+        for hostile_value in HOSTILE_FLAG_VALUES {
+            for (name, value) in [
+                ("MCLOVING_OIDC_ISSUER", "http://127.0.0.1:8080"),
+                (
+                    "MCLOVING_OIDC_TOKEN_ENDPOINT",
+                    "http://localhost:8080/token",
+                ),
+                (
+                    "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS",
+                    "http://127.0.0.1:8080/oidc/callback",
+                ),
+            ] {
+                let mut variables = valid_oidc_environment()
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect::<BTreeMap<_, _>>();
+                variables.extend(hostile_flag_battery(hostile_value));
+                variables.insert(name.to_owned(), value.to_owned());
+                let lookup = |name: &str| variables.get(name).map(std::ffi::OsString::from);
+
+                // The config type carries the client secret and deliberately has
+                // no Debug implementation, so unwrap the error arm by hand.
+                let error = match oidc_environment_from(Uuid::new_v4(), &lookup) {
+                    Err(error) => error.to_string(),
+                    Ok(_) => panic!("plain-HTTP loopback must fail closed for {name}"),
+                };
+                // Assert the named refusal, not the whole error chain: `context`
+                // composes the underlying message into the display string, so an
+                // exact match binds this gate to wording it does not own.
+                assert!(
+                    error.contains("validate complete OIDC runtime client before persistence"),
+                    "unexpected rejection for {name} with {hostile_value}: {error}"
+                );
+            }
+        }
+    }
+
     fn effect_catalog(mappings: Vec<(&str, &str)>) -> ConnectorMappingCatalog {
         ConnectorMappingCatalog {
             schema_version: mcloving_controller_api::CONNECTOR_MAPPING_CATALOG_V1.to_owned(),
@@ -1870,6 +2248,50 @@ mod tests {
         );
         assert!(validate_artifact_agent_token(&api_token, &api_token).is_err());
         assert!(validate_artifact_agent_token(&api_token, &"b".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn repeated_session_epoch_churn_names_a_suspected_identity_collision() {
+        let churn = SessionEpochChurn::default();
+        churn.record_advance("windows-1");
+        churn.record_advance("windows-1");
+        assert_eq!(churn.suspected_collision("windows-1"), None);
+        assert_eq!(churn.suspected_collision("other-agent"), None);
+        let quiet = stale_session_status(&churn, "windows-1");
+        assert_eq!(quiet.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(quiet.message(), "stale agent session epoch");
+
+        churn.record_advance("windows-1");
+        let collision = churn
+            .suspected_collision("windows-1")
+            .expect("threshold advances within the window name the collision");
+        assert_eq!(
+            collision,
+            "agent identity collision suspected for windows-1: session epoch advanced \
+             3 times in 60 seconds; a second executor may be sharing this agent identity"
+        );
+        let named = stale_session_status(&churn, "windows-1");
+        assert_eq!(named.code(), tonic::Code::FailedPrecondition);
+        assert!(named.message().contains("stale agent session epoch"));
+        assert!(
+            named
+                .message()
+                .contains("agent identity collision suspected for windows-1")
+        );
+        assert_eq!(churn.suspected_collision("other-agent"), None);
+    }
+
+    #[test]
+    fn tracked_session_advances_are_bounded() {
+        let churn = SessionEpochChurn::default();
+        for _ in 0..(MAX_TRACKED_SESSION_ADVANCES + 10) {
+            churn.record_advance("windows-1");
+        }
+        let advances = churn
+            .advances_by_agent
+            .lock()
+            .expect("session churn lock is never poisoned");
+        assert!(advances.get("windows-1").unwrap().len() <= MAX_TRACKED_SESSION_ADVANCES);
     }
 
     #[test]

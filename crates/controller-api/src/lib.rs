@@ -5,8 +5,9 @@ mod oidc;
 
 pub use mcloving_controller_store::{BuildCursor, PipelineOperationalState};
 pub use oidc::{
-    MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
-    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
+    InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
+    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
+    OidcClientConfig,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,22 +22,22 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mcloving_controller_store::{
-    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
-    ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
-    DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind, DiscoveryChild,
-    DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent, DiscoveryParentKind,
-    DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite, DiscoveryScanOutcome,
-    DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite, ForkTrustStrategy,
-    MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode, NewEnvironmentApproval,
-    NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy, PipelineOperationalStateRecord,
-    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
-    PipelinePutOutcome, PipelineRecord, PipelineTrigger, PipelineTriggerState,
-    PipelineTriggerWrite, PipelineWrite, PullRequestDiscoveryStrategy, RetryDecision, Store,
-    StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
-    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
-    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
-    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
-    TriggerScheduleSlot, WaitReason,
+    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, CancellationDecision,
+    ComponentCursor, ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite,
+    CredentialGrantView, DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind,
+    DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent,
+    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
+    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite,
+    ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
+    NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy,
+    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite,
+    PullRequestDiscoveryStrategy, RetryDecision, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
+    TestReportView, TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
+    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
+    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -59,7 +60,9 @@ pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorizat
 pub const MAX_DISCOVERY_SCAN_BODY_BYTES: usize = 128 * 1024 * 1024;
 pub const CONNECTOR_MAPPING_CATALOG_V1: &str = "mcloving.connector-mapping-catalog/v1";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
-const DEFAULT_PLATFORM: &str = "linux";
+// The scheduling capability vocabulary (docs/architecture/CAPABILITY_VOCABULARY_V1.md)
+// defines the closed platform set and the default; spell both through it.
+const DEFAULT_PLATFORM: &str = mcloving_domain::capability::DEFAULT_PLATFORM;
 const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 const MAX_DISCOVERY_SCAN_OBSERVATIONS: usize = 4096;
 
@@ -1330,7 +1333,7 @@ fn openapi_document() -> Value {
                         },
                         "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
                         "parameters": parameter_values_schema(),
-                        "platform": {"type": "string", "enum": ["linux", "windows"]},
+                        "platform": {"type": "string", "enum": mcloving_domain::capability::SUPPORTED_PLATFORMS},
                         "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
                     },
                     "additionalProperties": false
@@ -1682,7 +1685,7 @@ fn trigger_delivery_schema() -> Value {
             "payload_sha256": digest.clone(),
             "canonical_payload": {"type": "object"},
             "parameters": {"type": "object"},
-            "requested_platform": {"type": "string", "enum": ["linux", "windows"]},
+            "requested_platform": {"type": "string", "enum": mcloving_domain::capability::SUPPORTED_PLATFORMS},
             "requested_trust_pool": {"type": "string", "minLength": 1, "maxLength": 128},
             "event_time_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
             "accepted_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
@@ -2913,6 +2916,9 @@ pub struct LogPage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancellationResponse {
     pub accepted: bool,
+    /// Names why a refusal happened; absent when the request was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3531,6 +3537,13 @@ async fn submit_trigger_event(
         })
         .await
         .map_err(trigger_error)?;
+    // An unsupported platform is not refused before capture. The store has to
+    // resolve identity first, because an exact replay of an already terminal
+    // admission must stay readable and must not mint a second build, and
+    // refusing ahead of that would make a delivery admitted under the old
+    // vocabulary permanently unreadable. Processing instead claims the record
+    // and dead-letters it with a named reason, so it is captured, terminal,
+    // and never queued against a capability no worker can advertise.
     let delivery = match delivery {
         TriggerDeliveryAdmission::Created(delivery)
         | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
@@ -3646,6 +3659,13 @@ async fn process_trigger_delivery(
             return fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await;
         }
     };
+    // A delivery persisted before the vocabulary was closed can name a platform
+    // no worker will ever advertise. Retrying it forever is the queue-silently
+    // failure this ticket removes, so the delivery is terminalized instead.
+    if !mcloving_domain::capability::is_supported_platform(&claimed.requested_platform) {
+        return fail_claimed_trigger_delivery(state, claimed, worker_identity, invalid_platform())
+            .await;
+    }
     match admit_pipeline_parameters(
         state,
         PipelineAdmissionInput {
@@ -4141,6 +4161,14 @@ async fn admit_pipeline_parameters(
     };
     let pipeline = compile_source_with_parameters(&source, parameters)?;
     validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    // Revalidated here, not only at ingress. A delivery captured by an earlier
+    // release can carry a platform outside the closed set, and every admission
+    // path — header submission, claimed processing, and replay — funnels
+    // through this function. Admitting one would build a DAG requiring a
+    // capability no valid worker can advertise, which queues forever.
+    if !mcloving_domain::capability::is_supported_platform(&required_platform) {
+        return Err(invalid_platform());
+    }
     validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
@@ -4302,7 +4330,7 @@ fn submission_platform(headers: &HeaderMap) -> Result<String, ApiError> {
         Some(value) => value.to_str().map_err(|_| invalid_platform())?,
         None => DEFAULT_PLATFORM,
     };
-    if !matches!(value, "linux" | "windows") {
+    if !mcloving_domain::capability::is_supported_platform(value) {
         return Err(invalid_platform());
     }
     Ok(value.to_owned())
@@ -4400,6 +4428,54 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
     }
 }
 
+/// The execution machinery runs exactly one bounded step per scheduled node,
+/// and that step is either a process or a connector intent (`bins/agent`
+/// `validate_assignment` and the embedded execution spine both refuse anything
+/// else at claim time). Validation, planning, storage, and admission all
+/// compile through [`compile_source_with_parameters`], so this single check
+/// keeps "validate accepted" equivalent to "runnable".
+const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
+    for stage in &pipeline.stages {
+        if stage.steps.len() != 1 {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares {} steps; the execution machinery runs exactly one step per stage",
+                    stage.id,
+                    stage.steps.len()
+                ),
+            ));
+        }
+        for step in &stage.steps {
+            // Both runnable step kinds carry a bounded timeout, and both are
+            // checked here. An unbounded one would be accepted by validate and
+            // then be unrunnable, which is exactly the "validate accepted"
+            // versus "runnable" gap this function exists to close.
+            let (kind, timeout_seconds) = match step {
+                Step::Process(process) => ("process", process.timeout_seconds),
+                Step::ConnectorIntent(intent) => ("connector-intent", Some(intent.timeout_seconds)),
+            };
+            if !matches!(
+                timeout_seconds,
+                None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
+            ) {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsupported_execution_spec",
+                    format!(
+                        "stage {} declares a {kind} timeout outside 1..={MAX_EXECUTION_TIMEOUT_SECONDS} seconds",
+                        stage.id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn compile_source_with_parameters(
     source: &str,
     parameters: BTreeMap<String, ParameterValue>,
@@ -4411,8 +4487,15 @@ fn compile_source_with_parameters(
             "pipeline source exceeds the configured parser byte limit",
         ));
     }
-    compile_strict_yaml_with_parameters("public-api", source, ParseLimits::default(), parameters)
-        .map_err(pipeline_rejected)
+    let pipeline = compile_strict_yaml_with_parameters(
+        "public-api",
+        source,
+        ParseLimits::default(),
+        parameters,
+    )
+    .map_err(pipeline_rejected)?;
+    validate_execution_support(&pipeline)?;
+    Ok(pipeline)
 }
 
 fn validate_connector_mappings(
@@ -5379,12 +5462,54 @@ async fn cancel(
         Action::BuildCancel,
     )
     .await?;
-    let accepted = state
+    let decision = state
         .store
-        .request_cancellation_as(organization_id, project_id, build_id, &principal.subject)
+        .request_cancellation_decision_as(organization_id, project_id, build_id, &principal.subject)
         .await
         .map_err(internal)?;
-    Ok(Json(CancellationResponse { accepted }))
+    match decision {
+        CancellationDecision::Accepted => Ok(Json(CancellationResponse {
+            accepted: true,
+            reason: None,
+        })),
+        CancellationDecision::AlreadyRequested => Ok(Json(CancellationResponse {
+            accepted: false,
+            reason: Some("cancellation was already requested for this build".to_owned()),
+        })),
+        CancellationDecision::NotCancellable { build_status } => {
+            Err(cancellation_refusal(build_id, build_status))
+        }
+    }
+}
+
+/// Names the exact reason a build cannot be cancelled. A build parked in
+/// `reconciliation_required` in particular is refused with its state and the
+/// operator resolution path rather than a bare conflict.
+fn cancellation_refusal(build_id: Uuid, build_status: Option<String>) -> ApiError {
+    match build_status.as_deref() {
+        Some("reconciliation_required") => ApiError::new(
+            StatusCode::CONFLICT,
+            "build_reconciliation_required",
+            format!(
+                "build {build_id} is parked in reconciliation_required: a recovered agent \
+                 attempt is awaiting operator reconciliation, and cancellation cannot \
+                 discharge it; confirm the attempt's uncertain effects and then retry the \
+                 attempt or finalize the reconciliation, after which the owning agent \
+                 discharges its recovered journal record and resumes polling (see \
+                 docs/architecture/AGENT_RUNTIME.md, \"Recovered-attempt discharge\")"
+            ),
+        ),
+        Some(status) => ApiError::new(
+            StatusCode::CONFLICT,
+            "build_not_cancellable",
+            format!("build {build_id} is {status} and can no longer be cancelled"),
+        ),
+        None => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "build_not_found",
+            format!("build {build_id} was not found in this project"),
+        ),
+    }
 }
 
 async fn retry_attempt(
@@ -5835,6 +5960,29 @@ impl Client {
     pub fn with_artifact_agent_token(mut self, bearer_token: &str) -> Self {
         self.artifact_agent_token = Some(bearer_token.to_owned());
         self
+    }
+
+    /// Submits a build without naming a platform or trust pool, so the
+    /// controller applies the documented defaults (`platform:linux`,
+    /// `trusted-linux`).
+    pub async fn submit_pipeline_with_defaults(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+        idempotency_key: &str,
+        request: &PipelineBuildRequest,
+    ) -> Result<AdmissionResponse, ClientError> {
+        self.send(
+            self.inner
+                .post(format!(
+                    "{}/pipelines/{pipeline_id}/builds",
+                    self.project_url(organization_id, project_id)
+                ))
+                .header(IDEMPOTENCY_HEADER, idempotency_key)
+                .json(request),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6434,6 +6582,31 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn cancellation_refusals_name_their_exact_reason() {
+        let build_id = Uuid::from_u128(0x1234);
+
+        let parked = cancellation_refusal(build_id, Some("reconciliation_required".to_owned()));
+        assert_eq!(parked.status, StatusCode::CONFLICT);
+        assert_eq!(parked.code, "build_reconciliation_required");
+        assert!(parked.message.contains("reconciliation_required"));
+        assert!(
+            parked
+                .message
+                .contains("recovered agent attempt is awaiting operator reconciliation")
+        );
+        assert!(parked.message.contains("AGENT_RUNTIME.md"));
+
+        let terminal = cancellation_refusal(build_id, Some("succeeded".to_owned()));
+        assert_eq!(terminal.status, StatusCode::CONFLICT);
+        assert_eq!(terminal.code, "build_not_cancellable");
+        assert!(terminal.message.contains("succeeded"));
+
+        let missing = cancellation_refusal(build_id, None);
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(missing.code, "build_not_found");
     }
 
     #[tokio::test]
@@ -7544,5 +7717,63 @@ stages:
         .expect("compile direct process mode");
         validate_execution_platform(&pipeline, "linux").expect("Linux accepts direct mode");
         validate_execution_platform(&pipeline, "windows").expect("Windows accepts direct mode");
+    }
+
+    fn single_stage_source(step_count: usize) -> String {
+        let mut source = String::from(
+            "version: 1\nname: dense\nstages:\n  - id: build\n    name: Build\n    steps:\n",
+        );
+        for index in 0..step_count {
+            source.push_str(&format!(
+                "      - process:\n          program: /bin/step-{index}\n"
+            ));
+        }
+        source
+    }
+
+    #[test]
+    fn hundred_step_single_stage_pipeline_is_rejected_at_the_shared_compile_choke_point() {
+        // The measured EXEC-001 defect: this exact shape passed validate and
+        // admission, then looped forever at agent claim time. Both routes
+        // compile through compile_source_with_parameters, so this rejection
+        // proves validate and admission agree exactly.
+        let error = compile_source_with_parameters(&single_stage_source(100), BTreeMap::new())
+            .expect_err("multi-step stages are not executable and must not validate");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
+        );
+
+        let error = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
+            .expect_err("two steps in one stage are equally unsupported");
+        assert_eq!(error.code, "unsupported_execution_spec");
+
+        compile_source_with_parameters(&single_stage_source(1), BTreeMap::new())
+            .expect("exactly one process step per stage remains admissible");
+    }
+
+    #[test]
+    fn process_timeout_bounds_match_the_agent_execution_contract() {
+        let source = |timeout: &str| {
+            format!(
+                "version: 1\nname: bounded\nstages:\n  - id: build\n    name: Build\n    steps:\n      - process:\n          program: /bin/tool\n          timeout_seconds: {timeout}\n"
+            )
+        };
+        for rejected in ["0", "604801"] {
+            let error = compile_source_with_parameters(&source(rejected), BTreeMap::new())
+                .expect_err("timeouts the agent refuses must not validate");
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "unsupported_execution_spec");
+            assert_eq!(
+                error.message,
+                "stage build declares a process timeout outside 1..=604800 seconds"
+            );
+        }
+        for accepted in ["1", "604800"] {
+            compile_source_with_parameters(&source(accepted), BTreeMap::new())
+                .expect("agent-executable timeouts remain admissible");
+        }
     }
 }

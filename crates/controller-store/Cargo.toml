@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 aho-corasick = "=1.1.4"
 hex = "=0.4.3"
+mcloving-domain = { version = "0.0.0", path = "../domain" }
 mcloving-state-transfer = { version = "=0.0.0", path = "../state-transfer" }
 quick-xml = "=0.41.0"
 serde = { version = "=1.0.228", features = ["derive"] }

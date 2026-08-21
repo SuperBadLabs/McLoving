@@ -17,8 +17,9 @@ use mcloving_agent_protocol::wire::{
     OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{
-    ATTEMPT_CREDENTIALS_FEATURE, OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    TransportError, WORK_DELIVERY_FEATURE,
+    ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, OutboundMtlsConfig,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, RECOVERED_DISCHARGE_FEATURE, TransportError,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -36,6 +37,11 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const OPEN_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Consecutive stale-session-epoch session failures before the retry log
+/// names a suspected identity collision. A single healthy agent catches up a
+/// lagging journal inside one enrollment, so repeated stale rejections mean
+/// another executor keeps advancing this identity's epoch.
+const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
@@ -85,8 +91,6 @@ pub enum AgentError {
     InvalidAssignment(String),
     #[error("execution specification is invalid: {0}")]
     InvalidSpec(#[from] serde_json::Error),
-    #[error("execution specification is unsupported")]
-    UnsupportedSpec,
     #[error("agent execution failed: {0}")]
     Execution(#[from] ExecutionError),
     #[error("controller selected an unsupported protocol minor")]
@@ -219,6 +223,7 @@ pub async fn run_until_stopped(
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
     let _instance = acquire_instance_guard(config)?;
+    let mut consecutive_stale_sessions: u32 = 0;
     loop {
         if stop.is_cancelled() {
             return Ok(());
@@ -226,7 +231,21 @@ pub async fn run_until_stopped(
         match run_session(config, stop.clone()).await {
             Ok(()) => return Ok(()),
             Err(error) if !stop.is_cancelled() => {
+                consecutive_stale_sessions = if names_stale_session_epoch(&error) {
+                    consecutive_stale_sessions.saturating_add(1)
+                } else {
+                    0
+                };
                 eprintln!("agent session ended; retrying: {error}");
+                if consecutive_stale_sessions >= STALE_SESSION_COLLISION_THRESHOLD {
+                    eprintln!(
+                        "agent identity collision suspected: {consecutive_stale_sessions} \
+                         consecutive stale session epoch rejections for agent {}; a second \
+                         executor may be sharing this agent identity (verify \
+                         MCLOVING_AGENT_ID and its certificate binding are unique)",
+                        config.agent_id
+                    );
+                }
                 tokio::select! {
                     () = stop.cancelled() => return Ok(()),
                     () = sleep(RECONNECT_DELAY) => {}
@@ -234,6 +253,16 @@ pub async fn run_until_stopped(
             }
             Err(_) => return Ok(()),
         }
+    }
+}
+
+/// Whether a session failure was a controller stale-session-epoch rejection —
+/// the signature of a competing executor advancing this identity's epoch.
+fn names_stale_session_epoch(error: &AgentError) -> bool {
+    match error {
+        AgentError::StaleSession => true,
+        AgentError::Rpc(status) => status.message().contains("stale agent session epoch"),
+        _ => false,
     }
 }
 
@@ -347,7 +376,7 @@ async fn open_session(
     AgentError,
 > {
     let mut journal = Journal::open(&config.journal_path)?;
-    let session_epoch = journal.reserve_session_epoch(config.minimum_session_epoch)?;
+    let mut session_epoch = journal.reserve_session_epoch(config.minimum_session_epoch)?;
     let active_attempts = journal.reconcile()?.attempts.len();
     let endpoint = outbound_config(config).await?.endpoint()?;
     let channel = tokio::select! {
@@ -355,43 +384,87 @@ async fn open_session(
         result = endpoint.connect() => result?,
     };
     let mut client = AgentControlClient::new(channel);
-    let request = OpenSessionRequest {
-        agent_id: config.agent_id.clone(),
-        session_epoch,
-        protocol: Some(ProtocolOffer {
-            major: u32::from(PROTOCOL_MAJOR),
-            minimum_minor: u32::from(PROTOCOL_MINOR),
-            maximum_minor: u32::from(PROTOCOL_MINOR),
-            features: vec![
-                "journal-v1".to_owned(),
-                platform_feature().to_owned(),
-                WORK_DELIVERY_FEATURE.to_owned(),
-                ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
-            ],
-        }),
-        trust_pool: config.trust_pool.clone(),
-        capabilities: session_capabilities(),
-    };
-    let response = tokio::select! {
-        () = stop.cancelled() => return Err(AgentError::Stopped),
-        response = bounded_open_session_rpc(OPEN_SESSION_TIMEOUT, client.open_session(request)) => response?,
-    }
-    .into_inner();
-    if response.session_epoch != session_epoch {
-        return Err(AgentError::StaleSession);
-    }
-    if response.protocol_minor != u32::from(PROTOCOL_MINOR) {
-        return Err(AgentError::UnsupportedProtocol);
-    }
-    require_work_delivery_feature(&response.features)?;
-    require_attempt_credentials_feature(&response.features)?;
-    Ok((
-        client,
-        SessionReceipt {
+    let mut caught_up = false;
+    loop {
+        let request = OpenSessionRequest {
+            agent_id: config.agent_id.clone(),
             session_epoch,
-            active_attempts,
-        },
-    ))
+            protocol: Some(ProtocolOffer {
+                major: u32::from(PROTOCOL_MAJOR),
+                minimum_minor: u32::from(PROTOCOL_MINOR),
+                maximum_minor: u32::from(PROTOCOL_MINOR),
+                features: vec![
+                    "journal-v1".to_owned(),
+                    platform_feature().to_owned(),
+                    WORK_DELIVERY_FEATURE.to_owned(),
+                    ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
+                    WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
+                    RECOVERED_DISCHARGE_FEATURE.to_owned(),
+                ],
+            }),
+            trust_pool: config.trust_pool.clone(),
+            capabilities: session_capabilities(),
+        };
+        let response = tokio::select! {
+            () = stop.cancelled() => return Err(AgentError::Stopped),
+            response = bounded_open_session_rpc(OPEN_SESSION_TIMEOUT, client.open_session(request)) => response,
+        };
+        let response = match response {
+            Ok(response) => response.into_inner(),
+            Err(AgentError::Rpc(status)) => {
+                if !caught_up && let Some(floor) = stale_epoch_floor(&status) {
+                    // The controller durably remembers a newer session epoch
+                    // than this journal has reserved (for example after a
+                    // documented journal replacement). Reserve past the
+                    // returned floor in one durable step and re-offer once;
+                    // the controller's fence itself is unchanged and a second
+                    // rejection — the identity-collision signature — is
+                    // surfaced unmodified.
+                    caught_up = true;
+                    session_epoch = journal.reserve_session_epoch(
+                        floor.checked_add(1).ok_or(AgentError::StaleSession)?,
+                    )?;
+                    eprintln!(
+                        "advancing agent session epoch to {session_epoch} to satisfy the \
+                         controller's durable session floor"
+                    );
+                    continue;
+                }
+                return Err(AgentError::Rpc(status));
+            }
+            Err(error) => return Err(error),
+        };
+        if response.session_epoch != session_epoch {
+            return Err(AgentError::StaleSession);
+        }
+        if response.protocol_minor != u32::from(PROTOCOL_MINOR) {
+            return Err(AgentError::UnsupportedProtocol);
+        }
+        require_work_delivery_feature(&response.features)?;
+        require_attempt_credentials_feature(&response.features)?;
+        return Ok((
+            client,
+            SessionReceipt {
+                session_epoch,
+                active_attempts,
+            },
+        ));
+    }
+}
+
+/// Extracts the controller's stored session epoch from a stale-epoch
+/// open-session rejection, when the controller provided one.
+fn stale_epoch_floor(status: &tonic::Status) -> Option<u64> {
+    if status.code() != tonic::Code::FailedPrecondition
+        || !status.message().contains("stale agent session epoch")
+    {
+        return None;
+    }
+    status
+        .metadata()
+        .get(CURRENT_SESSION_EPOCH_METADATA)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 async fn bounded_open_session_rpc<T>(
@@ -519,10 +592,15 @@ async fn send_reconciliation(
             )
         })
         .collect::<std::collections::BTreeSet<_>>();
-    let mut unresolved = report
-        .attempts
-        .iter()
-        .any(|attempt| attempt.phase == AttemptPhase::ReconciliationRequired);
+    // Reconciliation-required attempts covered by the directive are settled
+    // below and may be discharged by an explicit controller confirmation;
+    // only an attempt the directive did not address keeps the session
+    // fail-closed unconditionally.
+    let mut unresolved = report.attempts.iter().any(|attempt| {
+        attempt.phase == AttemptPhase::ReconciliationRequired
+            && !cancellation_targets(&cancelled, attempt)
+            && !cancellation_targets(&retained, attempt)
+    });
     if !cancelled.is_empty() || !retained.is_empty() {
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
@@ -598,6 +676,17 @@ async fn send_reconciliation(
                     phase,
                     attempt.process_id,
                 )?;
+                if outcome == RecoveredCancellation::ReconciliationRequired
+                    && phase == AttemptPhase::Aborted
+                {
+                    eprintln!(
+                        "discharged recovered attempt {}/{} fence {}: the controller \
+                         confirmed its fenced authority is disowned; terminal evidence \
+                         is preserved in the journal and its spools are reclaimed under \
+                         the terminal spool rules",
+                        attempt.organization_id, attempt.attempt_id, attempt.fence_token
+                    );
+                }
                 unresolved |= phase == AttemptPhase::ReconciliationRequired;
             }
         }
@@ -652,6 +741,14 @@ fn recovered_cancellation_phase(
     if disposition == CancellationDisposition::Unspecified {
         return Err(AgentError::UnsupportedProtocol);
     }
+    // An explicit fenced discharge is the one controller confirmation that
+    // may retire a locally unverifiable recovered attempt: the controller
+    // determined under the exact current session that this fence is disowned
+    // (requeued, terminal, superseded by an operator retry, or unknown) and
+    // can never act again. The agent never self-discharges on suspicion.
+    if disposition == CancellationDisposition::DischargeRecovered {
+        return Ok(AttemptPhase::Aborted);
+    }
     // Local containment knowledge wins over a stale controller receipt. A
     // retired fence does not prove an unverifiable process group is gone.
     if outcome == RecoveredCancellation::ReconciliationRequired {
@@ -662,7 +759,9 @@ fn recovered_cancellation_phase(
             AttemptPhase::Aborted
         }
         CancellationDisposition::ReconciliationRequired => AttemptPhase::ReconciliationRequired,
-        CancellationDisposition::Unspecified => unreachable!("validated above"),
+        CancellationDisposition::Unspecified | CancellationDisposition::DischargeRecovered => {
+            unreachable!("validated above")
+        }
     })
 }
 
@@ -956,7 +1055,7 @@ const fn platform_feature() -> &'static str {
 fn session_capabilities() -> Vec<String> {
     vec![
         std::env::consts::OS.to_owned(),
-        format!("platform:{}", std::env::consts::OS),
+        mcloving_domain::capability::platform_capability(std::env::consts::OS),
         std::env::consts::ARCH.to_owned(),
     ]
 }
@@ -1301,6 +1400,69 @@ mod tests {
             .unwrap(),
             AttemptPhase::Aborted
         );
+    }
+
+    #[test]
+    fn explicit_discharge_confirmation_retires_an_unverifiable_recovered_attempt() {
+        assert_eq!(
+            recovered_cancellation_phase(
+                RecoveredCancellation::ReconciliationRequired,
+                CancellationDisposition::DischargeRecovered as i32,
+            )
+            .unwrap(),
+            AttemptPhase::Aborted
+        );
+        assert_eq!(
+            recovered_cancellation_phase(
+                RecoveredCancellation::AlreadyExited,
+                CancellationDisposition::DischargeRecovered as i32,
+            )
+            .unwrap(),
+            AttemptPhase::Aborted
+        );
+    }
+
+    #[test]
+    fn stale_session_epoch_failures_are_recognized_for_collision_naming() {
+        assert!(names_stale_session_epoch(&AgentError::StaleSession));
+        assert!(names_stale_session_epoch(&AgentError::Rpc(
+            tonic::Status::failed_precondition(
+                "stale agent session epoch; agent identity collision suspected for windows-1"
+            )
+        )));
+        assert!(!names_stale_session_epoch(&AgentError::Rpc(
+            tonic::Status::unavailable("controller restarting")
+        )));
+        assert!(!names_stale_session_epoch(&AgentError::StaleAuthority));
+    }
+
+    #[test]
+    fn stale_epoch_floor_requires_the_exact_rejection_and_metadata() {
+        let mut status = tonic::Status::failed_precondition("stale agent session epoch");
+        assert_eq!(stale_epoch_floor(&status), None);
+        status
+            .metadata_mut()
+            .insert(CURRENT_SESSION_EPOCH_METADATA, "41".parse().unwrap());
+        assert_eq!(stale_epoch_floor(&status), Some(41));
+
+        let mut wrong_code = tonic::Status::unavailable("stale agent session epoch");
+        wrong_code
+            .metadata_mut()
+            .insert(CURRENT_SESSION_EPOCH_METADATA, "41".parse().unwrap());
+        assert_eq!(stale_epoch_floor(&wrong_code), None);
+
+        let mut wrong_message = tonic::Status::failed_precondition("another precondition");
+        wrong_message
+            .metadata_mut()
+            .insert(CURRENT_SESSION_EPOCH_METADATA, "41".parse().unwrap());
+        assert_eq!(stale_epoch_floor(&wrong_message), None);
+
+        let mut invalid_value = tonic::Status::failed_precondition("stale agent session epoch");
+        invalid_value.metadata_mut().insert(
+            CURRENT_SESSION_EPOCH_METADATA,
+            "not-a-number".parse().unwrap(),
+        );
+        assert_eq!(stale_epoch_floor(&invalid_value), None);
     }
 
     #[test]

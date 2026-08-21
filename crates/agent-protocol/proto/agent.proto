@@ -116,6 +116,11 @@ enum CancellationDisposition {
   CANCELLATION_DISPOSITION_COMPLETED = 1;
   CANCELLATION_DISPOSITION_RETIRE_STALE = 2;
   CANCELLATION_DISPOSITION_RECONCILIATION_REQUIRED = 3;
+  // Explicit fenced controller confirmation that the reported recovered
+  // attempt's authority is disowned (requeued, terminal, superseded by an
+  // operator retry, or unknown). Only this disposition authorizes an agent to
+  // retire a reconciliation-required journal attempt.
+  CANCELLATION_DISPOSITION_DISCHARGE_RECOVERED = 4;
 }
 
 message WorkPoll {
@@ -204,4 +209,8 @@ enum WorkOutcome {
 message WorkReceipt {
   uint64 session_epoch = 1;
   bool accepted = 2;
+  // What the controller actually published. A committed cancellation can
+  // override a non-succeeded terminal at the publishing row lock, and the
+  // agent must journal what landed, not what it asked for.
+  WorkOutcome published_outcome = 3;
 }
