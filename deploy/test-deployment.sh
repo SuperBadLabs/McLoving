@@ -620,6 +620,111 @@ LINKEDDIR
 rm -f "${config_dir}/pki"
 mv "${config_dir}/pki.real" "${config_dir}/pki"
 
+# A special filesystem node inside a walked tree must not be opened. Hashing a
+# FIFO with no writer blocks forever, so CUTOVER-001 would receive no document
+# at all precisely when this kind of drift is present.
+mkfifo "${config_dir}/stall"
+special_digests="$(timeout 60 "${libexec}/helpers/mcloving-deployed-digests" --home "${home}")" || {
+  echo "digest re-read stalled or failed on a FIFO instead of recording it" >&2
+  rm -f "${config_dir}/stall"
+  exit 1
+}
+rm -f "${config_dir}/stall"
+python3 - "${special_digests}" <<'SPECIAL'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+contracts = document.get("environment_contracts", [])
+entry = [item for item in contracts if item["path"].endswith("/stall")]
+if not entry:
+    raise SystemExit("special node missing from the re-read")
+if entry[0].get("kind") != "fifo":
+    raise SystemExit(f"special node recorded as {entry[0]}")
+if "sha256" in entry[0]:
+    raise SystemExit("special node was digested as a regular file")
+SPECIAL
+
+# The root of a walked tree is configuration too. Repointing ~/.config/mcloving
+# itself at another managed directory with identical contents must not leave
+# the re-read byte-identical: that substitution redirects every contract, key,
+# and certificate the services read.
+before_root_swap="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+# The copy is taken before the move so the live configuration path is absent
+# for as little as possible: the controller and agent started in step 6 are
+# still running against it.
+cp -a "${config_dir}" "${config_dir}.alias"
+mv "${config_dir}" "${config_dir}.real"
+ln -s "$(basename "${config_dir}").alias" "${config_dir}"
+after_root_swap="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+rm -f "${config_dir}"
+rm -rf "${config_dir}.alias"
+mv "${config_dir}.real" "${config_dir}"
+if [[ "${before_root_swap}" == "${after_root_swap}" ]]; then
+  echo "a repointed configuration root left the re-read byte-identical" >&2
+  exit 1
+fi
+python3 - "${after_root_swap}" <<'ROOT'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+contracts = document.get("environment_contracts", [])
+entry = [item for item in contracts if item["path"] == ".config/mcloving"]
+if not entry:
+    raise SystemExit("symlinked configuration root missing from the re-read")
+if entry[0].get("kind") != "directory_symlink":
+    raise SystemExit(f"configuration root recorded as {entry[0]}")
+if "symlink_target" not in entry[0]:
+    raise SystemExit("configuration root recorded without its target")
+ROOT
+
+# `systemctl start` reaching the started state is not the same as a service
+# that is still running: Type=exec reports success once the exec succeeds. The
+# agent's health gate reads its journal and an intact journal says nothing
+# about the process, so without this an upgrade over a binary that execs and
+# exits reports "complete and healthy" while Restart=on-failure cycles. Driven
+# against a scripted manager because this test runs no user systemd instance.
+stability_shim="${workdir}/stability-shim"
+mkdir -p "${stability_shim}"
+cat > "${stability_shim}/systemctl" <<'SHIM'
+#!/usr/bin/env bash
+count="$(cat "${MCLOVING_FAKE_STATE}" 2>/dev/null || echo 0)"
+count=$((count + 1))
+echo "${count}" > "${MCLOVING_FAKE_STATE}"
+case "${MCLOVING_FAKE_MODE}" in
+  steady)
+    printf 'ActiveState=active\nSubState=running\nMainPID=4242\nNRestarts=0\n' ;;
+  flapping)
+    printf 'ActiveState=active\nSubState=running\nMainPID=%s\nNRestarts=%s\n' \
+      "$((4242 + count))" "${count}" ;;
+  restarting)
+    printf 'ActiveState=activating\nSubState=auto-restart\nMainPID=0\nNRestarts=3\n' ;;
+  *) exit 1 ;;
+esac
+SHIM
+chmod +x "${stability_shim}/systemctl"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  export PATH="${stability_shim}:${PATH}"
+  export MCLOVING_FAKE_STATE="${stability_shim}/count"
+  export MCLOVING_FAKE_MODE=steady
+  : > "${MCLOVING_FAKE_STATE}"
+  require_service_stable 0 mcloving-agent.service 3 >/dev/null || {
+    echo "stability check refused a service that stayed active/running" >&2
+    exit 1
+  }
+  for mode in flapping restarting; do
+    export MCLOVING_FAKE_MODE="${mode}"
+    : > "${MCLOVING_FAKE_STATE}"
+    if require_service_stable 0 mcloving-agent.service 3 >/dev/null 2>&1; then
+      echo "stability check accepted a ${mode} service" >&2
+      exit 1
+    fi
+  done
+)
+
 # The recovery command the upgrade path prints must actually run from where it
 # is installed. Checking only that the file exists proved nothing: the helper
 # resolved its shared library against the repository layout and exited before
@@ -641,4 +746,4 @@ mv "${config_dir}/pki.real" "${config_dir}/pki"
   exit 1
 }
 
-echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar (incl. multiline) -> symlinked contract -> symlinked pki -> installed rollback runs"
+echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar (incl. multiline) -> symlinked contract -> symlinked pki -> special node -> symlinked config root -> service stability -> installed rollback runs"

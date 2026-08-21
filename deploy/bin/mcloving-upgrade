@@ -99,12 +99,23 @@ if ! "${libexec_root}/helpers/mcloving-health" controller "${config_root}/contro
   echo "controller health gate failed after upgrade; ${rollback_hint}" >&2
   exit 1
 fi
+if ! require_service_stable "${no_systemd}" mcloving-controller.service; then
+  echo "controller did not stay running after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
 if ! service_control "${no_systemd}" start mcloving-agent.service; then
   echo "agent failed to start after upgrade; ${rollback_hint}" >&2
   exit 1
 fi
 if ! "${libexec_root}/helpers/mcloving-health" agent "${config_root}/agent.env"; then
   echo "agent health gate failed after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+# The journal check above proves the journal, not the process. Without this an
+# agent that execs and exits leaves the upgrade reporting success while nothing
+# accepts work.
+if ! require_service_stable "${no_systemd}" mcloving-agent.service; then
+  echo "agent did not stay running after upgrade; ${rollback_hint}" >&2
   exit 1
 fi
 echo "upgrade to release ${id} complete and healthy"

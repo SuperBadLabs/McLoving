@@ -33,9 +33,18 @@ fi
 python3 - "${home_dir}" <<'PY'
 import hashlib
 import json
+import stat
 import sys
 import os
 from pathlib import Path
+
+NODE_KINDS = {
+    stat.S_IFIFO: "fifo",
+    stat.S_IFSOCK: "socket",
+    stat.S_IFCHR: "character_device",
+    stat.S_IFBLK: "block_device",
+    stat.S_IFDIR: "directory",
+}
 
 home = Path(sys.argv[1])
 libexec = home / ".local/libexec/mcloving"
@@ -78,10 +87,36 @@ def file_record(path: Path, root: Path) -> dict:
             "symlink_target": os.readlink(path),
             "kind": "directory_symlink",
         }
+    try:
+        status = path.stat()
+    except OSError:
+        # Only reachable if the target disappeared between the checks above and
+        # here. Losing the whole document to a race would deny CUTOVER-001 its
+        # re-read exactly when the tree is changing underneath it.
+        record = {
+            "path": path.relative_to(root).as_posix(),
+            "kind": "unreadable",
+        }
+        if path.is_symlink():
+            record["symlink_target"] = os.readlink(path)
+        return record
+    if not stat.S_ISREG(status.st_mode):
+        # A FIFO, socket, or device node in a deployment tree has no content to
+        # digest, and opening one is not a neutral act: a FIFO with no writer
+        # blocks the read forever and a socket raises. Either way the document
+        # would be lost precisely when the drift it exists to report is
+        # present, so the node kind is the fact recorded instead.
+        record = {
+            "path": path.relative_to(root).as_posix(),
+            "kind": NODE_KINDS.get(stat.S_IFMT(status.st_mode), "unknown_node"),
+        }
+        if path.is_symlink():
+            record["symlink_target"] = os.readlink(path)
+        return record
     record = {
         "path": path.relative_to(root).as_posix(),
         "sha256": sha256_file(path),
-        "size_bytes": path.stat().st_size,
+        "size_bytes": status.st_size,
     }
     if path.is_symlink():
         record["symlink_target"] = os.readlink(path)
@@ -98,9 +133,17 @@ def walk(root: Path) -> list[Path]:
     it, following directory links, and guards against a link cycle by
     remembering resolved directories.
     """
-    if not root.is_dir():
-        return []
     found: list[Path] = []
+    if root.is_symlink():
+        # The root of a walked tree is live configuration in its own right.
+        # Every nested alias is recorded below, but repointing ~/.config/mcloving
+        # itself at another managed directory holding identical bytes would
+        # otherwise leave this document unchanged -- a drift re-read blind to
+        # the one substitution that redirects the whole tree. A root link whose
+        # target is gone is likewise a fact the `is_dir()` check would drop.
+        found.append(root)
+    if not root.is_dir():
+        return found
     seen: set = set()
 
     def descend(directory: Path) -> None:

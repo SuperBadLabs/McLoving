@@ -74,6 +74,11 @@ fi
 
 service_control "${no_systemd}" start mcloving-controller.service
 "${libexec_root}/helpers/mcloving-health" controller "${config_root}/controller.env"
+require_service_stable "${no_systemd}" mcloving-controller.service
 service_control "${no_systemd}" start mcloving-agent.service
 "${libexec_root}/helpers/mcloving-health" agent "${config_root}/agent.env"
+# The agent's gate reads its journal; only this observes the process. A
+# rollback that lands on a release the host cannot run would otherwise report
+# itself healthy, which is the one report an operator must be able to trust.
+require_service_stable "${no_systemd}" mcloving-agent.service
 echo "rollback to ${previous_target} complete and healthy"

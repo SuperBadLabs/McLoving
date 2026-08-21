@@ -398,3 +398,69 @@ service_control() {
   fi
   systemctl --user "${action}" "${unit}"
 }
+
+# require_service_stable NO_SYSTEMD UNIT [SAMPLES]
+#
+# A successful `systemctl start` means the manager reached the started state.
+# For Type=exec that state is the successful exec, not a process that is still
+# running: a binary that execs and then exits -- a shared library that only
+# resolves at first use, a contract the guard admits but the binary refuses --
+# leaves Restart=on-failure cycling behind a start that reported success. The
+# agent's health gate reads its journal, and an intact journal says nothing
+# about whether anything is still accepting work, so without this the upgrade
+# reports "complete and healthy" over a unit that is restarting in a loop.
+#
+# The window spans more than two RestartSec intervals (2s in the shipped
+# units), so a unit that is cycling is observed either mid-restart or under a
+# main PID that has changed. Both are refusals.
+require_service_stable() {
+  local no_systemd="$1" unit="$2" samples="${3:-12}"
+  if [[ "${no_systemd}" == "1" ]]; then
+    echo "skipping the stability check for ${unit} (--no-systemd)"
+    return 0
+  fi
+  local first_pid="" first_restarts="" properties key value
+  local state sub pid restarts sample
+  for ((sample = 0; sample < samples; sample++)); do
+    if ! properties="$(systemctl --user show "${unit}" \
+      --property=ActiveState --property=SubState \
+      --property=MainPID --property=NRestarts 2>/dev/null)"; then
+      echo "${unit} could not be queried after start" >&2
+      return 1
+    fi
+    state=""
+    sub=""
+    pid=""
+    # NRestarts is absent on older systemd; the main PID comparison below
+    # catches a restart on its own, so a missing counter is not fatal.
+    restarts=""
+    while IFS='=' read -r key value; do
+      case "${key}" in
+        ActiveState) state="${value}" ;;
+        SubState) sub="${value}" ;;
+        MainPID) pid="${value}" ;;
+        NRestarts) restarts="${value}" ;;
+      esac
+    done <<<"${properties}"
+    if [[ "${state}" != "active" || "${sub}" != "running" ]]; then
+      echo "${unit} is ${state:-unknown}/${sub:-unknown}, not active/running" >&2
+      return 1
+    fi
+    if [[ -z "${pid}" || "${pid}" == "0" ]]; then
+      echo "${unit} reports active but has no main process" >&2
+      return 1
+    fi
+    if [[ -z "${first_pid}" ]]; then
+      first_pid="${pid}"
+      first_restarts="${restarts}"
+    elif [[ "${pid}" != "${first_pid}" ]]; then
+      echo "${unit} restarted during the stability window (main PID ${first_pid} -> ${pid})" >&2
+      return 1
+    elif [[ -n "${restarts}" && "${restarts}" != "${first_restarts}" ]]; then
+      echo "${unit} restarted during the stability window (NRestarts ${first_restarts} -> ${restarts})" >&2
+      return 1
+    fi
+    sleep 0.5
+  done
+  echo "${unit} held active/running as PID ${first_pid} across the stability window"
+}
