@@ -4,7 +4,10 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{RESTORE_FENCE_LOCK_KEY, Store, StoreError, append_event_and_outbox};
+use crate::{
+    Store, StoreError, acquire_org_scheduler_lock, acquire_restore_fence_shared,
+    append_event_and_outbox,
+};
 
 /// Inputs to one deterministic scheduler claim.
 #[derive(Clone, Debug)]
@@ -99,14 +102,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("mcloving.scheduler.{}", request.organization_id))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, request.organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let restore_epoch = sqlx::query_scalar::<_, i64>(
             "SELECT restore_epoch
              FROM controller_metadata
@@ -323,10 +320,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -479,12 +474,13 @@ impl Store {
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
-            // The rejection event must serialize against restore activation,
-            // which holds this fence exclusively while it rewrites authority.
-            sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-                .bind(RESTORE_FENCE_LOCK_KEY)
-                .execute(&mut *tx)
-                .await?;
+            // Naming the refusal appends to build_events and the outbox, so
+            // this branch is a multi-table writer like the renewal below it and
+            // takes the same canonical order. The shared restore fence
+            // additionally makes the event serialize against restore
+            // activation, which holds it exclusively while rewriting authority.
+            acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+            acquire_restore_fence_shared(&mut tx).await?;
             record_lease_renewal_rejection(
                 &mut tx,
                 organization_id,
@@ -499,10 +495,13 @@ impl Store {
                 cause: "agent_session_stale",
             });
         }
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        // Renewal stopped being a single-table writer when the operational
+        // fence arrived: it locks the pipeline operational-state row before
+        // updating the attempt, so it must follow the canonical order like
+        // every other multi-table path or it deadlocks against DAG advance
+        // and cancellation, which lock builds/nodes/attempts under this lock.
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let active_build = sqlx::query_scalar::<_, Uuid>(
             "SELECT n.build_id
              FROM attempts AS a
@@ -623,14 +622,8 @@ impl Store {
     /// and routes the attempt through explicit reconciliation.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("mcloving.scheduler.{organization_id}"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let expired = sqlx::query(
             "SELECT a.id AS attempt_id, a.fence, n.id AS node_id, n.build_id,
                     (
@@ -1022,13 +1015,12 @@ impl Store {
         cause: &str,
     ) -> Result<(), StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        // Evaluate authority and append under the shared restore fence so the
-        // event cannot land after restore activation invalidates the lease it
-        // describes.
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        // Appending the event touches attempts, nodes, build_events, and the
+        // outbox, so this is a multi-table write and takes the canonical order.
+        // The shared restore fence additionally keeps the event from landing
+        // after restore activation invalidates the lease it describes.
+        acquire_org_scheduler_lock(&mut tx, organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let build = sqlx::query_scalar::<_, Uuid>(
             "SELECT n.build_id
              FROM attempts AS a
