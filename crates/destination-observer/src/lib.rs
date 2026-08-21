@@ -12,8 +12,9 @@ pub use authority::{
     sha256_running_executable,
 };
 pub use crypto::{
-    destination_state_message, observation_receipt_digest, observation_request_message,
-    receipt_message, sign_observation_request, sign_receipt, verify_observation_receipt,
+    destination_state_message, observation_receipt_digest, observation_request_digest,
+    observation_request_message, receipt_message, sign_observation_request, sign_receipt,
+    verify_observation_receipt,
 };
 pub use error::ObserverError;
 pub use model::*;

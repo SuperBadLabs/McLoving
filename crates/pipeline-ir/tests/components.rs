@@ -120,7 +120,9 @@ fn expansion_preserves_v12_for_windows_execution_modes() {
     .unwrap();
 
     assert_eq!(expanded.pipeline().schema, IR_V1_2);
-    let Step::Process(process) = &expanded.pipeline().stages[0].steps[0];
+    let Step::Process(process) = &expanded.pipeline().stages[0].steps[0] else {
+        panic!("fixture contains only process steps");
+    };
     assert_eq!(process.mode, ProcessMode::PowerShell);
 }
 
@@ -205,10 +207,9 @@ stages:
 
     assert_eq!(expanded.pipeline().schema, IR_V1_2);
     assert!(expanded.pipeline().stages.iter().any(|stage| {
-        stage.steps.iter().any(|step| {
-            let Step::Process(process) = step;
-            process.mode == ProcessMode::PowerShell
-        })
+        stage.steps.iter().any(
+            |step| matches!(step, Step::Process(process) if process.mode == ProcessMode::PowerShell),
+        )
     }));
 }
 
@@ -582,5 +583,8 @@ fn expansion_digest_binds_exact_component_even_for_equal_concrete_steps() {
 fn process_arg(step: &mcloving_pipeline_ir::Step) -> &str {
     match step {
         mcloving_pipeline_ir::Step::Process(process) => &process.args[0],
+        mcloving_pipeline_ir::Step::ConnectorIntent(_) => {
+            panic!("fixture contains only process steps")
+        }
     }
 }

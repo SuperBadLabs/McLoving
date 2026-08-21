@@ -9,7 +9,7 @@ pub use oidc::{
     MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -57,6 +57,7 @@ pub const PLATFORM_HEADER: &str = "mcloving-platform";
 pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorization";
 pub const MAX_DISCOVERY_SCAN_BODY_BYTES: usize = 128 * 1024 * 1024;
+pub const CONNECTOR_MAPPING_CATALOG_V1: &str = "mcloving.connector-mapping-catalog/v1";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 // The scheduling capability vocabulary (docs/architecture/CAPABILITY_VOCABULARY_V1.md)
 // defines the closed platform set and the default; spell both through it.
@@ -74,6 +75,67 @@ pub struct ApiState {
     staged_upload_ttl: Duration,
     publication_claim_cursor: Arc<Mutex<Option<String>>>,
     oidc_clients: BTreeMap<(Uuid, Uuid), oidc::OidcClient>,
+    connector_mapping_catalog: ConnectorMappingCatalog,
+}
+
+/// Deployment-owned admission catalog for one exact execution profile.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorMappingCatalog {
+    pub schema_version: String,
+    pub profile: String,
+    pub generation: u64,
+    pub mappings: Vec<ConnectorMappingRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorMappingRecord {
+    pub mapping_id: String,
+    pub mapping_digest: String,
+}
+
+impl ConnectorMappingCatalog {
+    fn deny_all() -> Self {
+        Self {
+            schema_version: CONNECTOR_MAPPING_CATALOG_V1.to_owned(),
+            profile: "unconfigured".to_owned(),
+            generation: 0,
+            mappings: Vec::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.schema_version != CONNECTOR_MAPPING_CATALOG_V1
+            || self.generation == 0
+            || !canonical_mapping_name(&self.profile)
+            || self.mappings.is_empty()
+            || self.mappings.len() > 1_024
+        {
+            return Err(ApiError::configuration(
+                "connector mapping catalog schema, profile, generation, or size is invalid",
+            ));
+        }
+        let mut identifiers = BTreeSet::new();
+        for mapping in &self.mappings {
+            if !canonical_mapping_name(&mapping.mapping_id)
+                || !canonical_sha256_reference(&mapping.mapping_digest)
+                || !identifiers.insert(&mapping.mapping_id)
+            {
+                return Err(ApiError::configuration(
+                    "connector mapping catalog contains an invalid or duplicate mapping",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn contains_exact(&self, mapping_id: &str, mapping_digest: &str) -> bool {
+        self.mappings.iter().any(|mapping| {
+            mapping.mapping_id == mapping_id && mapping.mapping_digest == mapping_digest
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -115,6 +177,7 @@ impl ApiState {
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
+            connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
         })
     }
 
@@ -133,6 +196,7 @@ impl ApiState {
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
+            connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
         }
     }
 
@@ -279,6 +343,15 @@ impl ApiState {
             usize::try_from(object_store.quota().max_object_bytes).unwrap_or(usize::MAX);
         self.object_store = Some(object_store);
         self
+    }
+
+    pub fn with_connector_mapping_catalog(
+        mut self,
+        catalog: ConnectorMappingCatalog,
+    ) -> Result<Self, ApiError> {
+        catalog.validate()?;
+        self.connector_mapping_catalog = catalog;
+        Ok(self)
     }
 
     /// Sets the maximum age of a durable but unpublished artifact upload.
@@ -788,6 +861,7 @@ pub struct PipelineStagePlan {
     pub id: String,
     pub name: String,
     pub process_steps: usize,
+    pub connector_intent_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2237,6 +2311,7 @@ async fn validate_pipeline(
     .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     Ok(Json(ValidationResponse {
         valid: true,
@@ -2260,6 +2335,7 @@ async fn plan_pipeline(
     .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     Ok(Json(pipeline_plan(&pipeline)?))
 }
 
@@ -2280,6 +2356,7 @@ async fn put_pipeline(
     let expected_revision = expected_revision(&headers)?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     let semantic_digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     let source_sha256 = Sha256::digest(request.source.as_bytes()).into();
     let parameter_schema = parameter_schema(&pipeline);
@@ -2794,6 +2871,20 @@ pub struct BuildResponse {
     pub lease_owner: Option<String>,
     pub cancellation_requested: bool,
     pub terminal_summary: Option<Value>,
+    pub effects: Vec<RuntimeEffectEvidenceResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeEffectEvidenceResponse {
+    pub fence: i64,
+    pub effect_key: String,
+    pub effect_class: String,
+    pub status: String,
+    pub payload_sha256: String,
+    pub outcome_receipt_sha256: Option<String>,
+    pub reconciliation_receipt_sha256: Option<String>,
+    pub observation_receipt_sha256: Option<String>,
+    pub shadow_replay_receipt_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -4051,6 +4142,7 @@ async fn admit_pipeline_parameters(
         }
     };
     let pipeline = compile_source_with_parameters(&source, parameters)?;
+    validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
     validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
@@ -4227,6 +4319,9 @@ fn invalid_platform() -> ApiError {
 }
 
 fn execution_spec(steps: &[Step]) -> Value {
+    let contains_connector_intent = steps
+        .iter()
+        .any(|step| matches!(step, Step::ConnectorIntent(_)));
     let steps = steps
         .iter()
         .map(|step| match step {
@@ -4238,9 +4333,37 @@ fn execution_spec(steps: &[Step]) -> Value {
                 "env": process.env,
                 "timeout_seconds": process.timeout_seconds,
             }),
+            Step::ConnectorIntent(intent) => json!({
+                "kind": "connector_intent",
+                "mapping_id": intent.mapping_id,
+                "mapping_digest": intent.mapping_digest,
+                "effect_class": match intent.effect_class {
+                    mcloving_pipeline_ir::ConnectorEffectClass::Idempotent => "idempotent",
+                    mcloving_pipeline_ir::ConnectorEffectClass::ExternallyIdempotent => "externally_idempotent",
+                    mcloving_pipeline_ir::ConnectorEffectClass::NonIdempotent => "non_idempotent",
+                },
+                "effect_key_template": intent.effect_key_template,
+                "public_input_schema": intent.public_input_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "protected_secret_ref_schema": intent.protected_secret_ref_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "expected_public_result_schema": intent.expected_public_result_schema.iter().map(|(name, kind)| (name, json_field_type_name(*kind))).collect::<BTreeMap<_, _>>(),
+                "timeout_seconds": intent.timeout_seconds,
+                "ambiguity_policy": "observe_then_reconcile",
+                "downstream_control_digest": intent.downstream_control_digest,
+            }),
         })
         .collect::<Vec<_>>();
-    json!({"version": 1, "steps": steps})
+    json!({"version": if contains_connector_intent { 2 } else { 1 }, "steps": steps})
+}
+
+fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
+    match kind {
+        mcloving_pipeline_ir::JsonFieldType::Array => "array",
+        mcloving_pipeline_ir::JsonFieldType::Boolean => "boolean",
+        mcloving_pipeline_ir::JsonFieldType::Null => "null",
+        mcloving_pipeline_ir::JsonFieldType::Number => "number",
+        mcloving_pipeline_ir::JsonFieldType::Object => "object",
+        mcloving_pipeline_ir::JsonFieldType::String => "string",
+    }
 }
 
 fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
@@ -4292,6 +4415,59 @@ fn compile_source_with_parameters(
     }
     compile_strict_yaml_with_parameters("public-api", source, ParseLimits::default(), parameters)
         .map_err(pipeline_rejected)
+}
+
+fn validate_connector_mappings(
+    pipeline: &PipelineIr,
+    catalog: &ConnectorMappingCatalog,
+) -> Result<(), ApiError> {
+    for intent in pipeline
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.steps)
+        .filter_map(|step| match step {
+            Step::ConnectorIntent(intent) => Some(intent),
+            Step::Process(_) => None,
+        })
+    {
+        let Some(mapping) = catalog
+            .mappings
+            .iter()
+            .find(|mapping| mapping.mapping_id == intent.mapping_id)
+        else {
+            return Err(pipeline_rejected(format!(
+                "connector mapping {} is not admitted by deployment profile {}",
+                intent.mapping_id, catalog.profile
+            )));
+        };
+        if mapping.mapping_digest != intent.mapping_digest {
+            return Err(pipeline_rejected(format!(
+                "connector mapping {} digest is floating, stale, or substituted for deployment profile {}",
+                intent.mapping_id, catalog.profile
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_mapping_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'/')
+        })
+}
+
+fn canonical_sha256_reference(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn parameter_values(
@@ -4388,7 +4564,16 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
             .map(|stage| PipelineStagePlan {
                 id: stage.id.clone(),
                 name: stage.name.clone(),
-                process_steps: stage.steps.len(),
+                process_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Process(_)))
+                    .count(),
+                connector_intent_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::ConnectorIntent(_)))
+                    .count(),
             })
             .collect(),
     })
@@ -4674,6 +4859,30 @@ async fn status(
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
+    let effects = state
+        .store
+        .effect_evidence_summaries(organization_id, snapshot.attempt_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|effect| RuntimeEffectEvidenceResponse {
+            fence: effect.fence,
+            effect_key: effect.effect_key,
+            effect_class: effect.effect_class,
+            status: effect.status,
+            payload_sha256: hex(&effect.payload_digest),
+            outcome_receipt_sha256: effect.outcome_receipt_digest.map(|digest| hex(&digest)),
+            reconciliation_receipt_sha256: effect
+                .reconciliation_receipt_digest
+                .map(|digest| hex(&digest)),
+            observation_receipt_sha256: effect
+                .observation_receipt_digest
+                .map(|digest| hex(&digest)),
+            shadow_replay_receipt_sha256: effect
+                .shadow_replay_receipt_digest
+                .map(|digest| hex(&digest)),
+        })
+        .collect();
     Ok(Json(BuildResponse {
         build_id: snapshot.build_id,
         node_id: snapshot.node_id,
@@ -4684,6 +4893,7 @@ async fn status(
         lease_owner: snapshot.lease_owner,
         cancellation_requested: snapshot.cancellation_requested,
         terminal_summary: snapshot.terminal_summary,
+        effects,
     }))
 }
 
@@ -7211,6 +7421,77 @@ mod tests {
         let error = submission_platform(&headers).expect_err("reject unsupported platform");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "invalid_platform");
+    }
+
+    #[test]
+    fn connector_mapping_catalog_denies_unknown_floating_and_duplicate_entries() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: notify
+stages:
+  - id: notify
+    name: Notify
+    steps:
+      - connector_intent:
+          mapping_id: notification.v1
+          mapping_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          effect_class: externally_idempotent
+          effect_key_template: build.notification
+          public_input_schema:
+            message: string
+          protected_secret_ref_schema:
+            token: string
+          expected_public_result_schema:
+            delivery_id: string
+          timeout_seconds: 30
+          ambiguity_policy: observe_then_reconcile
+          downstream_control_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile connector intent");
+        let mapping = ConnectorMappingRecord {
+            mapping_id: "notification.v1".into(),
+            mapping_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let catalog = ConnectorMappingCatalog {
+            schema_version: CONNECTOR_MAPPING_CATALOG_V1.into(),
+            profile: "private-linux-x86_64".into(),
+            generation: 1,
+            mappings: vec![mapping.clone()],
+        };
+        catalog.validate().expect("validate exact catalog");
+        validate_connector_mappings(&pipeline, &catalog).expect("admit exact mapping");
+
+        let unknown = ConnectorMappingCatalog {
+            mappings: vec![ConnectorMappingRecord {
+                mapping_id: "different.v1".into(),
+                ..mapping.clone()
+            }],
+            ..catalog.clone()
+        };
+        let error = validate_connector_mappings(&pipeline, &unknown)
+            .expect_err("unknown mapping must fail closed");
+        assert_eq!(error.code, "pipeline_rejected");
+        assert!(error.message.contains("not admitted"));
+
+        let floating = ConnectorMappingCatalog {
+            mappings: vec![ConnectorMappingRecord {
+                mapping_digest: format!("sha256:{}", "c".repeat(64)),
+                ..mapping.clone()
+            }],
+            ..catalog.clone()
+        };
+        let error = validate_connector_mappings(&pipeline, &floating)
+            .expect_err("floating mapping must fail closed");
+        assert!(error.message.contains("floating, stale, or substituted"));
+
+        let duplicate = ConnectorMappingCatalog {
+            mappings: vec![mapping.clone(), mapping],
+            ..catalog
+        };
+        assert!(duplicate.validate().is_err());
     }
 
     #[test]

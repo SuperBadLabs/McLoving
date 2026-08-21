@@ -11,7 +11,7 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2};
+use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -131,6 +131,46 @@ pub struct Stage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Step {
     Process(ProcessStep),
+    ConnectorIntent(ConnectorIntentStep),
+}
+
+/// A deployment-resolved external-effect intent. It deliberately contains no
+/// endpoint, credential, executable, shell, or network-policy field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectorIntentStep {
+    pub mapping_id: String,
+    pub mapping_digest: String,
+    pub effect_class: ConnectorEffectClass,
+    pub effect_key_template: String,
+    pub public_input_schema: BTreeMap<String, JsonFieldType>,
+    pub protected_secret_ref_schema: BTreeMap<String, JsonFieldType>,
+    pub expected_public_result_schema: BTreeMap<String, JsonFieldType>,
+    pub timeout_seconds: u64,
+    pub ambiguity_policy: AmbiguityPolicy,
+    pub downstream_control_digest: String,
+    pub source_span: SourceSpan,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectorEffectClass {
+    Idempotent,
+    ExternallyIdempotent,
+    NonIdempotent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonFieldType {
+    Array,
+    Boolean,
+    Null,
+    Number,
+    Object,
+    String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AmbiguityPolicy {
+    ObserveThenReconcile,
 }
 
 /// A native direct-process step.
@@ -246,13 +286,20 @@ pub fn compile_strict_yaml_with_parameters(
     let mut expressions = Vec::new();
     let stages = compile_stages(stages_node, &evaluation_context, &mut expressions)?;
     expressions.sort_by(|left, right| left.path.cmp(&right.path));
-    let has_explicit_shell_mode = stages.iter().any(|stage| {
-        stage.steps.iter().any(|step| {
-            let Step::Process(process) = step;
-            process.mode != ProcessMode::Direct
-        })
+    let has_connector_intent = stages.iter().any(|stage| {
+        stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::ConnectorIntent(_)))
     });
-    let schema = if has_explicit_shell_mode {
+    let has_explicit_shell_mode = stages.iter().any(|stage| {
+        stage.steps.iter().any(
+            |step| matches!(step, Step::Process(process) if process.mode != ProcessMode::Direct),
+        )
+    });
+    let schema = if has_connector_intent {
+        IR_V1_3
+    } else if has_explicit_shell_mode {
         IR_V1_2
     } else if parameters.is_empty() && expressions.is_empty() {
         IR_V1
@@ -313,19 +360,21 @@ pub fn instantiate_pipeline(
     pipeline.parameter_values = parameter_values;
     for (stage_index, stage) in pipeline.stages.iter_mut().enumerate() {
         for (step_index, step) in stage.steps.iter_mut().enumerate() {
-            let Step::Process(process) = step;
-            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
-            if let Some(value) = resolved.remove(&format!("{base}.program")) {
-                process.program = value;
-            }
-            for (argument_index, argument) in process.args.iter_mut().enumerate() {
-                if let Some(value) = resolved.remove(&format!("{base}.args[{argument_index}]")) {
-                    *argument = value;
+            if let Step::Process(process) = step {
+                let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+                if let Some(value) = resolved.remove(&format!("{base}.program")) {
+                    process.program = value;
                 }
-            }
-            for (name, value) in &mut process.env {
-                if let Some(resolved_value) = resolved.remove(&format!("{base}.env.{name}")) {
-                    *value = resolved_value;
+                for (argument_index, argument) in process.args.iter_mut().enumerate() {
+                    if let Some(value) = resolved.remove(&format!("{base}.args[{argument_index}]"))
+                    {
+                        *argument = value;
+                    }
+                }
+                for (name, value) in &mut process.env {
+                    if let Some(resolved_value) = resolved.remove(&format!("{base}.env.{name}")) {
+                        *value = resolved_value;
+                    }
                 }
             }
         }
@@ -543,9 +592,129 @@ fn compile_steps(
             let path = format!("{stage_path}.steps[{index}]");
             let step_span = node.span;
             let mut step = MappingView::new(node, &path)?;
-            let process = step.required("process")?;
+            let process = step.take("process");
+            let connector_intent = step.take("connector_intent");
             step.finish()?;
-            compile_process(process, &path, step_span, parameters, expressions).map(Step::Process)
+            match (process, connector_intent) {
+                (Some(process), None) => {
+                    compile_process(process, &path, step_span, parameters, expressions)
+                        .map(Step::Process)
+                }
+                (None, Some(intent)) => {
+                    compile_connector_intent(intent, &path, step_span).map(Step::ConnectorIntent)
+                }
+                (None, None) => Err(CompileError::schema(
+                    &path,
+                    "exactly one of process or connector_intent is required",
+                )),
+                (Some(_), Some(_)) => Err(CompileError::schema(
+                    &path,
+                    "process and connector_intent are mutually exclusive",
+                )),
+            }
+        })
+        .collect()
+}
+
+fn compile_connector_intent(
+    node: SpannedValue,
+    step_path: &str,
+    source_span: SourceSpan,
+) -> Result<ConnectorIntentStep, CompileError> {
+    let path = format!("{step_path}.connector_intent");
+    let mut intent = MappingView::new(node, &path)?;
+    let mapping_id = intent.required_string("mapping_id")?;
+    let mapping_digest = intent.required_string("mapping_digest")?;
+    let effect_class = match intent.required_string("effect_class")?.as_str() {
+        "idempotent" => ConnectorEffectClass::Idempotent,
+        "externally_idempotent" => ConnectorEffectClass::ExternallyIdempotent,
+        "non_idempotent" => ConnectorEffectClass::NonIdempotent,
+        _ => {
+            return Err(CompileError::schema(
+                format!("{path}.effect_class"),
+                "expected idempotent, externally_idempotent, or non_idempotent",
+            ));
+        }
+    };
+    let effect_key_template = intent.required_string("effect_key_template")?;
+    let public_input_schema = compile_json_field_schema(
+        intent.required("public_input_schema")?,
+        &format!("{path}.public_input_schema"),
+    )?;
+    let protected_secret_ref_schema = compile_json_field_schema(
+        intent.required("protected_secret_ref_schema")?,
+        &format!("{path}.protected_secret_ref_schema"),
+    )?;
+    let expected_public_result_schema = compile_json_field_schema(
+        intent.required("expected_public_result_schema")?,
+        &format!("{path}.expected_public_result_schema"),
+    )?;
+    let timeout_seconds = intent.optional_u64("timeout_seconds")?.ok_or_else(|| {
+        CompileError::schema(
+            format!("{path}.timeout_seconds"),
+            "required field is missing",
+        )
+    })?;
+    let ambiguity_policy = match intent.required_string("ambiguity_policy")?.as_str() {
+        "observe_then_reconcile" => AmbiguityPolicy::ObserveThenReconcile,
+        _ => {
+            return Err(CompileError::schema(
+                format!("{path}.ambiguity_policy"),
+                "expected observe_then_reconcile",
+            ));
+        }
+    };
+    let downstream_control_digest = intent.required_string("downstream_control_digest")?;
+    intent.finish()?;
+    Ok(ConnectorIntentStep {
+        mapping_id,
+        mapping_digest,
+        effect_class,
+        effect_key_template,
+        public_input_schema,
+        protected_secret_ref_schema,
+        expected_public_result_schema,
+        timeout_seconds,
+        ambiguity_policy,
+        downstream_control_digest,
+        source_span,
+    })
+}
+
+fn compile_json_field_schema(
+    node: SpannedValue,
+    path: &str,
+) -> Result<BTreeMap<String, JsonFieldType>, CompileError> {
+    let span = node.span;
+    let YamlValue::Mapping(entries) = node.value else {
+        return Err(CompileError::schema(path, "expected a mapping").with_span(span));
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            let field_path = format!("{path}.{}", entry.key);
+            let value_span = entry.value.span;
+            let YamlValue::String(kind) = entry.value.value else {
+                return Err(
+                    CompileError::schema(&field_path, "expected a string").with_span(value_span)
+                );
+            };
+            let kind = match kind.as_str() {
+                "array" => JsonFieldType::Array,
+                "boolean" => JsonFieldType::Boolean,
+                "null" => JsonFieldType::Null,
+                "number" => JsonFieldType::Number,
+                "object" => JsonFieldType::Object,
+                "string" => JsonFieldType::String,
+                _ => {
+                    return Err(CompileError::schema(
+                        &field_path,
+                        "expected array, boolean, null, number, object, or string",
+                    )
+                    .with_span(value_span));
+                }
+            };
+            Ok((entry.key, kind))
         })
         .collect()
 }
@@ -642,10 +811,10 @@ fn compile_resolved_string(
 
 /// Validate a Pipeline IR object without consulting its YAML source.
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
-    if !matches!(pipeline.schema, IR_V1 | IR_V1_1 | IR_V1_2) {
+    if !matches!(pipeline.schema, IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0, v1.1, and v1.2 are accepted",
+            "only Pipeline IR v1.0 through v1.3 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -693,6 +862,17 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 "stage must contain at least one step",
             ));
         }
+        if stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::ConnectorIntent(_)))
+            && stage.steps.len() != 1
+        {
+            return Err(IrValidationError::new(
+                format!("{path}.steps"),
+                "a connector-intent stage must contain exactly one connector intent",
+            ));
+        }
         total_steps = total_steps.saturating_add(stage.steps.len());
         if total_steps > MAX_STEPS {
             return Err(IrValidationError::new(
@@ -701,49 +881,112 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
             ));
         }
         for (step_index, step) in stage.steps.iter().enumerate() {
-            let Step::Process(process) = step;
-            if pipeline.schema.minor < IR_V1_2.minor && process.mode != ProcessMode::Direct {
-                return Err(IrValidationError::new(
-                    format!("{path}.steps[{step_index}].process.mode"),
-                    "non-direct process modes require Pipeline IR v1.2",
-                ));
-            }
-            if process.program.trim().is_empty() {
-                return Err(IrValidationError::new(
-                    format!("{path}.steps[{step_index}].process.program"),
-                    "program must not be empty",
-                ));
-            }
-            validate_string_length(
-                &format!("{path}.steps[{step_index}].process.program"),
-                &process.program,
-            )?;
-            if process.args.len() > MAX_STEPS || process.env.len() > MAX_STEPS {
-                return Err(IrValidationError::new(
-                    format!("{path}.steps[{step_index}].process"),
-                    format!("argument and environment counts must not exceed {MAX_STEPS}"),
-                ));
-            }
-            for (argument_index, argument) in process.args.iter().enumerate() {
-                validate_string_length(
-                    &format!("{path}.steps[{step_index}].process.args[{argument_index}]"),
-                    argument,
-                )?;
-            }
-            if process.env.keys().any(|key| key.is_empty()) {
-                return Err(IrValidationError::new(
-                    format!("{path}.steps[{step_index}].process.env"),
-                    "environment keys must not be empty",
-                ));
-            }
-            for (key, value) in &process.env {
-                if key.len() > MAX_IR_STRING_BYTES {
-                    return Err(IrValidationError::new(
-                        format!("{path}.steps[{step_index}].process.env"),
-                        format!("environment key {key:?} exceeds {MAX_IR_STRING_BYTES} bytes"),
-                    ));
+            match step {
+                Step::Process(process) => {
+                    if pipeline.schema.minor < IR_V1_2.minor && process.mode != ProcessMode::Direct
+                    {
+                        return Err(IrValidationError::new(
+                            format!("{path}.steps[{step_index}].process.mode"),
+                            "non-direct process modes require Pipeline IR v1.2",
+                        ));
+                    }
+                    if process.program.trim().is_empty() {
+                        return Err(IrValidationError::new(
+                            format!("{path}.steps[{step_index}].process.program"),
+                            "program must not be empty",
+                        ));
+                    }
+                    validate_string_length(
+                        &format!("{path}.steps[{step_index}].process.program"),
+                        &process.program,
+                    )?;
+                    if process.args.len() > MAX_STEPS || process.env.len() > MAX_STEPS {
+                        return Err(IrValidationError::new(
+                            format!("{path}.steps[{step_index}].process"),
+                            format!("argument and environment counts must not exceed {MAX_STEPS}"),
+                        ));
+                    }
+                    for (argument_index, argument) in process.args.iter().enumerate() {
+                        validate_string_length(
+                            &format!("{path}.steps[{step_index}].process.args[{argument_index}]"),
+                            argument,
+                        )?;
+                    }
+                    if process.env.keys().any(|key| key.is_empty()) {
+                        return Err(IrValidationError::new(
+                            format!("{path}.steps[{step_index}].process.env"),
+                            "environment keys must not be empty",
+                        ));
+                    }
+                    for (key, value) in &process.env {
+                        if key.len() > MAX_IR_STRING_BYTES {
+                            return Err(IrValidationError::new(
+                                format!("{path}.steps[{step_index}].process.env"),
+                                format!(
+                                    "environment key {key:?} exceeds {MAX_IR_STRING_BYTES} bytes"
+                                ),
+                            ));
+                        }
+                        validate_string_length(
+                            &format!("{path}.steps[{step_index}].process.env"),
+                            value,
+                        )?;
+                    }
                 }
-                validate_string_length(&format!("{path}.steps[{step_index}].process.env"), value)?;
+                Step::ConnectorIntent(intent) => {
+                    let base = format!("{path}.steps[{step_index}].connector_intent");
+                    if pipeline.schema.minor < IR_V1_3.minor {
+                        return Err(IrValidationError::new(
+                            &base,
+                            "connector intents require Pipeline IR v1.3",
+                        ));
+                    }
+                    validate_identifier(&format!("{base}.mapping_id"), &intent.mapping_id)?;
+                    validate_sha256_reference(
+                        &format!("{base}.mapping_digest"),
+                        &intent.mapping_digest,
+                    )?;
+                    if intent.effect_key_template.trim().is_empty() {
+                        return Err(IrValidationError::new(
+                            format!("{base}.effect_key_template"),
+                            "effect key template must not be empty",
+                        ));
+                    }
+                    validate_string_length(
+                        &format!("{base}.effect_key_template"),
+                        &intent.effect_key_template,
+                    )?;
+                    validate_field_schema(
+                        &format!("{base}.public_input_schema"),
+                        &intent.public_input_schema,
+                    )?;
+                    validate_field_schema(
+                        &format!("{base}.protected_secret_ref_schema"),
+                        &intent.protected_secret_ref_schema,
+                    )?;
+                    for (name, kind) in &intent.protected_secret_ref_schema {
+                        if *kind != JsonFieldType::String {
+                            return Err(IrValidationError::new(
+                                format!("{base}.protected_secret_ref_schema.{name}"),
+                                "protected secret references must be opaque strings",
+                            ));
+                        }
+                    }
+                    validate_field_schema(
+                        &format!("{base}.expected_public_result_schema"),
+                        &intent.expected_public_result_schema,
+                    )?;
+                    if intent.timeout_seconds == 0 || intent.timeout_seconds > 86_400 {
+                        return Err(IrValidationError::new(
+                            format!("{base}.timeout_seconds"),
+                            "timeout must be between 1 and 86400 seconds",
+                        ));
+                    }
+                    validate_sha256_reference(
+                        &format!("{base}.downstream_control_digest"),
+                        &intent.downstream_control_digest,
+                    )?;
+                }
             }
         }
     }
@@ -892,14 +1135,15 @@ fn expression_materialized_fields(pipeline: &PipelineIr) -> BTreeMap<String, &st
     let mut fields = BTreeMap::new();
     for (stage_index, stage) in pipeline.stages.iter().enumerate() {
         for (step_index, step) in stage.steps.iter().enumerate() {
-            let Step::Process(process) = step;
-            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
-            fields.insert(format!("{base}.program"), process.program.as_str());
-            for (argument_index, argument) in process.args.iter().enumerate() {
-                fields.insert(format!("{base}.args[{argument_index}]"), argument.as_str());
-            }
-            for (name, value) in &process.env {
-                fields.insert(format!("{base}.env.{name}"), value.as_str());
+            if let Step::Process(process) = step {
+                let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+                fields.insert(format!("{base}.program"), process.program.as_str());
+                for (argument_index, argument) in process.args.iter().enumerate() {
+                    fields.insert(format!("{base}.args[{argument_index}]"), argument.as_str());
+                }
+                for (name, value) in &process.env {
+                    fields.insert(format!("{base}.env.{name}"), value.as_str());
+                }
             }
         }
     }
@@ -966,6 +1210,43 @@ fn validate_string_length(path: &str, value: &str) -> Result<(), IrValidationErr
             path,
             format!("string exceeds {MAX_IR_STRING_BYTES} bytes"),
         ));
+    }
+    Ok(())
+}
+
+fn validate_sha256_reference(path: &str, value: &str) -> Result<(), IrValidationError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(IrValidationError::new(
+            path,
+            "expected exact sha256:<64 lowercase hex> reference",
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(IrValidationError::new(
+            path,
+            "expected exact sha256:<64 lowercase hex> reference",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_field_schema(
+    path: &str,
+    schema: &BTreeMap<String, JsonFieldType>,
+) -> Result<(), IrValidationError> {
+    if schema.len() > MAX_PARAMETERS {
+        return Err(IrValidationError::new(
+            path,
+            format!("field count exceeds {MAX_PARAMETERS}"),
+        ));
+    }
+    for name in schema.keys() {
+        validate_identifier(&format!("{path}.{name}"), name)?;
+        validate_string_length(&format!("{path}.{name}"), name)?;
     }
     Ok(())
 }

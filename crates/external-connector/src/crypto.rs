@@ -9,6 +9,7 @@ use crate::{
 };
 
 const REQUEST_DOMAIN: &[u8] = b"mcloving-external-action-request-v1";
+const REQUEST_PAYLOAD_DOMAIN: &[u8] = b"mcloving-external-request-payload-v1";
 const DESTINATION_DOMAIN: &[u8] = b"mcloving-external-destination-outcome-v1";
 const OUTCOME_DOMAIN: &[u8] = b"mcloving-external-outcome-receipt-v1";
 const OUTCOME_DIGEST_DOMAIN: &[u8] = b"mcloving-external-outcome-digest-v1";
@@ -25,6 +26,12 @@ pub fn canonical_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<String
 
 pub fn action_request_digest(request: &ActionRequest) -> Result<String, ConnectorError> {
     canonical_digest(REQUEST_DOMAIN, &unsigned_request(request))
+}
+
+/// Domain-separated digest of exactly the payload the connector was asked to
+/// deliver. Receipt producers and receipt validators must share this formula.
+pub fn request_payload_digest(payload: &serde_json::Value) -> Result<String, ConnectorError> {
+    canonical_digest(REQUEST_PAYLOAD_DOMAIN, payload)
 }
 
 pub fn destination_outcome_digest(

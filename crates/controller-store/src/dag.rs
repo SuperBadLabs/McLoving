@@ -537,6 +537,7 @@ pub(crate) async fn advance_dag_after_attempt(
                  WHERE organization_id = $1
                    AND attempt_id = $2
                    AND effect_class = 'non_idempotent'
+                   AND status <> 'abandoned'
              )",
         )
         .bind(organization_id)
