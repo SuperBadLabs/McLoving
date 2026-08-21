@@ -10,6 +10,7 @@ anyhow = "=1.0.104"
 axum = "=0.8.6"
 mcloving-controller-api = { version = "0.0.0", path = "../../crates/controller-api" }
 mcloving-controller-store = { version = "0.0.0", path = "../../crates/controller-store" }
+mcloving-domain = { version = "0.0.0", path = "../../crates/domain" }
 mcloving-execution-spine = { version = "0.0.0", path = "../../crates/execution-spine" }
 mcloving-external-connector = { version = "0.0.0", path = "../../crates/external-connector" }
 mcloving-object-store = { version = "0.0.0", path = "../../crates/object-store" }
