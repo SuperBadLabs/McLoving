@@ -2329,8 +2329,8 @@ impl Store {
         // state of a build it cannot cancel, and that judgement belongs to the
         // locked read below. Filtering here would collapse every refusal into
         // an unexplained one.
-        let target = sqlx::query_as::<_, (Option<Uuid>, Option<i64>)>(
-            "SELECT pipeline_id, pipeline_operational_generation
+        let target = sqlx::query_as::<_, (Option<Uuid>, Option<i64>, String)>(
+            "SELECT pipeline_id, pipeline_operational_generation, status
              FROM builds
              WHERE organization_id = $1
                AND project_id = $2
@@ -2341,10 +2341,22 @@ impl Store {
         .bind(build_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((Some(_), Some(_))) = target else {
+        let Some((pipeline_id, operational_generation, target_status)) = target else {
             tx.rollback().await?;
             return Ok(CancellationDecision::NotCancellable { build_status: None });
         };
+        if pipeline_id.is_none() || operational_generation.is_none() {
+            // A build admitted before migration 0027 carries no pipeline
+            // binding — the all-null form the migration's check constraint
+            // explicitly permits — so there is no pipeline row to lock and no
+            // cancellation to run. It exists all the same, and reporting no
+            // status at all would surface as "build not found" rather than the
+            // truthful refusal this ticket is about.
+            tx.rollback().await?;
+            return Ok(CancellationDecision::NotCancellable {
+                build_status: Some(target_status),
+            });
+        }
         // Lease renewal acquires the pipeline-definition row before it updates
         // the attempt/build graph. Use the same order here so cancellation
         // cannot hold the build graph while waiting for that pipeline row.
