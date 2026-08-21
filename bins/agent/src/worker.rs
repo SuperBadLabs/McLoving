@@ -475,9 +475,11 @@ async fn replay_finalization(
             .await?;
             ensure_session(receipt.session_epoch, session_epoch)?;
             match CancellationDisposition::try_from(receipt.disposition) {
-                Ok(CancellationDisposition::Completed | CancellationDisposition::RetireStale) => {
-                    Ok(AttemptPhase::Aborted)
-                }
+                Ok(
+                    CancellationDisposition::Completed
+                    | CancellationDisposition::RetireStale
+                    | CancellationDisposition::DischargeRecovered,
+                ) => Ok(AttemptPhase::Aborted),
                 Ok(CancellationDisposition::ReconciliationRequired) => {
                     Ok(AttemptPhase::ReconciliationRequired)
                 }
