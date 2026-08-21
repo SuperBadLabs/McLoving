@@ -164,6 +164,17 @@ pub const PIPELINE_OPERATIONAL_STATE_V27: &str =
 pub const TRIGGER_INGRESS_V28: &str = include_str!("../migrations/0028_trigger_ingress.sql");
 /// Versioned multibranch and organization-folder discovery truth.
 pub const DISCOVERY_V29: &str = include_str!("../migrations/0029_discovery.sql");
+/// Immutable transition evidence for controller-owned external effects.
+pub const EFFECT_EVIDENCE_V30: &str = include_str!("../migrations/0030_effect_evidence.sql");
+/// Explicit cleanup state for an undispatched observer reservation.
+pub const EFFECT_RELEASE_PENDING_V31: &str =
+    include_str!("../migrations/0031_effect_release_pending.sql");
+/// Durable dispatch commitment before an external connector can be invoked.
+pub const EFFECT_DISPATCH_COMMIT_V32: &str =
+    include_str!("../migrations/0032_effect_dispatch_commit.sql");
+/// A dispatch-committed effect can never be release_pending or abandoned.
+pub const EFFECT_DISPATCH_COMMIT_GUARD_V33: &str =
+    include_str!("../migrations/0033_effect_dispatch_commit_guard.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -274,6 +285,7 @@ pub struct NewLogChunk<'a> {
 pub struct AttemptExecution {
     pub build_id: Uuid,
     pub project_id: Uuid,
+    pub pipeline_id: Option<Uuid>,
     pub execution_spec: Value,
     pub cancellation_requested: bool,
 }
@@ -323,6 +335,52 @@ pub enum EffectStatus {
     Applied,
     Confirmed,
     Uncertain,
+    ReleasePending,
+    Abandoned,
+}
+
+/// One independently signed receipt slot in the controller-owned effect join.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectEvidenceKind {
+    Outcome,
+    ReconciliationOutcome,
+    Observation,
+    ShadowReplay,
+}
+
+impl EffectEvidenceKind {
+    fn columns(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Outcome => ("outcome_receipt", "outcome_receipt_digest"),
+            Self::ReconciliationOutcome => {
+                ("reconciliation_receipt", "reconciliation_receipt_digest")
+            }
+            Self::Observation => ("observation_receipt", "observation_receipt_digest"),
+            Self::ShadowReplay => ("shadow_replay_receipt", "shadow_replay_receipt_digest"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectEvidence {
+    pub kind: EffectEvidenceKind,
+    pub receipt: Value,
+    pub receipt_digest: [u8; 32],
+}
+
+/// Redacted public projection of one effect join. It contains only state and
+/// content digests, never the prepared payload or signed receipt bodies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectEvidenceSummary {
+    pub fence: i64,
+    pub effect_key: String,
+    pub effect_class: String,
+    pub status: String,
+    pub payload_digest: [u8; 32],
+    pub outcome_receipt_digest: Option<[u8; 32]>,
+    pub reconciliation_receipt_digest: Option<[u8; 32]>,
+    pub observation_receipt_digest: Option<[u8; 32]>,
+    pub shadow_replay_receipt_digest: Option<[u8; 32]>,
 }
 
 impl EffectStatus {
@@ -332,6 +390,8 @@ impl EffectStatus {
             Self::Applied => "applied",
             Self::Confirmed => "confirmed",
             Self::Uncertain => "uncertain",
+            Self::ReleasePending => "release_pending",
+            Self::Abandoned => "abandoned",
         }
     }
 }
@@ -1236,6 +1296,10 @@ impl Store {
         apply_migration(&mut tx, 27, PIPELINE_OPERATIONAL_STATE_V27).await?;
         apply_migration(&mut tx, 28, TRIGGER_INGRESS_V28).await?;
         apply_migration(&mut tx, 29, DISCOVERY_V29).await?;
+        apply_migration(&mut tx, 30, EFFECT_EVIDENCE_V30).await?;
+        apply_migration(&mut tx, 31, EFFECT_RELEASE_PENDING_V31).await?;
+        apply_migration(&mut tx, 32, EFFECT_DISPATCH_COMMIT_V32).await?;
+        apply_migration(&mut tx, 33, EFFECT_DISPATCH_COMMIT_GUARD_V33).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1729,7 +1793,7 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND status = 'uncertain'",
+               AND status IN ('uncertain', 'release_pending')",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -2138,6 +2202,27 @@ impl Store {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        let target = sqlx::query_as::<_, (Option<Uuid>, Option<i64>)>(
+            "SELECT pipeline_id, pipeline_operational_generation
+             FROM builds
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND id = $3
+               AND status IN ('queued', 'running')",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((Some(_), Some(_))) = target else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        // Lease renewal acquires the pipeline-definition row before it updates
+        // the attempt/build graph. Use the same order here so cancellation
+        // cannot hold the build graph while waiting for that pipeline row.
+        lock_build_pipeline_truth(&mut tx, organization_id, build_id).await?;
         let dag_mode = sqlx::query_scalar::<_, bool>(
             "SELECT dag_mode
              FROM builds
@@ -2739,8 +2824,51 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
-        let row = sqlx::query_as::<_, (Uuid, Uuid, Value, bool)>(
-            "SELECT b.id, b.project_id, n.execution_spec,
+        let build_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT b.id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('offered', 'accepted', 'running', 'finalizing', 'cancelling')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = build_id else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(None)
+                }
+                other => Err(other),
+            };
+        }
+        // Waiting for the pipeline-definition lock can outlive or otherwise
+        // invalidate the authority observed above. Repeat the complete
+        // execution-authority predicate after acquiring that lock; refreshing
+        // cancellation alone could dispatch after lease expiry, requeue, or a
+        // restore/fence handoff.
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
+            "SELECT b.id, b.project_id, b.pipeline_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
@@ -2765,25 +2893,16 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((build_id, _, _, _)) = row.as_ref()
-            && let Err(error) =
-                lock_enabled_build_pipeline(&mut tx, organization_id, *build_id).await
-        {
-            tx.rollback().await?;
-            return match error {
-                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
-                    Ok(None)
-                }
-                other => Err(other),
-            };
-        }
         tx.commit().await?;
         Ok(row.map(
-            |(build_id, project_id, execution_spec, cancellation_requested)| AttemptExecution {
-                build_id,
-                project_id,
-                execution_spec,
-                cancellation_requested,
+            |(build_id, project_id, pipeline_id, execution_spec, cancellation_requested)| {
+                AttemptExecution {
+                    build_id,
+                    project_id,
+                    pipeline_id,
+                    execution_spec,
+                    cancellation_requested,
+                }
             },
         ))
     }
@@ -2846,6 +2965,12 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
+        // Same canonical order as `claim_next`: agent-session check, per-org
+        // scheduler advisory lock, shared restore fence, then row locks. The
+        // advisory lock serializes this transition with
+        // `request_cancellation_as`, which locks the pipeline definition
+        // before the attempt/node graph — the inverse of the row-lock order
+        // taken below.
         acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
@@ -3076,6 +3201,15 @@ impl Store {
             .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
         let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Same canonical order as the claim, cancellation, dispatch-commit,
+        // and evidence-append paths: the per-org scheduler advisory lock
+        // precedes the shared restore fence and every row lock, so a status
+        // checkpoint cannot form an inverse attempt-then-pipeline lock cycle
+        // with `request_cancellation_as`.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let attempt_authority = sqlx::query_as::<_, (i64, Uuid)>(
             "SELECT a.restore_epoch, n.build_id
@@ -3105,8 +3239,13 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
-        let existing = sqlx::query_as::<_, (String, String, Vec<u8>)>(
-            "SELECT effect_class, status, payload_digest
+        let existing = sqlx::query_as::<_, (String, String, Vec<u8>, bool, bool)>(
+            "SELECT effect_class, status, payload_digest,
+                    outcome_receipt IS NOT NULL
+                    OR reconciliation_receipt IS NOT NULL
+                    OR observation_receipt IS NOT NULL
+                    OR shadow_replay_receipt IS NOT NULL AS has_evidence,
+                    dispatch_committed_at IS NOT NULL AS dispatch_committed
              FROM attempt_effects
              WHERE organization_id = $1
                AND attempt_id = $2
@@ -3120,9 +3259,22 @@ impl Store {
         .bind(effect_key)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((existing_class, existing_status, existing_digest)) = existing {
+        if let Some((
+            existing_class,
+            existing_status,
+            existing_digest,
+            has_evidence,
+            dispatch_committed,
+        )) = existing
+        {
             let valid = existing_class == effect_class.as_str()
                 && existing_digest == payload_digest
+                && !(status == EffectStatus::Abandoned && has_evidence)
+                && !(dispatch_committed
+                    && matches!(
+                        status,
+                        EffectStatus::Abandoned | EffectStatus::ReleasePending
+                    ))
                 && valid_effect_transition(&existing_status, status);
             if !valid {
                 tx.rollback().await?;
@@ -3196,6 +3348,481 @@ impl Store {
         Ok(true)
     }
 
+    /// Atomically commits external dispatch while the exact fenced lease and
+    /// immutable prepared effect are still authoritative.
+    ///
+    /// The marker is written before the connector process can be invoked. A
+    /// crash or lease expiry after this commit must therefore reconcile the
+    /// effect rather than infer that it was never dispatched.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_effect_dispatch(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        // Cancellation and claim transactions serialize on the per-org
+        // scheduler advisory lock before touching any pipeline or attempt
+        // row. Taking the same lock first here removes the inverse
+        // attempt-then-pipeline lock cycle with `request_cancellation_as`,
+        // which locks the pipeline definition before the attempt graph.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let build_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(build_id) = build_id else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
+        // A fresh dispatch commit is refused once cancellation has committed:
+        // the attempt must not be `cancelling` and neither the build nor the
+        // node may carry a cancellation timestamp. `cancelling` remains
+        // acceptable only for the idempotent replay of an already-committed
+        // dispatch, which writes nothing new.
+        let committed = sqlx::query_scalar::<_, bool>(
+            "UPDATE attempt_effects AS e
+             SET dispatch_committed_at = COALESCE(e.dispatch_committed_at, clock_timestamp()),
+                 updated_at = clock_timestamp()
+             FROM attempts AS a, nodes AS n, builds AS b, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $6
+               AND e.effect_class = $7
+               AND e.status = 'prepared'
+               AND e.payload_digest = $8
+               AND e.outcome_receipt IS NULL
+               AND e.reconciliation_receipt IS NULL
+               AND e.observation_receipt IS NULL
+               AND e.shadow_replay_receipt IS NULL
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND a.fence = e.fence
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND n.organization_id = a.organization_id
+               AND n.id = a.node_id
+               AND b.organization_id = n.organization_id
+               AND b.id = n.build_id
+               AND (
+                   e.dispatch_committed_at IS NOT NULL
+                   OR (
+                       a.status IN ('accepted', 'running', 'finalizing')
+                       AND b.cancellation_requested_at IS NULL
+                       AND n.cancellation_requested_at IS NULL
+                   )
+               )
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             RETURNING true",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(committed.unwrap_or(false))
+    }
+
+    /// Appends one immutable signed receipt to an existing fenced effect.
+    ///
+    /// The prepared payload remains immutable. Each receipt slot is write-once:
+    /// an exact replay succeeds, while substitution is rejected. Receipt
+    /// persistence is intentionally separate from status advancement so a
+    /// controller restart can observe and finish a partially completed join.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_effect_evidence(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        effect_key: &str,
+        kind: EffectEvidenceKind,
+        receipt: &Value,
+    ) -> Result<bool, StoreError> {
+        if agent_id.is_empty()
+            || agent_id.len() > 256
+            || effect_key.is_empty()
+            || effect_key.len() > 256
+        {
+            return Ok(false);
+        }
+        let receipt_bytes = serde_json::to_vec(receipt)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let receipt_digest: [u8; 32] = Sha256::digest(receipt_bytes).into();
+        let (receipt_column, digest_column) = kind.columns();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        // Same canonical order as the claim, cancellation, and dispatch-commit
+        // paths: the per-org scheduler advisory lock precedes the shared
+        // restore fence and every row lock, so evidence persistence cannot
+        // form an inverse attempt-then-pipeline lock cycle with
+        // `request_cancellation_as`.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let authority = sqlx::query_as::<_, (Uuid, bool)>(
+            "SELECT n.build_id, a.status = 'reconciliation_required'
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.restore_epoch = $4
+               AND m.singleton
+               AND (
+                   (
+                       a.fence = $3
+                       AND a.lease_owner = $5
+                       AND a.lease_expires_at > clock_timestamp()
+                       AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+                       AND a.restore_epoch = m.restore_epoch
+                   )
+                   OR (
+                       a.status = 'reconciliation_required'
+                       AND a.lease_expires_at IS NULL
+                       AND a.restore_epoch <= m.restore_epoch
+                       AND $3 <= a.fence
+                   )
+               )
+             FOR UPDATE OF a",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((build_id, reconciling)) = authority else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if !reconciling
+            && let Err(error) =
+                lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
+        type JoinRow = (
+            String,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+        );
+        let existing = sqlx::query_as::<_, JoinRow>(
+            "SELECT status,
+                    outcome_receipt, outcome_receipt_digest,
+                    reconciliation_receipt, reconciliation_receipt_digest,
+                    observation_receipt, observation_receipt_digest,
+                    shadow_replay_receipt, shadow_replay_receipt_digest
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((
+            status,
+            outcome,
+            outcome_digest,
+            reconciliation,
+            reconciliation_digest,
+            observation,
+            observation_digest,
+            shadow,
+            shadow_digest,
+        )) = existing
+        else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let ordering_valid = match kind {
+            EffectEvidenceKind::Outcome => status != "abandoned",
+            EffectEvidenceKind::ReconciliationOutcome => {
+                outcome_digest.is_some() && observation_digest.is_some() && status == "uncertain"
+            }
+            EffectEvidenceKind::Observation => {
+                outcome_digest.is_some()
+                    && matches!(status.as_str(), "applied" | "uncertain" | "confirmed")
+            }
+            EffectEvidenceKind::ShadowReplay => {
+                observation_digest.is_some() && status == "confirmed"
+            }
+        };
+        if !ordering_valid {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let (existing_receipt, existing_digest) = match kind {
+            EffectEvidenceKind::Outcome => (outcome, outcome_digest),
+            EffectEvidenceKind::ReconciliationOutcome => (reconciliation, reconciliation_digest),
+            EffectEvidenceKind::Observation => (observation, observation_digest),
+            EffectEvidenceKind::ShadowReplay => (shadow, shadow_digest),
+        };
+        if let Some(existing_digest) = existing_digest {
+            let exact =
+                existing_digest == receipt_digest && existing_receipt.as_ref() == Some(receipt);
+            if exact {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            return Ok(exact);
+        }
+        let update = format!(
+            "UPDATE attempt_effects
+             SET {receipt_column} = $5,
+                 {digest_column} = $6,
+                 updated_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4"
+        );
+        sqlx::query(&update)
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(fence)
+            .bind(effect_key)
+            .bind(receipt)
+            .bind(receipt_digest.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Loads the immutable receipt join for one exact fenced effect.
+    pub async fn effect_evidence(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        effect_key: &str,
+    ) -> Result<Vec<EffectEvidence>, StoreError> {
+        type EvidenceRow = (
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+            Option<Value>,
+            Option<Vec<u8>>,
+        );
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, EvidenceRow>(
+            "SELECT outcome_receipt, outcome_receipt_digest,
+                    reconciliation_receipt, reconciliation_receipt_digest,
+                    observation_receipt, observation_receipt_digest,
+                    shadow_replay_receipt, shadow_replay_receipt_digest
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some((
+            outcome,
+            outcome_digest,
+            reconciliation,
+            reconciliation_digest,
+            observation,
+            observation_digest,
+            shadow,
+            shadow_digest,
+        )) = row
+        else {
+            return Ok(Vec::new());
+        };
+        let mut evidence = Vec::with_capacity(4);
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::Outcome,
+            outcome,
+            outcome_digest,
+        )?;
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::ReconciliationOutcome,
+            reconciliation,
+            reconciliation_digest,
+        )?;
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::Observation,
+            observation,
+            observation_digest,
+        )?;
+        push_effect_evidence(
+            &mut evidence,
+            EffectEvidenceKind::ShadowReplay,
+            shadow,
+            shadow_digest,
+        )?;
+        Ok(evidence)
+    }
+
+    /// Loads the bounded redacted effect state across every fence of an exact
+    /// attempt. Historical restore fences remain operator-visible because they
+    /// can still block terminal reconciliation.
+    pub async fn effect_evidence_summaries(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<Vec<EffectEvidenceSummary>, StoreError> {
+        type SummaryRow = (
+            i64,
+            String,
+            String,
+            String,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        );
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, SummaryRow>(
+            "SELECT fence, effect_key, effect_class, status, payload_digest,
+                    outcome_receipt_digest, reconciliation_receipt_digest,
+                    observation_receipt_digest, shadow_replay_receipt_digest
+             FROM attempt_effects
+             WHERE organization_id = $1 AND attempt_id = $2
+             ORDER BY fence, effect_key
+             LIMIT 1025",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        if rows.len() > 1_024 {
+            return Err(StoreError::InvalidEffectPayload(
+                "effect evidence summary exceeds the public bound".to_owned(),
+            ));
+        }
+        rows.into_iter()
+            .map(
+                |(
+                    fence,
+                    effect_key,
+                    effect_class,
+                    status,
+                    payload_digest,
+                    outcome_receipt_digest,
+                    reconciliation_receipt_digest,
+                    observation_receipt_digest,
+                    shadow_replay_receipt_digest,
+                )| {
+                    Ok(EffectEvidenceSummary {
+                        fence,
+                        effect_key,
+                        effect_class,
+                        status,
+                        payload_digest: stored_effect_digest(payload_digest)?,
+                        outcome_receipt_digest: optional_stored_effect_digest(
+                            outcome_receipt_digest,
+                        )?,
+                        reconciliation_receipt_digest: optional_stored_effect_digest(
+                            reconciliation_receipt_digest,
+                        )?,
+                        observation_receipt_digest: optional_stored_effect_digest(
+                            observation_receipt_digest,
+                        )?,
+                        shadow_replay_receipt_digest: optional_stored_effect_digest(
+                            shadow_replay_receipt_digest,
+                        )?,
+                    })
+                },
+            )
+            .collect()
+    }
+
     /// Confirms one fenced uncertain effect without restoring execution authority.
     ///
     /// Restore activation and lease expiry leave the attempt fenced and move
@@ -3265,6 +3892,201 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(reconciled.is_some())
+    }
+
+    /// Records the observer-release disposition for a definitively
+    /// undispatched effect after the exact worker authority is no longer live.
+    ///
+    /// The transition is restricted to zero-receipt runtime effects and is
+    /// rejected while the same fence/epoch/owner still has an executable lease
+    /// on the enabled admitted pipeline generation. This lets a stale worker
+    /// preserve cleanup truth without restoring execution authority.
+    ///
+    /// A durably dispatch-committed effect is never "undispatched": even when
+    /// the commit acknowledgement was lost before the worker observed it, this
+    /// transition refuses the row so reconciliation stays mandatory.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_undispatched_release_after_authority_loss(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+        released: bool,
+    ) -> Result<bool, StoreError> {
+        if agent_id.is_empty()
+            || agent_id.len() > 256
+            || effect_key.is_empty()
+            || effect_key.len() > 256
+        {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let target_status = if released {
+            "abandoned"
+        } else {
+            "release_pending"
+        };
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let recorded = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE attempt_effects AS e
+             SET status = $9, updated_at = clock_timestamp()
+             FROM attempts AS a, nodes AS n, builds AS b, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $6
+               AND e.effect_class = $7
+               AND e.payload_digest = $8
+               AND (
+                   ($9 = 'abandoned' AND e.status IN (
+                       'prepared', 'uncertain', 'release_pending', 'abandoned'
+                   ))
+                   OR ($9 = 'release_pending' AND e.status IN (
+                       'prepared', 'uncertain', 'release_pending'
+                   ))
+               )
+               AND e.outcome_receipt IS NULL
+               AND e.reconciliation_receipt IS NULL
+               AND e.observation_receipt IS NULL
+               AND e.shadow_replay_receipt IS NULL
+               AND e.dispatch_committed_at IS NULL
+               AND e.payload ->> 'schema_version' =
+                   'mcloving.controller-effect-prepared/v1'
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND n.organization_id = a.organization_id
+               AND n.id = a.node_id
+               AND b.organization_id = n.organization_id
+               AND b.id = n.build_id
+               AND m.singleton
+               AND NOT (
+                   a.fence = $3
+                   AND a.restore_epoch = $4
+                   AND a.restore_epoch = m.restore_epoch
+                   AND a.lease_owner = $5
+                   AND a.lease_expires_at > clock_timestamp()
+                   AND a.status IN (
+                       'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+                   )
+                   AND EXISTS (
+                       SELECT 1
+                       FROM pipeline_definitions AS d
+                       JOIN pipeline_operational_state_history AS h
+                         ON h.organization_id = d.organization_id
+                        AND h.pipeline_id = d.pipeline_id
+                        AND h.generation = d.operational_generation
+                       WHERE d.organization_id = b.organization_id
+                         AND d.pipeline_id = b.pipeline_id
+                         AND d.operational_generation =
+                             b.pipeline_operational_generation
+                         AND h.state = 'enabled'
+                   )
+               )
+             RETURNING e.attempt_id",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .bind(target_status)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(recorded.is_some())
+    }
+
+    /// Abandons a definitively undispatched effect only after its observer
+    /// reservation has expired according to the controller database clock.
+    ///
+    /// This transition is intentionally unavailable to ordinary `uncertain`
+    /// effects: a connector timeout with no receipt may still have dispatched.
+    /// Only the dedicated `release_pending` state, an exact immutable payload,
+    /// zero effect receipts, no durable dispatch commitment, and a lease-less
+    /// reconciliation attempt qualify.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn abandon_expired_release_pending_effect(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let abandoned = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE attempt_effects AS e
+             SET status = 'abandoned',
+                 updated_at = CASE
+                     WHEN e.status = 'release_pending' THEN clock_timestamp()
+                     ELSE e.updated_at
+                 END
+             FROM attempts AS a, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $4
+               AND e.effect_class = $5
+               AND e.payload_digest = $6
+               AND e.status IN ('release_pending', 'abandoned')
+               AND e.outcome_receipt IS NULL
+               AND e.reconciliation_receipt IS NULL
+               AND e.observation_receipt IS NULL
+               AND e.shadow_replay_receipt IS NULL
+               AND e.dispatch_committed_at IS NULL
+               AND e.payload ->> 'schema_version' =
+                   'mcloving.controller-effect-prepared/v1'
+               AND jsonb_typeof(
+                   e.payload -> 'observer_reservation_expires_at_unix_ms'
+               ) = 'number'
+               AND to_timestamp(
+                   ((e.payload ->> 'observer_reservation_expires_at_unix_ms')::bigint)
+                   / 1000.0
+               ) <= clock_timestamp()
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND a.status = 'reconciliation_required'
+               AND a.lease_expires_at IS NULL
+               AND m.singleton
+               AND a.restore_epoch <= m.restore_epoch
+               AND (
+                   (a.restore_epoch = m.restore_epoch AND e.fence = a.fence)
+                   OR (
+                       a.restore_epoch < m.restore_epoch
+                       AND e.fence <= a.fence
+                   )
+               )
+             RETURNING e.attempt_id",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(abandoned.is_some())
     }
 
     /// Terminates one fully resolved reconciliation without granting a lease.
@@ -3348,7 +4170,30 @@ impl Store {
                    FROM attempt_effects AS e
                    WHERE e.organization_id = a.organization_id
                      AND e.attempt_id = a.id
-                     AND e.status = 'uncertain'
+                     AND e.status IN ('uncertain', 'release_pending')
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM attempt_effects AS e
+                   WHERE e.organization_id = a.organization_id
+                     AND e.attempt_id = a.id
+                     AND e.payload ->> 'schema_version' = 'mcloving.controller-effect-prepared/v1'
+                     AND (
+                         (e.status = 'abandoned' AND $4 = 'succeeded')
+                         OR (
+                             e.status <> 'abandoned'
+                             AND (
+                                 e.status <> 'confirmed'
+                                 OR e.outcome_receipt IS NULL
+                                 OR e.observation_receipt IS NULL
+                                 OR e.shadow_replay_receipt IS NULL
+                                 OR (
+                                     e.outcome_receipt ->> 'status' = 'ambiguous'
+                                     AND e.reconciliation_receipt IS NULL
+                                 )
+                             )
+                         )
+                     )
                )
              RETURNING n.id, n.build_id, a.restore_epoch",
         )
@@ -3424,7 +4269,8 @@ impl Store {
             "SELECT attempt_id, fence, effect_key, effect_class, status,
                     payload, payload_digest
              FROM attempt_effects
-             WHERE organization_id = $1 AND status = 'uncertain'
+             WHERE organization_id = $1
+               AND status IN ('uncertain', 'release_pending')
              ORDER BY updated_at, attempt_id, effect_key",
         )
         .bind(organization_id)
@@ -5148,6 +5994,44 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
+        Ok(self
+            .finalize_attempt_with_session(
+                organization_id,
+                attempt_id,
+                fence,
+                restore_epoch,
+                agent_id,
+                None,
+                outcome,
+                summary,
+                false,
+            )
+            .await?
+            .is_some())
+    }
+
+    /// Publishes a terminal outcome whose cancellation decision must be atomic
+    /// with the publication itself.
+    ///
+    /// A caller that reads cancellation in one transaction and publishes in
+    /// another can have cancellation commit in between: both cancellation
+    /// writers move a live attempt to `cancelling` under its row lock, yet
+    /// `finalize_attempt` accepts that status and would publish the caller's
+    /// now-stale non-aborted choice. This entry point instead derives the
+    /// terminal under the same row lock it publishes with, so a committed
+    /// cancellation always wins. Returns the outcome actually published, which
+    /// the caller must report in place of the one it requested.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_attempt_cancellation_aware(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<Option<TerminalOutcome>, StoreError> {
         self.finalize_attempt_with_session(
             organization_id,
             attempt_id,
@@ -5157,6 +6041,7 @@ impl Store {
             None,
             outcome,
             summary,
+            true,
         )
         .await
     }
@@ -5173,17 +6058,20 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
-        self.finalize_attempt_with_session(
-            organization_id,
-            attempt_id,
-            fence,
-            restore_epoch,
-            agent_id,
-            Some(session_epoch),
-            outcome,
-            summary,
-        )
-        .await
+        Ok(self
+            .finalize_attempt_with_session(
+                organization_id,
+                attempt_id,
+                fence,
+                restore_epoch,
+                agent_id,
+                Some(session_epoch),
+                outcome,
+                summary,
+                false,
+            )
+            .await?
+            .is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5197,13 +6085,14 @@ impl Store {
         session_epoch: Option<u64>,
         outcome: TerminalOutcome,
         summary: Value,
-    ) -> Result<bool, StoreError> {
+        cancellation_aborts: bool,
+    ) -> Result<Option<TerminalOutcome>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
         }
         acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
@@ -5230,17 +6119,28 @@ impl Store {
         if let Some((status, terminal_summary)) = existing
             && matches!(status.as_str(), "succeeded" | "failed" | "aborted")
         {
-            let identical =
-                status == outcome.as_str() && terminal_summary.as_ref() == Some(&summary);
+            // A cancellation-aware publication may already have substituted
+            // `aborted` for this exact request. Its retry names the outcome it
+            // asked for, so accept that substitution as the same publication
+            // rather than reporting authority loss.
+            let substituted = cancellation_aborts && status == TerminalOutcome::Aborted.as_str();
+            let identical = (status == outcome.as_str() || substituted)
+                && terminal_summary.as_ref() == Some(&summary);
             if identical {
                 tx.commit().await?;
             } else {
                 tx.rollback().await?;
             }
-            return Ok(identical);
+            return Ok(identical.then_some(if substituted {
+                TerminalOutcome::Aborted
+            } else {
+                outcome
+            }));
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "SELECT n.id, n.build_id
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
+            "SELECT n.id, n.build_id,
+                    a.status = 'cancelling'
+                    OR n.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -5267,9 +6167,20 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let Some((node_id, build_id)) = authority else {
+        let Some((node_id, build_id, cancelling)) = authority else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
+        };
+        // Both cancellation writers move a live attempt to `cancelling` under
+        // its row lock, and the DAG writer additionally stamps the node. The
+        // lock above therefore serializes this derivation against them: a
+        // cancellation is either already visible here or waits for this
+        // publication, so the choice can no longer go stale between reading it
+        // and publishing it.
+        let outcome = if cancellation_aborts && cancelling {
+            TerminalOutcome::Aborted
+        } else {
+            outcome
         };
 
         let uncertain_effects = sqlx::query_scalar::<_, i64>(
@@ -5278,7 +6189,7 @@ impl Store {
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
-               AND status = 'uncertain'",
+               AND status IN ('uncertain', 'release_pending')",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -5332,7 +6243,42 @@ impl Store {
             )
             .await?;
             tx.commit().await?;
-            return Ok(false);
+            return Ok(None);
+        }
+
+        let incomplete_runtime_effects = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND payload ->> 'schema_version' = 'mcloving.controller-effect-prepared/v1'
+               AND (
+                   (status = 'abandoned' AND $4 = 'succeeded')
+                   OR (
+                       status <> 'abandoned'
+                       AND (
+                           status <> 'confirmed'
+                           OR outcome_receipt IS NULL
+                           OR observation_receipt IS NULL
+                           OR shadow_replay_receipt IS NULL
+                           OR (
+                               outcome_receipt ->> 'status' = 'ambiguous'
+                               AND reconciliation_receipt IS NULL
+                           )
+                       )
+                   )
+               )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(outcome.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if incomplete_runtime_effects > 0 {
+            tx.rollback().await?;
+            return Ok(None);
         }
 
         sqlx::query(
@@ -5394,7 +6340,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(outcome))
     }
 
     pub(crate) async fn tenant_transaction(
@@ -5591,6 +6537,33 @@ pub(crate) async fn lock_enabled_build_pipeline(
     organization_id: Uuid,
     build_id: Uuid,
 ) -> Result<(Uuid, i64), StoreError> {
+    let (pipeline_id, admitted_generation, current_generation, state) =
+        lock_build_pipeline_truth(tx, organization_id, build_id).await?;
+    if state == "disabled" {
+        return Err(StoreError::PipelineDisabled {
+            pipeline_id,
+            generation: current_generation,
+        });
+    }
+    if state != "enabled" {
+        return Err(StoreError::InvalidPipelineState(format!(
+            "stored pipeline operational state '{state}' is invalid"
+        )));
+    }
+    if current_generation != admitted_generation {
+        return Err(StoreError::PipelineStateConflict(format!(
+            "build pipeline generation {admitted_generation} is stale; current generation is \
+             {current_generation}"
+        )));
+    }
+    Ok((pipeline_id, current_generation))
+}
+
+async fn lock_build_pipeline_truth(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+) -> Result<(Uuid, i64, i64, String), StoreError> {
     let binding = sqlx::query_as::<_, (Option<Uuid>, Option<i64>)>(
         "SELECT pipeline_id, pipeline_operational_generation
          FROM builds
@@ -5624,24 +6597,7 @@ pub(crate) async fn lock_enabled_build_pipeline(
             "build pipeline operational-state truth is missing".to_owned(),
         ));
     };
-    if state == "disabled" {
-        return Err(StoreError::PipelineDisabled {
-            pipeline_id,
-            generation: current_generation,
-        });
-    }
-    if state != "enabled" {
-        return Err(StoreError::InvalidPipelineState(format!(
-            "stored pipeline operational state '{state}' is invalid"
-        )));
-    }
-    if current_generation != admitted_generation {
-        return Err(StoreError::PipelineStateConflict(format!(
-            "build pipeline generation {admitted_generation} is stale; current generation is \
-             {current_generation}"
-        )));
-    }
-    Ok((pipeline_id, current_generation))
+    Ok((pipeline_id, admitted_generation, current_generation, state))
 }
 
 async fn append_event_and_outbox(
@@ -5844,16 +6800,62 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
         (current, requested),
         (
             "prepared",
-            EffectStatus::Prepared | EffectStatus::Applied | EffectStatus::Uncertain
+            EffectStatus::Prepared
+                | EffectStatus::Applied
+                | EffectStatus::Uncertain
+                | EffectStatus::ReleasePending
+                | EffectStatus::Abandoned
         ) | (
             "applied",
             EffectStatus::Applied | EffectStatus::Confirmed | EffectStatus::Uncertain
-        ) | ("confirmed", EffectStatus::Confirmed)
-            | (
-                "uncertain",
-                EffectStatus::Uncertain | EffectStatus::Confirmed
-            )
+        ) | (
+            "confirmed",
+            EffectStatus::Confirmed | EffectStatus::Uncertain
+        ) | (
+            "uncertain",
+            EffectStatus::Uncertain | EffectStatus::Confirmed
+        ) | (
+            "release_pending",
+            EffectStatus::ReleasePending | EffectStatus::Abandoned
+        ) | ("abandoned", EffectStatus::Abandoned)
     )
+}
+
+fn push_effect_evidence(
+    evidence: &mut Vec<EffectEvidence>,
+    kind: EffectEvidenceKind,
+    receipt: Option<Value>,
+    digest: Option<Vec<u8>>,
+) -> Result<(), StoreError> {
+    match (receipt, digest) {
+        (None, None) => Ok(()),
+        (Some(receipt), Some(digest)) => {
+            let receipt_digest = digest.try_into().map_err(|_| {
+                StoreError::InvalidEffectPayload(
+                    "stored evidence digest is not 32 bytes".to_owned(),
+                )
+            })?;
+            evidence.push(EffectEvidence {
+                kind,
+                receipt,
+                receipt_digest,
+            });
+            Ok(())
+        }
+        _ => Err(StoreError::InvalidEffectPayload(
+            "stored effect evidence is incomplete".to_owned(),
+        )),
+    }
+}
+
+fn stored_effect_digest(digest: Vec<u8>) -> Result<[u8; 32], StoreError> {
+    digest.try_into().map_err(|_| {
+        StoreError::InvalidEffectPayload("stored effect digest is not 32 bytes".to_owned())
+    })
+}
+
+fn optional_stored_effect_digest(digest: Option<Vec<u8>>) -> Result<Option<[u8; 32]>, StoreError> {
+    digest.map(stored_effect_digest).transpose()
 }
 
 fn recoverable_finalization_status(status: &str) -> bool {
@@ -5885,6 +6887,8 @@ fn parse_effect_status(value: &str) -> Result<EffectStatus, StoreError> {
         "applied" => Ok(EffectStatus::Applied),
         "confirmed" => Ok(EffectStatus::Confirmed),
         "uncertain" => Ok(EffectStatus::Uncertain),
+        "release_pending" => Ok(EffectStatus::ReleasePending),
+        "abandoned" => Ok(EffectStatus::Abandoned),
         other => Err(StoreError::InvalidEffectPayload(format!(
             "unknown effect status {other}"
         ))),

@@ -14,8 +14,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::crypto::{
-    canonical_digest, content_sha256, observation_receipt_digest, public_key_from_seed,
-    sign_receipt, verify_destination_state, verify_observation_receipt, verify_request,
+    canonical_digest, content_sha256, observation_receipt_digest, observation_request_digest,
+    public_key_from_seed, sign_receipt, verify_destination_state, verify_observation_receipt,
+    verify_request,
 };
 use crate::store::{ClaimResult, ObserverStore, validate_state_dir, validate_temporal};
 use crate::strict_json::collect_decoded_json_strings;
@@ -25,7 +26,6 @@ use crate::{
     REQUEST_SCHEMA_VERSION, SignedDestinationState, parse_json_no_duplicates,
 };
 
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-request-digest-v1";
 const QUERY_DOMAIN: &[u8] = b"mcloving-observer-query-v1";
 const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
 const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
@@ -182,6 +182,40 @@ impl DestinationObserver {
             .await
     }
 
+    /// Verifies the complete signed request and the currently loaded deployment
+    /// authority, and creates an expiring capacity reservation without reading
+    /// the destination.
+    pub fn preflight_request(&self, request: &ObservationRequest) -> Result<String, ObserverError> {
+        self.preflight_request_with_trusted_time(request, unix_time_ms()?, 0)
+    }
+
+    /// Verifies the request with enough remaining authority for the caller's
+    /// bounded connector and post-action observation window.
+    pub fn preflight_request_for_duration(
+        &self,
+        request: &ObservationRequest,
+        required_validity_ms: u64,
+    ) -> Result<String, ObserverError> {
+        self.preflight_request_with_trusted_time(request, unix_time_ms()?, required_validity_ms)
+    }
+
+    /// Releases an exact preflight reservation after the controller has
+    /// definitively decided that no connector dispatch occurred.
+    pub fn release_preflight_request(
+        &self,
+        request: &ObservationRequest,
+    ) -> Result<String, ObserverError> {
+        self.validate_request(request)?;
+        let request_sha256 = observation_request_digest(request)?;
+        self.store.release_pending(
+            self.config.generation,
+            &self.config_sha256,
+            request,
+            &request_sha256,
+        )?;
+        Ok(request_sha256)
+    }
+
     /// Deterministic clock entry point for the contained literal-loopback test boundary only.
     #[cfg(feature = "loopback-test")]
     #[doc(hidden)]
@@ -196,6 +230,83 @@ impl DestinationObserver {
         self.observe_with_trusted_time(request, now_ms).await
     }
 
+    /// Deterministic preflight clock for the contained literal-loopback tests.
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub fn preflight_request_at(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+    ) -> Result<String, ObserverError> {
+        if !is_literal_loopback_test_endpoint(&self.config) {
+            return Err(ObserverError::InvalidConfig);
+        }
+        self.preflight_request_with_trusted_time(request, now_ms, 0)
+    }
+
+    /// Deterministic bounded-validity preflight for contained literal-loopback tests.
+    #[cfg(feature = "loopback-test")]
+    #[doc(hidden)]
+    pub fn preflight_request_for_duration_at(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+        required_validity_ms: u64,
+    ) -> Result<String, ObserverError> {
+        if !is_literal_loopback_test_endpoint(&self.config) {
+            return Err(ObserverError::InvalidConfig);
+        }
+        self.preflight_request_with_trusted_time(request, now_ms, required_validity_ms)
+    }
+
+    fn preflight_request_with_trusted_time(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+        required_validity_ms: u64,
+    ) -> Result<String, ObserverError> {
+        let started_at = Instant::now();
+        self.validate_request(request)?;
+        let required_validity_ms =
+            i64::try_from(required_validity_ms).map_err(|_| ObserverError::MalformedRequest)?;
+        let required_valid_until = now_ms
+            .checked_add(required_validity_ms)
+            .ok_or(ObserverError::MalformedRequest)?;
+        if request.expires_at_unix_ms < required_valid_until {
+            return Err(ObserverError::ExpiredRequest);
+        }
+        // The read grant is this observer's own authority to observe the
+        // destination. Approving a window the grant cannot cover would let
+        // the controller dispatch and only then fail the post-action
+        // observation with `expired_grant`; deny before any reservation so
+        // the controller sees a definitive pre-dispatch rejection instead.
+        if self.config.read_grant_expires_unix_ms < required_valid_until {
+            return Err(ObserverError::ExpiredGrant);
+        }
+        let request_sha256 = observation_request_digest(request)?;
+        let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(request))?;
+        let destination_scope_sha256 = canonical_digest(
+            b"mcloving-observer-destination-scope-v1",
+            &DestinationScope::from_request(request),
+        )?;
+        match self.store.claim(
+            &self.config,
+            &self.config_sha256,
+            request,
+            &request_sha256,
+            &scope_sha256,
+            &destination_scope_sha256,
+            now_ms,
+            started_at,
+        )? {
+            ClaimResult::Completed(receipt) => {
+                self.validate_replayed_receipt(request, &request_sha256, &receipt)?;
+            }
+            ClaimResult::Claimed { .. } => {}
+        }
+        Ok(request_sha256)
+    }
+
     async fn observe_with_trusted_time(
         &self,
         request: ObservationRequest,
@@ -203,7 +314,7 @@ impl DestinationObserver {
     ) -> Result<ObservationReceipt, ObserverError> {
         let started_at = Instant::now();
         self.validate_request(&request)?;
-        let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, &request)?;
+        let request_sha256 = observation_request_digest(&request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(&request))?;
         let destination_scope_sha256 = canonical_digest(
             b"mcloving-observer-destination-scope-v1",
@@ -223,6 +334,7 @@ impl DestinationObserver {
             &self.config,
             &self.config_sha256,
             &request,
+            &request_sha256,
             &scope_sha256,
             now_ms,
             started_at,
@@ -441,7 +553,7 @@ impl DestinationObserver {
         started_at: Instant,
     ) -> Result<(SignedDestinationState, Vec<u8>, i64), ObserverError> {
         let query_sha256 = canonical_digest(QUERY_DOMAIN, &request.query)?;
-        let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, request)?;
+        let request_sha256 = observation_request_digest(request)?;
         let mut url =
             Url::parse(&self.config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
         {
@@ -1286,11 +1398,11 @@ fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
     })
 }
 
-fn maximum_receipt_envelope_fits(
+fn maximum_receipt(
     config: &ObserverConfig,
     config_sha256: &str,
     implementation_sha256: &str,
-) -> bool {
+) -> Option<ObservationReceipt> {
     let maximum_query_value = "\0".repeat(MAX_QUERY_VALUE_BYTES);
     let canonical_query: BTreeMap<String, String> = config
         .allowed_query_keys
@@ -1347,8 +1459,8 @@ fn maximum_receipt_envelope_fits(
         destination_attestation_key_id: config.destination_attestation_key_id.clone(),
         state: match maximum_schema_state_serialized_len(config) {
             Some(length) if length >= 2 => serde_json::Value::String("x".repeat(length - 2)),
-            None => return false,
-            _ => return false,
+            None => return None,
+            _ => return None,
         },
         retry_count: config.limits.retry_attempts,
         audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
@@ -1356,7 +1468,38 @@ fn maximum_receipt_envelope_fits(
         receipt_signing_public_key_sha256: config.receipt_signing_public_key_sha256.clone(),
         signature_base64: "A".repeat(88),
     };
-    crate::standalone::observed_response_fits(&maximum)
+    Some(maximum)
+}
+
+pub(crate) fn maximum_receipt_evidence_bytes_for_request(
+    config: &ObserverConfig,
+    config_sha256: &str,
+    implementation_sha256: &str,
+    request: &ObservationRequest,
+) -> Option<u64> {
+    let mut maximum = maximum_receipt(config, config_sha256, implementation_sha256)?;
+    maximum.observation_id = request.observation_id;
+    maximum.tenant_id = request.tenant_id;
+    maximum.project_id = request.project_id;
+    maximum.pipeline_id = request.pipeline_id;
+    maximum.build_id = request.build_id;
+    maximum.attempt_id = request.attempt_id;
+    maximum.effect_fence = request.effect_fence;
+    maximum.phase = request.phase;
+    maximum.predecessor_receipt_sha256 = request.predecessor_receipt_sha256.clone();
+    maximum.canonical_query = request.query.clone();
+    maximum.audit_provenance = request.audit_provenance.clone();
+    let evidence_bytes = serde_json::to_vec(&maximum).ok()?.len();
+    u64::try_from(evidence_bytes).ok()
+}
+
+fn maximum_receipt_envelope_fits(
+    config: &ObserverConfig,
+    config_sha256: &str,
+    implementation_sha256: &str,
+) -> bool {
+    maximum_receipt(config, config_sha256, implementation_sha256)
+        .is_some_and(|maximum| crate::standalone::observed_response_fits(&maximum))
 }
 
 fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize> {
