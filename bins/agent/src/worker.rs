@@ -559,6 +559,14 @@ fn connector_intent_payload(execution_spec_json: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(execution_spec_json) else {
         return false;
     };
+    // Version is part of the routing decision, not a detail. A connector-intent
+    // step under any version but 2 is unrunnable by every runtime, so declining
+    // it would recreate the very claim loop this ticket removes. Field validity
+    // beyond that belongs to the effect runtime, which owns the schema and can
+    // terminalize what it rejects.
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(2) {
+        return false;
+    }
     let steps = value.get("steps").and_then(serde_json::Value::as_array);
     matches!(steps, Some(steps) if steps.len() == 1
         && steps[0].get("kind").and_then(serde_json::Value::as_str) == Some("connector_intent"))
@@ -2624,6 +2632,15 @@ mod tests {
             validate_assignment(&config(), 4, assignment(spec)).unwrap(),
             AssignmentDisposition::ForAnotherRuntime(_)
         ));
+    }
+
+    /// A connector-intent step under the wrong version is runnable by nothing,
+    /// so declining it would loop forever. It must take the terminal path.
+    #[test]
+    fn version_mismatched_connector_intent_is_terminally_refused() {
+        let spec = br#"{"version":1,"steps":[{"kind":"connector_intent"}]}"#;
+        let refusal = unsupported(validate_assignment(&config(), 4, assignment(spec)).unwrap());
+        assert!(!refusal.detail.is_empty());
     }
 
     #[test]

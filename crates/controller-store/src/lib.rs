@@ -6047,6 +6047,40 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Session-bound terminal publication whose cancellation decision is made
+    /// under the same row lock as the publication.
+    ///
+    /// A caller that read cancellation from an earlier receipt can have
+    /// cancellation commit before this transaction locks the attempt, and the
+    /// ordinary path accepts a `cancelling` attempt and takes the caller at its
+    /// word. Returns the outcome actually published.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_attempt_in_session_cancellation_aware(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<Option<TerminalOutcome>, StoreError> {
+        self.finalize_attempt_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            outcome,
+            summary,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn finalize_attempt_in_session(
         &self,
         organization_id: Uuid,

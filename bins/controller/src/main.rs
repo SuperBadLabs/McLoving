@@ -1186,20 +1186,42 @@ impl AgentControl for ControllerAgentService {
                 return Err(Status::invalid_argument("work outcome must be explicit"));
             }
         };
-        let accepted = self
-            .store
-            .finalize_attempt_in_session(
-                context.organization_id,
-                context.attempt_id,
-                context.fence,
-                context.restore_epoch,
-                &authority.agent_id,
-                authority.session_epoch,
-                outcome,
-                summary,
-            )
-            .await
-            .map_err(internal_store_error)?;
+        // A non-succeeded terminal must not outrank a cancellation that
+        // committed while the agent was deciding. The agent reads cancellation
+        // from an earlier lease receipt, so that decision can be stale by the
+        // time this transaction locks the attempt; the publication re-derives
+        // it under the same lock. A genuine success is never overridden: work
+        // that completed is reported as completed.
+        let accepted = if matches!(outcome, TerminalOutcome::Succeeded) {
+            self.store
+                .finalize_attempt_in_session(
+                    context.organization_id,
+                    context.attempt_id,
+                    context.fence,
+                    context.restore_epoch,
+                    &authority.agent_id,
+                    authority.session_epoch,
+                    outcome,
+                    summary,
+                )
+                .await
+                .map_err(internal_store_error)?
+        } else {
+            self.store
+                .finalize_attempt_in_session_cancellation_aware(
+                    context.organization_id,
+                    context.attempt_id,
+                    context.fence,
+                    context.restore_epoch,
+                    &authority.agent_id,
+                    authority.session_epoch,
+                    outcome,
+                    summary,
+                )
+                .await
+                .map_err(internal_store_error)?
+                .is_some()
+        };
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
