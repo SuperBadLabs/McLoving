@@ -100,7 +100,12 @@ alone can never impersonate the leased artifact publisher.
 Cancellation is a durable request. Queued work becomes terminal immediately;
 owned work becomes `cancelling` until the fenced agent proves process-tree
 termination. Status reports both build and attempt state plus the cancellation
-flag. Logs are controller-committed, SHA-256-bound chunks ordered by a global
+flag. A refused cancellation is named: a repeated request answers HTTP 200
+with `accepted: false` and a `reason`, a terminal build answers HTTP 409
+`build_not_cancellable`, and a build parked in `reconciliation_required`
+answers HTTP 409 `build_reconciliation_required` whose message states that a
+recovered agent attempt awaits operator reconciliation and points at the
+discharge runbook in `docs/architecture/AGENT_RUNTIME.md`. Logs are controller-committed, SHA-256-bound chunks ordered by a global
 cursor. Continuation requires the complete
 `after_attempt_id`/`after_fence`/`after_sequence`/`after_stream` tuple so a
 saved cursor remains exact across attempt re-fencing. Every item exposes exact
