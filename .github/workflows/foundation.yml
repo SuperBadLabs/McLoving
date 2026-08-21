@@ -29,9 +29,12 @@ jobs:
         run: |
           set -euo pipefail
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /usr/local/share/powershell \
-            /usr/share/swift /usr/local/share/chromium
+          # Unlink the two largest unused runtimes only. Reclaiming every
+          # preinstalled SDK frees more, but the extra unlink I/O runs against
+          # the same disk the build is about to use, and headroom is the point
+          # here, not maximum free space.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
           df -h /
       - name: Install pinned Rust toolchain
         run: >-
