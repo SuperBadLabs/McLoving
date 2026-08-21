@@ -431,4 +431,31 @@ if "symlink_target" not in linked[0]:
 LINKED
 rm -f "${config_dir}/controller-linked.env"
 
-echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar -> symlinked contract"
+# A symlinked configuration *directory* is traversed too: rglob would not
+# descend it, so every key inside would be consumed by the services and absent
+# from the re-read.
+mkdir -p "${workdir}/managed-pki"
+cp "${config_dir}/pki/"* "${workdir}/managed-pki/" 2>/dev/null || true
+mv "${config_dir}/pki" "${config_dir}/pki.real"
+ln -s "${workdir}/managed-pki" "${config_dir}/pki"
+linked_dir_digests="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${linked_dir_digests}" <<'LINKEDDIR'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+contracts = document.get("environment_contracts", [])
+inside = [entry for entry in contracts if "/pki/" in entry["path"]]
+if not inside:
+    raise SystemExit("symlinked configuration directory was not traversed")
+LINKEDDIR
+rm -f "${config_dir}/pki"
+mv "${config_dir}/pki.real" "${config_dir}/pki"
+
+# The recovery command the upgrade path prints must exist on the host.
+[[ -x "${libexec}/helpers/mcloving-rollback" ]] || {
+  echo "rollback helper is not installed; the printed recovery command would not resolve" >&2
+  exit 1
+}
+
+echo "deployment smoke test passed: install -> bootstrap -> submit ${build_id} -> succeeded -> digest re-read -> upgrade/rollback -> tamper refusal -> env grammar -> symlinked contract -> symlinked pki -> rollback helper"

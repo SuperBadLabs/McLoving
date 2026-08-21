@@ -72,20 +72,50 @@ def file_record(path: Path, root: Path) -> dict:
 
 
 def walk(root: Path) -> list[Path]:
+    """Every file the services can actually read beneath ``root``.
+
+    ``rglob`` does not descend a symlinked directory, so an operator who points
+    a configuration subtree such as ``pki`` at managed storage would get a
+    re-read that silently omits every certificate and key inside it, while the
+    services read them happily. This walks the tree the way the services see
+    it, following directory links, and guards against a link cycle by
+    remembering resolved directories.
+    """
     if not root.is_dir():
         return []
-    resolved: list[Path] = []
-    for path in root.rglob("*"):
+    found: list[Path] = []
+    seen: set = set()
+
+    def descend(directory: Path) -> None:
         try:
-            if not path.is_file():
-                continue
+            key = directory.resolve().as_posix()
         except OSError:
-            # A dangling symlink is configuration the services would fail on;
-            # it is reported rather than silently dropped.
-            resolved.append(path)
-            continue
-        resolved.append(path)
-    return sorted(resolved)
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                is_directory = entry.is_dir()
+                is_file = entry.is_file()
+            except OSError:
+                # A dangling link is configuration the services would fail on,
+                # so it is reported rather than dropped.
+                found.append(entry)
+                continue
+            if is_directory:
+                descend(entry)
+            elif is_file:
+                found.append(entry)
+            else:
+                found.append(entry)
+
+    descend(root)
+    return sorted(found)
 
 
 document = {

@@ -66,8 +66,12 @@ fi
 point_symlink "${libexec_root}/current" "releases/${id}"
 echo "current release: releases/${id}"
 
+# mcloving-rollback is installed too: the upgrade path prints it as the
+# recovery command, and a recovery command that is not on the host is not a
+# recovery command.
 for helper in mcloving-env-guard mcloving-health mcloving-db-init \
-  mcloving-deployed-digests mcloving-unit-command; do
+  mcloving-deployed-digests mcloving-unit-command mcloving-rollback \
+  mcloving-upgrade; do
   install -m 0755 "${deploy_root}/bin/${helper}" "${libexec_root}/helpers/${helper}"
 done
 install -m 0644 "${deploy_root}/bin/mcloving-deploy-lib.sh" \
