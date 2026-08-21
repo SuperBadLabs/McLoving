@@ -218,6 +218,27 @@ Named honestly; none of these are hidden behind defaults:
   PostgreSQL hardening (pg_hba beyond the image defaults, TLS to the
   database) is not configured by this lane. The database listens on
   loopback only.
+- **Workload processes are not isolated from deployment credentials.**
+  This is the sharpest limitation in this document. A submitted process step
+  is spawned by the agent as the *same* service user, with no user
+  transition and no filesystem sandbox, so it can read every 0600 file under
+  `~/.config/mcloving` — controller, API, and database credentials, and the
+  agent's mTLS private key — and can write the user-owned current release and
+  helpers. `UMask=` and `StateDirectoryMode=` do not help: they are
+  discretionary controls against *other* users, and the workload is this
+  user. Nothing in the deployment layer can close this, because a rootless
+  user-level lane has no privilege to transition away from; it requires
+  per-workload containment in the agent executor. **Until that exists, treat
+  the right to submit a pipeline as equivalent to the right to read this
+  host's deployment credentials**, and do not run untrusted submissions on a
+  host whose credentials you are not willing to disclose. Tracked as
+  `SEC-005` on the execution board.
+- **Release integrity is bound to install-time identity, not tamper-proof.**
+  `verify_staged_release` recomputes the release identity and requires it to
+  match the directory name assigned at installation, which catches
+  corruption, partial writes, and in-place substitution. It is not a defence
+  against a compromised service user, who owns those files and can rewrite
+  them; that boundary is the isolation limitation above.
 - **Secrets live in 0600 environment files.** No secret manager
   integration; contract files and PKI are protected by file permissions and
   committed to (by hash) in the digest re-read.

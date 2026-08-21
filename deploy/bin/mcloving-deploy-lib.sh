@@ -103,6 +103,47 @@ release_id() {
   done | sha256sum | awk '{print substr($1, 1, 12)}'
 }
 
+# Parse systemd's environment-file grammar without executing it. Sourcing
+# would let a value that is literal to systemd — an unquoted token containing
+# `&`, `$`, or a space — fork jobs, run commands, and expand variables as the
+# service user. Shared by every helper that reads a contract file so the two
+# cannot diverge.
+#
+# Emits NUL-separated name/value pairs so no value can be mistaken for a
+# delimiter.
+parse_environment_file() {
+  python3 - "$1" <<'PARSE'
+import sys
+
+path = sys.argv[1]
+out = sys.stdout.buffer
+with open(path, "r", encoding="utf-8") as handle:
+    for number, raw in enumerate(handle, start=1):
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        name, separator, value = line.partition("=")
+        if not separator:
+            sys.stderr.write(f"line {number} is not NAME=VALUE\n")
+            raise SystemExit(1)
+        name = name.strip()
+        value = value.strip()
+        # A matching pair of surrounding quotes is a delimiter, not content.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out.write(name.encode() + b"\0" + value.encode() + b"\0")
+PARSE
+}
+
+# load_environment_file ENV_FILE — export the parsed contract.
+load_environment_file() {
+  local name value
+  while IFS= read -r -d '' name && IFS= read -r -d '' value; do
+    printf -v "${name}" '%s' "${value}"
+    export "${name?}"
+  done < <(parse_environment_file "$1")
+}
+
 # stage_release LIBEXEC_ROOT RELEASE_DIR RELEASE_ID
 stage_release() {
   local libexec_root="$1" release_dir="$2" id="$3" binary target
@@ -111,30 +152,32 @@ stage_release() {
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
     install -m 0755 "${release_dir}/${binary}" "${target}/${binary}"
   done
-  # Retain the verified digests beside the release. Installation is the only
-  # point at which these binaries are known to match the manifest, so rollback
-  # has nothing else to check a staged release against.
-  (
-    cd "${target}" || exit 1
-    sha256sum "${MCLOVING_DEPLOY_BINARIES[@]}" > SHA256SUMS
-  )
-  chmod 0444 "${target}/SHA256SUMS"
   echo "${target}"
 }
 
 # verify_staged_release RELEASE_PATH
 #
-# Recomputes every binary digest against the checksums retained at
-# installation. A staged release is writable by the service user, so
-# "still executable" is not evidence that it is the release that was verified.
+# Recomputes the release identity from the binaries and requires it to equal
+# the directory name assigned at installation. "Still executable" is not
+# evidence that a staged release is the one that was verified against the
+# manifest.
+#
+# The identity is the check rather than a retained checksum file, because such
+# a file lives beside the binaries under the same ownership and can simply be
+# rewritten; binding to the install-time name leaves no in-place side channel.
+# This detects corruption, partial writes, and in-place substitution. It is not
+# a defence against a compromised service user, which can rewrite anything it
+# owns — see the isolation boundary recorded in docs/operations/DEPLOYMENT_V1.md.
 verify_staged_release() {
-  local release_path="$1"
-  [[ -f "${release_path}/SHA256SUMS" ]] \
-    || deploy_fail "release ${release_path} has no retained checksums; refusing to use it"
-  (
-    cd "${release_path}" || exit 1
-    sha256sum --quiet --check SHA256SUMS
-  ) || deploy_fail "release ${release_path} does not match its retained checksums"
+  local release_path="$1" expected actual
+  expected="$(basename "${release_path}")"
+  for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+    [[ -f "${release_path}/${binary}" ]] \
+      || deploy_fail "release ${release_path} is missing ${binary}"
+  done
+  actual="$(release_id "${release_path}")"
+  [[ "${actual}" == "${expected}" ]] \
+    || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
 }
 
 # point_symlink LINK TARGET (atomic replace)

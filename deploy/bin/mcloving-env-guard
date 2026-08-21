@@ -19,44 +19,9 @@ if [[ ! -f "${env_file}" ]]; then
   exit 1
 fi
 
-# The contract file is systemd's, not Bash's. Sourcing it would evaluate the
-# values: an unquoted generated password containing `&`, `$`, or a space is
-# valid to systemd but is command substitution, a variable reference, or an
-# argument split to Bash, so the guard would abort or validate a value the
-# service never receives. Parse the grammar instead of executing it.
-#
-# Emits NUL-separated name/value pairs so no value can be mistaken for a
-# delimiter.
-parse_environment_file() {
-  python3 - "$1" <<'PARSE'
-import sys
-
-path = sys.argv[1]
-out = sys.stdout.buffer
-with open(path, "r", encoding="utf-8") as handle:
-    for number, raw in enumerate(handle, start=1):
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith(";"):
-            continue
-        name, separator, value = line.partition("=")
-        if not separator:
-            sys.stderr.write(f"line {number} is not NAME=VALUE\n")
-            raise SystemExit(1)
-        name = name.strip()
-        value = value.strip()
-        # systemd accepts a single- or double-quoted value; the quotes are
-        # delimiters, not part of the value. Anything else is literal, which is
-        # exactly where Bash and systemd disagree.
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        out.write(name.encode() + b"\0" + value.encode() + b"\0")
-PARSE
-}
-
-while IFS= read -r -d '' name && IFS= read -r -d '' value; do
-  printf -v "${name}" '%s' "${value}"
-  export "${name?}"
-done < <(parse_environment_file "${env_file}")
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+load_environment_file "${env_file}"
 
 fail() {
   echo "mcloving-env-guard[${service}]: $1" >&2
