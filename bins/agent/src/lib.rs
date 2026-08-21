@@ -18,8 +18,8 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, OutboundMtlsConfig,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError, WORK_COMPLETION_SUBSTITUTION_FEATURE,
-    WORK_DELIVERY_FEATURE,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, RECOVERED_DISCHARGE_FEATURE, TransportError,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -399,6 +399,7 @@ async fn open_session(
                     WORK_DELIVERY_FEATURE.to_owned(),
                     ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
                     WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
+                    RECOVERED_DISCHARGE_FEATURE.to_owned(),
                 ],
             }),
             trust_pool: config.trust_pool.clone(),

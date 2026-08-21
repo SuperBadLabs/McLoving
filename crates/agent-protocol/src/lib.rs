@@ -39,6 +39,12 @@ pub const CURRENT_SESSION_EPOCH_METADATA: &str = "mcloving-current-session-epoch
 /// would record the outcome it requested, so the controller must not substitute
 /// for such a peer during a rolling upgrade.
 pub const WORK_COMPLETION_SUBSTITUTION_FEATURE: &str = "work-completion-substitution-v1";
+/// The peer understands `CancellationDisposition::DISCHARGE_RECOVERED`.
+///
+/// A peer without it rejects the unknown enum value as an unsupported
+/// protocol and reconnects, leaving the recovered attempt parked forever, so
+/// the controller must answer such a peer with the previous disposition.
+pub const RECOVERED_DISCHARGE_FEATURE: &str = "recovered-discharge-v1";
 /// Controller lease granted while a retained terminal attempt is replayed.
 pub const RECOVERED_FINALIZATION_LEASE_SECONDS: u64 = 30;
 

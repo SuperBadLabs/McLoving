@@ -18,8 +18,8 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, ProtocolRange,
-    RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_COMPLETION_SUBSTITUTION_FEATURE,
-    WORK_DELIVERY_FEATURE, negotiate,
+    RECOVERED_DISCHARGE_FEATURE, RECOVERED_FINALIZATION_LEASE_SECONDS,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, ConnectorMappingCatalog, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
@@ -583,16 +583,20 @@ impl SessionEpochChurn {
     /// Names the suspected collision when this identity's stored epoch has
     /// advanced repeatedly within the sliding window.
     fn suspected_collision(&self, agent_id: &str) -> Option<String> {
-        let advances_by_agent = self
+        let mut advances_by_agent = self
             .advances_by_agent
             .lock()
             .expect("session churn lock is never poisoned");
         let now = Instant::now();
-        let advances = advances_by_agent
-            .get(agent_id)?
-            .iter()
-            .filter(|advance| now.duration_since(**advance) <= SESSION_CHURN_WINDOW)
-            .count();
+        // Prune while reading, and drop identities whose window has emptied.
+        // Recording alone would only ever age out agents that keep coming
+        // back, so an agent that connects once would hold its deque for the
+        // controller's lifetime and the map would grow without bound.
+        advances_by_agent.retain(|_, advances| {
+            advances.retain(|advance| now.duration_since(*advance) <= SESSION_CHURN_WINDOW);
+            !advances.is_empty()
+        });
+        let advances = advances_by_agent.get(agent_id)?.len();
         if advances < SESSION_CHURN_COLLISION_THRESHOLD {
             return None;
         }
@@ -702,6 +706,7 @@ impl AgentControl for ControllerAgentService {
             WORK_DELIVERY_FEATURE.to_owned(),
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
             WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
+            RECOVERED_DISCHARGE_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -930,6 +935,11 @@ impl AgentControl for ControllerAgentService {
             })
             .await
             .map_err(internal_store_error)?;
+        let discharge_negotiated = self
+            .store
+            .agent_session_supports(&request.agent_id, RECOVERED_DISCHARGE_FEATURE)
+            .await
+            .map_err(internal_store_error)?;
         Ok(Response::new(CancellationReceipt {
             session_epoch: request.session_epoch,
             disposition: match disposition {
@@ -940,6 +950,14 @@ impl AgentControl for ControllerAgentService {
                     CancellationDisposition::RetireStale as i32
                 }
                 AgentCancellationDisposition::ReconciliationRequired => {
+                    CancellationDisposition::ReconciliationRequired as i32
+                }
+                // A wire-semantics change: a peer that never negotiated the
+                // discharge cannot parse this enum value, rejects the response
+                // as an unsupported protocol, reconnects, and stays parked
+                // forever — the exact wedge this ticket removes. Such a peer
+                // keeps the previous fail-closed disposition instead.
+                AgentCancellationDisposition::DischargeRecovered if !discharge_negotiated => {
                     CancellationDisposition::ReconciliationRequired as i32
                 }
                 AgentCancellationDisposition::DischargeRecovered => {

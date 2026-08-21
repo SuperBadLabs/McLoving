@@ -2368,9 +2368,25 @@ impl Store {
         };
         if !matches!(current_status.as_str(), "queued" | "running") {
             tx.rollback().await?;
-            return Ok(CancellationDecision::NotCancellable {
-                build_status: Some(current_status),
-            });
+            // A cancellation that already succeeded stays idempotent even once
+            // it has driven the build terminal, which is the common case: a
+            // queued build aborts immediately, so the client's own retry would
+            // otherwise be refused as not cancellable. Only a build that was
+            // never asked to cancel reports its state as a refusal.
+            //
+            // `reconciliation_required` deliberately takes precedence. It is
+            // the diagnostic this ticket exists to surface, and reporting it as
+            // an accepted no-op would hide the parked attempt behind the
+            // cancellation the operator asked for.
+            return Ok(
+                if cancellation_already_requested && current_status != "reconciliation_required" {
+                    CancellationDecision::AlreadyRequested
+                } else {
+                    CancellationDecision::NotCancellable {
+                        build_status: Some(current_status),
+                    }
+                },
+            );
         }
         if dag_mode {
             if !dag::cancel_dag_build(&mut tx, organization_id, build_id).await? {
