@@ -15,8 +15,8 @@ use crate::{
     ActionRequest, ConnectorConfig, ConnectorError, DESTINATION_RESPONSE_SCHEMA_VERSION,
     DestinationActionEnvelope, OUTCOME_RECEIPT_SCHEMA_VERSION, OutcomeReceipt, OutcomeStatus,
     PROTOCOL_VERSION, RECONCILE_REQUEST_SCHEMA_VERSION, ReconcileRequest, SignedDestinationOutcome,
-    action_request_digest, canonical_digest, content_sha256, destination_outcome_digest,
-    outcome_receipt_digest, sign_outcome_receipt, verify_action_request,
+    action_request_digest, content_sha256, destination_outcome_digest, outcome_receipt_digest,
+    request_payload_digest, sign_outcome_receipt, verify_action_request,
     verify_destination_outcome,
 };
 
@@ -924,10 +924,7 @@ impl ExternalConnector {
             credential_grant_id: self.config.credential_grant_id.clone(),
             credential_grant_version: self.config.credential_grant_version.clone(),
             credential_grant_scope: self.config.credential_grant_scope.clone(),
-            request_payload_sha256: canonical_digest(
-                b"mcloving-external-request-payload-v1",
-                &request.request_payload,
-            )?,
+            request_payload_sha256: request_payload_digest(&request.request_payload)?,
             status: OutcomeStatus::Failed,
             status_code: String::new(),
             public_values: BTreeMap::new(),

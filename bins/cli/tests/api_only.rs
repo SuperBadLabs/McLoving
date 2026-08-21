@@ -467,6 +467,7 @@ async fn status(State(state): State<MockState>, headers: HeaderMap) -> Json<Valu
         "lease_owner": null,
         "cancellation_requested": false,
         "terminal_summary": if terminal { Some(json!({"exit_code": 0})) } else { None },
+        "effects": [],
     }))
 }
 
