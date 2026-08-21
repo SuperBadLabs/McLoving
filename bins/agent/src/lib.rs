@@ -18,7 +18,7 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    TransportError, WORK_DELIVERY_FEATURE,
+    TransportError, WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -85,8 +85,6 @@ pub enum AgentError {
     InvalidAssignment(String),
     #[error("execution specification is invalid: {0}")]
     InvalidSpec(#[from] serde_json::Error),
-    #[error("execution specification is unsupported")]
-    UnsupportedSpec,
     #[error("agent execution failed: {0}")]
     Execution(#[from] ExecutionError),
     #[error("controller selected an unsupported protocol minor")]
@@ -367,6 +365,7 @@ async fn open_session(
                 platform_feature().to_owned(),
                 WORK_DELIVERY_FEATURE.to_owned(),
                 ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
+                WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
             ],
         }),
         trust_pool: config.trust_pool.clone(),
