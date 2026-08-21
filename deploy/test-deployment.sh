@@ -425,12 +425,44 @@ GRAMMAR
   # shellcheck source=/dev/null
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
   load_environment_file "${guard_env}"
-  [[ "${MCLOVING_AGENT_ID}" == "/tmp/agent id" ]] || {
-    echo "partially quoted value was not concatenated: [${MCLOVING_AGENT_ID}]" >&2
+  [[ "$(contract_value MCLOVING_AGENT_ID)" == "/tmp/agent id" ]] || {
+    echo "partially quoted value was not concatenated: [$(contract_value MCLOVING_AGENT_ID)]" >&2
     exit 1
   }
-  [[ "${MCLOVING_TRUST_POOL}" == 'p&ss w$rd' ]] || {
-    echo "literal value was altered or executed: [${MCLOVING_TRUST_POOL}]" >&2
+  [[ "$(contract_value MCLOVING_TRUST_POOL)" == 'p&ss w$rd' ]] || {
+    echo "literal value was altered or executed: [$(contract_value MCLOVING_TRUST_POOL)]" >&2
+    exit 1
+  }
+)
+
+# A contract-supplied name must not reach a helper's own control variables:
+# Bash is dynamically scoped, so an assignment named `service` could otherwise
+# rewrite the guard's dispatch selector and validate the wrong service.
+hijack_env="${workdir}/hijack.env"
+cat > "${hijack_env}" <<'HIJACK'
+service=postgres
+POSTGRES_USER=x
+POSTGRES_DB=x
+POSTGRES_PASSWORD=x
+HIJACK
+if "${libexec}/helpers/mcloving-env-guard" controller "${hijack_env}" >/dev/null 2>&1; then
+  echo "a contract assignment hijacked the guard's service dispatch" >&2
+  exit 1
+fi
+
+# Escaped trailing whitespace is part of the value; unquoted padding is not.
+whitespace_env="${workdir}/whitespace.env"
+printf 'MCLOVING_TRAIL=/tmp/key.pem\\ \nMCLOVING_PAD=  spaced  \n' > "${whitespace_env}"
+(
+  # shellcheck source=/dev/null
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  load_environment_file "${whitespace_env}"
+  [[ "$(contract_value MCLOVING_TRAIL)" == "/tmp/key.pem " ]] || {
+    echo "escaped trailing space was lost: [$(contract_value MCLOVING_TRAIL)]" >&2
+    exit 1
+  }
+  [[ "$(contract_value MCLOVING_PAD)" == "spaced" ]] || {
+    echo "unquoted padding was not trimmed: [$(contract_value MCLOVING_PAD)]" >&2
     exit 1
   }
 )
@@ -444,12 +476,12 @@ printf "MCLOVING_SPAN='line one\nline two'\nMCLOVING_AFTER=tail\n" > "${multilin
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
   load_environment_file "${multiline_env}"
   expected_span="$(printf 'line one\nline two')"
-  [[ "${MCLOVING_SPAN}" == "${expected_span}" ]] || {
-    echo "multiline single-quoted value was not read: [${MCLOVING_SPAN}]" >&2
+  [[ "$(contract_value MCLOVING_SPAN)" == "${expected_span}" ]] || {
+    echo "multiline single-quoted value was not read: [$(contract_value MCLOVING_SPAN)]" >&2
     exit 1
   }
-  [[ "${MCLOVING_AFTER}" == "tail" ]] || {
-    echo "parsing did not resume after a multiline value: [${MCLOVING_AFTER}]" >&2
+  [[ "$(contract_value MCLOVING_AFTER)" == "tail" ]] || {
+    echo "parsing did not resume after a multiline value: [$(contract_value MCLOVING_AFTER)]" >&2
     exit 1
   }
 )

@@ -33,7 +33,11 @@ load_environment_file "${env_file}"
 
 case "${service}" in
   controller)
-    listen="${MCLOVING_LISTEN:?MCLOVING_LISTEN is required}"
+    listen="$(contract_value MCLOVING_LISTEN)"
+    [[ -n "${listen}" ]] || {
+      echo "mcloving-health: MCLOVING_LISTEN is required in ${env_file}" >&2
+      exit 1
+    }
     for _ in $(seq 1 120); do
       # --noproxy '*': this probe targets the local listener, so a proxy in
       # the environment would either break a healthy controller's gate or let
@@ -49,7 +53,11 @@ case "${service}" in
     exit 1
     ;;
   agent)
-    journal="${MCLOVING_AGENT_JOURNAL_PATH:?MCLOVING_AGENT_JOURNAL_PATH is required}"
+    journal="$(contract_value MCLOVING_AGENT_JOURNAL_PATH)"
+    [[ -n "${journal}" ]] || {
+      echo "mcloving-health: MCLOVING_AGENT_JOURNAL_PATH is required in ${env_file}" >&2
+      exit 1
+    }
     "${libexec_root}/current/mcloving-agent" journal-check "${journal}"
     echo "mcloving-health[agent]: journal at ${journal} is healthy"
     ;;

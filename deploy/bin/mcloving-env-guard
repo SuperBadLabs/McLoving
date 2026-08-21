@@ -31,7 +31,7 @@ fail() {
 require() {
   local name value
   for name in "$@"; do
-    value="${!name-}"
+    value="$(contract_value "${name}")"
     if [[ -z "${value}" ]]; then
       fail "required variable ${name} is unset or empty in ${env_file}"
     fi
@@ -44,7 +44,7 @@ require() {
 require_uuid() {
   local name value
   for name in "$@"; do
-    value="${!name-}"
+    value="$(contract_value "${name}")"
     if [[ ! "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
       fail "variable ${name} must be a UUID, got ${value:-<empty>}"
     fi
@@ -54,7 +54,7 @@ require_uuid() {
 require_readable_file() {
   local name value
   for name in "$@"; do
-    value="${!name-}"
+    value="$(contract_value "${name}")"
     if [[ ! -r "${value}" ]]; then
       fail "variable ${name} must name a readable file; ${value:-<empty>} is not"
     fi
@@ -63,7 +63,7 @@ require_readable_file() {
 
 require_min_bytes() {
   local name="$1" minimum="$2" value
-  value="${!name-}"
+  value="$(contract_value "${name}")"
   if [[ "${#value}" -lt "${minimum}" ]]; then
     fail "variable ${name} must contain at least ${minimum} bytes"
   fi

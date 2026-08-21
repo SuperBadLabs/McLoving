@@ -127,7 +127,12 @@ out = sys.stdout.buffer
 
 
 def parse_value(text, handle):
+    # `protected` marks characters that were quoted or escaped, so trailing
+    # whitespace can be trimmed only where it is syntactically insignificant.
+    # Stripping the raw text first would destroy an escaped trailing space and
+    # leave a dangling backslash, disagreeing with what systemd loads.
     result = []
+    protected = []
     index = 0
     while True:
         while index < len(text):
@@ -142,6 +147,7 @@ def parse_value(text, handle):
                     index = 0
                     break
                 result.append(text[index + 1])
+                protected.append(True)
                 index += 2
                 continue
             if char == "'":
@@ -154,13 +160,16 @@ def parse_value(text, handle):
                     closing = text.find("'", index)
                     if closing != -1:
                         result.append(text[index:closing])
+                        protected.extend([True] * (closing - index))
                         index = closing + 1
                         break
                     result.append(text[index:])
+                    protected.extend([True] * (len(text) - index))
                     following = handle.readline()
                     if not following:
                         raise SystemExit("unterminated single quote")
                     result.append("\n")
+                    protected.append(True)
                     text = following.rstrip("\n")
                     index = 0
                 continue
@@ -191,21 +200,36 @@ def parse_value(text, handle):
                         # "/tmp/key\\q.pem" survives intact rather than losing it.
                         if following_char in ('"', "\\", "$", "`"):
                             result.append(following_char)
+                            protected.append(True)
                         else:
                             result.append(char)
                             result.append(following_char)
+                            protected.extend([True, True])
                         index += 2
                         continue
                     if char == '"':
                         index += 1
                         break
                     result.append(char)
+                    protected.append(True)
                     index += 1
                 continue
             result.append(char)
+            protected.append(False)
             index += 1
         else:
-            return "".join(result).strip() if not result else "".join(result)
+            # Trim only whitespace that is neither quoted nor escaped.
+            text_out = "".join(result)
+            flags = []
+            for chunk, guard in zip(result, protected):
+                flags.extend([guard] * len(chunk))
+            end = len(text_out)
+            while end > 0 and text_out[end - 1].isspace() and not flags[end - 1]:
+                end -= 1
+            start = 0
+            while start < end and text_out[start].isspace() and not flags[start]:
+                start += 1
+            return text_out[start:end]
 
 
 with open(path, "r", encoding="utf-8") as handle:
@@ -213,25 +237,43 @@ with open(path, "r", encoding="utf-8") as handle:
         raw = handle.readline()
         if not raw:
             break
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith(";"):
+        # Only the newline is removed. Stripping the line would delete an
+        # escaped trailing space before the parser could see it was escaped,
+        # leaving a dangling backslash that reads as a line continuation.
+        probe = raw.strip()
+        if not probe or probe.startswith("#") or probe.startswith(";"):
             continue
+        line = raw.rstrip("\n")
         name, separator, value = line.partition("=")
         if not separator:
             sys.stderr.write("environment file line is not NAME=VALUE\n")
             raise SystemExit(1)
         name = name.strip()
-        out.write(name.encode() + b"\0" + parse_value(value.strip(), handle).encode() + b"\0")
+        out.write(name.encode() + b"\0" + parse_value(value, handle).encode() + b"\0")
 PARSE
 }
 
-# load_environment_file ENV_FILE — export the parsed contract.
+# load_environment_file ENV_FILE — parse the contract into MCLOVING_CONTRACT.
+#
+# The values are deliberately not assigned to shell variables. Bash is
+# dynamically scoped, so `printf -v` on a contract-supplied name can overwrite
+# a caller's own control variable: a file containing `service=postgres` would
+# rewrite the guard's dispatch selector and validate the wrong service
+# entirely. An associative array keyed by name has no such reach, and
+# `contract_value` is the only way to read one.
+declare -gA MCLOVING_CONTRACT=()
+
 load_environment_file() {
   local name value
+  MCLOVING_CONTRACT=()
   while IFS= read -r -d '' name && IFS= read -r -d '' value; do
-    printf -v "${name}" '%s' "${value}"
-    export "${name?}"
+    MCLOVING_CONTRACT["${name}"]="${value}"
   done < <(parse_environment_file "$1")
+}
+
+# contract_value NAME — the parsed value, or empty when unset.
+contract_value() {
+  printf '%s' "${MCLOVING_CONTRACT[$1]-}"
 }
 
 # stage_release LIBEXEC_ROOT RELEASE_DIR MANIFEST CHECKSUMS
