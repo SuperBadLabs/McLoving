@@ -3507,16 +3507,6 @@ async fn submit_trigger_event(
     // Reject parameter shapes before durable capture. The processing path
     // repeats this validation for crash/restart and legacy-corruption safety.
     parameter_values(request.parameters.clone())?;
-    // The platform arrives in the request body, where the OpenAPI enum is
-    // documentation rather than enforcement, so it is checked here against the
-    // same closed vocabulary the header-borne submission path uses. A DAG
-    // requiring an unsupported platform can never be claimed by any valid
-    // worker now that the worker vocabulary is sealed, so admitting one would
-    // queue the build forever — the defect this ticket removes, reached
-    // through the trigger surface instead of the worker's.
-    if !mcloving_domain::capability::is_supported_platform(&request.platform) {
-        return Err(invalid_platform());
-    }
     let accepted_at_unix_ms = unix_time_ms();
     let canonical_payload = canonical_trigger_payload(&request)?;
     let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
@@ -3546,6 +3536,13 @@ async fn submit_trigger_event(
         })
         .await
         .map_err(trigger_error)?;
+    // An unsupported platform is not refused before capture. The store has to
+    // resolve identity first, because an exact replay of an already terminal
+    // admission must stay readable and must not mint a second build, and
+    // refusing ahead of that would make a delivery admitted under the old
+    // vocabulary permanently unreadable. Processing instead claims the record
+    // and dead-letters it with a named reason, so it is captured, terminal,
+    // and never queued against a capability no worker can advertise.
     let delivery = match delivery {
         TriggerDeliveryAdmission::Created(delivery)
         | TriggerDeliveryAdmission::Replayed(delivery) => delivery,

@@ -733,9 +733,10 @@ stages:
     );
 
     // The platform arrives in the request body, where the OpenAPI enum is
-    // documentation rather than enforcement. Admitting an unsupported one
-    // would build a DAG requiring a capability no valid worker can advertise
-    // under the sealed vocabulary, so the build would queue forever.
+    // documentation rather than enforcement. Such a delivery is captured so
+    // that an exact retry stays readable, then dead-lettered with a named
+    // reason rather than queued against a capability no valid worker can
+    // advertise under the sealed vocabulary.
     let unsupported_platform = app
         .clone()
         .oneshot(
@@ -762,8 +763,11 @@ stages:
                 .unwrap(),
         )
         .await
-        .expect("reject an unsupported trigger platform before durable capture");
-    assert_eq!(unsupported_platform.status(), StatusCode::BAD_REQUEST);
+        .expect("dead-letter an unsupported trigger platform");
+    assert_eq!(
+        unsupported_platform.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
     assert!(
         store
             .due_trigger_deliveries(organization_id, now + 1, 128)
