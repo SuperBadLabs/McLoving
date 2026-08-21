@@ -4403,6 +4403,54 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
     }
 }
 
+/// The execution machinery runs exactly one bounded step per scheduled node,
+/// and that step is either a process or a connector intent (`bins/agent`
+/// `validate_assignment` and the embedded execution spine both refuse anything
+/// else at claim time). Validation, planning, storage, and admission all
+/// compile through [`compile_source_with_parameters`], so this single check
+/// keeps "validate accepted" equivalent to "runnable".
+const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
+    for stage in &pipeline.stages {
+        if stage.steps.len() != 1 {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares {} steps; the execution machinery runs exactly one step per stage",
+                    stage.id,
+                    stage.steps.len()
+                ),
+            ));
+        }
+        for step in &stage.steps {
+            // Both runnable step kinds carry a bounded timeout, and both are
+            // checked here. An unbounded one would be accepted by validate and
+            // then be unrunnable, which is exactly the "validate accepted"
+            // versus "runnable" gap this function exists to close.
+            let (kind, timeout_seconds) = match step {
+                Step::Process(process) => ("process", process.timeout_seconds),
+                Step::ConnectorIntent(intent) => ("connector-intent", Some(intent.timeout_seconds)),
+            };
+            if !matches!(
+                timeout_seconds,
+                None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
+            ) {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsupported_execution_spec",
+                    format!(
+                        "stage {} declares a {kind} timeout outside 1..={MAX_EXECUTION_TIMEOUT_SECONDS} seconds",
+                        stage.id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn compile_source_with_parameters(
     source: &str,
     parameters: BTreeMap<String, ParameterValue>,
@@ -4414,8 +4462,15 @@ fn compile_source_with_parameters(
             "pipeline source exceeds the configured parser byte limit",
         ));
     }
-    compile_strict_yaml_with_parameters("public-api", source, ParseLimits::default(), parameters)
-        .map_err(pipeline_rejected)
+    let pipeline = compile_strict_yaml_with_parameters(
+        "public-api",
+        source,
+        ParseLimits::default(),
+        parameters,
+    )
+    .map_err(pipeline_rejected)?;
+    validate_execution_support(&pipeline)?;
+    Ok(pipeline)
 }
 
 fn validate_connector_mappings(
@@ -7614,5 +7669,63 @@ stages:
         .expect("compile direct process mode");
         validate_execution_platform(&pipeline, "linux").expect("Linux accepts direct mode");
         validate_execution_platform(&pipeline, "windows").expect("Windows accepts direct mode");
+    }
+
+    fn single_stage_source(step_count: usize) -> String {
+        let mut source = String::from(
+            "version: 1\nname: dense\nstages:\n  - id: build\n    name: Build\n    steps:\n",
+        );
+        for index in 0..step_count {
+            source.push_str(&format!(
+                "      - process:\n          program: /bin/step-{index}\n"
+            ));
+        }
+        source
+    }
+
+    #[test]
+    fn hundred_step_single_stage_pipeline_is_rejected_at_the_shared_compile_choke_point() {
+        // The measured EXEC-001 defect: this exact shape passed validate and
+        // admission, then looped forever at agent claim time. Both routes
+        // compile through compile_source_with_parameters, so this rejection
+        // proves validate and admission agree exactly.
+        let error = compile_source_with_parameters(&single_stage_source(100), BTreeMap::new())
+            .expect_err("multi-step stages are not executable and must not validate");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
+        );
+
+        let error = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
+            .expect_err("two steps in one stage are equally unsupported");
+        assert_eq!(error.code, "unsupported_execution_spec");
+
+        compile_source_with_parameters(&single_stage_source(1), BTreeMap::new())
+            .expect("exactly one process step per stage remains admissible");
+    }
+
+    #[test]
+    fn process_timeout_bounds_match_the_agent_execution_contract() {
+        let source = |timeout: &str| {
+            format!(
+                "version: 1\nname: bounded\nstages:\n  - id: build\n    name: Build\n    steps:\n      - process:\n          program: /bin/tool\n          timeout_seconds: {timeout}\n"
+            )
+        };
+        for rejected in ["0", "604801"] {
+            let error = compile_source_with_parameters(&source(rejected), BTreeMap::new())
+                .expect_err("timeouts the agent refuses must not validate");
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "unsupported_execution_spec");
+            assert_eq!(
+                error.message,
+                "stage build declares a process timeout outside 1..=604800 seconds"
+            );
+        }
+        for accepted in ["1", "604800"] {
+            compile_source_with_parameters(&source(accepted), BTreeMap::new())
+                .expect("agent-executable timeouts remain admissible");
+        }
     }
 }

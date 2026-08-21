@@ -135,8 +135,6 @@ pub enum SpineError {
     InvalidSpec(#[from] serde_json::Error),
     #[error("controller rejected the current fenced authority")]
     StaleAuthority,
-    #[error("execution specification must contain exactly one process step")]
-    UnsupportedSpec,
     #[error("connector intent requires a configured controller-owned effect runtime")]
     EffectRuntimeUnavailable,
     #[error("controller effect invariant violated: {0}")]
@@ -181,45 +179,9 @@ struct ProcessSpec {
     timeout_seconds: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectorIntentSpec {
-    pub mapping_id: String,
-    pub mapping_digest: String,
-    pub effect_class: ConnectorEffectClass,
-    pub effect_key_template: String,
-    pub public_input_schema: std::collections::BTreeMap<String, JsonFieldType>,
-    pub protected_secret_ref_schema: std::collections::BTreeMap<String, JsonFieldType>,
-    pub expected_public_result_schema: std::collections::BTreeMap<String, JsonFieldType>,
-    pub timeout_seconds: u64,
-    pub ambiguity_policy: AmbiguityPolicy,
-    pub downstream_control_digest: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectorEffectClass {
-    Idempotent,
-    ExternallyIdempotent,
-    NonIdempotent,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JsonFieldType {
-    Array,
-    Boolean,
-    Null,
-    Number,
-    Object,
-    String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AmbiguityPolicy {
-    ObserveThenReconcile,
-}
+pub use mcloving_domain::{
+    AmbiguityPolicy, ConnectorEffectClass, ConnectorIntentSpec, JsonFieldType,
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,6 +191,72 @@ enum ProcessMode {
     WindowsCmd,
     #[serde(rename = "powershell", alias = "power_shell")]
     PowerShell,
+}
+
+/// One admitted execution specification this spine can actually run.
+enum RunnableSpec {
+    Process(ProcessSpec),
+    ConnectorIntent(ConnectorIntentSpec),
+}
+
+/// Classifies an admitted execution specification against the only two
+/// contracts this spine can execute: version 1 with exactly one process step,
+/// or version 2 with exactly one connector-intent step.
+///
+/// A refusal is a permanent property of the digest-bound payload — no retry,
+/// no other agent, and no later time can make it runnable — so callers must
+/// finalize the attempt as failed instead of surfacing a retryable error. That
+/// distinction is the whole ticket: the measured defect was a refusal raised as
+/// a transient error, which the agent retried into an unbounded claim loop
+/// while the build reported `running` forever.
+/// Refusal details are published into durable truth and into the completion
+/// summary, which the controller caps at 64 KiB, while an execution spec may
+/// approach the store's far larger limit. An unbounded detail would therefore
+/// fail the summary check and leave the attempt unfinalized, turning a terminal
+/// refusal back into the wedge this ticket removes.
+const MAX_REFUSAL_DETAIL_BYTES: usize = 512;
+
+fn bounded_refusal_detail(detail: String) -> String {
+    if detail.len() <= MAX_REFUSAL_DETAIL_BYTES {
+        return detail;
+    }
+    let mut cut = MAX_REFUSAL_DETAIL_BYTES;
+    while !detail.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{} (truncated)", &detail[..cut])
+}
+
+fn supported_spec(value: serde_json::Value) -> Result<RunnableSpec, String> {
+    let spec: ExecutionSpec = match serde_json::from_value(value) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return Err(format!(
+                "execution spec does not deserialize as a supported execution spec: {error}"
+            ));
+        }
+    };
+    let mut steps = spec.steps;
+    if steps.len() != 1 {
+        return Err(format!(
+            "execution spec declares {} steps (expected exactly 1)",
+            steps.len()
+        ));
+    }
+    let Some(step) = steps.pop() else {
+        return Err("execution spec declares 0 steps (expected exactly 1)".to_owned());
+    };
+    match (spec.version, step) {
+        (1, ExecutionStep::Process(process)) => Ok(RunnableSpec::Process(process)),
+        (2, ExecutionStep::ConnectorIntent(intent)) => Ok(RunnableSpec::ConnectorIntent(intent)),
+        (version, ExecutionStep::Process(_)) => Err(format!(
+            "execution spec version {version} does not support a process step (expected version 1)"
+        )),
+        (version, ExecutionStep::ConnectorIntent(_)) => Err(format!(
+            "execution spec version {version} does not support a connector-intent step \
+             (expected version 2)"
+        )),
+    }
 }
 
 fn journal_authority_token(restore_epoch: i64, fence: i64) -> Result<u64, SpineError> {
@@ -261,15 +289,23 @@ pub async fn run_claim(
         .ok_or(SpineError::StaleAuthority)?;
     let payload_digest: [u8; 32] =
         Sha256::digest(serde_json::to_vec(&execution.execution_spec)?).into();
-    let spec: ExecutionSpec = serde_json::from_value(execution.execution_spec)?;
-    let process = match (spec.version, spec.steps.as_slice()) {
-        (1, [ExecutionStep::Process(process)]) => process,
-        (2, [ExecutionStep::ConnectorIntent(intent)]) => match &config.effect_plan {
-            Some(plan) => return run_effect_claim(store, claim, config, intent, plan).await,
-            None => return Err(SpineError::EffectRuntimeUnavailable),
-        },
-        _ => return Err(SpineError::UnsupportedSpec),
-    };
+    // A refusal here is permanent: the digest-bound payload can never become
+    // runnable, so the attempt must still be accepted and finalized as failed
+    // below instead of erroring into an infinite reschedule loop. A connector
+    // intent is not a refusal — it is runnable by the effect runtime, which
+    // takes the claim from here with its own acceptance.
+    let supported_process =
+        match supported_spec(execution.execution_spec).map_err(bounded_refusal_detail) {
+            Ok(RunnableSpec::Process(process)) => Ok(process),
+            Ok(RunnableSpec::ConnectorIntent(intent)) => match &config.effect_plan {
+                Some(plan) => return run_effect_claim(store, claim, config, &intent, plan).await,
+                // Permanent for THIS worker but not for the payload: an agent
+                // configured with an effect runtime can still run it, so this stays
+                // a retryable refusal rather than a terminal publication.
+                None => return Err(SpineError::EffectRuntimeUnavailable),
+            },
+            Err(detail) => Err(detail),
+        };
     let database_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
     let journal_fence = journal_authority_token(claim.restore_epoch, claim.fence)?;
     let organization = claim.organization_id.to_string();
@@ -324,6 +360,23 @@ pub async fn run_claim(
         )
         .await;
     }
+    let process = match supported_process {
+        Ok(process) => process,
+        Err(detail) => {
+            return finalize_without_process(
+                store,
+                claim,
+                config,
+                &mut journal,
+                &organization,
+                &attempt,
+                journal_fence,
+                TerminalOutcome::Failed,
+                &format!("unsupported_execution_spec: {detail}"),
+            )
+            .await;
+        }
+    };
     if !store
         .mark_attempt_running(
             claim.organization_id,
@@ -1626,8 +1679,13 @@ async fn finalize_without_process(
         preparing,
         None,
     )?;
-    if !store
-        .finalize_attempt(
+    // Nothing ran here, and the caller's cancellation read happened in an
+    // earlier transaction, so cancellation can commit before this publication
+    // locks the attempt. Derive the terminal under that same lock and journal
+    // what was actually published, so the embedded worker cannot report a
+    // cancelled build as an execution-spec failure.
+    let Some(terminal) = store
+        .finalize_attempt_cancellation_aware(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
@@ -1637,8 +1695,23 @@ async fn finalize_without_process(
             json!({"reason": reason}),
         )
         .await?
-    {
+    else {
         return Err(SpineError::StaleAuthority);
+    };
+    // The journal reaches Aborted only through Cancelling. A refusal prepared
+    // as Finalizing that the store substituted to Aborted must take that step,
+    // or the journal refuses the outcome the controller already committed and
+    // this attempt is left nonterminal locally. Re-entering Cancelling is a
+    // no-op when the refusal was already a cancellation.
+    if terminal == TerminalOutcome::Aborted {
+        journal.transition(
+            organization,
+            attempt,
+            fence,
+            config.session_epoch,
+            AttemptPhase::Cancelling,
+            None,
+        )?;
     }
     journal.transition(
         organization,

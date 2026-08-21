@@ -6190,6 +6190,40 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Session-bound terminal publication whose cancellation decision is made
+    /// under the same row lock as the publication.
+    ///
+    /// A caller that read cancellation from an earlier receipt can have
+    /// cancellation commit before this transaction locks the attempt, and the
+    /// ordinary path accepts a `cancelling` attempt and takes the caller at its
+    /// word. Returns the outcome actually published.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_attempt_in_session_cancellation_aware(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<Option<TerminalOutcome>, StoreError> {
+        self.finalize_attempt_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            outcome,
+            summary,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn finalize_attempt_in_session(
         &self,
         organization_id: Uuid,
@@ -6266,9 +6300,22 @@ impl Store {
             // `aborted` for this exact request. Its retry names the outcome it
             // asked for, so accept that substitution as the same publication
             // rather than reporting authority loss.
-            let substituted = cancellation_aborts && status == TerminalOutcome::Aborted.as_str();
-            let identical = (status == outcome.as_str() || substituted)
-                && terminal_summary.as_ref() == Some(&summary);
+            // A cancellation-aware publication may already have substituted
+            // `aborted` and rewritten the summary to describe it. Its retry
+            // still names the outcome and summary it asked for, so the stored
+            // substitution is matched against that request rather than
+            // compared verbatim.
+            let substituted = cancellation_aborts
+                && status == TerminalOutcome::Aborted.as_str()
+                && terminal_summary.as_ref().is_some_and(|stored| {
+                    stored.get("reason").and_then(Value::as_str)
+                        == Some("cancelled_before_terminal_publication")
+                        && stored.get("requested_outcome").and_then(Value::as_str)
+                            == Some(outcome.as_str())
+                        && stored.get("requested_summary") == Some(&summary)
+                });
+            let identical = substituted
+                || (status == outcome.as_str() && terminal_summary.as_ref() == Some(&summary));
             if identical {
                 tx.commit().await?;
             } else {
@@ -6320,10 +6367,22 @@ impl Store {
         // cancellation is either already visible here or waits for this
         // publication, so the choice can no longer go stale between reading it
         // and publishing it.
-        let outcome = if cancellation_aborts && cancelling {
-            TerminalOutcome::Aborted
+        let (outcome, summary) = if cancellation_aborts && cancelling {
+            // The published terminal and its summary must describe the same
+            // event. Carrying the caller's failure reason onto an aborted
+            // attempt would leave durable truth self-contradicting, so the
+            // reason is normalized and what the caller asked for is preserved
+            // as evidence rather than as the headline.
+            (
+                TerminalOutcome::Aborted,
+                json!({
+                    "reason": "cancelled_before_terminal_publication",
+                    "requested_outcome": outcome.as_str(),
+                    "requested_summary": summary,
+                }),
+            )
         } else {
-            outcome
+            (outcome, summary)
         };
 
         let uncertain_effects = sqlx::query_scalar::<_, i64>(
@@ -6563,6 +6622,30 @@ impl Store {
             }),
         )
         .await
+    }
+
+    /// Whether the agent's current session negotiated a named protocol
+    /// feature.
+    ///
+    /// Wire semantics that a peer must understand to record correctly are
+    /// gated on this: during a rolling upgrade an older agent is still
+    /// admitted, so the controller has to ask what this session actually
+    /// negotiated rather than assume the shipped feature set.
+    pub async fn agent_session_supports(
+        &self,
+        agent_id: &str,
+        feature: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT $2 = ANY(features)
+             FROM agent_sessions
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .bind(feature)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(false))
     }
 
     pub(crate) async fn lock_agent_session(

@@ -31,6 +31,14 @@ pub const ATTEMPT_CREDENTIALS_FEATURE: &str = "attempt-credentials-v1";
 /// in one step instead of brute-forcing the epoch space one reconnect at a
 /// time. The rejection itself stays fail-closed.
 pub const CURRENT_SESSION_EPOCH_METADATA: &str = "mcloving-current-session-epoch";
+/// The peer understands `WorkReceipt.published_outcome` and will journal the
+/// terminal the controller actually published.
+///
+/// A committed cancellation can override a non-succeeded terminal at the
+/// publishing row lock. An agent without this feature ignores the field and
+/// would record the outcome it requested, so the controller must not substitute
+/// for such a peer during a rolling upgrade.
+pub const WORK_COMPLETION_SUBSTITUTION_FEATURE: &str = "work-completion-substitution-v1";
 /// Controller lease granted while a retained terminal attempt is replayed.
 pub const RECOVERED_FINALIZATION_LEASE_SECONDS: u64 = 30;
 
