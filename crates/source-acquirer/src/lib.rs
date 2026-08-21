@@ -793,6 +793,19 @@ impl SourceAcquirer {
         &self,
         request: &AcquisitionRequest,
     ) -> Result<AcquisitionReceipt, SourceError> {
+        // Whether this host's kernel transport namespace can execute the sealed
+        // launcher is a property of the host, not of the request, and settling
+        // it spawns a process. Do it before any lock is taken: the transport
+        // root is shared by every acquirer bound to the same filesystem, so
+        // probing under that lock charges one process's one-time host
+        // discovery to every acquisition queued behind it, and a deadline-bound
+        // request would spend its own expiry waiting for someone else's probe.
+        #[cfg(unix)]
+        if Url::parse(&request.repository_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        {
+            self.kernel_transport_namespace_usable().await;
+        }
         let _process_guard = self.admission.lock().await;
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
