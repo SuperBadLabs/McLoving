@@ -1564,6 +1564,9 @@ dependencies = [
 [[package]]
 name = "mcloving-domain"
 version = "0.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "mcloving-execution-spine"
@@ -1574,6 +1577,7 @@ dependencies = [
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-destination-observer",
+ "mcloving-domain",
  "mcloving-external-connector",
  "nix",
  "reqwest",
