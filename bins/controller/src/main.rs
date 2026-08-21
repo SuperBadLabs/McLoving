@@ -21,9 +21,9 @@ use mcloving_agent_protocol::{
     WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
-    ApiState, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
-    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
-    OidcClientConfig, router,
+    ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
+    MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
+    MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -31,7 +31,7 @@ use mcloving_controller_store::{
     NewLogChunk, NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization,
     Store, StoreError, TerminalOutcome, authz::ServiceScope,
 };
-use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
+use mcloving_execution_spine::{EffectExecutionPlan, WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -50,6 +50,30 @@ fn validate_artifact_agent_token(api_token: &str, artifact_agent_token: &str) ->
         bail!("MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct");
     }
     Ok(())
+}
+
+fn validate_effect_mapping_configuration(
+    executable_mapping: Option<(&str, &str)>,
+    catalog: Option<&ConnectorMappingCatalog>,
+) -> Result<()> {
+    match (executable_mapping, catalog) {
+        (Some((mapping_id, mapping_digest)), Some(catalog))
+            if catalog.mappings.len() == 1
+                && catalog.contains_exact(mapping_id, mapping_digest) =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(_)) => {
+            bail!("effect mapping catalog must contain exactly the executable runtime mapping")
+        }
+        (Some(_), None) => {
+            bail!("MCLOVING_EFFECT_MAPPING_CATALOG is required with an effect runtime plan")
+        }
+        (None, Some(_)) => {
+            bail!("effect mapping catalog cannot advertise a mapping without an executable plan")
+        }
+        (None, None) => Ok(()),
+    }
 }
 
 #[tokio::main]
@@ -84,6 +108,16 @@ async fn main() -> Result<()> {
     let artifact_agent_digest: [u8; 32] = Sha256::digest(artifact_agent_token.as_bytes()).into();
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
+    let connector_mapping_catalog = connector_mapping_catalog_from_environment()?;
+    validate_effect_mapping_configuration(
+        worker.config.effect_plan.as_ref().map(|plan| {
+            (
+                plan.freeze.mapping_id.as_str(),
+                plan.freeze.mapping_digest.as_str(),
+            )
+        }),
+        connector_mapping_catalog.as_ref(),
+    )?;
     let oidc = oidc_environment(worker.organization_id)?;
     let object_root = PathBuf::from(
         std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
@@ -142,6 +176,11 @@ async fn main() -> Result<()> {
         .await
         .context("preflight PostgreSQL runtime tenant access")?;
     let mut state = ApiState::new_durable(store.clone());
+    if let Some(catalog) = connector_mapping_catalog {
+        state = state
+            .with_connector_mapping_catalog(catalog)
+            .context("configure connector mapping admission catalog")?;
+    }
     if let Some(oidc) = &oidc {
         state = state
             .with_oidc_client(oidc.client.clone())
@@ -1609,6 +1648,7 @@ impl EmbeddedWorker {
                 cancellation_poll: Duration::from_millis(cancellation_milliseconds),
                 lease_seconds,
                 termination_grace: Duration::from_millis(termination_grace_milliseconds),
+                effect_plan: effect_plan_from_environment()?,
             },
         })
     }
@@ -1727,6 +1767,90 @@ fn required(name: &str) -> Result<String> {
 
 fn required_from(env: EnvLookup, name: &str) -> Result<String> {
     environment_string(env, name)?.with_context(|| format!("{name} is required"))
+}
+
+fn effect_plan_from_environment() -> Result<Option<EffectExecutionPlan>> {
+    let path = match std::env::var("MCLOVING_EFFECT_RUNTIME_PLAN") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_EFFECT_RUNTIME_PLAN must not be empty"),
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error).context("read MCLOVING_EFFECT_RUNTIME_PLAN"),
+    };
+    if !path.is_absolute() {
+        bail!("MCLOVING_EFFECT_RUNTIME_PLAN must be an absolute path");
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect effect runtime plan {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("effect runtime plan must be a bounded regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("effect runtime plan must not be accessible by group or other users");
+        }
+    }
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read effect runtime plan {}", path.display()))?;
+    mcloving_external_connector::parse_json_no_duplicates(&bytes)
+        .context("parse strict effect runtime plan")
+        .map(Some)
+}
+
+fn connector_mapping_catalog_from_environment() -> Result<Option<ConnectorMappingCatalog>> {
+    let path = match std::env::var("MCLOVING_EFFECT_MAPPING_CATALOG") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_EFFECT_MAPPING_CATALOG must not be empty"),
+        Err(std::env::VarError::NotPresent) => {
+            if std::env::var_os("MCLOVING_EFFECT_MAPPING_CATALOG_SHA256").is_some() {
+                bail!(
+                    "MCLOVING_EFFECT_MAPPING_CATALOG_SHA256 requires MCLOVING_EFFECT_MAPPING_CATALOG"
+                );
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read MCLOVING_EFFECT_MAPPING_CATALOG"),
+    };
+    if !path.is_absolute() {
+        bail!("MCLOVING_EFFECT_MAPPING_CATALOG must be an absolute path");
+    }
+    let expected_digest = required("MCLOVING_EFFECT_MAPPING_CATALOG_SHA256")?;
+    if expected_digest.len() != 64
+        || !expected_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("MCLOVING_EFFECT_MAPPING_CATALOG_SHA256 must be lowercase SHA-256 hex");
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect connector mapping catalog {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("connector mapping catalog must be a bounded regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            bail!("connector mapping catalog must not be writable by group or other users");
+        }
+    }
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read connector mapping catalog {}", path.display()))?;
+    let actual_digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual_digest != expected_digest {
+        bail!("connector mapping catalog digest does not match deployment configuration");
+    }
+    let catalog: ConnectorMappingCatalog =
+        mcloving_external_connector::parse_json_no_duplicates(&bytes)
+            .context("parse strict connector mapping catalog")?;
+    catalog
+        .validate()
+        .context("validate connector mapping catalog")?;
+    Ok(Some(catalog))
 }
 
 fn parse_positive<T>(name: &str) -> Result<T>
@@ -1875,6 +1999,23 @@ mod tests {
         }
     }
 
+    fn effect_catalog(mappings: Vec<(&str, &str)>) -> ConnectorMappingCatalog {
+        ConnectorMappingCatalog {
+            schema_version: mcloving_controller_api::CONNECTOR_MAPPING_CATALOG_V1.to_owned(),
+            profile: "private-linux-x86_64".to_owned(),
+            generation: 1,
+            mappings: mappings
+                .into_iter()
+                .map(|(mapping_id, mapping_digest)| {
+                    mcloving_controller_api::ConnectorMappingRecord {
+                        mapping_id: mapping_id.to_owned(),
+                        mapping_digest: mapping_digest.to_owned(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn artifact_agent_token_is_validated_before_bootstrap() {
         let api_token = "a".repeat(32);
@@ -1887,6 +2028,38 @@ mod tests {
         );
         assert!(validate_artifact_agent_token(&api_token, &api_token).is_err());
         assert!(validate_artifact_agent_token(&api_token, &"b".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn advertised_effect_mappings_exactly_match_the_embedded_worker() {
+        let first_digest = format!("sha256:{}", "a".repeat(64));
+        let second_digest = format!("sha256:{}", "b".repeat(64));
+        let exact = effect_catalog(vec![("notification.v1", &first_digest)]);
+        assert!(
+            validate_effect_mapping_configuration(
+                Some(("notification.v1", &first_digest)),
+                Some(&exact),
+            )
+            .is_ok()
+        );
+
+        let extra = effect_catalog(vec![
+            ("notification.v1", &first_digest),
+            ("deployment.v1", &second_digest),
+        ]);
+        assert!(
+            validate_effect_mapping_configuration(
+                Some(("notification.v1", &first_digest)),
+                Some(&extra),
+            )
+            .is_err()
+        );
+        assert!(validate_effect_mapping_configuration(None, Some(&exact)).is_err());
+        assert!(
+            validate_effect_mapping_configuration(Some(("notification.v1", &first_digest)), None,)
+                .is_err()
+        );
+        assert!(validate_effect_mapping_configuration(None, None).is_ok());
     }
 
     #[test]
