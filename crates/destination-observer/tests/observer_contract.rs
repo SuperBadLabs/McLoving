@@ -31,7 +31,8 @@ use mcloving_destination_observer::{
     ObservationReceipt, ObservationRequest, ObserverCommand, ObserverConfig, ObserverError,
     ObserverLimits, PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization,
     SignedDestinationState, StateFieldSchema, content_sha256, destination_state_message,
-    observation_receipt_digest, sign_observation_request, verify_observation_receipt,
+    observation_receipt_digest, observation_request_digest, sign_observation_request,
+    verify_observation_receipt,
 };
 use mcloving_external_connector::{
     OutcomeReceipt as ConnectorOutcomeReceipt, OutcomeStatus as ConnectorOutcomeStatus,
@@ -723,6 +724,192 @@ fn oversized_escaped_secret_body(size: usize) -> Vec<u8> {
     let mut body = br#"{"leak":"read-only-observer-\u0074oken"}"#.to_vec();
     body.resize(size, b'x');
     body
+}
+
+#[tokio::test]
+async fn request_preflight_verifies_authority_time_and_deployment_without_destination_io() {
+    let rig = Rig::new().await;
+    let mut request = rig.request(ObservationPhase::PreAction);
+    sign_observation_request(&mut request, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&request, NOW).unwrap(),
+        observation_request_digest(&request).unwrap()
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
+
+    let mut insufficient_validity = request.clone();
+    insufficient_validity.expires_at_unix_ms = NOW + 999;
+    sign_observation_request(&mut insufficient_validity, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer
+            .preflight_request_for_duration_at(&insufficient_validity, NOW, 1_000,),
+        Err(ObserverError::ExpiredRequest)
+    );
+
+    // The read grant must cover the requested window even when the signed
+    // request itself expires late enough; otherwise the post-action
+    // observation would fail with expired_grant only after dispatch.
+    let grant_state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(grant_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut grant_config = rig.config.clone();
+    grant_config.state_dir = grant_state.path().to_path_buf();
+    grant_config.read_grant_expires_unix_ms = NOW + 500;
+    let grant_observer = rig.observer_for_config(grant_config).unwrap();
+    let mut grant_limited = rig.request(ObservationPhase::PreAction);
+    grant_limited.expected_config_sha256 = grant_observer.config_sha256().to_owned();
+    let grant_limited = rig.prepare(grant_limited);
+    assert_eq!(
+        grant_observer.preflight_request_for_duration_at(&grant_limited, NOW, 1_000),
+        Err(ObserverError::ExpiredGrant),
+        "preflight must refuse a window the read grant cannot cover"
+    );
+    assert_eq!(
+        grant_observer
+            .preflight_request_for_duration_at(&grant_limited, NOW, 400)
+            .unwrap(),
+        observation_request_digest(&grant_limited).unwrap(),
+        "a window inside both the request and grant lifetimes is approved"
+    );
+
+    let mut invalid_signature = request.clone();
+    invalid_signature.authorization.signature_base64 = "AAAA".to_owned();
+    assert_eq!(
+        rig.observer.preflight_request_at(&invalid_signature, NOW),
+        Err(ObserverError::UnauthorizedRequest)
+    );
+
+    let mut expired = request.clone();
+    expired.expires_at_unix_ms = NOW - 1;
+    sign_observation_request(&mut expired, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&expired, NOW),
+        Err(ObserverError::ExpiredRequest)
+    );
+
+    let mut wrong_protocol = request.clone();
+    wrong_protocol.protocol_version = "mcloving.destination-observer/substituted".to_owned();
+    sign_observation_request(&mut wrong_protocol, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&wrong_protocol, NOW),
+        Err(ObserverError::MalformedRequest)
+    );
+
+    let mut wrong_binding = request;
+    wrong_binding.expected_config_sha256 = "f".repeat(64);
+    sign_observation_request(&mut wrong_binding, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.observer.preflight_request_at(&wrong_binding, NOW),
+        Err(ObserverError::BindingMismatch)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn preflight_reserves_receipt_and_evidence_capacity_atomically_until_expiry() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 1;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.expires_at_unix_ms = NOW + 1_000;
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    let first = rig.prepare(first);
+    let first_digest = observation_request_digest(&first).unwrap();
+    assert_eq!(
+        observer.preflight_request_at(&first, NOW).unwrap(),
+        first_digest
+    );
+    assert_eq!(
+        observer.preflight_request_at(&first, NOW).unwrap(),
+        first_digest
+    );
+
+    let mut second = rig.request(ObservationPhase::PreAction);
+    second.effect_fence = 18;
+    second.expected_config_sha256 = observer.config_sha256().to_owned();
+    let second = rig.prepare(second);
+    assert_eq!(
+        observer.preflight_request_at(&second, NOW),
+        Err(ObserverError::CapacityExceeded)
+    );
+
+    let later = NOW + 1_001;
+    let mut replacement = second;
+    replacement.requested_at_unix_ms = later - 1;
+    replacement.expires_at_unix_ms = later + 1_000;
+    let replacement = rig.prepare(replacement);
+    assert_eq!(
+        observer.preflight_request_at(&replacement, later).unwrap(),
+        observation_request_digest(&replacement).unwrap()
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
+
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let reserved: (u64, u64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(evidence_bytes), 0)
+             FROM observations WHERE status='pending'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(reserved.0, 1);
+    assert!(reserved.1 > 0);
+}
+
+#[tokio::test]
+async fn released_preflight_reservation_immediately_restores_capacity() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 1;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    let first = rig.prepare(first);
+    let first_digest = observation_request_digest(&first).unwrap();
+    assert_eq!(
+        observer.preflight_request_at(&first, NOW).unwrap(),
+        first_digest
+    );
+    assert_eq!(
+        observer.release_preflight_request(&first).unwrap(),
+        first_digest
+    );
+    assert_eq!(
+        observer.release_preflight_request(&first).unwrap(),
+        first_digest
+    );
+
+    let mut replacement = rig.request(ObservationPhase::PreAction);
+    replacement.effect_fence = 18;
+    replacement.expected_config_sha256 = observer.config_sha256().to_owned();
+    let replacement = rig.prepare(replacement);
+    observer
+        .preflight_request_at(&replacement, NOW)
+        .expect("released reservation restores the sole receipt slot");
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -2165,10 +2352,15 @@ async fn evidence_capacity_failure_releases_the_destination_claim() {
         request.expected_config_sha256 = observer.config_sha256().to_owned();
         let request = rig.prepare(request);
         assert_eq!(
+            observer.preflight_request_at(&request, NOW),
+            Err(ObserverError::CapacityExceeded)
+        );
+        assert_eq!(
             observer.observe_at(request, NOW).await,
             Err(ObserverError::CapacityExceeded)
         );
     }
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
 
     let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
     let pending_count: u64 = connection
@@ -2199,8 +2391,13 @@ async fn exhausted_evidence_bytes_are_rejected_before_destination_access() {
     let reads_before = rig.server.reads.load(Ordering::SeqCst);
     let mut second = rig.request(ObservationPhase::PreAction);
     second.effect_fence = 18;
+    let second = rig.prepare(second);
     assert_eq!(
-        rig.observer.observe_at(rig.prepare(second), NOW).await,
+        rig.observer.preflight_request_at(&second, NOW),
+        Err(ObserverError::CapacityExceeded)
+    );
+    assert_eq!(
+        rig.observer.observe_at(second, NOW).await,
         Err(ObserverError::CapacityExceeded)
     );
     assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads_before);
@@ -2480,7 +2677,7 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
     let mut config = rig.config.clone();
     config.state_dir = state.path().to_path_buf();
     config.limits.max_receipts = 2;
-    config.limits.max_evidence_bytes = 8 * 1024;
+    config.limits.max_evidence_bytes = 16 * 1024;
     let observer = rig.observer_for_config(config).unwrap();
 
     let mut first = rig.request(ObservationPhase::PreAction);
@@ -2506,9 +2703,8 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
 
     let first_bytes = serde_json::to_vec(&first_receipt).unwrap().len();
     let second_bytes = serde_json::to_vec(&second_receipt).unwrap().len();
-    assert!(first_bytes < 8 * 1024);
-    assert!(second_bytes < 8 * 1024);
-    assert!(first_bytes + second_bytes > 8 * 1024);
+    assert!(first_bytes < 16 * 1024);
+    assert!(second_bytes < 16 * 1024);
     let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
     let complete: u64 = connection
         .query_row(
@@ -2518,6 +2714,17 @@ async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
         )
         .unwrap();
     assert_eq!(complete, 1);
+    let retained_observation_id: String = connection
+        .query_row(
+            "SELECT observation_id FROM observations WHERE status='complete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retained_observation_id,
+        second_receipt.observation_id.to_string()
+    );
 }
 
 #[tokio::test]
