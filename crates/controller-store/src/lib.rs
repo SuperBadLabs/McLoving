@@ -6414,6 +6414,30 @@ impl Store {
         Ok(tx)
     }
 
+    /// Whether the agent's current session negotiated a named protocol
+    /// feature.
+    ///
+    /// Wire semantics that a peer must understand to record correctly are
+    /// gated on this: during a rolling upgrade an older agent is still
+    /// admitted, so the controller has to ask what this session actually
+    /// negotiated rather than assume the shipped feature set.
+    pub async fn agent_session_supports(
+        &self,
+        agent_id: &str,
+        feature: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT $2 = ANY(features)
+             FROM agent_sessions
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .bind(feature)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(false))
+    }
+
     pub(crate) async fn lock_agent_session(
         tx: &mut Transaction<'_, Postgres>,
         agent_id: &str,

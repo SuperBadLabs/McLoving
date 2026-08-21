@@ -18,7 +18,7 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
-    WORK_DELIVERY_FEATURE, negotiate,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, ConnectorMappingCatalog, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
@@ -629,6 +629,7 @@ impl AgentControl for ControllerAgentService {
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
+            WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -1198,7 +1199,19 @@ impl AgentControl for ControllerAgentService {
         // time this transaction locks the attempt; the publication re-derives
         // it under the same lock. A genuine success is never overridden: work
         // that completed is reported as completed.
-        let published = if matches!(outcome, TerminalOutcome::Succeeded) {
+        // Substituting a cancellation for the agent's terminal is a wire
+        // semantics change: the agent learns the substituted outcome only from
+        // `published_outcome`. A peer that never negotiated the feature would
+        // ignore it and record what it asked for, so an older agent in a
+        // rolling upgrade keeps the previous behaviour instead of receiving a
+        // completion it cannot record.
+        let substitution_negotiated = self
+            .store
+            .agent_session_supports(&authority.agent_id, WORK_COMPLETION_SUBSTITUTION_FEATURE)
+            .await
+            .map_err(internal_store_error)?;
+        let published = if matches!(outcome, TerminalOutcome::Succeeded) || !substitution_negotiated
+        {
             self.store
                 .finalize_attempt_in_session(
                     context.organization_id,
