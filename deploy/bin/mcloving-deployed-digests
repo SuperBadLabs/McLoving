@@ -75,6 +75,17 @@ def file_record(path: Path, root: Path) -> dict:
     # rechecked after; a link that moved under the read is retried.
     relative = path.relative_to(root).as_posix()
 
+    def identity(status: os.stat_result) -> tuple:
+        # Everything a record asserts about a file, plus the inode and
+        # modification time that reveal an in-place change of the same size.
+        return (
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mode,
+            status.st_mtime_ns,
+        )
+
     def link_target():
         try:
             return os.readlink(path)
@@ -130,16 +141,25 @@ def file_record(path: Path, root: Path) -> dict:
                     with os.fdopen(descriptor, "rb", closefd=False) as handle:
                         for chunk in iter(lambda: handle.read(1 << 20), b""):
                             digest.update(chunk)
+                    # One descriptor is not enough on its own: a file truncated
+                    # or appended in place while the read is in flight leaves
+                    # the digest describing the bytes actually seen and the
+                    # size describing the state before the change. Recheck the
+                    # metadata that defines the identity, and retry rather than
+                    # emit a pairing that never existed.
+                    settled = os.fstat(descriptor)
                 except PermissionError:
                     return unreadable("permission_denied", before)
                 except OSError:
                     return unreadable("read_failed", before)
+                if identity(settled) != identity(status):
+                    continue
                 record = {
                     "path": relative,
                     "sha256": digest.hexdigest(),
-                    "size_bytes": status.st_size,
-                    "mode": stat.S_IMODE(status.st_mode),
-                    "executable": bool(status.st_mode & 0o111),
+                    "size_bytes": settled.st_size,
+                    "mode": stat.S_IMODE(settled.st_mode),
+                    "executable": bool(settled.st_mode & 0o111),
                 }
         finally:
             os.close(descriptor)
@@ -148,9 +168,10 @@ def file_record(path: Path, root: Path) -> dict:
             if before is not None:
                 record["symlink_target"] = before
             return record
-    # The link moved under every attempt. Reporting that is honest; reporting a
-    # digest paired with a target it did not come from is not.
-    return unreadable("unstable_symlink", link_target())
+    # The file or its link moved under every attempt. Reporting that is honest;
+    # reporting a digest paired with a size, mode, or target it did not come
+    # from is not.
+    return unreadable("unstable_entry", link_target())
 
 
 def walk(root: Path) -> list[Path]:
