@@ -847,7 +847,7 @@ impl SourceAcquirer {
         // should work.
         let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         #[cfg(unix)]
-        if std::iter::once(request.repository_url.as_str())
+        let transport_namespace_required = std::iter::once(request.repository_url.as_str())
             // Submodules are fetched through the same credential-bearing path,
             // so a file: primary with an https submodule needs the namespace
             // just as much. Checking only the primary URL let such a request
@@ -862,8 +862,9 @@ impl SourceAcquirer {
             )
             .any(|value| {
                 Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-            })
-        {
+            });
+        #[cfg(unix)]
+        if transport_namespace_required {
             // The probe executes the sealed launcher, whose rewritten
             // interpreter and LD_LIBRARY_PATH resolve through the runtime
             // directory, so the binding is verified before anything sealed
@@ -882,15 +883,12 @@ impl SourceAcquirer {
             {
                 return Err(SourceError::TransportNamespaceUnavailable);
             }
-            // Recorded for this acquisition only. Every credential-bearing git
-            // invocation would otherwise probe again -- including each lazy
-            // `cat-file` that materializes a blob in a partial clone, one
-            // extra namespace and process chain per file -- and a transient
-            // failure in any of those post-claim probes would return before
-            // git started while the claim was already written, leaving that
-            // acquisition id ambiguous.
-            self.transport_namespace_ready
-                .store(true, Ordering::Release);
+            // Deliberately not recorded here. The shared transport lock below
+            // can be waited on until nearly the publication deadline, and the
+            // AppArmor policy or the sysctl can be tightened during that wait,
+            // so a verdict reached before it must not be trusted after it.
+            // This call is a fail-fast: refuse a host that already cannot do
+            // this, before queueing for a lock it will not be able to use.
         }
         let _transport_lock =
             lock_output_root_until(&self.config.transport_root, publication_deadline_unix_ms)
@@ -916,6 +914,25 @@ impl SourceAcquirer {
         // nothing caused, and every later attempt with that acquisition id would
         // fail as AmbiguousClaim. Nothing above this line has acted.
         self.ensure_before_deadline(publication_deadline_unix_ms)?;
+        // Settled here, after the lock wait and immediately before the claim,
+        // for the same reason the runtime binding is re-verified here: what was
+        // true before an unbounded wait says nothing about what is true now.
+        // Recording it at this point also makes it the verdict every
+        // credential-bearing git invocation in this acquisition reuses --
+        // otherwise each one probes again, including every lazy `cat-file` that
+        // materializes a blob in a partial clone, and a transient failure in
+        // any of them returns before git starts with the claim already written.
+        #[cfg(unix)]
+        if transport_namespace_required {
+            if !self
+                .kernel_transport_namespace_usable(Some(publication_deadline_unix_ms))
+                .await?
+            {
+                return Err(SourceError::TransportNamespaceUnavailable);
+            }
+            self.transport_namespace_ready
+                .store(true, Ordering::Release);
+        }
         self.store_claim(
             request.acquisition_id,
             &AcquisitionClaim {
