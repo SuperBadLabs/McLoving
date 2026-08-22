@@ -22,6 +22,10 @@ deploy_fail() {
 
 # verify_release_dir RELEASE_DIR (MANIFEST|"") (CHECKSUMS|"")
 #
+# Diagnostics go to stderr. This runs inside stage_release, whose stdout is a
+# protocol its callers parse; a progress line written there is indistinguishable
+# from the result, and was in fact being parsed as one.
+#
 # Fail-closed digest verification of every deployed binary. Exactly one
 # verification source must be provided:
 #
@@ -83,7 +87,7 @@ if failures:
     for failure in failures:
         print(f"digest verification failed: {failure}", file=sys.stderr)
     raise SystemExit(1)
-print(f"verified {len(binaries)} binaries against manifest {manifest_path}")
+print(f"verified {len(binaries)} binaries against manifest {manifest_path}", file=sys.stderr)
 PY
   else
     [[ -f "${checksums}" ]] || deploy_fail "checksums file ${checksums} does not exist"
@@ -97,7 +101,7 @@ PY
       cd "${release_dir}"
       sha256sum --check --strict --ignore-missing "${resolved_checksums}" >/dev/null
     ) || deploy_fail "sha256 verification against ${checksums} failed"
-    echo "verified ${#MCLOVING_DEPLOY_BINARIES[@]} binaries against checksums ${checksums}"
+    echo "verified ${#MCLOVING_DEPLOY_BINARIES[@]} binaries against checksums ${checksums}" >&2
   fi
 }
 
@@ -350,6 +354,21 @@ parts = urlsplit(url)
 if parts.username:
     print(unquote(parts.username))
 ROLE
+}
+
+# database_url_database URL -> the database name, or empty.
+database_url_database() {
+  python3 - "$1" <<'DBNAME'
+import sys
+from urllib.parse import unquote, urlsplit
+
+url = sys.argv[1]
+if not url:
+    raise SystemExit(0)
+name = urlsplit(url).path.lstrip("/")
+if name:
+    print(unquote(name))
+DBNAME
 }
 
 # load_environment_file ENV_FILE — parse the contract into MCLOVING_CONTRACT.

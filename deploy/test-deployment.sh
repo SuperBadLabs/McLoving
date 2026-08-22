@@ -883,6 +883,44 @@ fi
 }
 rm -rf "${retain_home}"
 
+# stage_release's stdout is a protocol its callers parse. A diagnostic written
+# there is indistinguishable from the result, and was being parsed as one: the
+# status came back as "verified" and the path as the rest of that sentence.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  protocol_home="${workdir}/protocol-home"
+  rm -rf "${protocol_home}"
+  mkdir -p "${protocol_home}/.local/libexec/mcloving"
+  line="$(stage_release "${protocol_home}/.local/libexec/mcloving" "${release_dir}" \
+    "" "${workdir}/checksums.sha256" 2>/dev/null)"
+  [[ "$(printf '%s' "${line}" | wc -l)" -eq 0 ]] || {
+    echo "stage_release emitted more than one line on stdout: ${line}" >&2
+    exit 1
+  }
+  [[ "${line%% *}" == "published" ]] || {
+    echo "stage_release status parsed as ${line%% *}, not published" >&2
+    exit 1
+  }
+  [[ -d "${line#* }" ]] || {
+    echo "stage_release path did not parse to a directory: ${line#* }" >&2
+    exit 1
+  }
+  rm -rf "${protocol_home}"
+)
+
+# The bootstrap migrates through MCLOVING_MIGRATION_DATABASE_URL and provisions
+# through the container fields, so a URL naming a different database would
+# migrate one and modify another.
+db_mismatch="${workdir}/db-mismatch.env"
+cp "${config_dir}/db-init.env" "${db_mismatch}"
+sed -i "s#^MCLOVING_POSTGRES_DB=.*#MCLOVING_POSTGRES_DB=someotherdb#" "${db_mismatch}"
+if "${libexec}/helpers/mcloving-env-guard" db-init "${db_mismatch}" >/dev/null 2>&1; then
+  echo "env guard accepted a bootstrap whose URL and container name different databases" >&2
+  exit 1
+fi
+rm -f "${db_mismatch}"
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

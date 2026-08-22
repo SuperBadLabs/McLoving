@@ -89,6 +89,19 @@ case "${service}" in
       MCLOVING_POSTGRES_CONTAINER MCLOVING_POSTGRES_SUPERUSER \
       MCLOVING_POSTGRES_DB
     require_uuid MCLOVING_ORGANIZATION_ID MCLOVING_PROJECT_ID
+    # The bootstrap uses two different connection targets for one database:
+    # migrations go through MCLOVING_MIGRATION_DATABASE_URL, while the tenant
+    # role and the provisioning queries go through `podman exec` against
+    # MCLOVING_POSTGRES_CONTAINER / _SUPERUSER / _DB. A mistyped but reachable
+    # URL therefore migrates one database and then modifies -- or fails
+    # against -- another, which the contract template requires to be the same.
+    contract_into migration_url MCLOVING_MIGRATION_DATABASE_URL
+    contract_into postgres_db MCLOVING_POSTGRES_DB
+    migration_db="$(database_url_database "${migration_url}")"
+    [[ -n "${migration_db}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL must name a database"
+    [[ "${migration_db}" == "${postgres_db}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL names database ${migration_db}, but MCLOVING_POSTGRES_DB is ${postgres_db}; the bootstrap migrates through the URL and provisions through the container, so both must name one database"
     ;;
   controller)
     require MCLOVING_MIGRATION_DATABASE_URL MCLOVING_DATABASE_URL \
