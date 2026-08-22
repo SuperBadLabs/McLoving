@@ -358,17 +358,23 @@ stage_release() {
   staging="${libexec_root}/releases/.staging.$$"
   rm -rf "${staging}"
   mkdir -p "${staging}"
+  # verify_release_dir calls deploy_fail on several paths, and deploy_fail
+  # exits. In command substitution that ends the subshell immediately, so an
+  # explicit rm after the call is unreachable for exactly the failures that
+  # matter. Without this trap a refused install leaves unverified binaries
+  # under releases/.staging.*, which the deployed-digest re-read then reports
+  # as part of the release inventory even though nothing was published.
+  # shellcheck disable=SC2064  # expand the path now; the variable is reassigned
+  trap "rm -rf -- '${staging}'" EXIT
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
     install -m 0755 "${release_dir}/${binary}" "${staging}/${binary}"
   done
   if ! verify_release_dir "${staging}" "${manifest}" "${checksums}"; then
-    rm -rf "${staging}"
     deploy_fail "staged copy does not match the supplied digest source"
   fi
   id="$(release_id "${staging}")"
   target="${libexec_root}/releases/${id}"
   if [[ -d "${target}" ]]; then
-    rm -rf "${staging}"
     verify_staged_release "${target}"
   else
     # Both callers run this function inside command substitution, and bash
@@ -378,10 +384,12 @@ stage_release() {
     # path -- a regular file, a dangling link -- producing an outage while
     # announcing that the release was staged.
     if ! mv -T "${staging}" "${target}"; then
-      rm -rf "${staging}"
       deploy_fail "could not publish the staged release at ${target}"
     fi
   fi
+  # Both callers use command substitution, so the trap would die with the
+  # subshell anyway; clearing it keeps the function safe to call directly.
+  trap - EXIT
   echo "${target}"
 }
 

@@ -55,12 +55,17 @@ unit_dirs = (
 )
 
 
-def sha256_file(path: Path) -> str:
+def sha256_and_size(path: Path) -> tuple[str, int]:
+    # Both facts come from one open descriptor. Taking the size from a separate
+    # stat() lets a file replaced or resized in between produce a record that
+    # pairs the new bytes' digest with the old size -- an identity that never
+    # existed, handed to CUTOVER-001 as the canonical re-read precisely during
+    # a concurrent contract, helper, or release update.
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+        return digest.hexdigest(), os.fstat(handle.fileno()).st_size
 
 
 def file_record(path: Path, root: Path) -> dict:
@@ -126,7 +131,7 @@ def file_record(path: Path, root: Path) -> dict:
     # stat above and the open below all raise here, and every one of them is
     # deployment drift rather than a reason to lose the document.
     try:
-        digest = sha256_file(path)
+        digest, size_bytes = sha256_and_size(path)
     except PermissionError:
         return unreadable("permission_denied")
     except OSError:
@@ -134,7 +139,7 @@ def file_record(path: Path, root: Path) -> dict:
     record = {
         "path": path.relative_to(root).as_posix(),
         "sha256": digest,
-        "size_bytes": status.st_size,
+        "size_bytes": size_bytes,
     }
     if path.is_symlink():
         record["symlink_target"] = os.readlink(path)

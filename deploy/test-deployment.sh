@@ -658,6 +658,37 @@ if "sha256" in entry[0]:
     raise SystemExit("special node was digested as a regular file")
 SPECIAL
 
+# A readable directory is not a readable file. `-r` alone accepts one, and the
+# binary would then fail at startup on a contract the guard called satisfied.
+dir_contract="${workdir}/dir-contract.env"
+cp "${config_dir}/agent.env" "${dir_contract}"
+sed -i "s#^MCLOVING_AGENT_PRIVATE_KEY_PATH=.*#MCLOVING_AGENT_PRIVATE_KEY_PATH=${config_dir}/pki#" \
+  "${dir_contract}"
+if "${libexec}/helpers/mcloving-env-guard" agent "${dir_contract}" >/dev/null 2>&1; then
+  echo "env guard accepted a directory where a regular file is required" >&2
+  exit 1
+fi
+rm -f "${dir_contract}"
+
+# Staging must not survive a refused install. verify_release_dir exits through
+# deploy_fail, which ends the command-substitution subshell, so cleanup has to
+# be a trap; otherwise unverified binaries stay under releases/.staging.* and
+# the digest re-read reports them as part of the release inventory.
+staging_home="${workdir}/staging-home"
+rm -rf "${staging_home}"
+mkdir -p "${staging_home}"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${staging_home}" \
+  --release-dir "${tampered_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "install accepted a tampered release" >&2
+  exit 1
+fi
+if compgen -G "${staging_home}/.local/libexec/mcloving/releases/.staging.*" >/dev/null; then
+  echo "a refused install left unverified binaries under releases/.staging.*" >&2
+  exit 1
+fi
+rm -rf "${staging_home}"
+
 # Publication must fail loudly. Both callers run stage_release inside command
 # substitution, where bash clears errexit, so a failed mv would otherwise fall
 # through and report a staged release that is not there -- after the upgrade

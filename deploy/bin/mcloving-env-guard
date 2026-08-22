@@ -55,8 +55,12 @@ require_readable_file() {
   local name value
   for name in "$@"; do
     contract_into value "${name}"
-    if [[ ! -r "${value}" ]]; then
-      fail "variable ${name} must name a readable file; ${value:-<empty>} is not"
+    # -r alone accepts a directory, and a FIFO or device node too. The
+    # controller and agent need a regular file they can read; reporting the
+    # contract satisfied here defers the failure to the binary, or worse, to a
+    # read that blocks on a special node.
+    if [[ ! -f "${value}" || ! -r "${value}" ]]; then
+      fail "variable ${name} must name a readable regular file; ${value:-<empty>} is not"
     fi
   done
 }
