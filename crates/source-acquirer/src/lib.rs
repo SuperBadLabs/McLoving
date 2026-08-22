@@ -18,6 +18,7 @@ use nix::time::ClockId;
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -40,6 +41,7 @@ const MAX_CONFIGURED_DEPTH: u32 = 1_000_000;
 const MAX_CONFIGURED_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const MAX_LOCAL_PUBLICATION_MS: u64 = 2 * 60 * 1_000;
 const TRANSPORT_QUOTA_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const TRANSPORT_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_TRANSPORT_QUOTA_SCAN_RESTARTS: usize = 3;
 const TRANSPORT_QUOTA_EXHAUSTED: &[u8] = b"No space left on device";
 const COORDINATION_LOCK_FILE: &str = ".coordination-v1.lock";
@@ -52,6 +54,8 @@ const MAX_RESOLVER_OUTPUT_BYTES: usize = 4 * 1_024;
 const MAX_RESOLVER_STDERR_BYTES: usize = 4 * 1_024;
 const MAX_RESOLVER_ADDRESSES: usize = 32;
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const TRANSPORT_NAMESPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
@@ -579,6 +583,11 @@ pub enum SourceError {
     InvalidStoredReceipt,
     #[error("source acquirer private state is unavailable")]
     StateUnavailable,
+    #[error(
+        "the kernel transport namespace cannot execute the sealed launcher on this host, \
+         so credential-bearing transport cannot be bounded by a kernel deadline"
+    )]
+    TransportNamespaceUnavailable,
 }
 
 impl SourceError {
@@ -599,6 +608,7 @@ impl SourceError {
             Self::AmbiguousClaim => "ambiguous_claim",
             Self::InvalidStoredReceipt => "invalid_stored_receipt",
             Self::StateUnavailable => "state_unavailable",
+            Self::TransportNamespaceUnavailable => "transport_namespace_unavailable",
         }
     }
 }
@@ -618,6 +628,13 @@ pub struct SourceAcquirer {
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
+    // The namespace verdict for the acquisition currently in progress, not a
+    // process-wide cache: `admission` serializes acquisitions, so exactly one
+    // owns this at a time, and it is cleared at the start of each. Within one
+    // acquisition the answer cannot go stale in a way that matters, because
+    // every real command still passes through launcher admission, which stays
+    // fail-closed.
+    transport_namespace_ready: AtomicBool,
     admission: Mutex<()>,
 }
 
@@ -768,6 +785,7 @@ impl SourceAcquirer {
             credential_path,
             signing_key,
             secret_marker_matcher,
+            transport_namespace_ready: AtomicBool::new(false),
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -788,7 +806,21 @@ impl SourceAcquirer {
         &self,
         request: &AcquisitionRequest,
     ) -> Result<AcquisitionReceipt, SourceError> {
+        // Whether this host's kernel transport namespace can execute the sealed
+        // launcher is a property of the host, not of the request, and settling
+        // it spawns a process. Do it before any lock is taken: the transport
+        // root is shared by every acquirer bound to the same filesystem, so
+        // probing under that lock charges one process's one-time host
+        // discovery to every acquisition queued behind it, and a deadline-bound
+        // request would spend its own expiry waiting for someone else's probe.
+        // Settled before any lock is taken, and its verdict is kept rather
+        // than discarded: whether this host can execute the sealed launcher is
+        // a property of the host, not of the request, and probing it under the
+        // shared transport lock would charge one process's discovery to every
+        // acquisition queued behind it.
         let _process_guard = self.admission.lock().await;
+        self.transport_namespace_ready
+            .store(false, Ordering::Release);
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
         let request_sha256 = self.validate_request(request, now)?;
@@ -802,15 +834,94 @@ impl SourceAcquirer {
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
         }
-        let _transport_lock = lock_output_root(&self.config.transport_root).await?;
+        // Settled here, and nowhere earlier or later. After validation and
+        // receipt replay, because the probe executes the sealed launcher and
+        // an unvalidated or unauthorized request must not be able to start git
+        // at all. Before the transport lock, because that lock is shared by
+        // every acquirer on the same filesystem and probing under it charges
+        // one process's host discovery to everything queued behind it. And
+        // before the claim, because a refused request fetches nothing, so
+        // persisting a claim would leave every retry with that acquisition id
+        // failing as AmbiguousClaim -- including the retry an operator makes
+        // right after selecting the deployment profile, which is the one that
+        // should work.
+        let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
+        #[cfg(unix)]
+        let transport_namespace_required = std::iter::once(request.repository_url.as_str())
+            // Submodules are fetched through the same credential-bearing path,
+            // so a file: primary with an https submodule needs the namespace
+            // just as much. Checking only the primary URL let such a request
+            // persist its claim and then be refused when the submodule was
+            // fetched, which is the poisoned-retry failure this preflight
+            // exists to prevent.
+            .chain(
+                request
+                    .submodules
+                    .iter()
+                    .map(|submodule| submodule.repository_url.as_str()),
+            )
+            .any(|value| {
+                Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+            });
+        let _transport_lock =
+            lock_output_root_until(&self.config.transport_root, publication_deadline_unix_ms)
+                .await?;
         validate_transport_filesystem(
             &self.config.transport_root,
             &self.config.output_root,
             self.config.max_transport_bytes,
         )?;
         ensure_clean_transport_root(&self.config.transport_root).await?;
+        // Unconditional, and deliberately after the transport lock. Waiting
+        // on that lock can take arbitrarily long, and the credential file or
+        // the runtime closure can change during the wait; skipping this
+        // because the probe verified earlier would persist a claim for an
+        // acquisition whose first git spawn then returns BindingMismatch,
+        // leaving that acquisition id ambiguous for every retry.
+        // Everything from here to the claim happens after the transport lock,
+        // because the wait for it is unbounded in principle and a fact proved
+        // before it says nothing about the moment the claim is written. There
+        // is deliberately no probe before the lock: it would need its own
+        // runtime verification to be safe, and a third full hash of the sealed
+        // closure costs a deadline-bound request more than refusing a little
+        // earlier saves it.
+        //
+        // The probe executes the sealed launcher, whose rewritten interpreter
+        // and LD_LIBRARY_PATH resolve through the runtime directory, so the
+        // binding is verified immediately before it and again immediately
+        // after -- once so nothing sealed runs against a substituted runtime,
+        // once because the probe itself can run long enough for the runtime to
+        // be substituted underneath it.
         self.verify_runtime_authority(true).await?;
-        let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
+        // Recording the verdict here also makes it the one every
+        // credential-bearing git invocation in this acquisition reuses --
+        // otherwise each probes again, including every lazy `cat-file` that
+        // materializes a blob in a partial clone, and a transient failure in
+        // any of them returns before git starts with the claim already
+        // written.
+        #[cfg(unix)]
+        if transport_namespace_required {
+            if !self
+                .kernel_transport_namespace_usable(Some(publication_deadline_unix_ms))
+                .await?
+            {
+                // The probe is bounded by the deadline, so it can fail by
+                // running out of it. Naming the namespace then reports a host
+                // policy problem to an operator whose configuration is fine
+                // and whose request simply expired -- and points them at
+                // AppArmor, which is the most misleading place to send them.
+                self.ensure_before_deadline(publication_deadline_unix_ms)?;
+                return Err(SourceError::TransportNamespaceUnavailable);
+            }
+            self.transport_namespace_ready
+                .store(true, Ordering::Release);
+        }
+        self.verify_runtime_authority(true).await?;
+        // Last act before the claim, with nothing between. Every step above --
+        // the filesystem validation, the transport-root scan, the probe, the
+        // authority hashing -- takes real time, and a claim written past the
+        // deadline manufactures an ambiguity that nothing caused.
+        self.ensure_before_deadline(publication_deadline_unix_ms)?;
         self.store_claim(
             request.acquisition_id,
             &AcquisitionClaim {
@@ -1666,6 +1777,22 @@ impl SourceAcquirer {
             && repository_url
                 .and_then(|value| Url::parse(value).ok())
                 .is_some_and(|value| matches!(value.scheme(), "http" | "https"));
+        // SOURCE_ACQUISITION_V1 requires a missing or unselected deployment
+        // profile to fail closed before Git starts, and the reason is exactly
+        // what a fallback would give up: the kernel timer and the
+        // PID-namespace PDEATHSIG chain are what stop a descheduled parent
+        // from letting buffered credential authority outlive the admitted
+        // transport deadline. Userspace enforcement cannot make that promise,
+        // so a host that cannot run the sealed launcher cannot carry a
+        // credential-bearing transport at all. Refuse by name instead.
+        #[cfg(unix)]
+        if requires_kernel_transport_deadline
+            && !self
+                .kernel_transport_namespace_usable(deadline_unix_ms)
+                .await?
+        {
+            return Err(SourceError::TransportNamespaceUnavailable);
+        }
         #[cfg(not(unix))]
         let requires_kernel_transport_deadline = false;
         let command_executable = if requires_kernel_transport_deadline {
@@ -1953,6 +2080,189 @@ impl SourceAcquirer {
             });
         }
         Ok(stdout)
+    }
+
+    // Hosts that restrict unprivileged user namespaces (Ubuntu's
+    // kernel.apparmor_restrict_unprivileged_userns confines the namespace under
+    // the `unprivileged_userns` profile, whose exec rules never match the
+    // sealed memfd-backed executables because they are disconnected paths) can
+    // create the transport namespace but cannot execute anything inside it.
+    // Probe the launcher end to end once so the condition is named rather than
+    // surfacing as an opaque `source_unavailable` on every credential-bearing
+    // fetch. The probe decides only whether to refuse: there is no fallback,
+    // because the guarantee the namespace provides is not one userspace can
+    // reproduce.
+    //
+    // A transient probe failure is never cached: this process may run for days,
+    // and remembering "the host cannot do this" because one probe hit EMFILE or
+    // timed out under load would refuse every later acquisition until someone
+    // restarted the service.
+    async fn kernel_transport_namespace_usable(
+        &self,
+        deadline_unix_ms: Option<i64>,
+    ) -> Result<bool, SourceError> {
+        if self.transport_namespace_ready.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        // The probe's own ten-second cap is intersected with the request or
+        // command deadline it runs under, exactly as every other bounded step
+        // here is. Without that, a request with less time than the probe wants
+        // could see admission continue past its own expiry and be reported
+        // `transport_namespace_unavailable` when the truth is that it expired.
+        let probe_timeout = match deadline_unix_ms {
+            Some(deadline) => {
+                let remaining = deadline
+                    .checked_sub(now_unix_ms()?)
+                    .filter(|value| *value > 0)
+                    .ok_or(SourceError::ExpiredRequest)?;
+                Duration::from_millis(u64::try_from(remaining).unwrap_or(u64::MAX))
+                    .min(TRANSPORT_NAMESPACE_PROBE_TIMEOUT)
+            }
+            None => TRANSPORT_NAMESPACE_PROBE_TIMEOUT,
+        };
+        Ok(self.probe_within(probe_timeout).await)
+    }
+
+    async fn probe_within(&self, probe_timeout: Duration) -> bool {
+        // Nothing is remembered between acquisitions, in either direction.
+        //
+        // A negative cannot be cached because nothing observable separates a
+        // namespace policy rejection from a launcher that hit EMFILE, EAGAIN,
+        // or ENOMEM, so a bad moment would become a permanent refusal. A
+        // positive cannot be cached either: the AppArmor policy and the
+        // `kernel.apparmor_restrict_unprivileged_userns` sysctl are mutable
+        // while this process runs, and a stale success lets an acquisition
+        // pass its pre-claim check, persist a claim, and then be refused at
+        // admission -- leaving that acquisition id ambiguous for every retry,
+        // including the one made after the policy is restored.
+        //
+        // So the answer is established fresh for each acquisition that needs
+        // it. That is one `git --version` inside the namespace, next to a
+        // runtime verification that hashes the whole sealed closure twice on
+        // the same path; the ordering guarantees are worth more than the
+        // spawn.
+        if self.probe_kernel_transport_namespace(probe_timeout).await {
+            return true;
+        }
+        // Printed with each refusal rather than once per process: it is the
+        // reason for that refusal, and an operator reading a failed
+        // acquisition should not have to find a diagnostic emitted earlier.
+        //
+        // It reports what was observed and lists causes to check, rather than
+        // asserting one, because nothing here can tell a namespace policy
+        // rejection from resource exhaustion.
+        #[cfg(target_os = "linux")]
+        eprintln!(
+            "transport_namespace_unusable: the sealed launcher did not run \
+             inside the kernel transport namespace, so credential-bearing \
+             transport is refused as transport_namespace_unavailable. Check, \
+             in order: whether the deployment AppArmor profile granting \
+             `userns create` is selected; whether \
+             kernel.apparmor_restrict_unprivileged_userns is set; and whether \
+             this host is out of process slots, file descriptors, or memory. \
+             Nothing is cached, so an acquisition retried after any of those \
+             is corrected will succeed without a restart."
+        );
+        false
+    }
+
+    async fn probe_kernel_transport_namespace(&self, probe_timeout: Duration) -> bool {
+        #[cfg(not(target_os = "linux"))]
+        {
+            // No kernel transport namespace exists to admit the launcher, and
+            // that is a settled property of the platform, not a bad moment.
+            false
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(anchor) = ClockId::CLOCK_MONOTONIC.now() else {
+                return false;
+            };
+            let Ok(timeout_ns) = i64::try_from(probe_timeout.as_nanos()) else {
+                return false;
+            };
+            let Some(deadline_ns) = anchor.num_nanoseconds().checked_add(timeout_ns) else {
+                return false;
+            };
+            let Some(deadline) = tokio::time::Instant::now().checked_add(probe_timeout) else {
+                return false;
+            };
+            let mut command = Command::new(&self.askpass_executable.invocation_path);
+            command
+                .env_clear()
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .env("PATH", &self.git_exec_directory.invocation_path)
+                .env("HOME", "/nonexistent")
+                .env("LD_BIND_NOW", "1")
+                .env("LD_LIBRARY_PATH", &self.runtime_directory.invocation_path)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_EXEC_PATH", &self.git_exec_directory.invocation_path)
+                .env(TRANSPORT_LAUNCHER_MODE_ENV, "1")
+                .env(
+                    TRANSPORT_EXECUTABLE_ENV,
+                    &self.git_executable.invocation_path,
+                )
+                .env(CREDENTIAL_MONOTONIC_DEADLINE_ENV, deadline_ns.to_string())
+                .arg("--version")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            command.process_group(0);
+            // EAGAIN or EMFILE here says the host is out of process slots or
+            // descriptors right now, which is not an answer about its namespace
+            // policy.
+            let Ok(mut child) = command.spawn() else {
+                return false;
+            };
+            let process_group_id = child.id().and_then(|id| i32::try_from(id).ok());
+            // Admission is where a namespace policy rejection lands, but it is
+            // not the only thing that fails here: a stage marker can simply be
+            // late, and a `/proc/<pid>/{setgroups,uid_map,gid_map}` write can
+            // fail transiently. Every one of those returns the same error, so
+            // the error alone establishes nothing. What separates them is the
+            // child: a launcher the policy refused is dead, while a launcher
+            // that was merely slow is still running. Only a child that has
+            // exited is treated as an answer about this host; anything else is
+            // a bad moment, and caching it would refuse every later
+            // acquisition until the process restarted.
+            if admit_transport_namespace(&mut child, deadline, process_group_id)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            let Some(stdout) = child.stdout.take() else {
+                let _ = terminate_child(&mut child, process_group_id).await;
+                return false;
+            };
+            let stdout_task = tokio::spawn(read_bounded(stdout, MAX_BINDING_TEXT_BYTES));
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            // A probe that outran its own timeout says the host was busy, not
+            // that the namespace is closed.
+            let status = match tokio::time::timeout(remaining, child.wait()).await {
+                Ok(Ok(status)) => status,
+                _ => {
+                    let _ = terminate_child(&mut child, process_group_id).await;
+                    stdout_task.abort();
+                    let _ = stdout_task.await;
+                    return false;
+                }
+            };
+            if matches!(
+                stdout_task.await,
+                Ok(Ok(version)) if status.success() && version.starts_with(b"git version ")
+            ) {
+                true
+            } else {
+                // It ran and did not produce the sealed git it was asked for.
+                false
+            }
+        }
     }
 
     async fn resolve_network_endpoint(
@@ -3810,22 +4120,9 @@ async fn lock_output_root(root: &Path) -> Result<OutputRootLock, SourceError> {
     #[cfg(unix)]
     {
         use nix::fcntl::{Flock, FlockArg};
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
-        let path = root.join(COORDINATION_LOCK_FILE);
+        let file = open_coordination_lock_file(root).await?;
         tokio::task::spawn_blocking(move || {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .mode(0o600)
-                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
-                .open(path)
-                .map_err(|_| SourceError::StateUnavailable)?;
-            let metadata = file.metadata().map_err(|_| SourceError::StateUnavailable)?;
-            if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-                return Err(SourceError::StateUnavailable);
-            }
             Flock::lock(file, FlockArg::LockExclusive).map_err(|_| SourceError::StateUnavailable)
         })
         .await
@@ -3836,6 +4133,84 @@ async fn lock_output_root(root: &Path) -> Result<OutputRootLock, SourceError> {
         let _ = root;
         Err(SourceError::InvalidConfig)
     }
+}
+
+// The transport root is shared by every acquirer bound to the same transport
+// filesystem, so this lock queues behind other acquisitions; a deadline-bound
+// request must not outwait its own expiry in that queue.
+async fn lock_output_root_until(
+    root: &Path,
+    deadline_unix_ms: i64,
+) -> Result<OutputRootLock, SourceError> {
+    loop {
+        if let Some(lock) = try_lock_output_root(root).await? {
+            // Winning the lock is not the same as still having time to use it:
+            // the holder may have released it after the deadline passed. The
+            // caller writes the claim immediately after this returns, so
+            // accepting an expired lock here would leave a claim behind for an
+            // acquisition that then refuses as expired, and every later attempt
+            // with that acquisition id would fail as AmbiguousClaim. Drop it
+            // and refuse instead; the lock is released with the binding.
+            if now_unix_ms()? >= deadline_unix_ms {
+                drop(lock);
+                return Err(SourceError::ExpiredRequest);
+            }
+            return Ok(lock);
+        }
+        let now = now_unix_ms()?;
+        if now >= deadline_unix_ms {
+            return Err(SourceError::ExpiredRequest);
+        }
+        // Never sleep past the deadline: a fixed interval would report the
+        // expiry up to one interval later than it happened.
+        let remaining = u64::try_from(deadline_unix_ms - now).unwrap_or(u64::MAX);
+        tokio::time::sleep(TRANSPORT_LOCK_POLL_INTERVAL.min(Duration::from_millis(remaining)))
+            .await;
+    }
+}
+
+async fn try_lock_output_root(root: &Path) -> Result<Option<OutputRootLock>, SourceError> {
+    #[cfg(unix)]
+    {
+        use nix::errno::Errno;
+        use nix::fcntl::{Flock, FlockArg};
+
+        let file = open_coordination_lock_file(root).await?;
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(Some(lock)),
+            Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+            Err(_) => Err(SourceError::StateUnavailable),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err(SourceError::InvalidConfig)
+    }
+}
+
+#[cfg(unix)]
+async fn open_coordination_lock_file(root: &Path) -> Result<std::fs::File, SourceError> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let path = root.join(COORDINATION_LOCK_FILE);
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let metadata = file.metadata().map_err(|_| SourceError::StateUnavailable)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(SourceError::StateUnavailable);
+        }
+        Ok(file)
+    })
+    .await
+    .map_err(|_| SourceError::StateUnavailable)?
 }
 
 async fn ensure_private_output_root(root: &Path) -> Result<(), SourceError> {

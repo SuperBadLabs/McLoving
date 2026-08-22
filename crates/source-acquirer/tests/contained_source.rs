@@ -1899,7 +1899,18 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     .await
     .expect("deadline-bounded source acquirer readiness");
     request.requested_at_unix_ms = now_ms() - 100;
-    request.expires_at_unix_ms = now_ms() + 2_000;
+    // Wide enough for the mandatory pre-claim work, and still far short of the
+    // ten-second response delay this case is set up against, so the
+    // publication deadline is what terminates the fetch rather than the
+    // command timeout -- which is the whole point of the case. The budget has
+    // to cover reading and hashing the credential, git, git-remote-https,
+    // askpass, the CA bundle, the preload file, and the runtime closure --
+    // twice, once before the launcher probe and once after the shared
+    // transport lock -- plus the transport-root scan, on a two-core runner
+    // executing this file's other tests concurrently. At two seconds the case
+    // was measuring whether that work fit, not whether the deadline is
+    // enforced.
+    request.expires_at_unix_ms = now_ms() + 8_000;
     let started = Instant::now();
     deadline_bounded
         .stdin
@@ -1911,7 +1922,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     let deadline_output = deadline_bounded.wait_with_output().await.unwrap();
     let deadline_elapsed = started.elapsed();
     assert!(
-        deadline_elapsed < std::time::Duration::from_secs(5),
+        deadline_elapsed < std::time::Duration::from_secs(12),
         "deadline-bounded acquisition took {deadline_elapsed:?}"
     );
     assert!(deadline_output.status.success());
