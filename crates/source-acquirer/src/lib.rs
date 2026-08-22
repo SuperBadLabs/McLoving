@@ -812,36 +812,6 @@ impl SourceAcquirer {
         // a property of the host, not of the request, and probing it under the
         // shared transport lock would charge one process's discovery to every
         // acquisition queued behind it.
-        #[cfg(unix)]
-        let mut runtime_verified = false;
-        #[cfg(not(unix))]
-        let runtime_verified = false;
-        #[cfg(unix)]
-        let transport_namespace_refused = if Url::parse(&request.repository_url)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-        {
-            // The probe executes the sealed launcher, whose rewritten
-            // interpreter and LD_LIBRARY_PATH resolve through the runtime
-            // directory. Verifying that binding after the probe would mean the
-            // probe had already run whatever the directory now contains, so
-            // the check comes first and its binding error is returned as
-            // itself rather than reduced to namespace unavailability.
-            //
-            // This is the acquisition's runtime verification moved earlier, not
-            // an additional one: it re-hashes git, git-remote-https, askpass,
-            // the CA bundle, the preload file, and the whole runtime closure,
-            // and running it twice would spend a deadline-bound request's own
-            // budget re-proving what it just proved. The authoritative check
-            // still runs immediately before every git spawn, where it binds
-            // what is actually about to execute.
-            self.verify_runtime_authority(true).await?;
-            runtime_verified = true;
-            !self.kernel_transport_namespace_usable().await
-        } else {
-            false
-        };
-        #[cfg(not(unix))]
-        let transport_namespace_refused = false;
         let _process_guard = self.admission.lock().await;
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
@@ -856,13 +826,40 @@ impl SourceAcquirer {
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
         }
-        // Refused here, after validation and receipt replay and before the
-        // claim: this request will fetch nothing, so persisting a claim for it
-        // would leave every retry with the same acquisition id failing as
-        // AmbiguousClaim -- including the retry an operator makes right after
-        // selecting the deployment profile, which is the one that should work.
-        if transport_namespace_refused {
-            return Err(SourceError::TransportNamespaceUnavailable);
+        // Settled here, and nowhere earlier or later. After validation and
+        // receipt replay, because the probe executes the sealed launcher and
+        // an unvalidated or unauthorized request must not be able to start git
+        // at all. Before the transport lock, because that lock is shared by
+        // every acquirer on the same filesystem and probing under it charges
+        // one process's host discovery to everything queued behind it. And
+        // before the claim, because a refused request fetches nothing, so
+        // persisting a claim would leave every retry with that acquisition id
+        // failing as AmbiguousClaim -- including the retry an operator makes
+        // right after selecting the deployment profile, which is the one that
+        // should work.
+        #[cfg(unix)]
+        let mut runtime_verified = false;
+        #[cfg(not(unix))]
+        let runtime_verified = false;
+        #[cfg(unix)]
+        if Url::parse(&request.repository_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        {
+            // The probe executes the sealed launcher, whose rewritten
+            // interpreter and LD_LIBRARY_PATH resolve through the runtime
+            // directory, so the binding is verified before anything sealed
+            // runs and its error is returned as itself rather than reduced to
+            // namespace unavailability. This is the acquisition's own
+            // verification performed here rather than an additional one: it
+            // re-hashes git, git-remote-https, askpass, the CA bundle, the
+            // preload file, and the whole runtime closure, and doing that
+            // twice would spend a deadline-bound request's budget re-proving
+            // what it just proved.
+            self.verify_runtime_authority(true).await?;
+            runtime_verified = true;
+            if !self.kernel_transport_namespace_usable().await {
+                return Err(SourceError::TransportNamespaceUnavailable);
+            }
         }
         let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         let _transport_lock =
