@@ -21,9 +21,10 @@ on 2026-08-17, ending the override. The alpha granted zero production or
 Jenkins authority. `CANARY-000` is complete: exact reviewed head
 `2ca737a28fca8926e3c4d7c92b339567213a78fd` squash-merged through PR #70 as
 protected-main commit `c6a238ae9acdc997d14850d1752cecd54feec8b9`, whose
-Foundation run `32080011592` and Windows run `32080011587` passed. `EXT-002`
-is the active serial ticket (PR #72 under review). `CANARY-001` remains the
-production ceremony, and any production effect still requires a separate fresh
+Foundation run `32080011592` and Windows run `32080011587` passed. `EXT-002` is
+complete, merged as `03a1f5d` through PR #72; the qualification lane has
+advanced to `CASE-001`, and `DEPLOY-001` holds the active implementation slot.
+`CANARY-001` remains the production ceremony, and any production effect still requires a separate fresh
 one-action owner authorization and every pre-action gate.
 
 ## Working rules
@@ -979,7 +980,11 @@ read the deployment credentials and the agent's mTLS private key. `SEC-005` is
 therefore a dependency of `CANARY-001`, `CUTOVER-001`, and `REL-002`, not an
 unattached parallel lane. The `EXEC-004` premise did not survive review:
 renewal always ran during steps, and the wedge was a shared-agent-identity
-session-epoch war, so `PERF-001` is gated on nothing but its own inputs. The
+session-epoch war. `PERF-001` is no longer gated on that disproven defect,
+but it is gated on `SEC-005`: containment changes how every workload process
+is launched, so envelopes measured before it would describe an executor that
+no longer exists. `REL-003` is gated on `SEC-005` for the matching reason —
+a ceremony held first would sign a pre-containment agent. The
 current Mario inventory still has zero eligible production canaries, and any
 real one-action effect requires separate fresh owner authorization after
 `CASE-001` and `CANARY-002` are complete.
