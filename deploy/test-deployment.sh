@@ -980,6 +980,25 @@ for bad_url in "postgres://mcloving:pw@remote.example:5432/mcloving" \
   rm -f "${endpoint_contract}"
 done
 
+# The controller migrates through one URL and opens its runtime pool through
+# the other, so both must name one database instance, not merely distinct roles.
+for endpoint_edit in \
+  "s#\(^MCLOVING_DATABASE_URL=.*127.0.0.1\):[0-9]*#\\1:6543#" \
+  "s#\(^MCLOVING_DATABASE_URL=.*\)/mcloving\$#\\1/otherdb#"; do
+  endpoint_contract="${workdir}/controller-endpoint.env"
+  cp "${config_dir}/controller.env" "${endpoint_contract}"
+  sed -i "${endpoint_edit}" "${endpoint_contract}"
+  if cmp -s "${endpoint_contract}" "${config_dir}/controller.env"; then
+    echo "controller endpoint gate did not modify the contract; shape changed" >&2
+    exit 1
+  fi
+  if "${libexec}/helpers/mcloving-env-guard" controller "${endpoint_contract}" >/dev/null 2>&1; then
+    echo "env guard accepted controller URLs addressing different databases" >&2
+    exit 1
+  fi
+  rm -f "${endpoint_contract}"
+done
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

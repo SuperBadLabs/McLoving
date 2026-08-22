@@ -432,6 +432,27 @@ except ValueError:
 LOOPBACK
 }
 
+# database_url_endpoint URL -> "host:port/database", or empty.
+#
+# The identity of the server and database a URL addresses, with the role and
+# credentials left out, so two URLs meant to reach one instance can be compared.
+database_url_endpoint() {
+  python3 - "$1" <<'ENDPOINT'
+import sys
+from urllib.parse import unquote, urlsplit
+
+url = sys.argv[1]
+if not url:
+    raise SystemExit(0)
+parts = urlsplit(url)
+host = parts.hostname or ""
+port = parts.port or 5432
+database = unquote(parts.path.lstrip("/"))
+if host and database:
+    print(f"{host}:{port}/{database}")
+ENDPOINT
+}
+
 # load_environment_file ENV_FILE — parse the contract into MCLOVING_CONTRACT.
 #
 # The values are deliberately not assigned to shell variables. Bash is

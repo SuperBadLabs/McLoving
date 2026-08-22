@@ -158,6 +158,18 @@ case "${service}" in
     if [[ "${runtime_role}" != "${MCLOVING_RUNTIME_ROLE}" ]]; then
       fail "MCLOVING_DATABASE_URL must use the constrained ${MCLOVING_RUNTIME_ROLE} role, got ${runtime_role}"
     fi
+    # Distinct roles on the same database, not two different databases. The
+    # controller migrates through the first URL and then opens its runtime pool
+    # through the second, so a typo in either host, port, or database name
+    # modifies one instance and then fails against another -- after startup has
+    # already reported the contract satisfied.
+    local migration_endpoint runtime_endpoint
+    migration_endpoint="$(database_url_endpoint "${migration_url}")"
+    runtime_endpoint="$(database_url_endpoint "${runtime_url}")"
+    [[ -n "${migration_endpoint}" && -n "${runtime_endpoint}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must each name a host and database"
+    [[ "${migration_endpoint}" == "${runtime_endpoint}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL addresses ${migration_endpoint} but MCLOVING_DATABASE_URL addresses ${runtime_endpoint}; the controller migrates through the first and runs through the second, so both must be one database"
     require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
       MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH

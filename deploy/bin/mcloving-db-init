@@ -68,6 +68,24 @@ fi
 echo "mcloving-db-init: applying schema migrations with the migration role"
 "${identity_admin}" migrate
 
+# The two halves of this bootstrap reach PostgreSQL by different routes:
+# migrations go through MCLOVING_MIGRATION_DATABASE_URL over the network, and
+# everything below runs `podman exec` into the container. The environment guard
+# checks the URL names a loopback host, the configured superuser, and the
+# configured database, but it cannot see the container's published port, so a
+# URL pointing at a different local server with the same database name would
+# migrate one instance and provision another.
+#
+# Prove they are the same instance rather than asserting it: the tables the
+# migration just created must be visible through the container.
+migrated_tables="$(printf '%s\n' \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'organizations';" \
+  | psql_in_container --tuples-only --no-align --file -)"
+if [[ "${migrated_tables}" != "1" ]]; then
+  echo "mcloving-db-init: migrations applied through MCLOVING_MIGRATION_DATABASE_URL are not visible in ${MCLOVING_POSTGRES_CONTAINER}; the URL and the container are different PostgreSQL instances" >&2
+  exit 1
+fi
+
 echo "mcloving-db-init: enabling constrained runtime login for mcloving_tenant"
 # SQL string literal with doubled single quotes; standard_conforming_strings
 # is on by default, so no other character is special inside the literal.
