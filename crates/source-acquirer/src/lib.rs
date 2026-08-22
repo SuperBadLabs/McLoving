@@ -18,9 +18,10 @@ use nix::time::ClockId;
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 use unicode_normalization::UnicodeNormalization as _;
 use url::Url;
 use uuid::Uuid;
@@ -627,7 +628,7 @@ pub struct SourceAcquirer {
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
-    transport_namespace_confirmed: OnceCell<()>,
+    transport_namespace_confirmed: AtomicBool,
     admission: Mutex<()>,
 }
 
@@ -778,7 +779,7 @@ impl SourceAcquirer {
             credential_path,
             signing_key,
             secret_marker_matcher,
-            transport_namespace_confirmed: OnceCell::new(),
+            transport_namespace_confirmed: AtomicBool::new(false),
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -812,9 +813,20 @@ impl SourceAcquirer {
         // shared transport lock would charge one process's discovery to every
         // acquisition queued behind it.
         #[cfg(unix)]
-        let transport_namespace_refused = Url::parse(&request.repository_url)
+        let transport_namespace_refused = if Url::parse(&request.repository_url)
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-            && !self.kernel_transport_namespace_usable().await;
+        {
+            // The probe executes the sealed launcher, whose rewritten
+            // interpreter and LD_LIBRARY_PATH resolve through the runtime
+            // directory. Verifying that binding after the probe would mean the
+            // probe had already run whatever the directory now contains, so
+            // the check comes first and its binding error is returned as
+            // itself rather than reduced to namespace unavailability.
+            self.verify_runtime_authority(true).await?;
+            !self.kernel_transport_namespace_usable().await
+        } else {
+            false
+        };
         #[cfg(not(unix))]
         let transport_namespace_refused = false;
         let _process_guard = self.admission.lock().await;
@@ -1852,8 +1864,19 @@ impl SourceAcquirer {
         #[cfg(not(unix))]
         let process_group_id = None;
         #[cfg(target_os = "linux")]
-        if requires_kernel_transport_deadline {
-            admit_transport_namespace(&mut child, command_deadline, process_group_id).await?;
+        if requires_kernel_transport_deadline
+            && let Err(error) =
+                admit_transport_namespace(&mut child, command_deadline, process_group_id).await
+        {
+            // Admission failing after the probe confirmed this host means the
+            // answer may have changed underneath us -- an AppArmor policy
+            // tightened or the sysctl set while the service kept running. Drop
+            // the confirmation so the next acquisition probes again and
+            // refuses before its claim, instead of trusting a stale success
+            // and leaving an ambiguous acquisition id behind.
+            self.transport_namespace_confirmed
+                .store(false, Ordering::Release);
+            return Err(error);
         }
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut child, process_group_id).await?;
@@ -2045,11 +2068,12 @@ impl SourceAcquirer {
         // fast failing probe and is refused anyway. It also removes the
         // restart requirement: select the deployment profile or clear the
         // sysctl, and the next acquisition works.
-        if self.transport_namespace_confirmed.get().is_some() {
+        if self.transport_namespace_confirmed.load(Ordering::Acquire) {
             return true;
         }
         if self.probe_kernel_transport_namespace().await {
-            let _ = self.transport_namespace_confirmed.set(());
+            self.transport_namespace_confirmed
+                .store(true, Ordering::Release);
             return true;
         }
         // Printed with each refusal rather than once per process: it is the
