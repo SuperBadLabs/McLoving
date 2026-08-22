@@ -163,7 +163,6 @@ case "${service}" in
     # through the second, so a typo in either host, port, or database name
     # modifies one instance and then fails against another -- after startup has
     # already reported the contract satisfied.
-    local migration_endpoint runtime_endpoint
     migration_endpoint="$(database_url_endpoint "${migration_url}")"
     runtime_endpoint="$(database_url_endpoint "${runtime_url}")"
     [[ -n "${migration_endpoint}" && -n "${runtime_endpoint}" ]] \

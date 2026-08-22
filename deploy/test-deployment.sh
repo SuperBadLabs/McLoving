@@ -53,6 +53,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# `local` outside a function aborts under `set -e`, and the helpers put their
+# service logic in a top-level `case` block where that is easy to do by
+# accident -- it has happened twice in this lane, each time rejecting every
+# valid contract at ExecStartPre. shellcheck does not flag it, so this does.
+python3 - "${repo_root}" <<'LOCALSCOPE'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "deploy" / "bin"
+opens = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*\(\)\s*\{")
+failures = []
+for script in sorted(root.iterdir()):
+    if not script.is_file():
+        continue
+    depth = 0
+    for number, line in enumerate(script.read_text().splitlines(), 1):
+        code = line.split("#", 1)[0]
+        if depth == 0 and opens.match(code.strip()):
+            depth = 1
+            continue
+        if depth:
+            depth += code.count("{") - code.count("}")
+            continue
+        if re.match(r"\s*local\s", code):
+            failures.append(f"{script.name}:{number}: `local` outside a function")
+for failure in failures:
+    print(failure, file=sys.stderr)
+raise SystemExit(1 if failures else 0)
+LOCALSCOPE
+
 echo "== [0/9] pinned-digest drift guard"
 quadlet_image="$(sed -n 's/^Image=//p' "${repo_root}/deploy/podman/mcloving-postgres.container")"
 if [[ "${quadlet_image}" != "${MCLOVING_POSTGRES_IMAGE}" ]]; then
