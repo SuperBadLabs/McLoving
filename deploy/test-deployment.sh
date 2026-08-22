@@ -257,10 +257,25 @@ echo "== [6/9] postgres (derived from quadlet) -> db-init -> controller -> agent
   > "${workdir}/postgres.derived.json"
 pre_argv=()
 derived_argv pre_argv "${workdir}/postgres.derived.json" '.exec_start_pre[0]'
-"${pre_argv[@]}"
+"${pre_argv[@]}" > "${workdir}/logs/postgres-volume.log" 2>&1 || {
+  echo "postgres volume creation failed:" >&2
+  cat "${workdir}/logs/postgres-volume.log" >&2
+  podman info --format '{{.Host.CgroupsVersion}} {{.Host.CgroupManager}}' >&2 2>&1 || true
+  exit 1
+}
 postgres_argv=()
 derived_argv postgres_argv "${workdir}/postgres.derived.json" '.exec_start'
-"${postgres_argv[@]}" >/dev/null
+# Output captured rather than discarded: when this fails the smoke test has
+# nothing else to say about why, and a container that will not start is the
+# single most likely thing to differ between an operator's host and a CI
+# runner. Podman's host configuration is printed alongside, since rootless
+# cgroup and user-namespace setup is what usually differs.
+"${postgres_argv[@]}" > "${workdir}/logs/postgres.log" 2>&1 || {
+  echo "postgres container failed to start:" >&2
+  cat "${workdir}/logs/postgres.log" >&2
+  podman info --format '{{.Host.CgroupsVersion}} {{.Host.CgroupManager}} {{.Host.OCIRuntime.Name}}' >&2 2>&1 || true
+  exit 1
+}
 health_argv=()
 derived_argv health_argv "${workdir}/postgres.derived.json" '.health_cmd'
 for _ in $(seq 1 120); do
