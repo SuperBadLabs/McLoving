@@ -905,42 +905,42 @@ impl SourceAcquirer {
         // because the probe verified earlier would persist a claim for an
         // acquisition whose first git spawn then returns BindingMismatch,
         // leaving that acquisition id ambiguous for every retry.
-        self.verify_runtime_authority(true).await?;
-        // The filesystem validation, the transport-root scan, and the runtime
-        // authority hashing above all take real time, so a lock won just before
-        // the deadline can leave it already passed by here. The claim is the
-        // durable record that an acquisition started; writing one for a request
-        // that is refused on the very next check manufactures an ambiguity that
-        // nothing caused, and every later attempt with that acquisition id would
-        // fail as AmbiguousClaim. Nothing above this line has acted.
-        self.ensure_before_deadline(publication_deadline_unix_ms)?;
-        // Settled here, after the lock wait and immediately before the claim,
-        // for the same reason the runtime binding is re-verified here: what was
-        // true before an unbounded wait says nothing about what is true now.
-        // Recording it at this point also makes it the verdict every
-        // credential-bearing git invocation in this acquisition reuses --
-        // otherwise each one probes again, including every lazy `cat-file` that
-        // materializes a blob in a partial clone, and a transient failure in
-        // any of them returns before git starts with the claim already written.
+        // Settled here, after the lock wait, because what was true before an
+        // unbounded wait says nothing about what is true now. Recording it at
+        // this point also makes it the verdict every credential-bearing git
+        // invocation in this acquisition reuses -- otherwise each one probes
+        // again, including every lazy `cat-file` that materializes a blob in a
+        // partial clone, and a transient failure in any of them returns before
+        // git starts with the claim already written.
         #[cfg(unix)]
         if transport_namespace_required {
             if !self
                 .kernel_transport_namespace_usable(Some(publication_deadline_unix_ms))
                 .await?
             {
+                // The probe is bounded by the deadline, so it can fail by
+                // running out of it. Naming the namespace then reports a host
+                // policy problem to an operator whose configuration is fine
+                // and whose request simply expired -- and points them at
+                // AppArmor, which is the most misleading place to send them.
+                self.ensure_before_deadline(publication_deadline_unix_ms)?;
                 return Err(SourceError::TransportNamespaceUnavailable);
             }
             self.transport_namespace_ready
                 .store(true, Ordering::Release);
-            // The probe is bounded by the deadline but can still consume what
-            // is left of it, and this sits after the check above rather than
-            // before it. Without rechecking, a claim is persisted for a
-            // request that acquire_into_stage refuses at its very first
-            // deadline test, leaving that acquisition id ambiguous for every
-            // retry -- the failure the earlier check was added to prevent,
-            // stepped over by work inserted after it.
-            self.ensure_before_deadline(publication_deadline_unix_ms)?;
         }
+        // After the probe, not before it. The probe can run for as long as the
+        // deadline allows, and a credential file or runtime closure that
+        // changes while it runs leaves an earlier verification describing a
+        // binding that no longer holds -- the claim is then persisted and the
+        // first git call returns BindingMismatch, leaving that acquisition id
+        // ambiguous for every retry.
+        self.verify_runtime_authority(true).await?;
+        // Last act before the claim, with nothing between. Every step above --
+        // the filesystem validation, the transport-root scan, the probe, the
+        // authority hashing -- takes real time, and a claim written past the
+        // deadline manufactures an ambiguity that nothing caused.
+        self.ensure_before_deadline(publication_deadline_unix_ms)?;
         self.store_claim(
             request.acquisition_id,
             &AcquisitionClaim {
