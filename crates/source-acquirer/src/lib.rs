@@ -18,6 +18,7 @@ use nix::time::ClockId;
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -627,6 +628,13 @@ pub struct SourceAcquirer {
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
+    // The namespace verdict for the acquisition currently in progress, not a
+    // process-wide cache: `admission` serializes acquisitions, so exactly one
+    // owns this at a time, and it is cleared at the start of each. Within one
+    // acquisition the answer cannot go stale in a way that matters, because
+    // every real command still passes through launcher admission, which stays
+    // fail-closed.
+    transport_namespace_ready: AtomicBool,
     admission: Mutex<()>,
 }
 
@@ -777,6 +785,7 @@ impl SourceAcquirer {
             credential_path,
             signing_key,
             secret_marker_matcher,
+            transport_namespace_ready: AtomicBool::new(false),
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -810,6 +819,8 @@ impl SourceAcquirer {
         // shared transport lock would charge one process's discovery to every
         // acquisition queued behind it.
         let _process_guard = self.admission.lock().await;
+        self.transport_namespace_ready
+            .store(false, Ordering::Release);
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
         let request_sha256 = self.validate_request(request, now)?;
@@ -834,6 +845,7 @@ impl SourceAcquirer {
         // failing as AmbiguousClaim -- including the retry an operator makes
         // right after selecting the deployment profile, which is the one that
         // should work.
+        let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         #[cfg(unix)]
         if std::iter::once(request.repository_url.as_str())
             // Submodules are fetched through the same credential-bearing path,
@@ -864,11 +876,22 @@ impl SourceAcquirer {
             // about the binding at the moment the claim is written. This one
             // exists to protect the probe; that one gates the claim.
             self.verify_runtime_authority(true).await?;
-            if !self.kernel_transport_namespace_usable().await {
+            if !self
+                .kernel_transport_namespace_usable(Some(publication_deadline_unix_ms))
+                .await?
+            {
                 return Err(SourceError::TransportNamespaceUnavailable);
             }
+            // Recorded for this acquisition only. Every credential-bearing git
+            // invocation would otherwise probe again -- including each lazy
+            // `cat-file` that materializes a blob in a partial clone, one
+            // extra namespace and process chain per file -- and a transient
+            // failure in any of those post-claim probes would return before
+            // git started while the claim was already written, leaving that
+            // acquisition id ambiguous.
+            self.transport_namespace_ready
+                .store(true, Ordering::Release);
         }
-        let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         let _transport_lock =
             lock_output_root_until(&self.config.transport_root, publication_deadline_unix_ms)
                 .await?;
@@ -1757,7 +1780,11 @@ impl SourceAcquirer {
         // so a host that cannot run the sealed launcher cannot carry a
         // credential-bearing transport at all. Refuse by name instead.
         #[cfg(unix)]
-        if requires_kernel_transport_deadline && !self.kernel_transport_namespace_usable().await {
+        if requires_kernel_transport_deadline
+            && !self
+                .kernel_transport_namespace_usable(deadline_unix_ms)
+                .await?
+        {
             return Err(SourceError::TransportNamespaceUnavailable);
         }
         #[cfg(not(unix))]
@@ -2064,7 +2091,33 @@ impl SourceAcquirer {
     // and remembering "the host cannot do this" because one probe hit EMFILE or
     // timed out under load would refuse every later acquisition until someone
     // restarted the service.
-    async fn kernel_transport_namespace_usable(&self) -> bool {
+    async fn kernel_transport_namespace_usable(
+        &self,
+        deadline_unix_ms: Option<i64>,
+    ) -> Result<bool, SourceError> {
+        if self.transport_namespace_ready.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        // The probe's own ten-second cap is intersected with the request or
+        // command deadline it runs under, exactly as every other bounded step
+        // here is. Without that, a request with less time than the probe wants
+        // could see admission continue past its own expiry and be reported
+        // `transport_namespace_unavailable` when the truth is that it expired.
+        let probe_timeout = match deadline_unix_ms {
+            Some(deadline) => {
+                let remaining = deadline
+                    .checked_sub(now_unix_ms()?)
+                    .filter(|value| *value > 0)
+                    .ok_or(SourceError::ExpiredRequest)?;
+                Duration::from_millis(u64::try_from(remaining).unwrap_or(u64::MAX))
+                    .min(TRANSPORT_NAMESPACE_PROBE_TIMEOUT)
+            }
+            None => TRANSPORT_NAMESPACE_PROBE_TIMEOUT,
+        };
+        Ok(self.probe_within(probe_timeout).await)
+    }
+
+    async fn probe_within(&self, probe_timeout: Duration) -> bool {
         // Nothing is remembered between acquisitions, in either direction.
         //
         // A negative cannot be cached because nothing observable separates a
@@ -2082,7 +2135,7 @@ impl SourceAcquirer {
         // runtime verification that hashes the whole sealed closure twice on
         // the same path; the ordering guarantees are worth more than the
         // spawn.
-        if self.probe_kernel_transport_namespace().await {
+        if self.probe_kernel_transport_namespace(probe_timeout).await {
             return true;
         }
         // Printed with each refusal rather than once per process: it is the
@@ -2107,7 +2160,7 @@ impl SourceAcquirer {
         false
     }
 
-    async fn probe_kernel_transport_namespace(&self) -> bool {
+    async fn probe_kernel_transport_namespace(&self, probe_timeout: Duration) -> bool {
         #[cfg(not(target_os = "linux"))]
         {
             // No kernel transport namespace exists to admit the launcher, and
@@ -2119,15 +2172,13 @@ impl SourceAcquirer {
             let Ok(anchor) = ClockId::CLOCK_MONOTONIC.now() else {
                 return false;
             };
-            let Ok(timeout_ns) = i64::try_from(TRANSPORT_NAMESPACE_PROBE_TIMEOUT.as_nanos()) else {
+            let Ok(timeout_ns) = i64::try_from(probe_timeout.as_nanos()) else {
                 return false;
             };
             let Some(deadline_ns) = anchor.num_nanoseconds().checked_add(timeout_ns) else {
                 return false;
             };
-            let Some(deadline) =
-                tokio::time::Instant::now().checked_add(TRANSPORT_NAMESPACE_PROBE_TIMEOUT)
-            else {
+            let Some(deadline) = tokio::time::Instant::now().checked_add(probe_timeout) else {
                 return false;
             };
             let mut command = Command::new(&self.askpass_executable.invocation_path);
