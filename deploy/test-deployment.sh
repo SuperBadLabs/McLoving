@@ -760,6 +760,53 @@ chmod +x "${stability_shim}/systemctl"
   done
 )
 
+# The recovery command is printed to be copied and run. A service account home
+# containing a space or a shell metacharacter must survive that round trip, so
+# the emitted text is evaluated against stub helpers that record their argv.
+quoted_home="${workdir}/od d & home"
+quoted_libexec="${quoted_home}/.local/libexec/mcloving"
+mkdir -p "${quoted_libexec}/helpers"
+for stub in mcloving-deployed-digests mcloving-rollback; do
+  cat > "${quoted_libexec}/helpers/${stub}" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$#" > "${quoted_libexec}/${stub}.argc"
+printf '%s\n' "\$2" > "${quoted_libexec}/${stub}.home"
+STUB
+  chmod +x "${quoted_libexec}/helpers/${stub}"
+done
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  eval "$(recovery_command "${quoted_libexec}" "${quoted_home}")"
+)
+for stub in mcloving-deployed-digests mcloving-rollback; do
+  [[ "$(cat "${quoted_libexec}/${stub}.argc")" == "2" ]] || {
+    echo "recovery command split the ${stub} arguments: got $(cat "${quoted_libexec}/${stub}.argc")" >&2
+    exit 1
+  }
+  [[ "$(cat "${quoted_libexec}/${stub}.home")" == "${quoted_home}" ]] || {
+    echo "recovery command mangled the --home value for ${stub}" >&2
+    exit 1
+  }
+done
+
+# Under --no-systemd the units resolve %h to the invoking user's home, not to
+# --home, so telling the operator to start them would start an unrelated
+# deployment or fail on units that are not there.
+alternate_home="${workdir}/alternate-home"
+mkdir -p "${alternate_home}"
+alternate_output="$("${repo_root}/deploy/bin/mcloving-install" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --home "${alternate_home}" --no-systemd)"
+if rg -q "systemctl --user enable" <<<"${alternate_output}"; then
+  echo "install told an alternate-home deployment to start the invoking user's units" >&2
+  exit 1
+fi
+rg -q "did not touch systemd" <<<"${alternate_output}" || {
+  echo "install gave no operable next step for --no-systemd" >&2
+  exit 1
+}
+
 # The recovery command the upgrade path prints must actually run from where it
 # is installed. Checking only that the file exists proved nothing: the helper
 # resolved its shared library against the repository layout and exited before

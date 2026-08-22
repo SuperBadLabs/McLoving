@@ -87,10 +87,7 @@ if [[ "${no_systemd}" == "1" ]]; then
   exit 0
 fi
 
-# An absolute path to the installed helper: nothing adds deploy/bin to PATH,
-# so a bare command name would resolve to nothing exactly when recovery is
-# needed.
-rollback_hint="rollback with: ${libexec_root}/helpers/mcloving-deployed-digests --home ${home_dir}; ${libexec_root}/helpers/mcloving-rollback --home ${home_dir}"
+rollback_hint="rollback with: $(recovery_command "${libexec_root}" "${home_dir}")"
 if ! service_control "${no_systemd}" start mcloving-controller.service; then
   echo "controller failed to start after upgrade; ${rollback_hint}" >&2
   exit 1

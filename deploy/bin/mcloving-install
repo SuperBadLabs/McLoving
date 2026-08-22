@@ -124,6 +124,23 @@ next steps:
      blocks startup while placeholders remain)
   2. place mTLS material under ${config_root}/pki/ and enroll the agent in
      ${config_root}/agent-identity-bindings.txt
+NEXT
+# The units resolve %h to the home of whoever runs them, so under --no-systemd
+# with an alternate --home they name a different deployment than the one just
+# installed. Printing the start command regardless would have the operator
+# start an unrelated deployment, or fail on units that are not there.
+if [[ "${no_systemd}" == "1" ]]; then
+  cat <<NEXT
+  3. this install did not touch systemd (--no-systemd). The units under
+     ${config_root%/mcloving}/systemd/user resolve %h to the home of whichever
+     user runs them, so they describe this deployment only when that user's
+     home is ${home_dir}. Start it with a manager whose %h resolves there, or
+     run the binaries under ${libexec_root}/current directly against the
+     contracts above.
+NEXT
+else
+  cat <<NEXT
   3. systemctl --user enable --now mcloving-postgres mcloving-db-init \\
        mcloving-controller mcloving-agent
 NEXT
+fi

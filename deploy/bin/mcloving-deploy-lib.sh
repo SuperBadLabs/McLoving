@@ -382,6 +382,25 @@ verify_staged_release() {
 }
 
 # point_symlink LINK TARGET (atomic replace)
+# recovery_command LIBEXEC_ROOT HOME_DIR
+#
+# The exact shell command that re-reads the deployed digests and then rolls
+# back, ready to copy and run.
+#
+# Absolute paths, because nothing adds deploy/bin to PATH and a bare command
+# name would resolve to nothing exactly when recovery is needed. Every argument
+# is rendered with %q, because this text is meant to be pasted into a shell: a
+# service account home containing a space or a shell metacharacter would
+# otherwise split the path or execute part of it, and the one moment this line
+# exists for is the moment an operator cannot afford to debug it.
+recovery_command() {
+  local libexec_root="$1" home_dir="$2" rendered
+  printf -v rendered '%q --home %q; %q --home %q' \
+    "${libexec_root}/helpers/mcloving-deployed-digests" "${home_dir}" \
+    "${libexec_root}/helpers/mcloving-rollback" "${home_dir}"
+  printf '%s' "${rendered}"
+}
+
 point_symlink() {
   local link="$1" target="$2" staging
   staging="${link}.staging.$$"
