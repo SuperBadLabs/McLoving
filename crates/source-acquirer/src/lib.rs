@@ -932,6 +932,14 @@ impl SourceAcquirer {
             }
             self.transport_namespace_ready
                 .store(true, Ordering::Release);
+            // The probe is bounded by the deadline but can still consume what
+            // is left of it, and this sits after the check above rather than
+            // before it. Without rechecking, a claim is persisted for a
+            // request that acquire_into_stage refuses at its very first
+            // deadline test, leaving that acquisition id ambiguous for every
+            // retry -- the failure the earlier check was added to prevent,
+            // stepped over by work inserted after it.
+            self.ensure_before_deadline(publication_deadline_unix_ms)?;
         }
         self.store_claim(
             request.acquisition_id,
