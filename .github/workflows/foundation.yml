@@ -248,3 +248,27 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run isolated logical backup and restore drill
         run: bash scripts/test-backup-restore.sh docker
+
+  # DEPLOY-001's acceptance is that a scripted install on a clean host brings
+  # the spine up and its upgrade and rollback paths hold. Nothing ran that
+  # script here, so every fail-closed gate in it -- tampered releases,
+  # placeholder contracts, the environment-file grammar, digest drift, the
+  # recovery command -- was asserted and never executed.
+  deployment:
+    name: Deployment lane
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
+      - name: Run the deployment smoke test
+        run: bash deploy/test-deployment.sh

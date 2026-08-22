@@ -348,11 +348,19 @@ cmp "${workdir}/digests-1.json" "${workdir}/digests-2.json" || {
   echo "digest re-read output is not deterministic" >&2
   exit 1
 }
+# Named paths rather than a count: the document grew unit-root and directory
+# records, and an exact length asserts the shape of the walker instead of the
+# coverage this gate is about.
 jq -e '
-  .schema == "mcloving.deployed-digests/v1"
+  . as $document
+  | .schema == "mcloving.deployed-digests/v1"
   and (.current_release | startswith("releases/"))
   and (.releases | length >= 4)
-  and (.units | length == 5)
+  and (["mcloving-db-init.service", "mcloving-controller.service",
+        "mcloving-agent.service", "mcloving-postgres.container",
+        "mcloving-postgres-data.volume"]
+       | all(. as $unit
+             | ([$document.units[].path] | any(endswith("/" + $unit)))))
   and (.environment_contracts | length >= 5)
 ' "${workdir}/digests-1.json" >/dev/null || {
   echo "digest document is missing required coverage" >&2

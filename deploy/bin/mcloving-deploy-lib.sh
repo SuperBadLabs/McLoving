@@ -157,11 +157,40 @@ COPY
 }
 
 # release_id RELEASE_DIR -> deterministic 12-hex id over the binary digests
+#
+# Reads through the same classified descriptors as copy_regular_file, and for
+# the same reason: `sha256sum` on a pathname that has become a FIFO blocks
+# until something writes to it, and on a device reads without end. This runs on
+# a source directory the caller does not control the timing of, so the
+# classification has to be part of the read rather than a check before it.
 release_id() {
-  local release_dir="$1" binary
-  for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
-    sha256sum "${release_dir}/${binary}" | awk '{print $1}'
-  done | sha256sum | awk '{print substr($1, 1, 12)}'
+  python3 - "$1" "${MCLOVING_DEPLOY_BINARIES[@]}" <<'ID'
+import hashlib
+import os
+import stat
+import sys
+
+release_dir, binaries = sys.argv[1], sys.argv[2:]
+combined = hashlib.sha256()
+for binary in binaries:
+    path = os.path.join(release_dir, binary)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        raise SystemExit(f"cannot open {path}: {error}")
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise SystemExit(f"{path} is not a regular file")
+        os.set_blocking(descriptor, True)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    combined.update(f"{digest.hexdigest()}\n".encode("ascii"))
+print(combined.hexdigest()[:12])
+ID
 }
 
 # release_dir_is_complete RELEASE_DIR — every deployed binary is present.
