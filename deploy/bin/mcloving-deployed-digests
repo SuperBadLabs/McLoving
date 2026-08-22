@@ -121,6 +121,7 @@ def file_record(path: Path, root: Path) -> dict:
             return unreadable("open_failed", before)
         try:
             status = os.fstat(descriptor)
+            opened = (status.st_dev, status.st_ino)
             if not stat.S_ISREG(status.st_mode):
                 # A FIFO, socket, device node, or directory has no content to
                 # digest. A directory's mode is deployment state in its own
@@ -163,6 +164,19 @@ def file_record(path: Path, root: Path) -> dict:
                 }
         finally:
             os.close(descriptor)
+        # An atomic rename can replace the file after the open while the
+        # descriptor stays perfectly stable, and neither path is a symlink, so
+        # the link check above sees nothing. Without this the record reports
+        # the old inode's content for a pathname that already refers to new
+        # content -- a CUTOVER re-read describing stale deployment state during
+        # exactly the update it is meant to observe. Compare what the pathname
+        # resolves to now against what was actually opened.
+        try:
+            current = os.stat(path)
+        except OSError:
+            continue
+        if (current.st_dev, current.st_ino) != opened:
+            continue
         after = link_target()
         if after == before:
             if before is not None:
