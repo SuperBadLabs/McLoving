@@ -55,6 +55,11 @@ const MAX_RESOLVER_ADDRESSES: usize = 32;
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const TRANSPORT_NAMESPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+// How long to wait for a launcher that failed admission to exit before
+// concluding it was delayed rather than refused. A policy rejection kills it
+// immediately; this only has to outlast the scheduling gap.
+#[cfg(target_os = "linux")]
+const TRANSPORT_NAMESPACE_EXIT_GRACE: Duration = Duration::from_millis(250);
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
@@ -2124,13 +2129,28 @@ impl SourceAcquirer {
                 return TransportNamespaceProbe::Indeterminate;
             };
             let process_group_id = child.id().and_then(|id| i32::try_from(id).ok());
-            // Admission is where a namespace policy rejection lands: the child
-            // either never reaches the mapping gate or dies executing inside
-            // the namespace. That is an answer about this host.
+            // Admission is where a namespace policy rejection lands, but it is
+            // not the only thing that fails here: a stage marker can simply be
+            // late, and a `/proc/<pid>/{setgroups,uid_map,gid_map}` write can
+            // fail transiently. Every one of those returns the same error, so
+            // the error alone establishes nothing. What separates them is the
+            // child: a launcher the policy refused is dead, while a launcher
+            // that was merely slow is still running. Only a child that has
+            // exited is treated as an answer about this host; anything else is
+            // a bad moment, and caching it would refuse every later
+            // acquisition until the process restarted.
             if admit_transport_namespace(&mut child, deadline, process_group_id)
                 .await
                 .is_err()
             {
+                let exited = matches!(
+                    tokio::time::timeout(TRANSPORT_NAMESPACE_EXIT_GRACE, child.wait()).await,
+                    Ok(Ok(_))
+                );
+                if !exited {
+                    let _ = terminate_child(&mut child, process_group_id).await;
+                    return TransportNamespaceProbe::Indeterminate;
+                }
                 return TransportNamespaceProbe::Refused;
             }
             let Some(stdout) = child.stdout.take() else {
