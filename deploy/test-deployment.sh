@@ -1063,7 +1063,7 @@ rm -rf "${blocked_home}" "${blocked_release}"
 tenant_swap="${workdir}/tenant-swap.env"
 cp "${config_dir}/controller.env" "${tenant_swap}"
 sed -i "s#\(^MCLOVING_DATABASE_URL=.*\)mcloving_tenant#\1mcloving_admin#" "${tenant_swap}"
-if rg -q "mcloving_admin" "${tenant_swap}"; then
+if grep -q "mcloving_admin" "${tenant_swap}"; then
   if "${libexec}/helpers/mcloving-env-guard" controller "${tenant_swap}" >/dev/null 2>&1; then
     echo "env guard accepted a runtime role other than mcloving_tenant" >&2
     exit 1
@@ -1253,11 +1253,11 @@ mkdir -p "${alternate_home}"
 alternate_output="$("${repo_root}/deploy/bin/mcloving-install" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
   --home "${alternate_home}" --no-systemd)"
-if rg -q "systemctl --user enable" <<<"${alternate_output}"; then
+if grep -q -- "systemctl --user enable" <<<"${alternate_output}"; then
   echo "install told an alternate-home deployment to start the invoking user's units" >&2
   exit 1
 fi
-rg -q "did not touch systemd" <<<"${alternate_output}" || {
+grep -q "did not touch systemd" <<<"${alternate_output}" || {
   echo "install gave no operable next step for --no-systemd" >&2
   exit 1
 }
