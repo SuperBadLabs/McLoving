@@ -658,6 +658,35 @@ if "sha256" in entry[0]:
     raise SystemExit("special node was digested as a regular file")
 SPECIAL
 
+# Publication must fail loudly. Both callers run stage_release inside command
+# substitution, where bash clears errexit, so a failed mv would otherwise fall
+# through and report a staged release that is not there -- after the upgrade
+# has already stopped the services.
+blocked_release="${workdir}/blocked-release"
+rm -rf "${blocked_release}"
+cp -r "${release_dir}" "${blocked_release}"
+blocked_home="${workdir}/blocked-home"
+rm -rf "${blocked_home}"
+mkdir -p "${blocked_home}/.local/libexec/mcloving/releases"
+blocked_id="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  release_id "${blocked_release}"
+)"
+# A regular file sitting where the release directory must go.
+printf 'not a directory\n' > "${blocked_home}/.local/libexec/mcloving/releases/${blocked_id}"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${blocked_home}" \
+  --release-dir "${blocked_release}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "install reported success when the release could not be published" >&2
+  exit 1
+fi
+if [[ -e "${blocked_home}/.local/libexec/mcloving/current" ]]; then
+  echo "a failed publication still produced a current release" >&2
+  exit 1
+fi
+rm -rf "${blocked_home}" "${blocked_release}"
+
 # systemd accepts a quoted multiline value that ends in a newline and passes it
 # to the service intact. A guard reading contracts through command substitution
 # would silently validate the value without it and report a contract satisfied

@@ -371,7 +371,16 @@ stage_release() {
     rm -rf "${staging}"
     verify_staged_release "${target}"
   else
-    mv -T "${staging}" "${target}"
+    # Both callers run this function inside command substitution, and bash
+    # clears errexit inside one, so a failed publication would fall through to
+    # the echo below and report success. An upgrade would then stop the
+    # services and point `current` at whatever is actually sitting at that
+    # path -- a regular file, a dangling link -- producing an outage while
+    # announcing that the release was staged.
+    if ! mv -T "${staging}" "${target}"; then
+      rm -rf "${staging}"
+      deploy_fail "could not publish the staged release at ${target}"
+    fi
   fi
   echo "${target}"
 }
