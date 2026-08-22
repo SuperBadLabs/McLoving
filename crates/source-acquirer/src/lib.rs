@@ -813,6 +813,10 @@ impl SourceAcquirer {
         // shared transport lock would charge one process's discovery to every
         // acquisition queued behind it.
         #[cfg(unix)]
+        let mut runtime_verified = false;
+        #[cfg(not(unix))]
+        let runtime_verified = false;
+        #[cfg(unix)]
         let transport_namespace_refused = if Url::parse(&request.repository_url)
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
         {
@@ -822,7 +826,16 @@ impl SourceAcquirer {
             // probe had already run whatever the directory now contains, so
             // the check comes first and its binding error is returned as
             // itself rather than reduced to namespace unavailability.
+            //
+            // This is the acquisition's runtime verification moved earlier, not
+            // an additional one: it re-hashes git, git-remote-https, askpass,
+            // the CA bundle, the preload file, and the whole runtime closure,
+            // and running it twice would spend a deadline-bound request's own
+            // budget re-proving what it just proved. The authoritative check
+            // still runs immediately before every git spawn, where it binds
+            // what is actually about to execute.
             self.verify_runtime_authority(true).await?;
+            runtime_verified = true;
             !self.kernel_transport_namespace_usable().await
         } else {
             false
@@ -861,7 +874,13 @@ impl SourceAcquirer {
             self.config.max_transport_bytes,
         )?;
         ensure_clean_transport_root(&self.config.transport_root).await?;
-        self.verify_runtime_authority(true).await?;
+        // Skipped only when the preflight above already verified for this
+        // acquisition; an acquisition that never reaches the preflight -- any
+        // scheme other than http(s) -- still binds the runtime before its
+        // claim rather than at its first git spawn.
+        if !runtime_verified {
+            self.verify_runtime_authority(true).await?;
+        }
         // The filesystem validation, the transport-root scan, and the runtime
         // authority hashing above all take real time, so a lock won just before
         // the deadline can leave it already passed by here. The claim is the
