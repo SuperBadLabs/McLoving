@@ -181,10 +181,16 @@ for contract in postgres db-init controller agent; do
   fill_contract "${config}/${contract}.env"
 done
 
-# Assert the guard ACCEPTS a valid contract, explicitly and early. Every other
-# guard assertion in this file is a refusal, and a guard that refuses
-# everything satisfies all of them; a break in the accepting path would
-# otherwise surface much later as a confusing downstream failure.
+# Mirror what StateDirectory= creates for the real units.
+mkdir -p "${home}/.local/state/mcloving-controller" \
+  "${home}/.local/state/mcloving-agent/workspace"
+
+# Assert the guard ACCEPTS a valid contract, explicitly. Every other guard
+# assertion in this file is a refusal, and a guard that refuses everything
+# satisfies all of them; a break in the accepting path would otherwise surface
+# much later as a confusing downstream failure. It has to come after the state
+# directories above, because the agent contract names a workspace root the
+# guard requires to exist -- which is what the units get from StateDirectory=.
 for guarded in controller agent; do
   "${libexec}/helpers/mcloving-env-guard" "${guarded}" \
     "${config}/${guarded}.env" >/dev/null || {
@@ -193,10 +199,6 @@ for guarded in controller agent; do
     exit 1
   }
 done
-
-# Mirror what StateDirectory= creates for the real units.
-mkdir -p "${home}/.local/state/mcloving-controller" \
-  "${home}/.local/state/mcloving-agent/workspace"
 
 run_with_env() { # ENV_FILE COMMAND...
   local env_file="$1"
