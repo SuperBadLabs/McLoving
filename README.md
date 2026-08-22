@@ -39,6 +39,7 @@ See:
 - [Architecture decisions](docs/adr/README.md)
 - [Execution board](docs/EXECUTION_BOARD.md)
 - [Threat model](docs/threat-model/README.md)
+- [Related work: Fogell](docs/related-work/FOGELL.md)
 - [Contributing](CONTRIBUTING.md)
 
 On HeMan, run the complete pinned repository validation gate with:
