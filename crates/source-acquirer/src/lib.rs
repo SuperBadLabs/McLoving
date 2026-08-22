@@ -863,33 +863,6 @@ impl SourceAcquirer {
             .any(|value| {
                 Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
             });
-        #[cfg(unix)]
-        if transport_namespace_required {
-            // The probe executes the sealed launcher, whose rewritten
-            // interpreter and LD_LIBRARY_PATH resolve through the runtime
-            // directory, so the binding is verified before anything sealed
-            // runs and its error is returned as itself rather than reduced to
-            // namespace unavailability.
-            //
-            // This does not stand in for the pre-claim verification below. The
-            // transport lock between them is shared and can be waited on for a
-            // long time, so a binding proved before that wait says nothing
-            // about the binding at the moment the claim is written. This one
-            // exists to protect the probe; that one gates the claim.
-            self.verify_runtime_authority(true).await?;
-            if !self
-                .kernel_transport_namespace_usable(Some(publication_deadline_unix_ms))
-                .await?
-            {
-                return Err(SourceError::TransportNamespaceUnavailable);
-            }
-            // Deliberately not recorded here. The shared transport lock below
-            // can be waited on until nearly the publication deadline, and the
-            // AppArmor policy or the sysctl can be tightened during that wait,
-            // so a verdict reached before it must not be trusted after it.
-            // This call is a fail-fast: refuse a host that already cannot do
-            // this, before queueing for a lock it will not be able to use.
-        }
         let _transport_lock =
             lock_output_root_until(&self.config.transport_root, publication_deadline_unix_ms)
                 .await?;
@@ -905,13 +878,27 @@ impl SourceAcquirer {
         // because the probe verified earlier would persist a claim for an
         // acquisition whose first git spawn then returns BindingMismatch,
         // leaving that acquisition id ambiguous for every retry.
-        // Settled here, after the lock wait, because what was true before an
-        // unbounded wait says nothing about what is true now. Recording it at
-        // this point also makes it the verdict every credential-bearing git
-        // invocation in this acquisition reuses -- otherwise each one probes
-        // again, including every lazy `cat-file` that materializes a blob in a
-        // partial clone, and a transient failure in any of them returns before
-        // git starts with the claim already written.
+        // Everything from here to the claim happens after the transport lock,
+        // because the wait for it is unbounded in principle and a fact proved
+        // before it says nothing about the moment the claim is written. There
+        // is deliberately no probe before the lock: it would need its own
+        // runtime verification to be safe, and a third full hash of the sealed
+        // closure costs a deadline-bound request more than refusing a little
+        // earlier saves it.
+        //
+        // The probe executes the sealed launcher, whose rewritten interpreter
+        // and LD_LIBRARY_PATH resolve through the runtime directory, so the
+        // binding is verified immediately before it and again immediately
+        // after -- once so nothing sealed runs against a substituted runtime,
+        // once because the probe itself can run long enough for the runtime to
+        // be substituted underneath it.
+        self.verify_runtime_authority(true).await?;
+        // Recording the verdict here also makes it the one every
+        // credential-bearing git invocation in this acquisition reuses --
+        // otherwise each probes again, including every lazy `cat-file` that
+        // materializes a blob in a partial clone, and a transient failure in
+        // any of them returns before git starts with the claim already
+        // written.
         #[cfg(unix)]
         if transport_namespace_required {
             if !self
@@ -929,12 +916,6 @@ impl SourceAcquirer {
             self.transport_namespace_ready
                 .store(true, Ordering::Release);
         }
-        // After the probe, not before it. The probe can run for as long as the
-        // deadline allows, and a credential file or runtime closure that
-        // changes while it runs leaves an earlier verification describing a
-        // binding that no longer holds -- the claim is then persisted and the
-        // first git call returns BindingMismatch, leaving that acquisition id
-        // ambiguous for every retry.
         self.verify_runtime_authority(true).await?;
         // Last act before the claim, with nothing between. Every step above --
         // the filesystem validation, the transport-root scan, the probe, the
