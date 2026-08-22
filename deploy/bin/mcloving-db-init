@@ -65,6 +65,30 @@ if ! ready; then
   exit 1
 fi
 
+# Before migrating, not after. The URL and the container are two routes to
+# PostgreSQL, and a post-migration schema check cannot tell "the URL reached
+# this container" from "this container was already initialized" -- by then the
+# other server has been migrated regardless. The container's published host
+# port is the one fact that settles it in advance, and this script already
+# talks to podman.
+published="$(podman port "${MCLOVING_POSTGRES_CONTAINER}" 5432/tcp | head -n 1)"
+if [[ -z "${published}" ]]; then
+  echo "mcloving-db-init: ${MCLOVING_POSTGRES_CONTAINER} publishes no host port for 5432/tcp; cannot confirm MCLOVING_MIGRATION_DATABASE_URL reaches it" >&2
+  exit 1
+fi
+published_port="${published##*:}"
+url_port="$(python3 - "${MCLOVING_MIGRATION_DATABASE_URL}" <<'URLPORT'
+import sys
+from urllib.parse import urlsplit
+
+print(urlsplit(sys.argv[1]).port or 5432)
+URLPORT
+)"
+if [[ "${url_port}" != "${published_port}" ]]; then
+  echo "mcloving-db-init: MCLOVING_MIGRATION_DATABASE_URL uses port ${url_port} but ${MCLOVING_POSTGRES_CONTAINER} publishes ${published_port}; migrating would modify a different PostgreSQL instance than the one this bootstrap provisions" >&2
+  exit 1
+fi
+
 echo "mcloving-db-init: applying schema migrations with the migration role"
 "${identity_admin}" migrate
 

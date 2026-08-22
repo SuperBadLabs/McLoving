@@ -65,6 +65,13 @@ config_root="${home_dir}/.config/mcloving"
 unit_root="${home_dir}/.config/systemd/user"
 quadlet_root="${home_dir}/.config/containers/systemd"
 
+# Set before the hierarchy is created, not after. `mkdir -p` builds every
+# missing ancestor -- .local, .local/libexec, .config, .config/systemd,
+# .config/containers -- with the caller's umask, and chmod-ing only the leaves
+# leaves those parents world-writable under `umask 000`. A writable parent is
+# as good as a writable child: the protected subtree can simply be renamed
+# aside and replaced.
+umask 077
 mkdir -p "${libexec_root}/helpers" "${config_root}/pki" "${unit_root}" "${quadlet_root}"
 # Explicit modes rather than whatever umask the operator invoked us with. A
 # world-writable libexec or helpers directory lets another local user rename a
