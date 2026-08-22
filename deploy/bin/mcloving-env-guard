@@ -102,7 +102,6 @@ case "${service}" in
     require_uuid MCLOVING_ORGANIZATION_ID
     require_min_bytes MCLOVING_API_TOKEN 32
     require_min_bytes MCLOVING_ARTIFACT_AGENT_TOKEN 32
-    local api_token artifact_token
     contract_into api_token MCLOVING_API_TOKEN
     contract_into artifact_token MCLOVING_ARTIFACT_AGENT_TOKEN
     if [[ "${api_token}" == "${artifact_token}" ]]; then
@@ -113,7 +112,6 @@ case "${service}" in
     # the other — would otherwise pass as distinct, and the controller would
     # run its runtime pool as the migration role, which is exactly what this
     # check exists to prevent.
-    local migration_url runtime_url
     contract_into migration_url MCLOVING_MIGRATION_DATABASE_URL
     contract_into runtime_url MCLOVING_DATABASE_URL
     migration_role="$(database_url_role "${migration_url}")"

@@ -181,6 +181,19 @@ for contract in postgres db-init controller agent; do
   fill_contract "${config}/${contract}.env"
 done
 
+# Assert the guard ACCEPTS a valid contract, explicitly and early. Every other
+# guard assertion in this file is a refusal, and a guard that refuses
+# everything satisfies all of them; a break in the accepting path would
+# otherwise surface much later as a confusing downstream failure.
+for guarded in controller agent; do
+  "${libexec}/helpers/mcloving-env-guard" "${guarded}" \
+    "${config}/${guarded}.env" >/dev/null || {
+    echo "env guard refused a valid ${guarded} contract:" >&2
+    "${libexec}/helpers/mcloving-env-guard" "${guarded}" "${config}/${guarded}.env" >&2 || true
+    exit 1
+  }
+done
+
 # Mirror what StateDirectory= creates for the real units.
 mkdir -p "${home}/.local/state/mcloving-controller" \
   "${home}/.local/state/mcloving-agent/workspace"
