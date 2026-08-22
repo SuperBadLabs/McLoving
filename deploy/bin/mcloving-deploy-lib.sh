@@ -101,6 +101,57 @@ PY
   fi
 }
 
+# copy_regular_file SRC DST MODE
+#
+# Copy SRC to DST, refusing anything that is not a regular file.
+#
+# Testing the pathname and then letting `install` open it are two separate
+# operations, and a source replaced in between is exactly the case worth
+# refusing: `install` reading a FIFO blocks until something writes to it, and
+# reading a device such as a symlinked /dev/zero fills the disk -- both before
+# any digest verification sees a byte. The classification therefore happens on
+# the descriptor that is read, not on the name: O_NONBLOCK so opening a
+# writer-less FIFO returns instead of hanging, then fstat, then the copy from
+# that same descriptor.
+copy_regular_file() {
+  python3 - "$1" "$2" "$3" <<'COPY'
+import os
+import stat
+import sys
+
+source, destination, mode = sys.argv[1], sys.argv[2], int(sys.argv[3], 8)
+try:
+    descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as error:
+    raise SystemExit(f"cannot open {source}: {error}")
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(f"{source} is not a regular file")
+    # Cleared of O_NONBLOCK only after the descriptor is known to be regular,
+    # for which the flag is meaningless anyway.
+    os.set_blocking(descriptor, True)
+    staging = f"{destination}.copy.{os.getpid()}"
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as reader:
+            with open(staging, "wb") as writer:
+                while True:
+                    chunk = reader.read(1 << 20)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
+        os.chmod(staging, mode)
+        os.replace(staging, destination)
+    except BaseException:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+finally:
+    os.close(descriptor)
+COPY
+}
+
 # release_id RELEASE_DIR -> deterministic 12-hex id over the binary digests
 release_id() {
   local release_dir="$1" binary
@@ -363,7 +414,14 @@ contract_into() {
 # source holds at the moment it is read, so a source that changes after
 # verification would simply be re-measured and agree with itself. The manifest
 # or checksums file is the only fixed reference here, so that is what the
-# copied bytes are checked against. Echoes the published path.
+# copied bytes are checked against.
+#
+# Echoes `published <path>` or `existing <path>`. The caller has to be able to
+# tell the two apart: on a refusal it may only remove a release this invocation
+# created, never one that was already retained -- deleting the `previous`
+# target would destroy the rollback release and leave that link dangling.
+# Status first, because a home directory may contain spaces and the path may
+# not be split.
 stage_release() {
   local libexec_root="$1" release_dir="$2" manifest="$3" checksums="$4"
   local binary target staging id
@@ -384,22 +442,17 @@ stage_release() {
   # shellcheck disable=SC2064  # expand the path now; the variable is reassigned
   trap "rm -rf -- $(printf '%q' "${staging}")" EXIT
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
-    # Checked before the copy, because the copy is what gets hurt. `install`
-    # reading a FIFO blocks until something writes to it, and reading a device
-    # such as a symlinked /dev/zero fills the disk -- both before
-    # verify_release_dir ever sees the bytes. `-f` is true only for a regular
-    # file and follows symlinks, so it rejects both while still admitting a
-    # symlinked release directory.
-    [[ -f "${release_dir}/${binary}" ]] \
-      || deploy_fail "release ${release_dir} does not provide ${binary} as a regular file"
-    install -m 0755 "${release_dir}/${binary}" "${staging}/${binary}"
+    copy_regular_file "${release_dir}/${binary}" "${staging}/${binary}" 0755 \
+      || deploy_fail "release ${release_dir} does not provide ${binary} as a readable regular file"
   done
   if ! verify_release_dir "${staging}" "${manifest}" "${checksums}"; then
     deploy_fail "staged copy does not match the supplied digest source"
   fi
   id="$(release_id "${staging}")"
   target="${libexec_root}/releases/${id}"
+  local state="published"
   if [[ -d "${target}" ]]; then
+    state="existing"
     # The release is already published, so the copy just made is redundant.
     # Removing it here rather than leaving it to the trap matters because the
     # trap is cleared before this function returns: otherwise reinstalling the
@@ -422,7 +475,7 @@ stage_release() {
   # Both callers use command substitution, so the trap would die with the
   # subshell anyway; clearing it keeps the function safe to call directly.
   trap - EXIT
-  echo "${target}"
+  printf '%s %s\n' "${state}" "${target}"
 }
 
 # verify_staged_release RELEASE_PATH

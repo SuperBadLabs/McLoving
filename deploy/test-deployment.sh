@@ -840,6 +840,49 @@ if "${repo_root}/deploy/bin/mcloving-install" --home "${noexec_home}" \
 fi
 rm -rf "${noexec_home}"
 
+# A directory where a contract file belongs must be refused. Without -T, GNU
+# install copies the example *into* that directory and reports success while
+# the unit's EnvironmentFile= still names a directory and startup must fail.
+dir_dest_home="${workdir}/dir-dest-home"
+rm -rf "${dir_dest_home}"
+mkdir -p "${dir_dest_home}/.config/mcloving/agent.env"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${dir_dest_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "install reported success with a directory where a contract must be" >&2
+  exit 1
+fi
+rm -rf "${dir_dest_home}"
+
+# A refusal must never delete a release it did not publish: the same id can
+# already be the retained rollback target.
+retain_home="${workdir}/retain-home"
+rm -rf "${retain_home}"
+mkdir -p "${retain_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${retain_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+retain_libexec="${retain_home}/.local/libexec/mcloving"
+retain_id="$(basename "$(readlink "${retain_libexec}/current")")"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${retain_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${retain_libexec}/previous")" == "releases/${retain_id}" ]] || {
+  echo "upgrade did not retain the first release as previous" >&2
+  exit 1
+}
+if "${repo_root}/deploy/bin/mcloving-install" --home "${retain_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "install accepted a release differing from the current one" >&2
+  exit 1
+fi
+[[ -d "${retain_libexec}/releases/${retain_id}" ]] || {
+  echo "a refused install destroyed the retained rollback release" >&2
+  exit 1
+}
+rm -rf "${retain_home}"
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

@@ -66,7 +66,8 @@ old_target="$(readlink "${libexec_root}/current")"
 # Captured in its own assignment: nesting this inside basename would let
 # basename's success mask a verification failure, since the outer command
 # substitution reports basename's status, not staging's.
-staged_target="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
+staged="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
+staged_target="${staged#* }"
 id="$(basename "${staged_target}")"
 if [[ "${old_target}" == "releases/${id}" ]]; then
   deploy_fail "release ${id} is already current; nothing to upgrade"

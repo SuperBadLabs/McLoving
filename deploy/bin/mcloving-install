@@ -88,7 +88,9 @@ if [[ -L "${libexec_root}/current" ]] && release_dir_is_complete "${release_dir}
   fi
 fi
 
-target="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
+staged="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
+staged_state="${staged%% *}"
+target="${staged#* }"
 id="$(basename "${target}")"
 echo "staged release ${id} at ${target}"
 
@@ -96,9 +98,13 @@ if [[ -L "${libexec_root}/current" ]]; then
   old_target="$(readlink "${libexec_root}/current")"
   if [[ "${old_target}" != "releases/${id}" ]]; then
     # Reachable only if the source changed between the pre-check and the copy.
-    # The copy is the identity, so it decides -- and the release it published
-    # is removed, since nothing references it and the command is refused.
-    rm -rf -- "${libexec_root}/releases/${id}"
+    # The copy is the identity, so it decides. Remove the release only when
+    # this invocation published it: the same id may already exist as a
+    # retained release -- the `previous` rollback target, for instance -- and
+    # deleting that would destroy the rollback while reporting a refusal.
+    if [[ "${staged_state}" == "published" ]]; then
+      rm -rf -- "${libexec_root}/releases/${id}"
+    fi
     deploy_fail "release ${old_target} is already installed; use mcloving-upgrade --release-dir ... to change the active release"
   fi
 fi
@@ -146,21 +152,25 @@ fi
 for helper in mcloving-env-guard mcloving-health mcloving-db-init \
   mcloving-deployed-digests mcloving-unit-command mcloving-rollback \
   mcloving-upgrade; do
-  install -m 0755 "${deploy_root}/bin/${helper}" "${libexec_root}/helpers/${helper}"
+  install -T -m 0755 "${deploy_root}/bin/${helper}" "${libexec_root}/helpers/${helper}"
 done
-install -m 0644 "${deploy_root}/bin/mcloving-deploy-lib.sh" \
+install -T -m 0644 "${deploy_root}/bin/mcloving-deploy-lib.sh" \
   "${libexec_root}/helpers/mcloving-deploy-lib.sh"
 
 for unit in mcloving-db-init.service mcloving-controller.service mcloving-agent.service; do
-  install -m 0644 "${deploy_root}/systemd/${unit}" "${unit_root}/${unit}"
+  install -T -m 0644 "${deploy_root}/systemd/${unit}" "${unit_root}/${unit}"
 done
 for quadlet in mcloving-postgres.container mcloving-postgres-data.volume; do
-  install -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
+  install -T -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
 done
 
 for contract in postgres db-init controller agent; do
   if [[ ! -f "${config_root}/${contract}.env" ]]; then
-    install -m 0600 "${deploy_root}/env/${contract}.env.example" \
+    # -T: without it, GNU install copies the source *into* an existing
+    # directory at that path, so a directory named agent.env would be reported
+    # as an installed placeholder while the unit's EnvironmentFile= still
+    # names a directory and startup must fail.
+    install -T -m 0600 "${deploy_root}/env/${contract}.env.example" \
       "${config_root}/${contract}.env"
     echo "installed placeholder contract ${config_root}/${contract}.env (edit before starting)"
   fi
