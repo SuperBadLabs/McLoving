@@ -18,7 +18,6 @@ use nix::time::ClockId;
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -628,7 +627,6 @@ pub struct SourceAcquirer {
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
-    transport_namespace_confirmed: AtomicBool,
     admission: Mutex<()>,
 }
 
@@ -779,7 +777,6 @@ impl SourceAcquirer {
             credential_path,
             signing_key,
             secret_marker_matcher,
-            transport_namespace_confirmed: AtomicBool::new(false),
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -838,8 +835,22 @@ impl SourceAcquirer {
         // right after selecting the deployment profile, which is the one that
         // should work.
         #[cfg(unix)]
-        if Url::parse(&request.repository_url)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        if std::iter::once(request.repository_url.as_str())
+            // Submodules are fetched through the same credential-bearing path,
+            // so a file: primary with an https submodule needs the namespace
+            // just as much. Checking only the primary URL let such a request
+            // persist its claim and then be refused when the submodule was
+            // fetched, which is the poisoned-retry failure this preflight
+            // exists to prevent.
+            .chain(
+                request
+                    .submodules
+                    .iter()
+                    .map(|submodule| submodule.repository_url.as_str()),
+            )
+            .any(|value| {
+                Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+            })
         {
             // The probe executes the sealed launcher, whose rewritten
             // interpreter and LD_LIBRARY_PATH resolve through the runtime
@@ -1876,19 +1887,8 @@ impl SourceAcquirer {
         #[cfg(not(unix))]
         let process_group_id = None;
         #[cfg(target_os = "linux")]
-        if requires_kernel_transport_deadline
-            && let Err(error) =
-                admit_transport_namespace(&mut child, command_deadline, process_group_id).await
-        {
-            // Admission failing after the probe confirmed this host means the
-            // answer may have changed underneath us -- an AppArmor policy
-            // tightened or the sysctl set while the service kept running. Drop
-            // the confirmation so the next acquisition probes again and
-            // refuses before its claim, instead of trusting a stale success
-            // and leaving an ambiguous acquisition id behind.
-            self.transport_namespace_confirmed
-                .store(false, Ordering::Release);
-            return Err(error);
+        if requires_kernel_transport_deadline {
+            admit_transport_namespace(&mut child, command_deadline, process_group_id).await?;
         }
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut child, process_group_id).await?;
@@ -2065,27 +2065,24 @@ impl SourceAcquirer {
     // timed out under load would refuse every later acquisition until someone
     // restarted the service.
     async fn kernel_transport_namespace_usable(&self) -> bool {
-        // Only a confirmed success is remembered. Nothing observable
-        // distinguishes a namespace policy rejection from a launcher that hit
-        // EMFILE, EAGAIN, or ENOMEM: the child dies either way, admission
-        // returns the same error either way, and the launcher maps its
-        // deadline-arming, pipe2, and inner spawn failures to one exit status.
-        // Three attempts to classify that signal each found another way it
-        // does not discriminate, so this stops trying and never caches a
-        // negative.
+        // Nothing is remembered between acquisitions, in either direction.
         //
-        // The cost lands where it cannot matter. On a host that can run the
-        // launcher one probe succeeds and every later acquisition is free; on
-        // a host that cannot, each credential-bearing acquisition pays one
-        // fast failing probe and is refused anyway. It also removes the
-        // restart requirement: select the deployment profile or clear the
-        // sysctl, and the next acquisition works.
-        if self.transport_namespace_confirmed.load(Ordering::Acquire) {
-            return true;
-        }
+        // A negative cannot be cached because nothing observable separates a
+        // namespace policy rejection from a launcher that hit EMFILE, EAGAIN,
+        // or ENOMEM, so a bad moment would become a permanent refusal. A
+        // positive cannot be cached either: the AppArmor policy and the
+        // `kernel.apparmor_restrict_unprivileged_userns` sysctl are mutable
+        // while this process runs, and a stale success lets an acquisition
+        // pass its pre-claim check, persist a claim, and then be refused at
+        // admission -- leaving that acquisition id ambiguous for every retry,
+        // including the one made after the policy is restored.
+        //
+        // So the answer is established fresh for each acquisition that needs
+        // it. That is one `git --version` inside the namespace, next to a
+        // runtime verification that hashes the whole sealed closure twice on
+        // the same path; the ordering guarantees are worth more than the
+        // spawn.
         if self.probe_kernel_transport_namespace().await {
-            self.transport_namespace_confirmed
-                .store(true, Ordering::Release);
             return true;
         }
         // Printed with each refusal rather than once per process: it is the
@@ -2093,10 +2090,8 @@ impl SourceAcquirer {
         // acquisition should not have to find a diagnostic emitted earlier.
         //
         // It reports what was observed and lists causes to check, rather than
-        // asserting one. Nothing here can tell a namespace policy rejection
-        // from resource exhaustion, so naming only the profile would hand an
-        // operator a confident wrong diagnosis on a host whose policy is fine
-        // and whose descriptors ran out.
+        // asserting one, because nothing here can tell a namespace policy
+        // rejection from resource exhaustion.
         #[cfg(target_os = "linux")]
         eprintln!(
             "transport_namespace_unusable: the sealed launcher did not run \
@@ -2106,8 +2101,8 @@ impl SourceAcquirer {
              `userns create` is selected; whether \
              kernel.apparmor_restrict_unprivileged_userns is set; and whether \
              this host is out of process slots, file descriptors, or memory. \
-             The refusal is not cached, so an acquisition retried after any of \
-             those is corrected will succeed without a restart."
+             Nothing is cached, so an acquisition retried after any of those \
+             is corrected will succeed without a restart."
         );
         false
     }
