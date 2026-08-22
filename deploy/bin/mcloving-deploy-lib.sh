@@ -2,6 +2,11 @@
 # Sourced, not executed. Requires: bash, sha256sum, python3.
 # shellcheck shell=bash
 
+# The constrained runtime login. Store::preflight_tenant_runtime refuses any
+# other session role, so the guard must require this exact name rather than
+# merely a name different from the migration role.
+MCLOVING_RUNTIME_ROLE="mcloving_tenant"
+
 MCLOVING_DEPLOY_BINARIES=(
   mcloving-controller
   mcloving-agent
@@ -316,8 +321,23 @@ load_environment_file() {
 }
 
 # contract_value NAME — the parsed value, or empty when unset.
+#
+# Command substitution strips every trailing newline from what it captures, so
+# `$(contract_value X)` cannot reproduce a value that ends in one. systemd
+# accepts such values from a quoted multiline assignment and passes them to the
+# service intact, which means a guard reading through `$( )` would validate
+# `/tmp/key.pem` while the service receives `/tmp/key.pem\n` — a contract
+# reported satisfied that the binary then refuses. Use `contract_into` for any
+# check whose verdict must describe the exact bytes systemd supplies.
 contract_value() {
   printf '%s' "${MCLOVING_CONTRACT[$1]-}"
+}
+
+# contract_into VARNAME NAME — assign the parsed value, trailing newlines and
+# all, to VARNAME.
+contract_into() {
+  local -n __mcloving_contract_target="$1"
+  __mcloving_contract_target="${MCLOVING_CONTRACT[$2]-}"
 }
 
 # stage_release LIBEXEC_ROOT RELEASE_DIR MANIFEST CHECKSUMS

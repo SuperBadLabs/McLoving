@@ -645,6 +645,40 @@ if "sha256" in entry[0]:
     raise SystemExit("special node was digested as a regular file")
 SPECIAL
 
+# systemd accepts a quoted multiline value that ends in a newline and passes it
+# to the service intact. A guard reading contracts through command substitution
+# would silently validate the value without it and report a contract satisfied
+# that the binary then refuses, so the reader must reproduce the exact bytes.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  declare -gA MCLOVING_CONTRACT
+  MCLOVING_CONTRACT[NEWLINE_PATH]=$'/tmp/key.pem\n'
+  contract_into exact NEWLINE_PATH
+  # shellcheck disable=SC2154  # contract_into assigns through a nameref
+  [[ "${exact}" == $'/tmp/key.pem\n' ]] || {
+    echo "contract reader dropped a trailing newline systemd would supply" >&2
+    exit 1
+  }
+)
+
+# Distinct database roles are not enough: the controller requires the runtime
+# session role to be exactly mcloving_tenant, so a second privileged role must
+# be refused before anything binds a listener.
+tenant_swap="${workdir}/tenant-swap.env"
+cp "${config_dir}/controller.env" "${tenant_swap}"
+sed -i "s#\(^MCLOVING_DATABASE_URL=.*\)mcloving_tenant#\1mcloving_admin#" "${tenant_swap}"
+if rg -q "mcloving_admin" "${tenant_swap}"; then
+  if "${libexec}/helpers/mcloving-env-guard" controller "${tenant_swap}" >/dev/null 2>&1; then
+    echo "env guard accepted a runtime role other than mcloving_tenant" >&2
+    exit 1
+  fi
+else
+  echo "tenant-role gate could not rewrite MCLOVING_DATABASE_URL; contract shape changed" >&2
+  exit 1
+fi
+rm -f "${tenant_swap}"
+
 # `stat()` succeeding does not mean the bytes can be read. A contract whose
 # mode or ACL withdrew access is drift, and losing the whole canonical document
 # to it would deny CUTOVER-001 the re-read exactly when it matters.
@@ -679,6 +713,32 @@ if "sha256" in entry[0]:
     raise SystemExit("unreadable file was recorded with a digest it could not compute")
 UNREADABLE
 fi
+
+# A symlinked unit root must survive the mcloving-* name filter: the root is
+# named `user`, so filtering it out would leave the document unchanged while
+# systemd read an entirely different tree.
+unit_root="${home}/.config/systemd/user"
+cp -a "${unit_root}" "${unit_root}.alias"
+mv "${unit_root}" "${unit_root}.real"
+ln -s "user.alias" "${unit_root}"
+unit_alias_digests="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+rm -f "${unit_root}"
+rm -rf "${unit_root}.alias"
+mv "${unit_root}.real" "${unit_root}"
+python3 - "${unit_alias_digests}" <<'UNITROOT'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+units = document.get("units", [])
+entry = [item for item in units if item["path"] == ".config/systemd/user"]
+if not entry:
+    raise SystemExit("symlinked unit root missing from the re-read")
+if entry[0].get("kind") != "directory_symlink":
+    raise SystemExit(f"unit root recorded as {entry[0]}")
+if entry[0].get("symlink_target") != "user.alias":
+    raise SystemExit(f"unit root recorded without its target: {entry[0]}")
+UNITROOT
 
 # The root of a walked tree is configuration too. Repointing ~/.config/mcloving
 # itself at another managed directory with identical contents must not leave

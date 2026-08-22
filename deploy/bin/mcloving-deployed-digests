@@ -227,7 +227,13 @@ document = {
         file_record(path, home)
         for unit_dir in unit_dirs
         for path in walk(unit_dir)
-        if path.name.startswith("mcloving-")
+        # The name filter selects the units this deployment owns out of a
+        # directory it shares with everything else the user runs. It must not
+        # discard the unit root itself: `~/.config/systemd/user` is named
+        # `user`, not `mcloving-*`, so repointing that live root at managed
+        # storage holding identical unit bytes would leave this document
+        # unchanged while systemd or Quadlet reads an entirely different tree.
+        if path.name.startswith("mcloving-") or path in unit_dirs
     ],
     "environment_contracts": [
         file_record(path, home)

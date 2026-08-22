@@ -33,7 +33,7 @@ load_environment_file "${env_file}"
 
 case "${service}" in
   controller)
-    listen="$(contract_value MCLOVING_LISTEN)"
+    contract_into listen MCLOVING_LISTEN
     [[ -n "${listen}" ]] || {
       echo "mcloving-health: MCLOVING_LISTEN is required in ${env_file}" >&2
       exit 1
@@ -53,7 +53,7 @@ case "${service}" in
     exit 1
     ;;
   agent)
-    journal="$(contract_value MCLOVING_AGENT_JOURNAL_PATH)"
+    contract_into journal MCLOVING_AGENT_JOURNAL_PATH
     [[ -n "${journal}" ]] || {
       echo "mcloving-health: MCLOVING_AGENT_JOURNAL_PATH is required in ${env_file}" >&2
       exit 1

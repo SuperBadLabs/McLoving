@@ -31,7 +31,7 @@ fail() {
 require() {
   local name value
   for name in "$@"; do
-    value="$(contract_value "${name}")"
+    contract_into value "${name}"
     if [[ -z "${value}" ]]; then
       fail "required variable ${name} is unset or empty in ${env_file}"
     fi
@@ -44,7 +44,7 @@ require() {
 require_uuid() {
   local name value
   for name in "$@"; do
-    value="$(contract_value "${name}")"
+    contract_into value "${name}"
     if [[ ! "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
       fail "variable ${name} must be a UUID, got ${value:-<empty>}"
     fi
@@ -54,7 +54,7 @@ require_uuid() {
 require_readable_file() {
   local name value
   for name in "$@"; do
-    value="$(contract_value "${name}")"
+    contract_into value "${name}"
     if [[ ! -r "${value}" ]]; then
       fail "variable ${name} must name a readable file; ${value:-<empty>} is not"
     fi
@@ -63,7 +63,7 @@ require_readable_file() {
 
 require_min_bytes() {
   local name="$1" minimum="$2" value bytes
-  value="$(contract_value "${name}")"
+  contract_into value "${name}"
   # Bytes, not characters. ${#value} counts characters under a UTF-8 locale,
   # while the controller measures String::len(), which is the UTF-8 byte
   # length — so a valid multi-byte token would be refused here and accepted
@@ -102,8 +102,10 @@ case "${service}" in
     require_uuid MCLOVING_ORGANIZATION_ID
     require_min_bytes MCLOVING_API_TOKEN 32
     require_min_bytes MCLOVING_ARTIFACT_AGENT_TOKEN 32
-    if [[ "$(contract_value MCLOVING_API_TOKEN)" \
-      == "$(contract_value MCLOVING_ARTIFACT_AGENT_TOKEN)" ]]; then
+    local api_token artifact_token
+    contract_into api_token MCLOVING_API_TOKEN
+    contract_into artifact_token MCLOVING_ARTIFACT_AGENT_TOKEN
+    if [[ "${api_token}" == "${artifact_token}" ]]; then
       fail "MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct"
     fi
     # Compare the roles the URLs authenticate as, not the URL text. Two
@@ -111,13 +113,24 @@ case "${service}" in
     # the other — would otherwise pass as distinct, and the controller would
     # run its runtime pool as the migration role, which is exactly what this
     # check exists to prevent.
-    migration_role="$(database_url_role "$(contract_value MCLOVING_MIGRATION_DATABASE_URL)")"
-    runtime_role="$(database_url_role "$(contract_value MCLOVING_DATABASE_URL)")"
+    local migration_url runtime_url
+    contract_into migration_url MCLOVING_MIGRATION_DATABASE_URL
+    contract_into runtime_url MCLOVING_DATABASE_URL
+    migration_role="$(database_url_role "${migration_url}")"
+    runtime_role="$(database_url_role "${runtime_url}")"
     if [[ -z "${migration_role}" || -z "${runtime_role}" ]]; then
       fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must each name a role"
     fi
     if [[ "${migration_role}" == "${runtime_role}" ]]; then
       fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must use distinct roles, both are ${runtime_role}"
+    fi
+    # Distinct is not sufficient. Store::preflight_tenant_runtime requires the
+    # runtime session role to be exactly MCLOVING_RUNTIME_ROLE, so a typo or a
+    # second privileged role passes an inequality check here and fails after
+    # the controller has already bound its listeners and run migrations. The
+    # guard exists to stop that before anything starts.
+    if [[ "${runtime_role}" != "${MCLOVING_RUNTIME_ROLE}" ]]; then
+      fail "MCLOVING_DATABASE_URL must use the constrained ${MCLOVING_RUNTIME_ROLE} role, got ${runtime_role}"
     fi
     require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
       MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
@@ -134,7 +147,7 @@ case "${service}" in
       MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
     # The agent refuses to spawn work into a missing workspace root; require
     # it up front so the unit fails at start, not at first assignment.
-    workspace_root="$(contract_value MCLOVING_AGENT_WORKSPACE_ROOT)"
+    contract_into workspace_root MCLOVING_AGENT_WORKSPACE_ROOT
     if [[ ! -d "${workspace_root}" ]]; then
       fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${workspace_root}"
     fi
