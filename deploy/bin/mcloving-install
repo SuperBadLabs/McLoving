@@ -68,6 +68,26 @@ quadlet_root="${home_dir}/.config/containers/systemd"
 mkdir -p "${libexec_root}/helpers" "${config_root}/pki" "${unit_root}" "${quadlet_root}"
 chmod 0700 "${config_root}" "${config_root}/pki"
 
+# Decided before staging, not after. Repointing current here would leave
+# running services executing the old binaries while the digest re-read reports
+# the new release as current -- a deployment that disagrees with its own
+# canonical identity. Changing the active release is mcloving-upgrade's job,
+# because it stops the services, flips the symlinks, restarts, and gates on
+# health; this installer does none of that.
+#
+# The prospective id is computed from the source directory purely to reach that
+# refusal before anything is published. It is not the release identity: that is
+# still taken from the verified copy below, because a source can change after
+# it is read. Refusing after staging would leave a rejected command having
+# added a release to disk and to the canonical inventory.
+if [[ -L "${libexec_root}/current" ]] && release_dir_is_complete "${release_dir}"; then
+  old_target="$(readlink "${libexec_root}/current")"
+  prospective="$(release_id "${release_dir}")"
+  if [[ "${old_target}" != "releases/${prospective}" ]]; then
+    deploy_fail "release ${old_target} is already installed; use mcloving-upgrade --release-dir ... to change the active release"
+  fi
+fi
+
 target="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
 id="$(basename "${target}")"
 echo "staged release ${id} at ${target}"
@@ -75,17 +95,50 @@ echo "staged release ${id} at ${target}"
 if [[ -L "${libexec_root}/current" ]]; then
   old_target="$(readlink "${libexec_root}/current")"
   if [[ "${old_target}" != "releases/${id}" ]]; then
-    # Repointing current here would leave running services executing the old
-    # binaries while the digest re-read reports the new release as current --
-    # a deployment that disagrees with its own canonical identity. Changing the
-    # active release is mcloving-upgrade's job, because it stops the services,
-    # flips the symlinks, restarts, and gates on health; this installer does
-    # none of that.
+    # Reachable only if the source changed between the pre-check and the copy.
+    # The copy is the identity, so it decides -- and the release it published
+    # is removed, since nothing references it and the command is refused.
+    rm -rf -- "${libexec_root}/releases/${id}"
     deploy_fail "release ${old_target} is already installed; use mcloving-upgrade --release-dir ... to change the active release"
   fi
 fi
 point_symlink "${libexec_root}/current" "releases/${id}"
 echo "current release: releases/${id}"
+
+# Replacing units and helpers under running services would leave those
+# processes on the old unit-applied environment and sandbox settings while the
+# digest document records the new files. `daemon-reload` does not fix that: it
+# reloads the manager's configuration, and applying a changed unit to an
+# already-active service needs a restart, which this installer does not do.
+# Under --no-systemd nothing here is managed, so replacement is safe.
+if [[ "${no_systemd}" != "1" ]]; then
+  asset_changed=""
+  for asset in \
+    "${deploy_root}/bin/mcloving-env-guard:${libexec_root}/helpers/mcloving-env-guard" \
+    "${deploy_root}/bin/mcloving-health:${libexec_root}/helpers/mcloving-health" \
+    "${deploy_root}/bin/mcloving-db-init:${libexec_root}/helpers/mcloving-db-init" \
+    "${deploy_root}/bin/mcloving-deployed-digests:${libexec_root}/helpers/mcloving-deployed-digests" \
+    "${deploy_root}/bin/mcloving-unit-command:${libexec_root}/helpers/mcloving-unit-command" \
+    "${deploy_root}/bin/mcloving-rollback:${libexec_root}/helpers/mcloving-rollback" \
+    "${deploy_root}/bin/mcloving-upgrade:${libexec_root}/helpers/mcloving-upgrade" \
+    "${deploy_root}/bin/mcloving-deploy-lib.sh:${libexec_root}/helpers/mcloving-deploy-lib.sh" \
+    "${deploy_root}/systemd/mcloving-db-init.service:${unit_root}/mcloving-db-init.service" \
+    "${deploy_root}/systemd/mcloving-controller.service:${unit_root}/mcloving-controller.service" \
+    "${deploy_root}/systemd/mcloving-agent.service:${unit_root}/mcloving-agent.service" \
+    "${deploy_root}/podman/mcloving-postgres.container:${quadlet_root}/mcloving-postgres.container" \
+    "${deploy_root}/podman/mcloving-postgres-data.volume:${quadlet_root}/mcloving-postgres-data.volume" \
+  ; do
+    source_asset="${asset%%:*}"
+    installed_asset="${asset#*:}"
+    if [[ -e "${installed_asset}" ]] && ! cmp -s "${source_asset}" "${installed_asset}"; then
+      asset_changed="${installed_asset}"
+      break
+    fi
+  done
+  if [[ -n "${asset_changed}" ]]; then
+    deploy_fail "${asset_changed} differs from this deployment tree and services may be active; stop the mcloving units, rerun with --no-systemd to replace the assets, then start them again"
+  fi
+fi
 
 # mcloving-rollback is installed too: the upgrade path prints it as the
 # recovery command, and a recovery command that is not on the host is not a

@@ -109,6 +109,18 @@ release_id() {
   done | sha256sum | awk '{print substr($1, 1, 12)}'
 }
 
+# release_dir_is_complete RELEASE_DIR — every deployed binary is present.
+#
+# A cheap precondition for computing a prospective release id from a source
+# directory. It is not verification: verify_release_dir does that against the
+# staged copy.
+release_dir_is_complete() {
+  local release_dir="$1" binary
+  for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+    [[ -f "${release_dir}/${binary}" ]] || return 1
+  done
+}
+
 # Parse systemd's environment-file grammar without executing it. Sourcing
 # would let a value that is literal to systemd — an unquoted token containing
 # `&`, `$`, or a space — fork jobs, run commands, and expand variables as the

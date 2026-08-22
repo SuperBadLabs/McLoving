@@ -773,6 +773,7 @@ if compgen -G "${rerun_libexec}/releases/.staging.*" >/dev/null; then
 fi
 # A different release must be refused and must change nothing.
 rerun_before="$(readlink "${rerun_libexec}/current")"
+rerun_releases_before="$(ls "${rerun_libexec}/releases" | sort | tr '\n' ' ')"
 if "${repo_root}/deploy/bin/mcloving-install" --home "${rerun_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null 2>&1; then
@@ -787,6 +788,13 @@ if compgen -G "${rerun_libexec}/releases/.staging.*" >/dev/null; then
   echo "a refused installer rerun left staging behind" >&2
   exit 1
 fi
+# A refused command must not have published anything either: staging the copy
+# before deciding would add a release to disk and to the canonical inventory
+# under an operation reported as refused.
+[[ "$(ls "${rerun_libexec}/releases" | sort | tr '\n' ' ')" == "${rerun_releases_before}" ]] || {
+  echo "a refused installer rerun still published a release" >&2
+  exit 1
+}
 rm -rf "${rerun_home}"
 
 # A readable directory is not a readable file. `-r` alone accepts one, and the
