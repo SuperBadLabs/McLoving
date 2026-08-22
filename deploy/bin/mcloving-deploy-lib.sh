@@ -400,6 +400,38 @@ if name:
 DBNAME
 }
 
+# database_url_host URL -> the host, or empty.
+database_url_host() {
+  python3 - "$1" <<'DBHOST'
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1]
+if not url:
+    raise SystemExit(0)
+host = urlsplit(url).hostname
+if host:
+    print(host)
+DBHOST
+}
+
+# database_url_is_loopback URL -> success when the host is a loopback address.
+database_url_is_loopback() {
+  python3 - "$1" <<'LOOPBACK'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+host = urlsplit(sys.argv[1]).hostname or ""
+if host == "localhost":
+    raise SystemExit(0)
+try:
+    raise SystemExit(0 if ipaddress.ip_address(host).is_loopback else 1)
+except ValueError:
+    raise SystemExit(1)
+LOOPBACK
+}
+
 # load_environment_file ENV_FILE — parse the contract into MCLOVING_CONTRACT.
 #
 # The values are deliberately not assigned to shell variables. Bash is
@@ -477,6 +509,11 @@ stage_release() {
   staging="${libexec_root}/releases/.staging.$$"
   rm -rf "${staging}"
   mkdir -p "${staging}"
+  # Explicit modes, not whatever the caller's umask happens to be. Under
+  # `umask 000` these would be 0777, and a world-writable releases directory
+  # lets another local user rename a verified binary out and a chosen one in --
+  # code execution as the service account, with every file still mode 0755.
+  chmod 0700 "${libexec_root}/releases" "${staging}"
   # verify_release_dir calls deploy_fail on several paths, and deploy_fail
   # exits. In command substitution that ends the subshell immediately, so an
   # explicit rm after the call is unreachable for exactly the failures that

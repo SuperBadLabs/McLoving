@@ -66,7 +66,15 @@ unit_root="${home_dir}/.config/systemd/user"
 quadlet_root="${home_dir}/.config/containers/systemd"
 
 mkdir -p "${libexec_root}/helpers" "${config_root}/pki" "${unit_root}" "${quadlet_root}"
-chmod 0700 "${config_root}" "${config_root}/pki"
+# Explicit modes rather than whatever umask the operator invoked us with. A
+# world-writable libexec or helpers directory lets another local user rename a
+# verified binary out and a chosen one in -- code execution as the service
+# account, with every file still mode 0755. The unit directories are shared
+# XDG locations that may hold unrelated content, so those only have the group
+# and other write bits removed rather than being forced to a fixed mode.
+chmod 0700 "${config_root}" "${config_root}/pki" \
+  "${libexec_root}" "${libexec_root}/helpers"
+chmod go-w "${unit_root}" "${quadlet_root}"
 
 # Decided before staging, not after. Repointing current here would leave
 # running services executing the old binaries while the digest re-read reports

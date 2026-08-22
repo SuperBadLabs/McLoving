@@ -931,6 +931,50 @@ if "${libexec}/helpers/mcloving-env-guard" db-init "${db_mismatch}" >/dev/null 2
 fi
 rm -f "${db_mismatch}"
 
+# Deployment directories must not inherit a permissive umask. World-writable
+# releases or helpers lets another local user rename a verified binary out and
+# a chosen one in -- code execution as the service account with every file
+# still 0755.
+umask_home="${workdir}/umask-home"
+rm -rf "${umask_home}"
+mkdir -p "${umask_home}"
+( umask 000
+  "${repo_root}/deploy/bin/mcloving-install" --home "${umask_home}" \
+    --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+    --no-systemd >/dev/null )
+for guarded_dir in \
+  "${umask_home}/.local/libexec/mcloving" \
+  "${umask_home}/.local/libexec/mcloving/helpers" \
+  "${umask_home}/.local/libexec/mcloving/releases" \
+  "${umask_home}/.local/libexec/mcloving/current" \
+  "${umask_home}/.config/mcloving" \
+  "${umask_home}/.config/systemd/user" \
+  "${umask_home}/.config/containers/systemd"; do
+  mode="$(stat -Lc '%a' "${guarded_dir}")"
+  case "${mode}" in
+    *[2367])
+      echo "deployment directory ${guarded_dir} is group- or world-writable (${mode})" >&2
+      exit 1
+      ;;
+  esac
+done
+rm -rf "${umask_home}"
+
+# The bootstrap's two halves must address one instance, not merely one database
+# name: provisioning runs podman exec into the local container.
+for bad_url in "postgres://mcloving:pw@remote.example:5432/mcloving" \
+  "postgres://someoneelse:pw@127.0.0.1:5432/mcloving"; do
+  endpoint_contract="${workdir}/endpoint.env"
+  cp "${config_dir}/db-init.env" "${endpoint_contract}"
+  sed -i "s#^MCLOVING_MIGRATION_DATABASE_URL=.*#MCLOVING_MIGRATION_DATABASE_URL=${bad_url}#" \
+    "${endpoint_contract}"
+  if "${libexec}/helpers/mcloving-env-guard" db-init "${endpoint_contract}" >/dev/null 2>&1; then
+    echo "env guard accepted a bootstrap URL addressing ${bad_url}" >&2
+    exit 1
+  fi
+  rm -f "${endpoint_contract}"
+done
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

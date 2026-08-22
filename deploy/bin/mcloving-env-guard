@@ -102,6 +102,17 @@ case "${service}" in
       || fail "MCLOVING_MIGRATION_DATABASE_URL must name a database"
     [[ "${migration_db}" == "${postgres_db}" ]] \
       || fail "MCLOVING_MIGRATION_DATABASE_URL names database ${migration_db}, but MCLOVING_POSTGRES_DB is ${postgres_db}; the bootstrap migrates through the URL and provisions through the container, so both must name one database"
+    # The database name alone does not identify an instance. The provisioning
+    # half runs `podman exec` into a local container, so a URL pointing at a
+    # remote host with a same-named database would have the bootstrap migrate
+    # one server and then alter roles in another. The container publishes to
+    # loopback, so the URL must address loopback too, and its role must be the
+    # superuser the container was created with.
+    database_url_is_loopback "${migration_url}" \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL must address the local PostgreSQL container on loopback, got host $(database_url_host "${migration_url}")"
+    contract_into postgres_superuser MCLOVING_POSTGRES_SUPERUSER
+    [[ "$(database_url_role "${migration_url}")" == "${postgres_superuser}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL uses role $(database_url_role "${migration_url}"), but MCLOVING_POSTGRES_SUPERUSER is ${postgres_superuser}"
     ;;
   controller)
     require MCLOVING_MIGRATION_DATABASE_URL MCLOVING_DATABASE_URL \
