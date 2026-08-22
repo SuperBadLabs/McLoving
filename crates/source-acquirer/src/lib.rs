@@ -838,10 +838,6 @@ impl SourceAcquirer {
         // right after selecting the deployment profile, which is the one that
         // should work.
         #[cfg(unix)]
-        let mut runtime_verified = false;
-        #[cfg(not(unix))]
-        let runtime_verified = false;
-        #[cfg(unix)]
         if Url::parse(&request.repository_url)
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
         {
@@ -849,14 +845,14 @@ impl SourceAcquirer {
             // interpreter and LD_LIBRARY_PATH resolve through the runtime
             // directory, so the binding is verified before anything sealed
             // runs and its error is returned as itself rather than reduced to
-            // namespace unavailability. This is the acquisition's own
-            // verification performed here rather than an additional one: it
-            // re-hashes git, git-remote-https, askpass, the CA bundle, the
-            // preload file, and the whole runtime closure, and doing that
-            // twice would spend a deadline-bound request's budget re-proving
-            // what it just proved.
+            // namespace unavailability.
+            //
+            // This does not stand in for the pre-claim verification below. The
+            // transport lock between them is shared and can be waited on for a
+            // long time, so a binding proved before that wait says nothing
+            // about the binding at the moment the claim is written. This one
+            // exists to protect the probe; that one gates the claim.
             self.verify_runtime_authority(true).await?;
-            runtime_verified = true;
             if !self.kernel_transport_namespace_usable().await {
                 return Err(SourceError::TransportNamespaceUnavailable);
             }
@@ -871,13 +867,13 @@ impl SourceAcquirer {
             self.config.max_transport_bytes,
         )?;
         ensure_clean_transport_root(&self.config.transport_root).await?;
-        // Skipped only when the preflight above already verified for this
-        // acquisition; an acquisition that never reaches the preflight -- any
-        // scheme other than http(s) -- still binds the runtime before its
-        // claim rather than at its first git spawn.
-        if !runtime_verified {
-            self.verify_runtime_authority(true).await?;
-        }
+        // Unconditional, and deliberately after the transport lock. Waiting
+        // on that lock can take arbitrarily long, and the credential file or
+        // the runtime closure can change during the wait; skipping this
+        // because the probe verified earlier would persist a claim for an
+        // acquisition whose first git spawn then returns BindingMismatch,
+        // leaving that acquisition id ambiguous for every retry.
+        self.verify_runtime_authority(true).await?;
         // The filesystem validation, the transport-root scan, and the runtime
         // authority hashing above all take real time, so a lock won just before
         // the deadline can leave it already passed by here. The claim is the
