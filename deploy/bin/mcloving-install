@@ -75,8 +75,13 @@ echo "staged release ${id} at ${target}"
 if [[ -L "${libexec_root}/current" ]]; then
   old_target="$(readlink "${libexec_root}/current")"
   if [[ "${old_target}" != "releases/${id}" ]]; then
-    point_symlink "${libexec_root}/previous" "${old_target}"
-    echo "previous release preserved: ${old_target}"
+    # Repointing current here would leave running services executing the old
+    # binaries while the digest re-read reports the new release as current --
+    # a deployment that disagrees with its own canonical identity. Changing the
+    # active release is mcloving-upgrade's job, because it stops the services,
+    # flips the symlinks, restarts, and gates on health; this installer does
+    # none of that.
+    deploy_fail "release ${old_target} is already installed; use mcloving-upgrade --release-dir ... to change the active release"
   fi
 fi
 point_symlink "${libexec_root}/current" "releases/${id}"

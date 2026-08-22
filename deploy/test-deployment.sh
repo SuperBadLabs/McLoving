@@ -750,6 +750,45 @@ if any(item.get("executable") is not False for item in entry):
     raise SystemExit(f"non-executable agent not recorded as such: {entry}")
 MODE
 
+# Changing the active release is the upgrade path's job: it stops the services,
+# flips the symlinks, restarts, and gates on health. An installer rerun would
+# repoint current under running processes, leaving them on the old binaries
+# while the digest re-read reports the new release as current. Run in its own
+# home so the assertion does not depend on which release is current here.
+rerun_home="${workdir}/rerun-home"
+rm -rf "${rerun_home}"
+mkdir -p "${rerun_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${rerun_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+rerun_libexec="${rerun_home}/.local/libexec/mcloving"
+# Reinstalling the release that is already current is accepted, and must not
+# leave the redundant staging copy behind.
+"${repo_root}/deploy/bin/mcloving-install" --home "${rerun_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+if compgen -G "${rerun_libexec}/releases/.staging.*" >/dev/null; then
+  echo "reinstalling the current release left a redundant staging copy" >&2
+  exit 1
+fi
+# A different release must be refused and must change nothing.
+rerun_before="$(readlink "${rerun_libexec}/current")"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${rerun_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "install repointed current for a differing existing installation" >&2
+  exit 1
+fi
+[[ "$(readlink "${rerun_libexec}/current")" == "${rerun_before}" ]] || {
+  echo "a refused installer rerun still moved the current release" >&2
+  exit 1
+}
+if compgen -G "${rerun_libexec}/releases/.staging.*" >/dev/null; then
+  echo "a refused installer rerun left staging behind" >&2
+  exit 1
+fi
+rm -rf "${rerun_home}"
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

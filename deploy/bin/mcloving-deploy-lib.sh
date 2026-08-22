@@ -380,6 +380,13 @@ stage_release() {
   id="$(release_id "${staging}")"
   target="${libexec_root}/releases/${id}"
   if [[ -d "${target}" ]]; then
+    # The release is already published, so the copy just made is redundant.
+    # Removing it here rather than leaving it to the trap matters because the
+    # trap is cleared before this function returns: otherwise reinstalling the
+    # current release, or upgrading back to a previously staged one, leaves
+    # releases/.staging.$$ behind and the digest re-read reports those
+    # duplicate binaries as release inventory.
+    rm -rf -- "${staging}"
     verify_staged_release "${target}"
   else
     # Both callers run this function inside command substitution, and bash
