@@ -801,8 +801,9 @@ impl SourceAcquirer {
         // discovery to every acquisition queued behind it, and a deadline-bound
         // request would spend its own expiry waiting for someone else's probe.
         #[cfg(unix)]
-        if Url::parse(&request.repository_url)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        if self.transport_namespace.get().is_none()
+            && Url::parse(&request.repository_url)
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
         {
             self.kernel_transport_namespace_usable().await;
         }
@@ -3964,12 +3965,28 @@ async fn lock_output_root_until(
 ) -> Result<OutputRootLock, SourceError> {
     loop {
         if let Some(lock) = try_lock_output_root(root).await? {
+            // Winning the lock is not the same as still having time to use it:
+            // the holder may have released it after the deadline passed. The
+            // caller writes the claim immediately after this returns, so
+            // accepting an expired lock here would leave a claim behind for an
+            // acquisition that then refuses as expired, and every later attempt
+            // with that acquisition id would fail as AmbiguousClaim. Drop it
+            // and refuse instead; the lock is released with the binding.
+            if now_unix_ms()? >= deadline_unix_ms {
+                drop(lock);
+                return Err(SourceError::ExpiredRequest);
+            }
             return Ok(lock);
         }
-        if now_unix_ms()? >= deadline_unix_ms {
+        let now = now_unix_ms()?;
+        if now >= deadline_unix_ms {
             return Err(SourceError::ExpiredRequest);
         }
-        tokio::time::sleep(TRANSPORT_LOCK_POLL_INTERVAL).await;
+        // Never sleep past the deadline: a fixed interval would report the
+        // expiry up to one interval later than it happened.
+        let remaining = u64::try_from(deadline_unix_ms - now).unwrap_or(u64::MAX);
+        tokio::time::sleep(TRANSPORT_LOCK_POLL_INTERVAL.min(Duration::from_millis(remaining)))
+            .await;
     }
 }
 
