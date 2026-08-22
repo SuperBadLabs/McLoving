@@ -806,13 +806,17 @@ impl SourceAcquirer {
         // probing under that lock charges one process's one-time host
         // discovery to every acquisition queued behind it, and a deadline-bound
         // request would spend its own expiry waiting for someone else's probe.
+        // Settled before any lock is taken, and its verdict is kept rather
+        // than discarded: whether this host can execute the sealed launcher is
+        // a property of the host, not of the request, and probing it under the
+        // shared transport lock would charge one process's discovery to every
+        // acquisition queued behind it.
         #[cfg(unix)]
-        if self.transport_namespace_confirmed.get().is_none()
-            && Url::parse(&request.repository_url)
-                .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-        {
-            self.kernel_transport_namespace_usable().await;
-        }
+        let transport_namespace_refused = Url::parse(&request.repository_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+            && !self.kernel_transport_namespace_usable().await;
+        #[cfg(not(unix))]
+        let transport_namespace_refused = false;
         let _process_guard = self.admission.lock().await;
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
@@ -826,6 +830,14 @@ impl SourceAcquirer {
             }
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
+        }
+        // Refused here, after validation and receipt replay and before the
+        // claim: this request will fetch nothing, so persisting a claim for it
+        // would leave every retry with the same acquisition id failing as
+        // AmbiguousClaim -- including the retry an operator makes right after
+        // selecting the deployment profile, which is the one that should work.
+        if transport_namespace_refused {
+            return Err(SourceError::TransportNamespaceUnavailable);
         }
         let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         let _transport_lock =
@@ -2043,14 +2055,23 @@ impl SourceAcquirer {
         // Printed with each refusal rather than once per process: it is the
         // reason for that refusal, and an operator reading a failed
         // acquisition should not have to find a diagnostic emitted earlier.
+        //
+        // It reports what was observed and lists causes to check, rather than
+        // asserting one. Nothing here can tell a namespace policy rejection
+        // from resource exhaustion, so naming only the profile would hand an
+        // operator a confident wrong diagnosis on a host whose policy is fine
+        // and whose descriptors ran out.
         #[cfg(target_os = "linux")]
         eprintln!(
-            "transport_namespace_unusable: the kernel transport namespace \
-             cannot execute the sealed launcher on this host, so \
-             credential-bearing transport is refused as \
-             transport_namespace_unavailable; select the deployment \
-             AppArmor profile that grants `userns create`, or clear \
-             kernel.apparmor_restrict_unprivileged_userns"
+            "transport_namespace_unusable: the sealed launcher did not run \
+             inside the kernel transport namespace, so credential-bearing \
+             transport is refused as transport_namespace_unavailable. Check, \
+             in order: whether the deployment AppArmor profile granting \
+             `userns create` is selected; whether \
+             kernel.apparmor_restrict_unprivileged_userns is set; and whether \
+             this host is out of process slots, file descriptors, or memory. \
+             The refusal is not cached, so an acquisition retried after any of \
+             those is corrected will succeed without a restart."
         );
         false
     }
