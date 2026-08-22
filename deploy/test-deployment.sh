@@ -749,13 +749,18 @@ import json
 import sys
 
 document = json.loads(sys.argv[1])
+# Scoped to the release that `current` points at. Earlier upgrades leave other
+# release directories on disk, and only the current one had its execute bit
+# stripped -- asserting across all of them tests the wrong thing.
+current = document.get("current_release")
+if not current:
+    raise SystemExit("re-read has no current release")
+suffix = f"/{current}/mcloving-agent"
 entry = [
-    item
-    for item in document.get("releases", [])
-    if item["path"].endswith("/mcloving-agent")
+    item for item in document.get("releases", []) if item["path"].endswith(suffix)
 ]
 if not entry:
-    raise SystemExit("deployed agent missing from the re-read")
+    raise SystemExit(f"agent of the current release {current} missing from the re-read")
 if any(item.get("executable") is not False for item in entry):
     raise SystemExit(f"non-executable agent not recorded as such: {entry}")
 MODE
