@@ -797,6 +797,49 @@ fi
 }
 rm -rf "${rerun_home}"
 
+# A release entry that is not a regular file must be refused before it is
+# copied: `install` reading a FIFO blocks until something writes, and reading a
+# symlinked device fills the disk, both before digest verification runs.
+fifo_release="${workdir}/fifo-release"
+rm -rf "${fifo_release}"
+cp -r "${release_dir}" "${fifo_release}"
+rm -f "${fifo_release}/mcloving-cli"
+mkfifo "${fifo_release}/mcloving-cli"
+fifo_home="${workdir}/fifo-home"
+rm -rf "${fifo_home}"
+mkdir -p "${fifo_home}"
+fifo_status=0
+timeout 60 "${repo_root}/deploy/bin/mcloving-install" --home "${fifo_home}" \
+  --release-dir "${fifo_release}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null 2>&1 || fifo_status=$?
+if [[ "${fifo_status}" -eq 0 ]]; then
+  echo "install accepted a release entry that is not a regular file" >&2
+  exit 1
+fi
+if [[ "${fifo_status}" -eq 124 ]]; then
+  echo "install hung reading a FIFO release entry" >&2
+  exit 1
+fi
+rm -rf "${fifo_release}" "${fifo_home}"
+
+# Identical bytes without execute permission still cannot run, so a published
+# release that lost its execute bits must be refused rather than reported
+# usable.
+noexec_home="${workdir}/noexec-home"
+rm -rf "${noexec_home}"
+mkdir -p "${noexec_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${noexec_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+chmod 0644 "${noexec_home}/.local/libexec/mcloving/current/mcloving-agent"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${noexec_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null 2>&1; then
+  echo "install reported success over a release whose binaries cannot execute" >&2
+  exit 1
+fi
+rm -rf "${noexec_home}"
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

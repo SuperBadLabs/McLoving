@@ -384,6 +384,14 @@ stage_release() {
   # shellcheck disable=SC2064  # expand the path now; the variable is reassigned
   trap "rm -rf -- $(printf '%q' "${staging}")" EXIT
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+    # Checked before the copy, because the copy is what gets hurt. `install`
+    # reading a FIFO blocks until something writes to it, and reading a device
+    # such as a symlinked /dev/zero fills the disk -- both before
+    # verify_release_dir ever sees the bytes. `-f` is true only for a regular
+    # file and follows symlinks, so it rejects both while still admitting a
+    # symlinked release directory.
+    [[ -f "${release_dir}/${binary}" ]] \
+      || deploy_fail "release ${release_dir} does not provide ${binary} as a regular file"
     install -m 0755 "${release_dir}/${binary}" "${staging}/${binary}"
   done
   if ! verify_release_dir "${staging}" "${manifest}" "${checksums}"; then
@@ -434,8 +442,16 @@ verify_staged_release() {
   local release_path="$1" expected actual
   expected="$(basename "${release_path}")"
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+    # Executable, not merely present with the right bytes. Identical content
+    # with the execute bits stripped passes a digest check and cannot be run,
+    # so reinstalling such a release would report completion over binaries the
+    # services cannot start, and upgrading back to one costs an outage that
+    # only startup discovers. mcloving-rollback already requires this of the
+    # release it is about to make current.
     [[ -f "${release_path}/${binary}" ]] \
       || deploy_fail "release ${release_path} is missing ${binary}"
+    [[ -x "${release_path}/${binary}" ]] \
+      || deploy_fail "release ${release_path} has ${binary} without execute permission; refusing to use it"
   done
   actual="$(release_id "${release_path}")"
   [[ "${actual}" == "${expected}" ]] \
