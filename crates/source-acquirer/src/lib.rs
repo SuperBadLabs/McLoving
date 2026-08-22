@@ -582,6 +582,11 @@ pub enum SourceError {
     InvalidStoredReceipt,
     #[error("source acquirer private state is unavailable")]
     StateUnavailable,
+    #[error(
+        "the kernel transport namespace cannot execute the sealed launcher on this host, \
+         so credential-bearing transport cannot be bounded by a kernel deadline"
+    )]
+    TransportNamespaceUnavailable,
 }
 
 impl SourceError {
@@ -602,6 +607,7 @@ impl SourceError {
             Self::AmbiguousClaim => "ambiguous_claim",
             Self::InvalidStoredReceipt => "invalid_stored_receipt",
             Self::StateUnavailable => "state_unavailable",
+            Self::TransportNamespaceUnavailable => "transport_namespace_unavailable",
         }
     }
 }
@@ -1686,8 +1692,19 @@ impl SourceAcquirer {
         let requires_kernel_transport_deadline = credential_bearing
             && repository_url
                 .and_then(|value| Url::parse(value).ok())
-                .is_some_and(|value| matches!(value.scheme(), "http" | "https"))
-            && self.kernel_transport_namespace_usable().await;
+                .is_some_and(|value| matches!(value.scheme(), "http" | "https"));
+        // SOURCE_ACQUISITION_V1 requires a missing or unselected deployment
+        // profile to fail closed before Git starts, and the reason is exactly
+        // what a fallback would give up: the kernel timer and the
+        // PID-namespace PDEATHSIG chain are what stop a descheduled parent
+        // from letting buffered credential authority outlive the admitted
+        // transport deadline. Userspace enforcement cannot make that promise,
+        // so a host that cannot run the sealed launcher cannot carry a
+        // credential-bearing transport at all. Refuse by name instead.
+        #[cfg(unix)]
+        if requires_kernel_transport_deadline && !self.kernel_transport_namespace_usable().await {
+            return Err(SourceError::TransportNamespaceUnavailable);
+        }
         #[cfg(not(unix))]
         let requires_kernel_transport_deadline = false;
         let command_executable = if requires_kernel_transport_deadline {
@@ -1982,9 +1999,11 @@ impl SourceAcquirer {
     // the `unprivileged_userns` profile, whose exec rules never match the
     // sealed memfd-backed executables because they are disconnected paths) can
     // create the transport namespace but cannot execute anything inside it.
-    // Probe the launcher end to end once; when the namespaced transport cannot
-    // run, fall back to the direct spawn, which keeps the credential deadline
-    // timers, endpoint pinning, and process-group termination.
+    // Probe the launcher end to end once so the condition is named rather than
+    // surfacing as an opaque `source_unavailable` on every credential-bearing
+    // fetch. The probe decides only whether to refuse: there is no fallback,
+    // because the guarantee the namespace provides is not one userspace can
+    // reproduce.
     async fn kernel_transport_namespace_usable(&self) -> bool {
         *self
             .transport_namespace
@@ -1992,14 +2011,16 @@ impl SourceAcquirer {
                 let usable = self.probe_kernel_transport_namespace().await;
                 #[cfg(target_os = "linux")]
                 if !usable {
-                    // A dropped hardening layer must never be silent: name the
-                    // downgrade once so operators can see which deadline
-                    // enforcement this host actually runs.
+                    // Name the host condition once, on the diagnostic stream,
+                    // so the operator sees why every credential-bearing
+                    // acquisition on this host now refuses and what to change.
                     eprintln!(
                         "transport_namespace_unusable: the kernel transport namespace \
-                         cannot execute the sealed launcher on this host; \
-                         credential-bearing transports fall back to the direct \
-                         launcher with userspace deadline enforcement"
+                         cannot execute the sealed launcher on this host, so \
+                         credential-bearing transport is refused as \
+                         transport_namespace_unavailable; select the deployment \
+                         AppArmor profile that grants `userns create`, or clear \
+                         kernel.apparmor_restrict_unprivileged_userns"
                     );
                 }
                 usable
