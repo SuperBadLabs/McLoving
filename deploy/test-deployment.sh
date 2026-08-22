@@ -694,6 +694,35 @@ if compgen -G "${quoted_staging}/.local/libexec/mcloving/releases/.staging.*" >/
 fi
 rm -rf "${quoted_staging}"
 
+# Content is not the whole identity. A deployed binary that loses its execute
+# bit keeps its digest and size while systemd can no longer run it, and the
+# release manifest records executable: true per component, so the re-read has
+# to carry the mode or the cutover freeze cannot see that drift.
+mode_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+current_agent="${libexec}/current/mcloving-agent"
+chmod 0644 "${current_agent}"
+mode_after="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+chmod 0755 "${current_agent}"
+if [[ "${mode_before}" == "${mode_after}" ]]; then
+  echo "a deployed binary that lost its execute bit left the re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${mode_after}" <<'MODE'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+entry = [
+    item
+    for item in document.get("releases", [])
+    if item["path"].endswith("/mcloving-agent")
+]
+if not entry:
+    raise SystemExit("deployed agent missing from the re-read")
+if any(item.get("executable") is not False for item in entry):
+    raise SystemExit(f"non-executable agent not recorded as such: {entry}")
+MODE
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

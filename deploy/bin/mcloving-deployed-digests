@@ -140,6 +140,15 @@ def file_record(path: Path, root: Path) -> dict:
         "path": path.relative_to(root).as_posix(),
         "sha256": digest,
         "size_bytes": size_bytes,
+        # Content is not the whole identity. A binary chmod'd to 0644 keeps its
+        # digest and its size while systemd can no longer execute it, so a
+        # document carrying only the bytes reports no drift for a deployment
+        # that has stopped working. The release manifest records
+        # `executable: true` per component; without the mode here the cutover
+        # re-read cannot tell that a deployed artifact no longer satisfies the
+        # metadata it was verified against.
+        "mode": stat.S_IMODE(status.st_mode),
+        "executable": bool(status.st_mode & 0o111),
     }
     if path.is_symlink():
         record["symlink_target"] = os.readlink(path)
