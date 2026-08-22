@@ -55,11 +55,6 @@ const MAX_RESOLVER_ADDRESSES: usize = 32;
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const TRANSPORT_NAMESPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-// How long to wait for a launcher that failed admission to exit before
-// concluding it was delayed rather than refused. A policy rejection kills it
-// immediately; this only has to outlast the scheduling gap.
-#[cfg(target_os = "linux")]
-const TRANSPORT_NAMESPACE_EXIT_GRACE: Duration = Duration::from_millis(250);
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
@@ -617,23 +612,6 @@ impl SourceError {
     }
 }
 
-// What a transport-namespace probe actually established. Only the first two
-// are answers about this host; the third says the probe could not run well
-// enough to produce one, and must not be remembered as a refusal.
-#[cfg(unix)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TransportNamespaceProbe {
-    /// The sealed launcher ran inside the namespace and produced its version.
-    Usable,
-    /// The launcher was admitted or started and could not execute: the
-    /// namespace policy on this host forbids it.
-    Refused,
-    /// The probe itself could not complete -- no file descriptors, no process
-    /// slots, a clock that would not read, or a timeout under load. This is a
-    /// fact about the moment, not about the host.
-    Indeterminate,
-}
-
 pub struct SourceAcquirer {
     config: SourceConfig,
     config_sha256: String,
@@ -649,7 +627,7 @@ pub struct SourceAcquirer {
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
-    transport_namespace: OnceCell<bool>,
+    transport_namespace_confirmed: OnceCell<()>,
     admission: Mutex<()>,
 }
 
@@ -800,7 +778,7 @@ impl SourceAcquirer {
             credential_path,
             signing_key,
             secret_marker_matcher,
-            transport_namespace: OnceCell::new(),
+            transport_namespace_confirmed: OnceCell::new(),
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -829,14 +807,11 @@ impl SourceAcquirer {
         // discovery to every acquisition queued behind it, and a deadline-bound
         // request would spend its own expiry waiting for someone else's probe.
         #[cfg(unix)]
-        if self.transport_namespace.get().is_none()
+        if self.transport_namespace_confirmed.get().is_none()
             && Url::parse(&request.repository_url)
                 .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
         {
-            // Warm-up only. A probe that cannot conclude right now is left
-            // for the authoritative call below to retry and report; failing the
-            // request here would turn an optimization into a refusal.
-            let _ = self.kernel_transport_namespace_usable().await;
+            self.kernel_transport_namespace_usable().await;
         }
         let _process_guard = self.admission.lock().await;
         let _root_lock = lock_output_root(&self.config.output_root).await?;
@@ -1735,7 +1710,7 @@ impl SourceAcquirer {
         // so a host that cannot run the sealed launcher cannot carry a
         // credential-bearing transport at all. Refuse by name instead.
         #[cfg(unix)]
-        if requires_kernel_transport_deadline && !self.kernel_transport_namespace_usable().await? {
+        if requires_kernel_transport_deadline && !self.kernel_transport_namespace_usable().await {
             return Err(SourceError::TransportNamespaceUnavailable);
         }
         #[cfg(not(unix))]
@@ -1866,9 +1841,7 @@ impl SourceAcquirer {
         let process_group_id = None;
         #[cfg(target_os = "linux")]
         if requires_kernel_transport_deadline {
-            admit_transport_namespace(&mut child, command_deadline, process_group_id)
-                .await
-                .map_err(|failure| failure.error)?;
+            admit_transport_namespace(&mut child, command_deadline, process_group_id).await?;
         }
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut child, process_group_id).await?;
@@ -2044,61 +2017,66 @@ impl SourceAcquirer {
     // and remembering "the host cannot do this" because one probe hit EMFILE or
     // timed out under load would refuse every later acquisition until someone
     // restarted the service.
-    async fn kernel_transport_namespace_usable(&self) -> Result<bool, SourceError> {
-        self.transport_namespace
-            .get_or_try_init(|| async {
-                let outcome = self.probe_kernel_transport_namespace().await;
-                #[cfg(unix)]
-                if outcome == TransportNamespaceProbe::Indeterminate {
-                    return Err(SourceError::StateUnavailable);
-                }
-                #[cfg(unix)]
-                let usable = outcome == TransportNamespaceProbe::Usable;
-                #[cfg(not(unix))]
-                let usable = outcome;
-                #[cfg(target_os = "linux")]
-                if !usable {
-                    // Name the host condition once, on the diagnostic stream,
-                    // so the operator sees why every credential-bearing
-                    // acquisition on this host now refuses and what to change.
-                    eprintln!(
-                        "transport_namespace_unusable: the kernel transport namespace \
-                         cannot execute the sealed launcher on this host, so \
-                         credential-bearing transport is refused as \
-                         transport_namespace_unavailable; select the deployment \
-                         AppArmor profile that grants `userns create`, or clear \
-                         kernel.apparmor_restrict_unprivileged_userns"
-                    );
-                }
-                Ok(usable)
-            })
-            .await
-            .copied()
+    async fn kernel_transport_namespace_usable(&self) -> bool {
+        // Only a confirmed success is remembered. Nothing observable
+        // distinguishes a namespace policy rejection from a launcher that hit
+        // EMFILE, EAGAIN, or ENOMEM: the child dies either way, admission
+        // returns the same error either way, and the launcher maps its
+        // deadline-arming, pipe2, and inner spawn failures to one exit status.
+        // Three attempts to classify that signal each found another way it
+        // does not discriminate, so this stops trying and never caches a
+        // negative.
+        //
+        // The cost lands where it cannot matter. On a host that can run the
+        // launcher one probe succeeds and every later acquisition is free; on
+        // a host that cannot, each credential-bearing acquisition pays one
+        // fast failing probe and is refused anyway. It also removes the
+        // restart requirement: select the deployment profile or clear the
+        // sysctl, and the next acquisition works.
+        if self.transport_namespace_confirmed.get().is_some() {
+            return true;
+        }
+        if self.probe_kernel_transport_namespace().await {
+            let _ = self.transport_namespace_confirmed.set(());
+            return true;
+        }
+        // Printed with each refusal rather than once per process: it is the
+        // reason for that refusal, and an operator reading a failed
+        // acquisition should not have to find a diagnostic emitted earlier.
+        #[cfg(target_os = "linux")]
+        eprintln!(
+            "transport_namespace_unusable: the kernel transport namespace \
+             cannot execute the sealed launcher on this host, so \
+             credential-bearing transport is refused as \
+             transport_namespace_unavailable; select the deployment \
+             AppArmor profile that grants `userns create`, or clear \
+             kernel.apparmor_restrict_unprivileged_userns"
+        );
+        false
     }
 
-    #[cfg(unix)]
-    async fn probe_kernel_transport_namespace(&self) -> TransportNamespaceProbe {
+    async fn probe_kernel_transport_namespace(&self) -> bool {
         #[cfg(not(target_os = "linux"))]
         {
             // No kernel transport namespace exists to admit the launcher, and
             // that is a settled property of the platform, not a bad moment.
-            TransportNamespaceProbe::Refused
+            false
         }
         #[cfg(target_os = "linux")]
         {
             let Ok(anchor) = ClockId::CLOCK_MONOTONIC.now() else {
-                return TransportNamespaceProbe::Indeterminate;
+                return false;
             };
             let Ok(timeout_ns) = i64::try_from(TRANSPORT_NAMESPACE_PROBE_TIMEOUT.as_nanos()) else {
-                return TransportNamespaceProbe::Indeterminate;
+                return false;
             };
             let Some(deadline_ns) = anchor.num_nanoseconds().checked_add(timeout_ns) else {
-                return TransportNamespaceProbe::Indeterminate;
+                return false;
             };
             let Some(deadline) =
                 tokio::time::Instant::now().checked_add(TRANSPORT_NAMESPACE_PROBE_TIMEOUT)
             else {
-                return TransportNamespaceProbe::Indeterminate;
+                return false;
             };
             let mut command = Command::new(&self.askpass_executable.invocation_path);
             command
@@ -2128,7 +2106,7 @@ impl SourceAcquirer {
             // descriptors right now, which is not an answer about its namespace
             // policy.
             let Ok(mut child) = command.spawn() else {
-                return TransportNamespaceProbe::Indeterminate;
+                return false;
             };
             let process_group_id = child.id().and_then(|id| i32::try_from(id).ok());
             // Admission is where a namespace policy rejection lands, but it is
@@ -2141,18 +2119,15 @@ impl SourceAcquirer {
             // exited is treated as an answer about this host; anything else is
             // a bad moment, and caching it would refuse every later
             // acquisition until the process restarted.
-            if let Err(failure) =
-                admit_transport_namespace(&mut child, deadline, process_group_id).await
+            if admit_transport_namespace(&mut child, deadline, process_group_id)
+                .await
+                .is_err()
             {
-                return if failure.child_had_exited {
-                    TransportNamespaceProbe::Refused
-                } else {
-                    TransportNamespaceProbe::Indeterminate
-                };
+                return false;
             }
             let Some(stdout) = child.stdout.take() else {
                 let _ = terminate_child(&mut child, process_group_id).await;
-                return TransportNamespaceProbe::Indeterminate;
+                return false;
             };
             let stdout_task = tokio::spawn(read_bounded(stdout, MAX_BINDING_TEXT_BYTES));
             let remaining = deadline
@@ -2166,17 +2141,17 @@ impl SourceAcquirer {
                     let _ = terminate_child(&mut child, process_group_id).await;
                     stdout_task.abort();
                     let _ = stdout_task.await;
-                    return TransportNamespaceProbe::Indeterminate;
+                    return false;
                 }
             };
             if matches!(
                 stdout_task.await,
                 Ok(Ok(version)) if status.success() && version.starts_with(b"git version ")
             ) {
-                TransportNamespaceProbe::Usable
+                true
             } else {
                 // It ran and did not produce the sealed git it was asked for.
-                TransportNamespaceProbe::Refused
+                false
             }
         }
     }
@@ -3007,20 +2982,10 @@ async fn admit_transport_namespace(
     child: &mut tokio::process::Child,
     deadline: tokio::time::Instant,
     process_group_id: Option<i32>,
-) -> Result<(), TransportAdmissionFailure> {
-    let fail = |error: SourceError, child_had_exited: bool| TransportAdmissionFailure {
-        error,
-        child_had_exited,
-    };
-    let Some(child_pid) = child.id() else {
-        return Err(fail(SourceError::SourceUnavailable, true));
-    };
-    let Some(mut input) = child.stdin.take() else {
-        return Err(fail(SourceError::StateUnavailable, false));
-    };
-    let Some(mut output) = child.stdout.take() else {
-        return Err(fail(SourceError::StateUnavailable, false));
-    };
+) -> Result<(), SourceError> {
+    let child_pid = child.id().ok_or(SourceError::SourceUnavailable)?;
+    let mut input = child.stdin.take().ok_or(SourceError::StateUnavailable)?;
+    let mut output = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
     let result = async {
         read_transport_stage(&mut output, 1, deadline).await?;
         let setgroups = format!("/proc/{child_pid}/setgroups");
@@ -3062,32 +3027,11 @@ async fn admit_transport_namespace(
     }
     .await;
     if let Err(error) = result {
-        // Observe before cleanup, never after: terminate_child kills and waits,
-        // so a check placed afterwards would report every failure as an exited
-        // child and cache a transient one as a permanent refusal. The wait is
-        // capped by the caller's own deadline so this cannot outlive it.
-        let grace = deadline
-            .checked_duration_since(tokio::time::Instant::now())
-            .unwrap_or(Duration::ZERO)
-            .min(TRANSPORT_NAMESPACE_EXIT_GRACE);
-        let child_had_exited = matches!(tokio::time::timeout(grace, child.wait()).await, Ok(Ok(_)));
         let _ = terminate_child(child, process_group_id).await;
-        return Err(fail(error, child_had_exited));
+        return Err(error);
     }
     child.stdout = Some(output);
     Ok(())
-}
-
-// Why admission failed, as far as it can be established. The error alone
-// cannot say: a policy rejection, a late stage marker, and a transient
-// `/proc/<pid>/{setgroups,uid_map,gid_map}` write all return the same value.
-// What separates them is whether the launcher was still alive, and that has to
-// be observed before cleanup kills it -- afterwards every failure looks
-// identical.
-#[cfg(target_os = "linux")]
-struct TransportAdmissionFailure {
-    error: SourceError,
-    child_had_exited: bool,
 }
 
 #[cfg(target_os = "linux")]
