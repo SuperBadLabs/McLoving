@@ -55,112 +55,102 @@ unit_dirs = (
 )
 
 
-def sha256_size_and_mode(path: Path) -> tuple[str, int, int]:
-    # Every fact in a file record comes from one open descriptor. Reading any
-    # of them from a separate stat() lets a file replaced in between produce a
-    # record mixing the new bytes' digest with the old size or the old mode --
-    # an identity that never existed, handed to CUTOVER-001 as the canonical
-    # re-read precisely during a concurrent contract, helper, or release
-    # update.
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-        status = os.fstat(handle.fileno())
-        return digest.hexdigest(), status.st_size, status.st_mode
+MAX_RECORD_ATTEMPTS = 3
 
 
 def file_record(path: Path, root: Path) -> dict:
-    # The services and the environment guard follow symlinks, so the re-read
-    # must describe the content they actually consume. Skipping a symlinked
-    # certificate, key, or contract would let a rotation or substitution of the
-    # live target leave this document unchanged — a drift re-read that cannot
-    # see the drift. The link target is recorded alongside the digest so a
-    # repointed link is itself visible.
-    if path.is_symlink() and not path.exists():
-        # A target that has gone missing is exactly the drift this document
-        # exists to report, so the link is recorded rather than dereferenced.
-        # Hashing it would raise and produce no document at all.
-        return {
-            "path": path.relative_to(root).as_posix(),
-            "symlink_target": os.readlink(path),
-            "kind": "dangling_symlink",
-        }
-    if path.is_symlink() and path.is_dir():
-        # A directory alias has no bytes of its own; what it names is the
-        # configuration fact worth recording.
-        return {
-            "path": path.relative_to(root).as_posix(),
-            "symlink_target": os.readlink(path),
-            "kind": "directory_symlink",
-        }
-    def unreadable(reason: str) -> dict:
-        # Losing the whole document to one unreadable entry would deny
-        # CUTOVER-001 its re-read exactly when the tree is drifting underneath
-        # it, and an entry that cannot be read is itself the drift worth
-        # reporting. The reason is recorded so a permission change is not
-        # mistaken for a disappearance.
-        record = {
-            "path": path.relative_to(root).as_posix(),
-            "kind": "unreadable",
-            "reason": reason,
-        }
-        if path.is_symlink():
-            record["symlink_target"] = os.readlink(path)
+    # Every fact in a record comes from one non-blocking descriptor, and the
+    # link target is checked on both sides of the read.
+    #
+    # Classifying with a stat() and then opening leaves a window: a contract
+    # replaced with a FIFO in between makes the ordinary open block forever, so
+    # the document is lost exactly when the drift it reports is present.
+    # O_NONBLOCK returns immediately for a FIFO with no writer, and fstat on
+    # the descriptor describes the thing actually opened rather than whatever
+    # the path named a moment earlier.
+    #
+    # Reading the link separately leaves the same kind of window: a rotated
+    # symlink yields the old target's bytes beside the new target's name, an
+    # identity that never existed. The target is snapshotted before and
+    # rechecked after; a link that moved under the read is retried.
+    relative = path.relative_to(root).as_posix()
+
+    def link_target():
+        try:
+            return os.readlink(path)
+        except OSError:
+            return None
+
+    def unreadable(reason: str, target: str | None) -> dict:
+        # An entry that cannot be read is itself the drift worth reporting, and
+        # losing the whole document to it would deny CUTOVER-001 its re-read
+        # precisely while the tree is changing. The reason distinguishes a
+        # withdrawn permission from a disappearance.
+        record = {"path": relative, "kind": "unreadable", "reason": reason}
+        if target is not None:
+            record["symlink_target"] = target
         return record
 
-    try:
-        status = path.stat()
-    except PermissionError:
-        return unreadable("permission_denied")
-    except OSError:
-        return unreadable("stat_failed")
-    if not stat.S_ISREG(status.st_mode):
-        # A FIFO, socket, or device node in a deployment tree has no content to
-        # digest, and opening one is not a neutral act: a FIFO with no writer
-        # blocks the read forever and a socket raises. Either way the document
-        # would be lost precisely when the drift it exists to report is
-        # present, so the node kind is the fact recorded instead.
-        # A directory's mode is deployment state in its own right: a config
-        # root or release directory relaxed from private permissions to 0777
-        # leaves every file record byte-identical while another local user can
-        # replace the contracts and binaries inside it. That is exactly the
-        # drift this document exists to surface.
-        record = {
-            "path": path.relative_to(root).as_posix(),
-            "kind": NODE_KINDS.get(stat.S_IFMT(status.st_mode), "unknown_node"),
-            "mode": stat.S_IMODE(status.st_mode),
-        }
-        if path.is_symlink():
-            record["symlink_target"] = os.readlink(path)
-        return record
-    # `stat()` succeeding does not mean the bytes can be read: a contract at
-    # mode 000, an ACL that withdrew access, or a file unlinked between the
-    # stat above and the open below all raise here, and every one of them is
-    # deployment drift rather than a reason to lose the document.
-    try:
-        digest, size_bytes, file_mode = sha256_size_and_mode(path)
-    except PermissionError:
-        return unreadable("permission_denied")
-    except OSError:
-        return unreadable("read_failed")
-    record = {
-        "path": path.relative_to(root).as_posix(),
-        "sha256": digest,
-        "size_bytes": size_bytes,
-        # Content is not the whole identity. A binary chmod'd to 0644 keeps its
-        # digest and its size while systemd can no longer execute it, so a
-        # document carrying only the bytes reports no drift for a deployment
-        # that has stopped working. The release manifest records
-        # `executable: true` per component; without the mode here the cutover
-        # re-read cannot tell that a deployed artifact no longer satisfies the
-        # metadata it was verified against.
-        "mode": stat.S_IMODE(file_mode),
-        "executable": bool(file_mode & 0o111),
-    }
-    if path.is_symlink():
-        record["symlink_target"] = os.readlink(path)
-    return record
+    for _ in range(MAX_RECORD_ATTEMPTS):
+        before = link_target()
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except PermissionError:
+            return unreadable("permission_denied", before)
+        except OSError:
+            if before is not None:
+                # A target that has gone missing is exactly the drift this
+                # document exists to report, so the link is recorded rather
+                # than dereferenced.
+                return {
+                    "path": relative,
+                    "symlink_target": before,
+                    "kind": "dangling_symlink",
+                }
+            return unreadable("open_failed", before)
+        try:
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode):
+                # A FIFO, socket, device node, or directory has no content to
+                # digest. A directory's mode is deployment state in its own
+                # right: a config root relaxed to 0777 leaves every file record
+                # byte-identical while another local user can replace the
+                # contracts and keys inside it.
+                kind = NODE_KINDS.get(stat.S_IFMT(status.st_mode), "unknown_node")
+                if before is not None and stat.S_ISDIR(status.st_mode):
+                    kind = "directory_symlink"
+                record = {
+                    "path": relative,
+                    "kind": kind,
+                    "mode": stat.S_IMODE(status.st_mode),
+                }
+            else:
+                digest = hashlib.sha256()
+                try:
+                    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(chunk)
+                except PermissionError:
+                    return unreadable("permission_denied", before)
+                except OSError:
+                    return unreadable("read_failed", before)
+                record = {
+                    "path": relative,
+                    "sha256": digest.hexdigest(),
+                    "size_bytes": status.st_size,
+                    "mode": stat.S_IMODE(status.st_mode),
+                    "executable": bool(status.st_mode & 0o111),
+                }
+        finally:
+            os.close(descriptor)
+        after = link_target()
+        if after == before:
+            if before is not None:
+                record["symlink_target"] = before
+            return record
+    # The link moved under every attempt. Reporting that is honest; reporting a
+    # digest paired with a target it did not come from is not.
+    return unreadable("unstable_symlink", link_target())
 
 
 def walk(root: Path) -> list[Path]:
