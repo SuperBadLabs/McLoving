@@ -55,17 +55,19 @@ unit_dirs = (
 )
 
 
-def sha256_and_size(path: Path) -> tuple[str, int]:
-    # Both facts come from one open descriptor. Taking the size from a separate
-    # stat() lets a file replaced or resized in between produce a record that
-    # pairs the new bytes' digest with the old size -- an identity that never
-    # existed, handed to CUTOVER-001 as the canonical re-read precisely during
-    # a concurrent contract, helper, or release update.
+def sha256_size_and_mode(path: Path) -> tuple[str, int, int]:
+    # Every fact in a file record comes from one open descriptor. Reading any
+    # of them from a separate stat() lets a file replaced in between produce a
+    # record mixing the new bytes' digest with the old size or the old mode --
+    # an identity that never existed, handed to CUTOVER-001 as the canonical
+    # re-read precisely during a concurrent contract, helper, or release
+    # update.
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
-        return digest.hexdigest(), os.fstat(handle.fileno()).st_size
+        status = os.fstat(handle.fileno())
+        return digest.hexdigest(), status.st_size, status.st_mode
 
 
 def file_record(path: Path, root: Path) -> dict:
@@ -119,9 +121,15 @@ def file_record(path: Path, root: Path) -> dict:
         # blocks the read forever and a socket raises. Either way the document
         # would be lost precisely when the drift it exists to report is
         # present, so the node kind is the fact recorded instead.
+        # A directory's mode is deployment state in its own right: a config
+        # root or release directory relaxed from private permissions to 0777
+        # leaves every file record byte-identical while another local user can
+        # replace the contracts and binaries inside it. That is exactly the
+        # drift this document exists to surface.
         record = {
             "path": path.relative_to(root).as_posix(),
             "kind": NODE_KINDS.get(stat.S_IFMT(status.st_mode), "unknown_node"),
+            "mode": stat.S_IMODE(status.st_mode),
         }
         if path.is_symlink():
             record["symlink_target"] = os.readlink(path)
@@ -131,7 +139,7 @@ def file_record(path: Path, root: Path) -> dict:
     # stat above and the open below all raise here, and every one of them is
     # deployment drift rather than a reason to lose the document.
     try:
-        digest, size_bytes = sha256_and_size(path)
+        digest, size_bytes, file_mode = sha256_size_and_mode(path)
     except PermissionError:
         return unreadable("permission_denied")
     except OSError:
@@ -147,8 +155,8 @@ def file_record(path: Path, root: Path) -> dict:
         # `executable: true` per component; without the mode here the cutover
         # re-read cannot tell that a deployed artifact no longer satisfies the
         # metadata it was verified against.
-        "mode": stat.S_IMODE(status.st_mode),
-        "executable": bool(status.st_mode & 0o111),
+        "mode": stat.S_IMODE(file_mode),
+        "executable": bool(file_mode & 0o111),
     }
     if path.is_symlink():
         record["symlink_target"] = os.readlink(path)
@@ -166,6 +174,10 @@ def walk(root: Path) -> list[Path]:
     remembering resolved directories.
     """
     found: list[Path] = []
+    if root.is_dir() and not root.is_symlink():
+        # The walked root is a directory whose permissions are themselves
+        # deployment state, so it is recorded alongside what it contains.
+        found.append(root)
     if root.is_symlink():
         # The root of a walked tree is live configuration in its own right.
         # Every nested alias is recorded below, but repointing ~/.config/mcloving
@@ -200,6 +212,10 @@ def walk(root: Path) -> list[Path]:
                 found.append(entry)
                 continue
             if is_directory:
+                if not entry.is_symlink():
+                    # Recorded as well as descended: the mode of every
+                    # directory in the tree is drift worth reporting.
+                    found.append(entry)
                 if entry.is_symlink():
                     # Record the alias itself before deduplication can suppress
                     # it. Two links to one target are two pieces of live

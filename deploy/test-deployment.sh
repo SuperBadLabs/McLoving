@@ -694,6 +694,33 @@ if compgen -G "${quoted_staging}/.local/libexec/mcloving/releases/.staging.*" >/
 fi
 rm -rf "${quoted_staging}"
 
+# A directory's permissions are deployment state too. Relaxing the config root
+# to 0777 lets another local user replace every contract and key inside it,
+# while each file record stays byte-identical.
+dir_mode_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+chmod 0777 "${config_dir}"
+dir_mode_after="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+chmod 0700 "${config_dir}"
+if [[ "${dir_mode_before}" == "${dir_mode_after}" ]]; then
+  echo "a world-writable configuration root left the re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${dir_mode_after}" <<'DIRMODE'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+entry = [
+    item
+    for item in document.get("environment_contracts", [])
+    if item["path"] == ".config/mcloving"
+]
+if not entry:
+    raise SystemExit("configuration root missing from the re-read")
+if entry[0].get("mode") != 0o777:
+    raise SystemExit(f"configuration root mode not recorded: {entry[0]}")
+DIRMODE
+
 # Content is not the whole identity. A deployed binary that loses its execute
 # bit keeps its digest and size while systemd can no longer run it, and the
 # release manifest records executable: true per component, so the re-read has
