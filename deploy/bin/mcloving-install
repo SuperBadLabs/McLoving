@@ -58,9 +58,7 @@ done
 # reloaded below is this user's, so installing into a different tree while
 # expecting systemd to use it would advertise services that cannot see any of
 # the installed files. That combination is refused rather than half-performed.
-if [[ "${no_systemd}" != "1" && "${home_dir}" != "${HOME}" ]]; then
-  deploy_fail "--home ${home_dir} differs from ${HOME}; systemd units resolve %h to ${HOME}, so pass --no-systemd for an alternate tree"
-fi
+require_systemd_home "${home_dir}" "${no_systemd}"
 
 libexec_root="${home_dir}/.local/libexec/mcloving"
 config_root="${home_dir}/.config/mcloving"

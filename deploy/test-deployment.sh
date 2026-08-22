@@ -658,6 +658,42 @@ if "sha256" in entry[0]:
     raise SystemExit("special node was digested as a regular file")
 SPECIAL
 
+# --home must be checked against the account home systemd expands %h to, not
+# against HOME, which the caller controls. Comparing two copies of HOME always
+# agrees, so an install could write a whole deployment under one tree while
+# daemon-reload and every later service operation acted on units pointing at
+# another.
+overridden_home="${workdir}/overridden-home"
+mkdir -p "${overridden_home}"
+if HOME="${overridden_home}" "${repo_root}/deploy/bin/mcloving-install" \
+  --home "${overridden_home}" --release-dir "${release_dir}" \
+  --checksums "${workdir}/checksums.sha256" >/dev/null 2>&1; then
+  echo "install drove systemd for a tree its units do not describe" >&2
+  exit 1
+fi
+rm -rf "${overridden_home}"
+
+# The staging trap must survive a home containing shell metacharacters. A
+# single quote is legal in a directory name and would break a trap body that
+# wrapped the path in quotes instead of rendering it.
+quoted_staging="${workdir}/"$'o\'h staging'
+rm -rf "${quoted_staging}"
+mkdir -p "${quoted_staging}/.local/libexec/mcloving/releases"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  stage_release "${quoted_staging}/.local/libexec/mcloving" "${tampered_dir}" \
+    "" "${workdir}/checksums.sha256"
+) >/dev/null 2>&1 && {
+  echo "staging accepted a tampered release under a quoted home" >&2
+  exit 1
+}
+if compgen -G "${quoted_staging}/.local/libexec/mcloving/releases/.staging.*" >/dev/null; then
+  echo "the staging cleanup trap did not run for a home containing a single quote" >&2
+  exit 1
+fi
+rm -rf "${quoted_staging}"
+
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
 dir_contract="${workdir}/dir-contract.env"

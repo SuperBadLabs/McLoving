@@ -5,6 +5,7 @@
 # The constrained runtime login. Store::preflight_tenant_runtime refuses any
 # other session role, so the guard must require this exact name rather than
 # merely a name different from the migration role.
+# shellcheck disable=SC2034  # read by mcloving-env-guard, which sources this
 MCLOVING_RUNTIME_ROLE="mcloving_tenant"
 
 MCLOVING_DEPLOY_BINARIES=(
@@ -364,8 +365,12 @@ stage_release() {
   # matter. Without this trap a refused install leaves unverified binaries
   # under releases/.staging.*, which the deployed-digest re-read then reports
   # as part of the release inventory even though nothing was published.
+  # The path is rendered with %q rather than wrapped in quotes: a home
+  # containing a single quote -- /tmp/o'h is a valid directory -- would
+  # otherwise produce a trap body that does not parse, and the cleanup this
+  # exists for would be lost for exactly the alternate-home paths that need it.
   # shellcheck disable=SC2064  # expand the path now; the variable is reassigned
-  trap "rm -rf -- '${staging}'" EXIT
+  trap "rm -rf -- $(printf '%q' "${staging}")" EXIT
   for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
     install -m 0755 "${release_dir}/${binary}" "${staging}/${binary}"
   done
@@ -419,6 +424,31 @@ verify_staged_release() {
 }
 
 # point_symlink LINK TARGET (atomic replace)
+# account_home -> the home directory systemd expands %h to.
+#
+# From the passwd database for the effective uid, never from HOME. HOME is set
+# by whoever invoked this script, so comparing --home against it compares two
+# copies of the same caller-controlled value and always agrees, while the user
+# manager keeps expanding %h to the account's real home. An install could then
+# write a whole deployment under one tree while daemon-reload and every later
+# service operation acted on units pointing at another.
+account_home() {
+  getent passwd "$(id -u)" | cut -d: -f6
+}
+
+# require_systemd_home HOME_DIR NO_SYSTEMD
+#
+# Refuse to drive systemd for a tree its units do not describe.
+require_systemd_home() {
+  local home_dir="$1" no_systemd="$2" resolved
+  [[ "${no_systemd}" == "1" ]] && return 0
+  resolved="$(account_home)"
+  [[ -n "${resolved}" ]] || deploy_fail \
+    "cannot read the service account home from the passwd database; pass --no-systemd"
+  [[ "${home_dir}" == "${resolved}" ]] || deploy_fail \
+    "--home ${home_dir} is not the service account home ${resolved}; systemd units resolve %h there, so pass --no-systemd for an alternate tree"
+}
+
 # recovery_command LIBEXEC_ROOT HOME_DIR
 #
 # The exact shell command that re-reads the deployed digests and then rolls
