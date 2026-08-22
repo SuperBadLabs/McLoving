@@ -1866,7 +1866,9 @@ impl SourceAcquirer {
         let process_group_id = None;
         #[cfg(target_os = "linux")]
         if requires_kernel_transport_deadline {
-            admit_transport_namespace(&mut child, command_deadline, process_group_id).await?;
+            admit_transport_namespace(&mut child, command_deadline, process_group_id)
+                .await
+                .map_err(|failure| failure.error)?;
         }
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut child, process_group_id).await?;
@@ -2139,19 +2141,14 @@ impl SourceAcquirer {
             // exited is treated as an answer about this host; anything else is
             // a bad moment, and caching it would refuse every later
             // acquisition until the process restarted.
-            if admit_transport_namespace(&mut child, deadline, process_group_id)
-                .await
-                .is_err()
+            if let Err(failure) =
+                admit_transport_namespace(&mut child, deadline, process_group_id).await
             {
-                let exited = matches!(
-                    tokio::time::timeout(TRANSPORT_NAMESPACE_EXIT_GRACE, child.wait()).await,
-                    Ok(Ok(_))
-                );
-                if !exited {
-                    let _ = terminate_child(&mut child, process_group_id).await;
-                    return TransportNamespaceProbe::Indeterminate;
-                }
-                return TransportNamespaceProbe::Refused;
+                return if failure.child_had_exited {
+                    TransportNamespaceProbe::Refused
+                } else {
+                    TransportNamespaceProbe::Indeterminate
+                };
             }
             let Some(stdout) = child.stdout.take() else {
                 let _ = terminate_child(&mut child, process_group_id).await;
@@ -3010,10 +3007,20 @@ async fn admit_transport_namespace(
     child: &mut tokio::process::Child,
     deadline: tokio::time::Instant,
     process_group_id: Option<i32>,
-) -> Result<(), SourceError> {
-    let child_pid = child.id().ok_or(SourceError::SourceUnavailable)?;
-    let mut input = child.stdin.take().ok_or(SourceError::StateUnavailable)?;
-    let mut output = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
+) -> Result<(), TransportAdmissionFailure> {
+    let fail = |error: SourceError, child_had_exited: bool| TransportAdmissionFailure {
+        error,
+        child_had_exited,
+    };
+    let Some(child_pid) = child.id() else {
+        return Err(fail(SourceError::SourceUnavailable, true));
+    };
+    let Some(mut input) = child.stdin.take() else {
+        return Err(fail(SourceError::StateUnavailable, false));
+    };
+    let Some(mut output) = child.stdout.take() else {
+        return Err(fail(SourceError::StateUnavailable, false));
+    };
     let result = async {
         read_transport_stage(&mut output, 1, deadline).await?;
         let setgroups = format!("/proc/{child_pid}/setgroups");
@@ -3055,11 +3062,32 @@ async fn admit_transport_namespace(
     }
     .await;
     if let Err(error) = result {
+        // Observe before cleanup, never after: terminate_child kills and waits,
+        // so a check placed afterwards would report every failure as an exited
+        // child and cache a transient one as a permanent refusal. The wait is
+        // capped by the caller's own deadline so this cannot outlive it.
+        let grace = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO)
+            .min(TRANSPORT_NAMESPACE_EXIT_GRACE);
+        let child_had_exited = matches!(tokio::time::timeout(grace, child.wait()).await, Ok(Ok(_)));
         let _ = terminate_child(child, process_group_id).await;
-        return Err(error);
+        return Err(fail(error, child_had_exited));
     }
     child.stdout = Some(output);
     Ok(())
+}
+
+// Why admission failed, as far as it can be established. The error alone
+// cannot say: a policy rejection, a late stage marker, and a transient
+// `/proc/<pid>/{setgroups,uid_map,gid_map}` write all return the same value.
+// What separates them is whether the launcher was still alive, and that has to
+// be observed before cleanup kills it -- afterwards every failure looks
+// identical.
+#[cfg(target_os = "linux")]
+struct TransportAdmissionFailure {
+    error: SourceError,
+    child_had_exited: bool,
 }
 
 #[cfg(target_os = "linux")]
