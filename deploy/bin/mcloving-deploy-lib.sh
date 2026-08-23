@@ -85,25 +85,27 @@ require_secure_ancestors() {
 # single derivation consumed by BOTH the installer's refusal walk and the
 # deployed-digests inventory, so the two cannot drift apart.
 #
-# Each root contributes two chains, because a path has two spellings. The
-# LEXICAL parent chain up to HOME covers the components an operator sees --
-# any of which may itself be a symlink, checked and recorded through its
-# target. The PHYSICAL parent chain of the fully resolved root covers where
-# the deployment actually lives: following a symlinked ancestor to its
-# target without walking the target's OWN parents is how this class of gap
-# happened a fourth time -- ~/.local -> /srv/mcloving/user left /srv/mcloving
-# unexamined while its writability permits the same rename-substitution the
-# direct checks refuse. Resolving the whole root also covers every
-# intermediate link's target chain at once.
+# Each root contributes chains for every spelling a path has. The LEXICAL
+# parent chain up to HOME covers the components an operator sees -- any of
+# which may itself be a symlink, checked and recorded through its target.
+# The PHYSICAL side is derived COMPONENT BY COMPONENT: every time resolution
+# crosses a symlink, the resolved target's own parent chain joins the set,
+# recursively, because the target may contain further links. A single
+# realpath of the whole root keeps only the FINAL chain: with
+# .local -> /srv/a/user-local and user-local/libexec -> /opt/mcloving/libexec,
+# it walks /opt/mcloving and never /srv/a -- and a writable /srv/a lets
+# another user replace user-local wholesale. The ancestor set is the union
+# of every directory encountered in any traversal.
 #
 # Stop points: a chain inside the (resolved) home stops at the home
 # directory, whose own parents are the platform's -- the boundary the
-# installer has always drawn. A resolved chain that leaves the home has no
-# such anchor and is walked to "/" inclusive. That deliberately refuses a
+# installer has always drawn. A chain that leaves the home has no such
+# anchor and is walked to "/" inclusive. That deliberately refuses a
 # deployment routed through a sticky world-writable directory such as /tmp:
 # the sticky bit only narrows who may rename, and any attacker-owned
 # component inside such a chain defeats it entirely. A looping or dangling
-# link on the way to a root is refused by name rather than resolved around.
+# link on the way to a root is refused by name rather than resolved around,
+# with resolution bounded like the kernel bounds ELOOP.
 deployment_ancestor_chain() {
   python3 - "$@" <<'CHAIN'
 import os
@@ -116,38 +118,7 @@ try:
 except OSError as error:
     raise SystemExit(f"deployment home {home} does not resolve: {error}")
 
-
-def resolve_root(root):
-    # The deepest existing prefix is resolved strictly (os.stat succeeding
-    # proves the prefix is loop-free); missing trailing components are
-    # appended lexically, because mkdir -p will create them under the
-    # resolved prefix. A dangling or looping link is refused by name -- the
-    # services cannot read through it and mkdir cannot create through it.
-    remainder = []
-    probe = os.path.normpath(root)
-    while True:
-        try:
-            os.stat(probe)
-            break
-        except FileNotFoundError:
-            if os.path.islink(probe):
-                raise SystemExit(
-                    f"deployment path {root} crosses a dangling symlink at {probe}"
-                )
-            head, tail = os.path.split(probe)
-            if not tail or head == probe:
-                raise SystemExit(f"deployment path {root} has no existing ancestor")
-            probe = head
-            remainder.append(tail)
-        except OSError as error:
-            raise SystemExit(
-                f"deployment path {root} does not resolve at {probe}: {error}"
-            )
-    resolved = os.path.realpath(probe, strict=True)
-    for tail in reversed(remainder):
-        resolved = os.path.join(resolved, tail)
-    return resolved
-
+MAX_LINK_TRAVERSALS = 40
 
 found = set()
 
@@ -164,13 +135,51 @@ def ascend(path, stop):
         current = parent
 
 
-for root in roots:
-    ascend(root, home)
-    resolved_root = resolve_root(root)
-    inside_home = resolved_root == resolved_home or resolved_root.startswith(
+def chain_of(resolved):
+    inside_home = resolved == resolved_home or resolved.startswith(
         resolved_home + os.sep
     )
-    ascend(resolved_root, resolved_home if inside_home else "/")
+    ascend(resolved, resolved_home if inside_home else "/")
+
+
+def resolve_recording(origin, path, budget):
+    """Resolve ``path`` component by component.
+
+    Missing trailing components are appended lexically (mkdir -p will create
+    them under the resolved prefix). Each symlink component is resolved
+    recursively -- its target may contain further links -- and the resolved
+    target's parent chain joins the ancestor set. A dangling link is refused
+    by name; a loop exhausts the shared traversal budget and is refused by
+    name too.
+    """
+    resolved = "/"
+    for component in [c for c in os.path.normpath(path).split(os.sep) if c]:
+        candidate = os.path.join(resolved, component)
+        if not os.path.islink(candidate):
+            resolved = candidate
+            continue
+        if budget[0] <= 0:
+            raise SystemExit(
+                f"deployment path {origin} exceeds the symlink resolution bound at {candidate}"
+            )
+        budget[0] -= 1
+        target = os.readlink(candidate)
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(candidate), target)
+        target_resolved = resolve_recording(origin, target, budget)
+        if not os.path.exists(target_resolved):
+            raise SystemExit(
+                f"deployment path {origin} crosses a dangling symlink at {candidate}"
+            )
+        chain_of(target_resolved)
+        resolved = target_resolved
+    return resolved
+
+
+for root in roots:
+    ascend(root, home)
+    resolved_root = resolve_recording(root, root, [MAX_LINK_TRAVERSALS])
+    chain_of(resolved_root)
 
 for path in sorted(found):
     print(path)

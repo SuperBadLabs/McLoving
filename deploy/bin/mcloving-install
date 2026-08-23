@@ -72,8 +72,25 @@ quadlet_root="${home_dir}/.config/containers/systemd"
 # created. Refused rather than re-moded: these are shared locations holding
 # unrelated content, and checking before mkdir keeps a refused install free
 # of side effects.
-require_secure_ancestors "${home_dir}" \
-  "${libexec_root}" "${config_root}" "${unit_root}" "${quadlet_root}"
+#
+# The list names EVERY directory this installer (and stage_release on its
+# behalf) creates or re-modes under the home -- pki and the release trees
+# included, not only the four top roots. A pre-existing symlink at any of
+# these names redirects the subtree it heads, and the validator resolves
+# each root component by component, so the link's target chain is examined
+# too. The trace-coverage gate in deploy/test-deployment.sh mechanically
+# asserts this list covers every path an install actually touches, so a
+# directory added later cannot bypass the walk.
+managed_roots=(
+  "${libexec_root}"
+  "${libexec_root}/helpers"
+  "${libexec_root}/releases"
+  "${config_root}"
+  "${config_root}/pki"
+  "${unit_root}"
+  "${quadlet_root}"
+)
+require_secure_ancestors "${home_dir}" "${managed_roots[@]}"
 
 # Set before the hierarchy is created, not after. `mkdir -p` builds every
 # missing ancestor -- .local, .local/libexec, .config, .config/systemd,

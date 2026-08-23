@@ -1152,7 +1152,7 @@ race_ancestors="$(
   deployment_ancestor_chain "${home}" \
     "${libexec}/releases" "${libexec}/helpers" \
     "${home}/.config/systemd/user" "${home}/.config/containers/systemd" \
-    "${home}/.config/mcloving"
+    "${home}/.config/mcloving" "${home}/.config/mcloving/pki"
 )"
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
@@ -1622,6 +1622,188 @@ podman unshare chown 0:0 "${foreign_home}/.local"
   exit 1
 }
 rm -rf "${foreign_home}"
+
+# One realpath of the whole root keeps only the FINAL chain. With
+# .local -> srv-a/user-local and user-local/libexec -> opt-m/libexec, the
+# opt-m chain is walked but srv-a is the directory whose writability lets
+# another user replace user-local wholesale -- so the derivation resolves
+# component by component and every intermediate target's parents join the
+# set. Refused writable by name, accepted once secured, and visible to the
+# digest inventory in both states.
+twohop_home="${workdir}/twohop-home"
+rm -rf "${twohop_home}"
+mkdir -p "${twohop_home}/srv-a/user-local" "${twohop_home}/opt-m/libexec"
+chmod 0755 "${twohop_home}" "${twohop_home}/srv-a" "${twohop_home}/srv-a/user-local" \
+  "${twohop_home}/opt-m" "${twohop_home}/opt-m/libexec"
+ln -s "srv-a/user-local" "${twohop_home}/.local"
+ln -s "${twohop_home}/opt-m/libexec" "${twohop_home}/srv-a/user-local/libexec"
+chmod 0777 "${twohop_home}/srv-a"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${twohop_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/twohop.log" 2>&1; then
+  echo "install accepted a writable intermediate symlink-target parent" >&2
+  exit 1
+fi
+grep -q "srv-a (mode 777)" "${workdir}/logs/twohop.log" || {
+  echo "the intermediate target-parent refusal did not name srv-a:" >&2
+  cat "${workdir}/logs/twohop.log" >&2
+  exit 1
+}
+if [[ -e "${twohop_home}/opt-m/libexec/mcloving" ]]; then
+  echo "a refused install still created directories through the two-hop chain" >&2
+  exit 1
+fi
+chmod 0755 "${twohop_home}/srv-a"
+"${repo_root}/deploy/bin/mcloving-install" --home "${twohop_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -x "${twohop_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete through the secured two-hop chain" >&2
+  exit 1
+}
+twohop_before="$("${twohop_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${twohop_home}")"
+chmod 0777 "${twohop_home}/srv-a"
+twohop_after="$("${twohop_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${twohop_home}")"
+chmod 0755 "${twohop_home}/srv-a"
+if [[ "${twohop_before}" == "${twohop_after}" ]]; then
+  echo "a relaxed intermediate target parent left the digest re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${twohop_after}" <<'TWOHOP'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("ancestors", [])}
+entry = records.get("srv-a")
+if entry is None:
+    raise SystemExit(f"intermediate target parent missing: {sorted(records)}")
+if entry.get("mode") != 0o777:
+    raise SystemExit(f"intermediate target parent mode not recorded: {entry}")
+if "opt-m" not in records:
+    raise SystemExit(f"final target parent missing: {sorted(records)}")
+TWOHOP
+twohop_restored="$("${twohop_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${twohop_home}")"
+[[ "${twohop_before}" == "${twohop_restored}" ]] || {
+  echo "the two-hop re-read did not return to baseline" >&2
+  exit 1
+}
+rm -rf "${twohop_home}"
+
+# pki heads a subtree of keys and certificates and is created and secured by
+# this installer, so it is a managed root in its own right: a pre-existing
+# pki symlink must have its target chain judged -- writable parent and
+# foreign-owned parent refused by name, secured chain accepted.
+pki_home="${workdir}/pki-link-home"
+rm -rf "${pki_home}"
+mkdir -p "${pki_home}/shared/pki" "${pki_home}/.config/mcloving"
+chmod 0755 "${pki_home}" "${pki_home}/shared" "${pki_home}/shared/pki" \
+  "${pki_home}/.config" "${pki_home}/.config/mcloving"
+ln -s "../../shared/pki" "${pki_home}/.config/mcloving/pki"
+chmod 0777 "${pki_home}/shared"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${pki_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/pki-link.log" 2>&1; then
+  echo "install accepted a pki symlink whose target parent is world-writable" >&2
+  exit 1
+fi
+grep -q "shared (mode 777)" "${workdir}/logs/pki-link.log" || {
+  echo "the pki target-parent refusal did not name shared:" >&2
+  cat "${workdir}/logs/pki-link.log" >&2
+  exit 1
+}
+chmod 0755 "${pki_home}/shared"
+podman unshare chown 1:1 "${pki_home}/shared"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${pki_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/pki-link-owner.log" 2>&1; then
+  echo "install accepted a pki symlink whose target parent is foreign-owned" >&2
+  exit 1
+fi
+grep -q "shared (owned by uid .*, expected uid $(id -u) or root)" \
+  "${workdir}/logs/pki-link-owner.log" || {
+  echo "the pki foreign-owner refusal did not name shared and the uids:" >&2
+  cat "${workdir}/logs/pki-link-owner.log" >&2
+  exit 1
+}
+podman unshare chown 0:0 "${pki_home}/shared"
+"${repo_root}/deploy/bin/mcloving-install" --home "${pki_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -x "${pki_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete with a secured pki symlink" >&2
+  exit 1
+}
+[[ "$(stat -Lc '%a' "${pki_home}/.config/mcloving/pki")" == "700" ]] || {
+  echo "the pki symlink target was not secured to 0700" >&2
+  exit 1
+}
+rm -rf "${pki_home}"
+
+# The managed-roots list stays honest mechanically: an install is traced
+# with xtrace, every directory-touching command's path under its home is
+# parsed from the trace, and each must be covered by the very root set the
+# installer passed to require_secure_ancestors -- itself read from the same
+# trace, so there is no second copy of the list to drift.
+trace_home="${workdir}/trace-home"
+rm -rf "${trace_home}"
+mkdir -p "${trace_home}"
+bash -x "${repo_root}/deploy/bin/mcloving-install" --home "${trace_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > /dev/null 2> "${workdir}/logs/install-trace.log"
+python3 - "${workdir}/logs/install-trace.log" "${trace_home}" <<'TRACECOVER'
+import shlex
+import sys
+
+trace_path, home = sys.argv[1], sys.argv[2]
+home = home.rstrip("/")
+prefix = home + "/"
+roots = None
+touched = set()
+commands = {"mkdir", "chmod", "install", "ln"}
+for raw in open(trace_path, encoding="utf-8", errors="replace"):
+    line = raw.lstrip()
+    if not line.startswith("+"):
+        continue
+    line = line.lstrip("+ ").rstrip("\n")
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        continue
+    if not tokens:
+        continue
+    if tokens[0] == "require_secure_ancestors":
+        roots = [token for token in tokens[2:] if token.startswith(prefix)]
+        continue
+    if tokens[0] not in commands:
+        continue
+    for token in tokens[1:]:
+        if token.startswith(prefix):
+            touched.add(token.rstrip("/"))
+if not roots:
+    raise SystemExit("trace never showed require_secure_ancestors with its roots")
+if not touched:
+    raise SystemExit("trace parsing found no touched paths; the xtrace format drifted")
+if not any(path.endswith("/pki") for path in touched):
+    raise SystemExit(f"expected core paths missing from the parsed trace: {sorted(touched)}")
+uncovered = []
+for path in sorted(touched):
+    covered = path == home or any(
+        path == root or path.startswith(root + "/") or root.startswith(path + "/")
+        for root in roots
+    )
+    if not covered:
+        uncovered.append(path)
+if uncovered:
+    raise SystemExit(
+        "installer touches paths not covered by its validated roots: "
+        + " ".join(uncovered)
+    )
+TRACECOVER
+rm -rf "${trace_home}"
 
 # The bootstrap's two halves must address one instance, not merely one database
 # name: provisioning runs podman exec into the local container.

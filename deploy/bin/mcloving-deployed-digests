@@ -48,7 +48,8 @@ ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
   "${home_dir}/.local/libexec/mcloving/helpers" \
   "${home_dir}/.config/systemd/user" \
   "${home_dir}/.config/containers/systemd" \
-  "${home_dir}/.config/mcloving")" || {
+  "${home_dir}/.config/mcloving" \
+  "${home_dir}/.config/mcloving/pki")" || {
   echo "mcloving-deployed-digests: cannot derive the deployment ancestor chain" >&2
   exit 1
 }
