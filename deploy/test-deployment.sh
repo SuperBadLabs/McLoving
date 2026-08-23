@@ -156,7 +156,8 @@ for service in ["postgres", "db-init", "controller", "agent"]:
          str(repo_root / "deploy/bin/mcloving-deploy-lib.sh"), service],
         capture_output=True, text=True, check=True,
     ).stdout
-    classified |= {line.split()[1] for line in listing.splitlines() if line}
+    # "CLASS LINK-POLICY VARIABLE" -- the variable is the third field.
+    classified |= {line.split()[2] for line in listing.splitlines() if line}
 if not classified:
     raise SystemExit("the classification enumeration is empty; the authority went blind")
 # Reviewed exclusions: value-typed variables that carry no filesystem path.
@@ -232,6 +233,14 @@ smoke_config_base="$(
 )"
 smoke_unit_root="${smoke_config_base}/systemd/user"
 smoke_quadlet_root="${smoke_config_base}/containers/systemd"
+# The wrapper-to-payload exports carry base64 items (one per line); the
+# race drivers bypass the wrapper and must speak the same transport.
+smoke_unit_dirs_env="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  encode_path_item "${smoke_unit_root}"
+  encode_path_item "${smoke_quadlet_root}"
+)"
 
 echo "== [2/9] fail-closed install: tampered binary must be refused"
 tampered_dir="${workdir}/tampered"
@@ -535,6 +544,25 @@ chmod 0600 "${effect_plan}"
   echo "env guard refused an owner-only effect runtime plan" >&2
   exit 1
 }
+# Parity with the binary: the controller inspects the plan with
+# symlink_metadata() and refuses every symlink, so the guard must refuse
+# the link itself rather than follow it to a valid target and report a
+# contract the unit then fails on after ExecStartPre.
+mv "${effect_plan}" "${effect_plan}.real"
+ln -s "${effect_plan}.real" "${effect_plan}"
+if "${libexec}/helpers/mcloving-env-guard" controller "${effect_env}" \
+  > "${workdir}/logs/guard-effect-symlink.log" 2>&1; then
+  echo "env guard accepted a symlinked effect runtime plan the controller refuses" >&2
+  exit 1
+fi
+grep -q "MCLOVING_EFFECT_RUNTIME_PLAN must not be a symlink" \
+  "${workdir}/logs/guard-effect-symlink.log" || {
+  echo "the symlinked-plan refusal did not name the parity rule:" >&2
+  cat "${workdir}/logs/guard-effect-symlink.log" >&2
+  exit 1
+}
+rm -f "${effect_plan}"
+mv "${effect_plan}.real" "${effect_plan}"
 catalog_env="${home}/effect-catalog.env"
 sed "s#^MCLOVING_LISTEN=#MCLOVING_EFFECT_MAPPING_CATALOG=${effect_plan}\nMCLOVING_LISTEN=#" \
   "${config}/controller.env" > "${catalog_env}"
@@ -1494,8 +1522,7 @@ race_ancestors="$(
 )"
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
-MCLOVING_UNIT_DIRS="${smoke_unit_root}
-${smoke_quadlet_root}" \
+MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1555,8 +1582,7 @@ chmod 0600 "${config_dir}/race-probe.txt"
 content_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
-MCLOVING_UNIT_DIRS="${smoke_unit_root}
-${smoke_quadlet_root}" \
+MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
 import contextlib
@@ -1630,8 +1656,7 @@ chmod 0600 "${config_dir}/ctime-probe.txt"
 ctime_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
-MCLOVING_UNIT_DIRS="${smoke_unit_root}
-${smoke_quadlet_root}" \
+MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/ctime-probe.txt" <<'CTIMERACE' || ctime_race_status=$?
 import contextlib
@@ -1704,8 +1729,7 @@ fi
 listing_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
-MCLOVING_UNIT_DIRS="${smoke_unit_root}
-${smoke_quadlet_root}" \
+MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_CONFIGURED_PATHS="" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}" <<'LISTRACE' || listing_race_status=$?
@@ -1826,6 +1850,61 @@ rm -rf "${home}/external-trust"
 external_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
 [[ "${external_baseline}" == "${external_restored}" ]] || {
   echo "the re-read did not return to baseline after the external CA was removed" >&2
+  exit 1
+}
+
+# A quoted multiline contract value carrying a newline in an absolute path
+# is legal to the shared parser and to systemd; the inventory transport
+# must carry it as ONE item with the right digest, never split it into
+# records that hash unrelated paths.
+newline_dir_literal="${home}/nl
+dir"
+mkdir -p "${newline_dir_literal}"
+chmod 0755 "${newline_dir_literal}"
+printf 'newline-path-trust-bytes' > "${newline_dir_literal}/ca.pem"
+chmod 0644 "${newline_dir_literal}/ca.pem"
+cp "${config_dir}/agent.env" "${workdir}/agent.env.before-newline"
+python3 - "${config_dir}/agent.env" "${newline_dir_literal}/ca.pem" <<'NLREWRITE'
+import sys
+from pathlib import Path
+
+contract = Path(sys.argv[1])
+target = sys.argv[2]
+lines = []
+for line in contract.read_text().splitlines():
+    if line.startswith("MCLOVING_CONTROLLER_CA_PATH="):
+        lines.append("MCLOVING_CONTROLLER_CA_PATH='" + target + "'")
+    else:
+        lines.append(line)
+contract.write_text("\n".join(lines) + "\n")
+NLREWRITE
+chmod 0600 "${config_dir}/agent.env"
+newline_doc="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${newline_doc}" <<'NLCHECK'
+import hashlib
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = [
+    record
+    for record in document.get("configured_paths", [])
+    if "nl" in record.get("path", "")
+]
+if len(records) != 1:
+    raise SystemExit(f"newline-bearing path did not round-trip as one record: {records}")
+expected = hashlib.sha256(b"newline-path-trust-bytes").hexdigest()
+if records[0].get("sha256") != expected:
+    raise SystemExit(f"newline-bearing path hashed the wrong bytes: {records[0]}")
+if "\n" not in records[0]["path"]:
+    raise SystemExit(f"the record lost the newline from the path: {records[0]}")
+NLCHECK
+cp "${workdir}/agent.env.before-newline" "${config_dir}/agent.env"
+chmod 0600 "${config_dir}/agent.env"
+rm -rf "${newline_dir_literal}"
+newline_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+[[ "${external_baseline}" == "${newline_restored}" ]] || {
+  echo "the re-read did not return to baseline after the newline path was removed" >&2
   exit 1
 }
 
@@ -2733,7 +2812,12 @@ xdg_state_roots="$(
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${xdg_home}/.local/libexec/mcloving/helpers/mcloving-deploy-lib.sh"
   XDG_STATE_HOME="${xdg_home}/custom-state" deployment_unit_declared_roots \
-    "${xdg_home}" "${repo_root}"/deploy/systemd/*.service
+    "${xdg_home}" "${repo_root}"/deploy/systemd/*.service \
+    | while IFS= read -r encoded_root; do
+        [[ -n "${encoded_root}" ]] || continue
+        base64 -d <<<"${encoded_root}"
+        echo
+      done
 )"
 grep -q "^${xdg_home}/custom-state/mcloving-agent/workspace$" <<<"${xdg_state_roots}" || {
   echo "the declared-roots parser did not follow XDG_STATE_HOME:" >&2

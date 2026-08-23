@@ -189,11 +189,19 @@ require_min_bytes() {
 # this lane refuses. The shipped contracts are all %h-absolute, so nothing
 # legitimate carries a relative spelling; emptiness is judged by the
 # per-service require lists.
-while IFS=' ' read -r _ path_variable; do
+while IFS=' ' read -r _ link_policy path_variable; do
   [[ -n "${path_variable:-}" ]] || continue
   contract_into class_path_value "${path_variable}"
-  if [[ -n "${class_path_value}" && "${class_path_value}" != /* ]]; then
+  [[ -n "${class_path_value}" ]] || continue
+  if [[ "${class_path_value}" != /* ]]; then
     fail "${path_variable} must be an absolute path; ${class_path_value} depends on the runtime working directory"
+  fi
+  # Parity with the consuming binary: the effect plan and mapping catalog
+  # are inspected with symlink_metadata() and refused as symlinks by the
+  # controller itself, so a guard that followed the link would report a
+  # contract satisfied and watch the unit fail after ExecStartPre.
+  if [[ "${link_policy}" == "nofollow" && -L "${class_path_value}" ]]; then
+    fail "${path_variable} must not be a symlink; the consuming binary refuses symlinked configuration (${class_path_value})"
   fi
 done < <(deployment_contract_path_variables "${service}")
 
@@ -318,11 +326,11 @@ esac
 # consumes -- so a variable added there inherits enforcement here without
 # anyone remembering a second list.
 mapfile -t class_secret < <(deployment_contract_path_variables "${service}" \
-  | sed -n 's/^secret //p')
+  | awk '$1 == "secret" { print $3 }')
 mapfile -t class_trust < <(deployment_contract_path_variables "${service}" \
-  | sed -n 's/^trust //p')
+  | awk '$1 == "trust" { print $3 }')
 mapfile -t class_state < <(deployment_contract_path_variables "${service}" \
-  | sed -n 's/^state //p')
+  | awk '$1 == "state" { print $3 }')
 if [[ ${#class_secret[@]} -gt 0 ]]; then
   require_secret_paths "${class_secret[@]}"
 fi

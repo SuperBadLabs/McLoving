@@ -85,8 +85,11 @@ MCLOVING_DEPLOY_LIB="$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 export MCLOVING_DEPLOY_LIB
 # The walker's unit roots are the derived ones above -- one derivation for
 # writer, validator, and inventory alike.
-MCLOVING_UNIT_DIRS="${unit_root}
-${quadlet_root}"
+# One substitution per item strips its own trailing newline, so the items
+# are joined with an explicit one -- two adjacent substitutions would fuse
+# into a single undecodable token.
+MCLOVING_UNIT_DIRS="$(encode_path_item "${unit_root}")
+$(encode_path_item "${quadlet_root}")"
 export MCLOVING_UNIT_DIRS
 
 # The contracts may point their identity material OUTSIDE the walked trees
@@ -108,20 +111,21 @@ for contract_service in postgres db-init controller agent; do
   service_paths="$(
     load_environment_file "${contract_file}" 2>/dev/null || exit 0
     deployment_contract_path_variables "${contract_service}" \
-      | while IFS=' ' read -r path_class path_variable; do
+      | while IFS=' ' read -r path_class _ path_variable; do
           case "${path_class}" in
             secret | trust) ;;
             *) continue ;;
           esac
           contract_into path_value "${path_variable}"
           case "${path_value}" in
-            /*) printf '%s\n' "${path_value}" ;;
+            /*) encode_path_item "${path_value}" ;;
             "") ;;
             *)
               # The guard refuses relative class paths outright; a contract
               # carrying one anyway is drift the document must SHOW, never
-              # silently skip.
-              printf '!relative %s %s\n' "${path_variable}" "${path_value}"
+              # silently skip. The whole marker is one encoded item, so a
+              # value carrying a newline stays one record.
+              encode_path_item "!relative ${path_variable} ${path_value}"
               ;;
           esac
         done
@@ -134,6 +138,7 @@ MCLOVING_CONFIGURED_PATHS="${configured_paths%$'\n'}"
 export MCLOVING_CONFIGURED_PATHS
 
 python3 - "${home_dir}" <<'PY'
+import base64
 import hashlib
 import json
 import stat
@@ -159,9 +164,17 @@ if unit_dirs_supplied is None:
         "mcloving-deployed-digests: MCLOVING_UNIT_DIRS is not set; "
         "run this through its shell wrapper"
     )
-unit_dirs = tuple(
-    Path(line) for line in unit_dirs_supplied.splitlines() if line
-)
+def decode_path_items(text: str) -> list:
+    """One base64 line per item -- the shared transport convention; an item
+    carrying a newline or any other byte stays one item."""
+    return [
+        os.fsdecode(base64.b64decode(line))
+        for line in text.splitlines()
+        if line
+    ]
+
+
+unit_dirs = tuple(Path(item) for item in decode_path_items(unit_dirs_supplied))
 
 
 MAX_RECORD_ATTEMPTS = 3
@@ -533,7 +546,7 @@ contract_entries = walk(config)
 # document to one bad in-tree link would deny CUTOVER-001 its re-read
 # precisely while drift is present. Root ancestors keep their named,
 # fail-closed refusal: nothing behind a broken root chain is recordable.
-chain_directories = {line for line in ancestors_supplied.splitlines() if line}
+chain_directories = set(decode_path_items(ancestors_supplied))
 unresolvable_links = []
 
 
@@ -551,9 +564,7 @@ def collect_chain(path: Path) -> bool:
     )
     if derived.returncode != 0:
         return False
-    chain_directories.update(
-        line for line in derived.stdout.splitlines() if line
-    )
+    chain_directories.update(decode_path_items(derived.stdout))
     return True
 
 
@@ -590,7 +601,7 @@ def inside_walked_trees(path: Path) -> bool:
 configured_supplied = os.environ.get("MCLOVING_CONFIGURED_PATHS", "")
 relative_configured = []
 absolute_configured = set()
-for line in configured_supplied.splitlines():
+for line in decode_path_items(configured_supplied):
     if not line:
         continue
     if line.startswith("!relative "):

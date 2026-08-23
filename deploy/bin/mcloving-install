@@ -121,7 +121,11 @@ contract_destinations=(
 # systemd creates StateDirectory= leaves under ~/.local/state at service
 # start -- so their roots are derived from the staged unit files and walked
 # alongside everything else. A future directive lands here automatically.
-mapfile -t unit_declared_roots < <(deployment_unit_declared_roots "${home_dir}" \
+unit_declared_roots=()
+while IFS= read -r encoded_declared_root; do
+  [[ -n "${encoded_declared_root}" ]] || continue
+  unit_declared_roots+=("$(base64 -d <<<"${encoded_declared_root}")")
+done < <(deployment_unit_declared_roots "${home_dir}" \
   "${deploy_root}"/systemd/*.service \
   "${deploy_root}"/podman/*.container \
   "${deploy_root}"/podman/*.volume | sort -u)

@@ -52,7 +52,11 @@ require_secure_ancestors() {
   home_owner="$(stat -Lc '%u' "${home_dir}")" \
     || deploy_fail "cannot stat deployment home ${home_dir}"
   offending=""
-  while IFS= read -r ancestor; do
+  local encoded_ancestor
+  while IFS= read -r encoded_ancestor; do
+    [[ -n "${encoded_ancestor}" ]] || continue
+    ancestor="$(base64 -d <<<"${encoded_ancestor}")" \
+      || deploy_fail "cannot decode a deployment ancestor chain item"
     # -d and stat -L follow a symlinked ancestor deliberately: the directory
     # the services traverse is the target, and a writable target permits the
     # same rename regardless of how it is reached. The target's own parents
@@ -145,7 +149,7 @@ require_secret_files() {
   fi
 }
 
-# deployment_contract_path_variables SERVICE -> "CLASS VARIABLE" lines
+# deployment_contract_path_variables SERVICE -> "CLASS LINK-POLICY VARIABLE" lines
 #
 # The single authority for which contract variables carry filesystem paths
 # and which protection class each belongs to, shared by mcloving-env-guard
@@ -162,6 +166,17 @@ require_secret_files() {
 # chain, absence legal for journals. The migration URL is a network
 # address, not a filesystem path, and the postgres/db-init contracts carry
 # no path variables.
+#
+# LINK-POLICY encodes the PARITY PRINCIPLE: wherever the guard validates a
+# path a binary enforces its own rules on, the guard mirrors the binary's
+# EXACT check -- a guard that accepts what the binary refuses reports a
+# contract satisfied and then watches the unit fail after ExecStartPre.
+# "follow": the binary opens through the pathname (fs::read,
+# read_to_string, store/journal opens), so symlinks are legal and the
+# resolved target chain is what the walk judges. "nofollow": the binary
+# inspects with symlink_metadata() and refuses every symlink -- today the
+# two effect variables -- so the guard refuses the link itself, lstat-based,
+# before any generic class check follows it.
 deployment_contract_path_variables() {
   case "$1" in
     controller)
@@ -173,26 +188,26 @@ deployment_contract_path_variables() {
       # stays legal. Both are optional; empty means unset here, and the
       # binary refuses set-but-empty on its own.
       printf '%s\n' \
-        "secret MCLOVING_AGENT_SERVER_KEY_PATH" \
-        "secret MCLOVING_AGENT_IDENTITY_BINDINGS_PATH" \
-        "secret MCLOVING_EFFECT_RUNTIME_PLAN" \
-        "trust MCLOVING_AGENT_SERVER_CERT_PATH" \
-        "trust MCLOVING_AGENT_CLIENT_CA_PATH" \
-        "trust MCLOVING_EFFECT_MAPPING_CATALOG" \
-        "state MCLOVING_OBJECT_ROOT" \
-        "state MCLOVING_WORKSPACE_ROOT" \
-        "state MCLOVING_AGENT_JOURNAL"
+        "secret follow MCLOVING_AGENT_SERVER_KEY_PATH" \
+        "secret follow MCLOVING_AGENT_IDENTITY_BINDINGS_PATH" \
+        "secret nofollow MCLOVING_EFFECT_RUNTIME_PLAN" \
+        "trust follow MCLOVING_AGENT_SERVER_CERT_PATH" \
+        "trust follow MCLOVING_AGENT_CLIENT_CA_PATH" \
+        "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG" \
+        "state follow MCLOVING_OBJECT_ROOT" \
+        "state follow MCLOVING_WORKSPACE_ROOT" \
+        "state follow MCLOVING_AGENT_JOURNAL"
       ;;
     agent)
       # The session receipt is an optional durable output the agent writes;
       # state-class like the journal, absence legal before first use.
       printf '%s\n' \
-        "secret MCLOVING_AGENT_PRIVATE_KEY_PATH" \
-        "trust MCLOVING_CONTROLLER_CA_PATH" \
-        "trust MCLOVING_AGENT_CERTIFICATE_PATH" \
-        "state MCLOVING_AGENT_WORKSPACE_ROOT" \
-        "state MCLOVING_AGENT_JOURNAL_PATH" \
-        "state MCLOVING_AGENT_SESSION_RECEIPT_PATH"
+        "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH" \
+        "trust follow MCLOVING_CONTROLLER_CA_PATH" \
+        "trust follow MCLOVING_AGENT_CERTIFICATE_PATH" \
+        "state follow MCLOVING_AGENT_WORKSPACE_ROOT" \
+        "state follow MCLOVING_AGENT_JOURNAL_PATH" \
+        "state follow MCLOVING_AGENT_SESSION_RECEIPT_PATH"
       ;;
     postgres | db-init)
       :
@@ -234,6 +249,22 @@ deployment_xdg_value_applies() {
     return 0
   fi
   return 1
+}
+
+# encode_path_item PATH -> one base64 line (no wrap).
+#
+# The single transport token for every internal multi-path protocol: chain
+# and declared-roots output, and the wrapper-to-inventory environment
+# exports. Chosen over NUL delimiting because bash variables cannot hold
+# NUL, and over ad-hoc escaping because the base64 alphabet contains
+# neither newline nor NUL, so an item carrying either -- a quoted multiline
+# contract value is legal to the parser and to systemd -- CANNOT regress to
+# splitting: whatever the bytes, one item is one line. Decoding through
+# command substitution strips one trailing newline; a directory NAME ending
+# in a newline is therefore out of scope, stated.
+encode_path_item() {
+  printf '%s' "$1" | base64 -w0
+  printf '\n'
 }
 
 deployment_config_root() {
@@ -288,19 +319,19 @@ deployment_unit_declared_roots() {
       StateDirectory)
         # shellcheck disable=SC2086  # systemd's value is space-separated names
         for entry in ${value}; do
-          printf '%s\n' "${state_base}/${entry}"
+          encode_path_item "${state_base}/${entry}"
         done
         ;;
       LogsDirectory)
         # shellcheck disable=SC2086  # systemd's value is space-separated names
         for entry in ${value}; do
-          printf '%s\n' "${state_base}/log/${entry}"
+          encode_path_item "${state_base}/log/${entry}"
         done
         ;;
       CacheDirectory)
         # shellcheck disable=SC2086  # systemd's value is space-separated names
         for entry in ${value}; do
-          printf '%s\n' "${cache_base}/${entry}"
+          encode_path_item "${cache_base}/${entry}"
         done
         ;;
       RuntimeDirectory)
@@ -310,14 +341,14 @@ deployment_unit_declared_roots() {
         path="${value#-}"
         path="${path//%h/${home_dir}}"
         case "${path}" in
-          "${home_dir}"/*) printf '%s\n' "${path}" ;;
+          "${home_dir}"/*) encode_path_item "${path}" ;;
         esac
         ;;
       Volume)
         path="${value%%:*}"
         path="${path//%h/${home_dir}}"
         case "${path}" in
-          "${home_dir}"/*) printf '%s\n' "${path}" ;;
+          "${home_dir}"/*) encode_path_item "${path}" ;;
         esac
         ;;
     esac
@@ -352,6 +383,7 @@ deployment_unit_declared_roots() {
 # with resolution bounded like the kernel bounds ELOOP.
 deployment_ancestor_chain() {
   python3 - "$@" <<'CHAIN'
+import base64
 import os
 import sys
 
@@ -433,7 +465,9 @@ for root in roots:
     chain_of(resolved_root)
 
 for path in sorted(found):
-    print(path)
+    # One item, one line, whatever bytes the path carries: the transport
+    # convention shared by every internal multi-path protocol.
+    print(base64.b64encode(os.fsencode(path)).decode("ascii"))
 CHAIN
 }
 
@@ -1147,10 +1181,12 @@ require_deployment_integrity() {
     "${quadlet_root}"/mcloving-*.container "${quadlet_root}"/mcloving-*.volume; do
     [[ -f "${unit_file}" ]] && unit_files+=("${unit_file}")
   done
-  local unit_declared_roots=()
+  local unit_declared_roots=() encoded_root
   if [[ ${#unit_files[@]} -gt 0 ]]; then
-    mapfile -t unit_declared_roots < <(deployment_unit_declared_roots \
-      "${home_dir}" "${unit_files[@]}" | sort -u)
+    while IFS= read -r encoded_root; do
+      [[ -n "${encoded_root}" ]] || continue
+      unit_declared_roots+=("$(base64 -d <<<"${encoded_root}")")
+    done < <(deployment_unit_declared_roots "${home_dir}" "${unit_files[@]}" | sort -u)
   fi
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
     "${contract_destinations[@]}" "${unit_declared_roots[@]}"
