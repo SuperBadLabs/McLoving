@@ -32,6 +32,58 @@ const IMPLEMENTATION_SHA256: &str =
 const PROVIDER_TOKEN: &str = "contained-provider-token";
 const RECEIPT_KEY: &[u8] = b"contained-receipt-signing-key-000000000000000000000000";
 
+/// Lifetime every `provision_request` grants its request and its instance.
+const REQUEST_LIFETIME_MS: i64 = 120_000;
+const REQUEST_INSTANCE_LIFETIME_MS: i64 = 90_000;
+
+/// Startup budget for cases whose asserted outcome is *not* the startup
+/// timeout.
+///
+/// `Provisioner::startup_deadline` anchors the budget to wall-clock time at
+/// admission and charges the whole provision path against it — the ledger
+/// write, the provider create round trip, instance validation and only then
+/// the readiness polls. A short budget therefore races real I/O rather than
+/// bounding startup, and on a loaded host `StartupTimeoutCleaned` preempts
+/// whatever outcome the test meant to observe.
+///
+/// The deadline is also clamped to the request's own
+/// `instance_expires_at_unix_ms`, so handing that same span to
+/// `startup_timeout_ms` makes the request lifetime the binding deadline. The
+/// startup budget then stops being a second, shorter clock that host load can
+/// exhaust, and these tests assert their outcome against the only expiry they
+/// actually care about.
+const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS as u64;
+
+/// Delay the fixture holds a delayed-create response open for before
+/// answering. The startup budgets below are derived from it.
+const FIXTURE_DELAYED_CREATE_MS: u64 = 200;
+
+/// Delay the one rendezvous-on-create case asks the fixture to hold its
+/// create response open for, via `Fixture::set_create_delay_ms`.
+///
+/// That case is the only genuinely two-sided window in the suite: its budget
+/// has to outlast the admission write yet expire before the fixture answers.
+/// Widening the delay well past the mode's own `FIXTURE_DELAYED_CREATE_MS`
+/// widens both margins at once instead of splitting a couple of hundred
+/// milliseconds between them.
+const FIXTURE_RENDEZVOUS_CREATE_MS: u64 = 3_000;
+
+/// Startup budget for that case: a third of the delay the fixture holds the
+/// create open. The admission write would have to take a full second to miss
+/// the create call, and the create would have to answer three times early for
+/// the deadline not to have passed.
+const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
+
+/// Startup budget for the cases where the startup timeout *is* the subject.
+///
+/// It must sit below the delay the fixture injects on the path under test —
+/// `FIXTURE_DELAYED_CREATE_MS` for the delayed-create modes, 3 s for the
+/// delayed lookup modes, and the backdated admission in the recovery-anchoring
+/// test — so the deadline is already past when the observation lands. Host
+/// load only pushes those delays further out, so firing stays deterministic in
+/// the one direction these tests depend on.
+const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FixtureMode {
     Ready,
@@ -80,6 +132,7 @@ struct Inner {
     inventory_started: usize,
     create_started: usize,
     lookup_started: usize,
+    create_delay_override_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -120,6 +173,7 @@ impl Fixture {
                 inventory_started: 0,
                 create_started: 0,
                 lookup_started: 0,
+                create_delay_override_ms: None,
             })),
             signing_key,
         };
@@ -234,6 +288,17 @@ impl Fixture {
         self.state.inner.lock().expect("fixture state").mode = mode;
     }
 
+    /// Hold the create response open for longer than the mode's own delay, so
+    /// a test that rendezvouses on the create call has a wide window to work
+    /// in rather than a few hundred milliseconds that host load can close.
+    fn set_create_delay_ms(&self, delay_ms: u64) {
+        self.state
+            .inner
+            .lock()
+            .expect("fixture state")
+            .create_delay_override_ms = Some(delay_ms);
+    }
+
     async fn wait_for_create_start(&self) {
         for _ in 0..1_000 {
             if self
@@ -301,11 +366,17 @@ async fn create_instance(
     let create_delay_ms = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.create_started += 1;
-        match inner.mode {
-            FixtureMode::DelayedCreateAfterInitialSnapshot
-            | FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
-            FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce => 200,
-            _ => 0,
+        if let Some(override_ms) = inner.create_delay_override_ms {
+            override_ms
+        } else {
+            match inner.mode {
+                FixtureMode::DelayedCreateAfterInitialSnapshot
+                | FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
+                FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce => {
+                    FIXTURE_DELAYED_CREATE_MS
+                }
+                _ => 0,
+            }
         }
     };
     if create_delay_ms != 0 {
@@ -716,12 +787,22 @@ impl Context {
         Self::with_quota(mode, 4).await
     }
 
+    /// The default startup budget deliberately exceeds anything the contained
+    /// harness can spend, so a test only observes `StartupTimeoutCleaned` when
+    /// it asked for it. Tests that put the timeout itself under test opt in
+    /// with [`Context::with_startup_timeout`].
     async fn with_quota(mode: FixtureMode, maximum: u32) -> Self {
-        Self::with_limits(mode, maximum, 300, 150).await
+        Self::with_limits(mode, maximum, 300, STARTUP_BUDGET_BEYOND_TEST_WORK_MS).await
     }
 
     async fn with_provider_timeout(mode: FixtureMode, provider_timeout_ms: u64) -> Self {
-        Self::with_limits(mode, 4, provider_timeout_ms, 150).await
+        Self::with_limits(
+            mode,
+            4,
+            provider_timeout_ms,
+            STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
+        )
+        .await
     }
 
     async fn with_startup_timeout(mode: FixtureMode, startup_timeout_ms: u64) -> Self {
@@ -911,8 +992,8 @@ fn provision_request(config: &ProvisionerConfig, implementation_sha256: &str) ->
         provider_grant_scope: config.provider_grant_scope.clone(),
         agent: config.agent.clone(),
         requested_at_unix_ms: now,
-        expires_at_unix_ms: now + 120_000,
-        instance_expires_at_unix_ms: now + 90_000,
+        expires_at_unix_ms: now + REQUEST_LIFETIME_MS,
+        instance_expires_at_unix_ms: now + REQUEST_INSTANCE_LIFETIME_MS,
         audit_lineage: format!("contained-audit:{}", Uuid::new_v4()),
     }
 }
@@ -1064,25 +1145,32 @@ fn diff003_source_workload() -> Option<(Uuid, Uuid, Uuid, Uuid)> {
 async fn substitution_startup_failure_and_timeout_leave_no_compute() {
     let mut substitution_denials = 0;
     let mut cleaned_failures = 0;
-    for (mode, expected) in [
+    // Each case carries the startup budget its outcome depends on. The first
+    // three are decided the moment the create response lands, so they must not
+    // be preempted by a deadline; only the last one waits for the timeout.
+    for (mode, expected, startup_timeout_ms) in [
         (
             FixtureMode::SubstituteTemplate,
             LifecycleOutcome::SubstitutionDeniedCleaned,
+            STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
         ),
         (
             FixtureMode::SubstituteIdentity,
             LifecycleOutcome::SubstitutionDeniedCleaned,
+            STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
         ),
         (
             FixtureMode::StartupFailed,
             LifecycleOutcome::StartupFailedCleaned,
+            STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
         ),
         (
             FixtureMode::PendingForever,
             LifecycleOutcome::StartupTimeoutCleaned,
+            STARTUP_BUDGET_UNDER_TEST_MS,
         ),
     ] {
-        let context = Context::new(mode).await;
+        let context = Context::with_startup_timeout(mode, startup_timeout_ms).await;
         let receipt = context
             .provisioner
             .provision(&context.request())
@@ -1607,7 +1695,9 @@ async fn startup_absence_yields_to_a_newer_pending_revision() {
 
 #[tokio::test]
 async fn provider_ready_after_startup_deadline_is_cleaned_as_timeout() {
-    let context = Context::new(FixtureMode::DelayedReady).await;
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedReady, STARTUP_BUDGET_UNDER_TEST_MS)
+            .await;
     let receipt = context
         .provisioner
         .provision(&context.request())
@@ -1623,7 +1713,9 @@ async fn provider_ready_after_startup_deadline_is_cleaned_as_timeout() {
 
 #[tokio::test]
 async fn lookup_absence_after_startup_deadline_is_classified_as_timeout() {
-    let context = Context::new(FixtureMode::DelayedAbsence).await;
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedAbsence, STARTUP_BUDGET_UNDER_TEST_MS)
+            .await;
     let receipt = context
         .provisioner
         .provision(&context.request())
@@ -1932,7 +2024,11 @@ async fn post_lookup_timeout_cannot_reactivate_confirmed_cleanup() {
 
 #[tokio::test]
 async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
-    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    let context = Context::with_startup_timeout(
+        FixtureMode::DelayedCreateReady,
+        STARTUP_BUDGET_UNDER_TEST_MS,
+    )
+    .await;
     let receipt = context
         .provisioner
         .provision(&context.request())
@@ -1948,7 +2044,8 @@ async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
 
 #[tokio::test]
 async fn admission_deadline_is_rechecked_after_durable_intent_before_create() {
-    let context = Context::with_startup_timeout(FixtureMode::Ready, 50).await;
+    let context =
+        Context::with_startup_timeout(FixtureMode::Ready, STARTUP_BUDGET_UNDER_TEST_MS).await;
     let database_path = context.config.state_dir.join("provisioner.sqlite3");
     let (locked, receiver) = std::sync::mpsc::channel();
     let blocker = std::thread::spawn(move || {
@@ -1978,7 +2075,8 @@ async fn admission_deadline_is_rechecked_after_durable_intent_before_create() {
 
 #[tokio::test]
 async fn cancel_preserves_a_confirmed_failed_startup_receipt() {
-    let context = Context::with_startup_timeout(FixtureMode::Ready, 50).await;
+    let context =
+        Context::with_startup_timeout(FixtureMode::Ready, STARTUP_BUDGET_UNDER_TEST_MS).await;
     let request = context.request();
     let database_path = context.config.state_dir.join("provisioner.sqlite3");
     let (locked, receiver) = std::sync::mpsc::channel();
@@ -2022,7 +2120,21 @@ async fn cancel_preserves_a_confirmed_failed_startup_receipt() {
 
 #[tokio::test]
 async fn reconcile_does_not_close_an_in_flight_fresh_intent() {
-    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    // This one needs the create call to be reached — it rendezvouses on
+    // `wait_for_create_start` — and only then to blow its deadline while the
+    // call is still open. Hold the create open far longer than the mode's own
+    // delay so both sides of that window have room; the provider timeout has
+    // to clear the held-open create as well.
+    let context = Context::with_limits(
+        FixtureMode::DelayedCreateReady,
+        4,
+        FIXTURE_RENDEZVOUS_CREATE_MS + 2_000,
+        STARTUP_BUDGET_DURING_CREATE_MS,
+    )
+    .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
@@ -2481,7 +2593,17 @@ async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
 
 #[tokio::test]
 async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
-    let context = Context::new(FixtureMode::DelayedMalformedCreateOnce).await;
+    // The assertion below counts a *confirmed* cleanup, so the reconciling
+    // delete has to complete inside `provider_timeout_ms`. The default 300 ms
+    // is a provider-RPC bound, not the subject here, and a loaded host can
+    // exhaust it and downgrade the cleanup to ambiguous.
+    let context = Context::with_limits(
+        FixtureMode::DelayedMalformedCreateOnce,
+        4,
+        5_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2502,6 +2624,24 @@ async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
     assert!(provisioned.body.ambiguity);
     assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
     assert_eq!(context.fixture.counts().3, 1);
+
+    // Reconciliation only reclaims an ambiguous row once its startup deadline
+    // has passed, and that deadline is anchored to the admission time in the
+    // ledger. Retire the admission explicitly rather than leaving a short
+    // wall-clock budget to expire on its own, which would race the provision
+    // above on a loaded host.
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "UPDATE requests SET created_at_unix_ms = ?2 WHERE request_id = ?1",
+            rusqlite::params![
+                request.request_id.to_string(),
+                now_ms() - (STARTUP_BUDGET_BEYOND_TEST_WORK_MS as i64) - 1_000,
+            ],
+        )
+        .expect("retire the admission behind its startup deadline");
+    drop(database);
 
     let reconciled = context
         .provisioner
@@ -2773,7 +2913,12 @@ async fn signed_absence_crash_recovery_preserves_startup_outcome() {
 
 #[tokio::test]
 async fn recovery_anchors_startup_timeout_to_immutable_admission_time() {
-    let context = Context::new(FixtureMode::Ready).await;
+    // The startup timeout is the subject here: recovery must measure it from
+    // the admission time recorded in the ledger, so the backdated
+    // `created_at_unix_ms` below has to sit further in the past than the
+    // budget.
+    let context =
+        Context::with_startup_timeout(FixtureMode::Ready, STARTUP_BUDGET_UNDER_TEST_MS).await;
     let request = context.request();
     context
         .provisioner
@@ -2788,7 +2933,11 @@ async fn recovery_anchors_startup_timeout_to_immutable_admission_time() {
              SET state = 'pending', latest_receipt_json = NULL,
                  created_at_unix_ms = ?2, updated_at_unix_ms = ?3
              WHERE request_id = ?1",
-            rusqlite::params![request.request_id.to_string(), now_ms() - 1_000, now_ms(),],
+            rusqlite::params![
+                request.request_id.to_string(),
+                now_ms() - (STARTUP_BUDGET_UNDER_TEST_MS as i64) - 1_000,
+                now_ms(),
+            ],
         )
         .expect("simulate mutable update after original admission");
     drop(database);
