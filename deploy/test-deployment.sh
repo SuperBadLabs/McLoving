@@ -54,7 +54,9 @@ cleanup() {
     # removal below destroys it. Without this, the single most informative
     # log on a runner -- what PostgreSQL itself printed -- exists only inside
     # a container this trap is about to delete, and the preserved ${workdir}
-    # never held it.
+    # never held it. A failure before step [1/9] predates the logs
+    # directory, so the trap makes it rather than losing its captures.
+    mkdir -p "${workdir}/logs" 2>/dev/null || true
     {
       echo "== podman ps --all"
       podman ps --all 2>&1 || true
@@ -1132,6 +1134,64 @@ missing = required - set(records)
 if missing:
     raise SystemExit(f"ancestor records missing: {sorted(missing)}")
 ANCESTORS
+
+# A chmod landing between a record's fstat and its pathname re-check must
+# not survive into the canonical document: the inode is unchanged, so a
+# device+inode re-check alone keeps the stale mode. Driven against the
+# INSTALLED helper's own code with a hook that fires the chmod exactly
+# inside that window (after the record is built, before the pathname
+# re-check), this requires the returned document to carry the settled mode.
+race_mode_before="$(stat -c '%a' "${libexec}")"
+race_status=0
+python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
+import contextlib
+import io
+import json
+import os
+import sys
+
+helper, home, target = sys.argv[1], sys.argv[2], sys.argv[3]
+source = open(helper, encoding="utf-8").read()
+payload = source.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+state = {"fd": None, "fired": False}
+real_open, real_close = os.open, os.close
+
+
+def hooked_open(path, flags, *args, **kwargs):
+    fd = real_open(path, flags, *args, **kwargs)
+    if not state["fired"] and os.fspath(path) == target:
+        state["fd"] = fd
+    return fd
+
+
+def hooked_close(fd):
+    if fd == state["fd"] and not state["fired"]:
+        state["fired"] = True
+        os.chmod(target, 0o777)
+    return real_close(fd)
+
+
+os.open, os.close = hooked_open, hooked_close
+buffer = io.StringIO()
+sys.argv = ["-", home]
+try:
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(payload, helper, "exec"), {"__name__": "__main__"})
+finally:
+    os.open, os.close = real_open, real_close
+if not state["fired"]:
+    raise SystemExit("the racing chmod never fired; the hook missed the record window")
+document = json.loads(buffer.getvalue())
+records = {record["path"]: record for record in document["ancestors"]}
+entry = records[".local/libexec/mcloving"]
+if entry.get("mode") != 0o777:
+    raise SystemExit(f"record kept the pre-chmod mode: {entry}")
+MODERACE
+chmod "${race_mode_before}" "${libexec}"
+if [[ "${race_status}" -ne 0 ]]; then
+  echo "digest re-read kept a stale directory mode across a racing chmod" >&2
+  exit 1
+fi
 
 # Content is not the whole identity. A deployed binary that loses its execute
 # bit keeps its digest and size while systemd can no longer run it, and the

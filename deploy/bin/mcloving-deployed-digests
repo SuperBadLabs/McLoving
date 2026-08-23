@@ -125,6 +125,9 @@ def file_record(path: Path, root: Path) -> dict:
         try:
             status = os.fstat(descriptor)
             opened = (status.st_dev, status.st_ino)
+            # The metadata snapshot the returned record was built from; the
+            # regular-file branch refreshes it with its post-read fstat.
+            recorded = status
             if not stat.S_ISREG(status.st_mode):
                 # A FIFO, socket, device node, or directory has no content to
                 # digest. A directory's mode is deployment state in its own
@@ -158,6 +161,7 @@ def file_record(path: Path, root: Path) -> dict:
                     return unreadable("read_failed", before)
                 if identity(settled) != identity(status):
                     continue
+                recorded = settled
                 record = {
                     "path": relative,
                     "sha256": digest.hexdigest(),
@@ -179,6 +183,24 @@ def file_record(path: Path, root: Path) -> dict:
         except OSError:
             continue
         if (current.st_dev, current.st_ino) != opened:
+            continue
+        # Same inode is not same identity: a chmod or chown landing between
+        # the record's fstat and this re-check leaves device and inode
+        # untouched while the mode the record carries is already stale -- a
+        # canonical document reporting 0700 for a directory that is 0777 by
+        # the time it returns. Non-regular nodes never had a second look at
+        # all; regular files only compared their own two fstats. Revalidate
+        # the identity-relevant metadata against what the pathname resolves
+        # to NOW, and retry on change like every other instability here.
+        if (
+            stat.S_IMODE(current.st_mode),
+            current.st_uid,
+            current.st_gid,
+        ) != (
+            stat.S_IMODE(recorded.st_mode),
+            recorded.st_uid,
+            recorded.st_gid,
+        ):
             continue
         after = link_target()
         if after == before:
