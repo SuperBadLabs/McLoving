@@ -32,6 +32,14 @@ for id in "${MCLOVING_ORGANIZATION_ID}" "${MCLOVING_PROJECT_ID}"; do
     exit 1
   fi
 done
+# Normalized ONCE, at the source. Every comparison below is textual against
+# PostgreSQL's canonical lowercase uuid rendering, so a valid uppercase UUID
+# in the contract would provision fine and then be refused on the next
+# bootstrap as belonging to a different identity -- blocking the controller
+# unit behind a spelling. Rust's uuid parser accepts either case, so the
+# lowercased form reaches identity-admin unchanged in meaning.
+MCLOVING_ORGANIZATION_ID="${MCLOVING_ORGANIZATION_ID,,}"
+MCLOVING_PROJECT_ID="${MCLOVING_PROJECT_ID,,}"
 
 libexec_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
@@ -150,10 +158,39 @@ project_org_row="$(printf "SELECT 'org=' || organization_id FROM projects WHERE 
 project_slug_row="$(printf "SELECT 'slug=' || slug FROM projects WHERE id = '%s';\n" \
   "${MCLOVING_PROJECT_ID}" | psql_in_container --tuples-only --no-align --file -)"
 
+# Ownership runs the other direction too: the requested SLUGS may already
+# belong to other ids. organizations.slug is globally unique and
+# projects(organization_id, slug) is unique, so a slug owned by a different
+# id makes create-project fail on the constraint AFTER this bootstrap has
+# already been classified as a clean provision -- the same
+# mutate-then-refuse interval the id checks close. Slugs are interpolated as
+# SQL literals with doubled single quotes, the same escaping the ALTER ROLE
+# password uses; the ids they resolve to are compared in the shell.
+#
+# Checked on the PROVISION path only: on the existing-identity path the
+# slug-match checks below already pin both slugs to the configured ids (the
+# unique constraints make owner and holder one fact), and the project-missing
+# branch refuses on its own precise diagnosis before ownership could add one.
+escaped_organization_slug="${MCLOVING_ORGANIZATION_SLUG//\'/\'\'}"
+escaped_project_slug="${MCLOVING_PROJECT_SLUG//\'/\'\'}"
+organization_slug_owner="$(printf "SELECT 'id=' || id FROM organizations WHERE slug = '%s';\n" \
+  "${escaped_organization_slug}" | psql_in_container --tuples-only --no-align --file -)"
+project_slug_owner="$(printf "SELECT 'id=' || id FROM projects WHERE organization_id = '%s' AND slug = '%s';\n" \
+  "${MCLOVING_ORGANIZATION_ID}" "${escaped_project_slug}" \
+  | psql_in_container --tuples-only --no-align --file -)"
+
 provision="0"
 if [[ -z "${organization_slug_row}" ]]; then
   if [[ -n "${project_org_row}" ]]; then
     echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} does not exist but project ${MCLOVING_PROJECT_ID} already does (${project_org_row}); provisioning would collide, resolve the project id first" >&2
+    exit 1
+  fi
+  if [[ -n "${organization_slug_owner}" && "${organization_slug_owner}" != "id=${MCLOVING_ORGANIZATION_ID}" ]]; then
+    echo "mcloving-db-init: organization slug ${MCLOVING_ORGANIZATION_SLUG} is already owned by another organization (${organization_slug_owner}); provisioning would fail on the unique slug constraint after mutating credentials" >&2
+    exit 1
+  fi
+  if [[ -n "${project_slug_owner}" && "${project_slug_owner}" != "id=${MCLOVING_PROJECT_ID}" ]]; then
+    echo "mcloving-db-init: project slug ${MCLOVING_PROJECT_SLUG} is already owned by another project (${project_slug_owner}) in organization ${MCLOVING_ORGANIZATION_ID}; refusing before any credential mutation" >&2
     exit 1
   fi
   provision="1"

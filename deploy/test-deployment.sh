@@ -461,6 +461,62 @@ grep -q "refusing to report a different identity as provisioned" \
   exit 1
 }
 rm -f "${slug_mismatch_env}"
+# Ownership runs the other direction too: fresh UUIDs with a slug that is
+# already owned by ANOTHER organization classify as a clean provision and
+# then fail on the unique slug constraint -- after rotating credentials.
+# The refusal must come first and must leave the stored hash untouched.
+slug_owner_env="${workdir}/db-init-slug-owner.env"
+owner_gate_org="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+owner_gate_project="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+sed -e "s#^MCLOVING_ORGANIZATION_ID=.*#MCLOVING_ORGANIZATION_ID=${owner_gate_org}#" \
+    -e "s#^MCLOVING_PROJECT_ID=.*#MCLOVING_PROJECT_ID=${owner_gate_project}#" \
+  "${db_init_env}" > "${slug_owner_env}"
+grep -q "^MCLOVING_ORGANIZATION_ID=${owner_gate_org}\$" "${slug_owner_env}" || {
+  echo "slug-ownership gate could not rewrite MCLOVING_ORGANIZATION_ID; contract shape changed" >&2
+  exit 1
+}
+owner_hash_before="$(tenant_hash)"
+if run_with_env "${slug_owner_env}" "${db_init_argv[@]}" \
+  > "${workdir}/logs/db-init-slug-owner.log" 2>&1; then
+  echo "db-init classified an already-owned organization slug as a clean provision" >&2
+  exit 1
+fi
+grep -q "already owned by another organization" "${workdir}/logs/db-init-slug-owner.log" || {
+  echo "db-init refused the owned slug for the wrong reason:" >&2
+  cat "${workdir}/logs/db-init-slug-owner.log" >&2
+  exit 1
+}
+[[ "$(tenant_hash)" == "${owner_hash_before}" ]] || {
+  echo "the owned-slug refusal still rotated the tenant password" >&2
+  exit 1
+}
+rm -f "${slug_owner_env}"
+# UUID case is spelling, not identity. PostgreSQL renders uuids in canonical
+# lowercase, so a contract whose valid UUIDs use uppercase hex must still
+# resolve to the provisioned identity instead of being refused as belonging
+# to another organization on every bootstrap after the first.
+uppercase_env="${workdir}/db-init-uppercase.env"
+uppercase_org="${organization_id^^}"
+uppercase_project="${project_id^^}"
+sed -e "s#^MCLOVING_ORGANIZATION_ID=.*#MCLOVING_ORGANIZATION_ID=${uppercase_org}#" \
+    -e "s#^MCLOVING_PROJECT_ID=.*#MCLOVING_PROJECT_ID=${uppercase_project}#" \
+  "${db_init_env}" > "${uppercase_env}"
+grep -q "^MCLOVING_ORGANIZATION_ID=${uppercase_org}\$" "${uppercase_env}" || {
+  echo "uppercase-UUID gate could not rewrite MCLOVING_ORGANIZATION_ID; contract shape changed" >&2
+  exit 1
+}
+run_with_env "${uppercase_env}" "${db_init_argv[@]}" \
+  > "${workdir}/logs/db-init-uppercase.log" 2>&1 || {
+  echo "db-init refused a valid uppercase spelling of the provisioned UUIDs:" >&2
+  cat "${workdir}/logs/db-init-uppercase.log" >&2
+  exit 1
+}
+grep -q "already provisioned" "${workdir}/logs/db-init-uppercase.log" || {
+  echo "the uppercase spelling did not resolve to the provisioned identity:" >&2
+  cat "${workdir}/logs/db-init-uppercase.log" >&2
+  exit 1
+}
+rm -f "${uppercase_env}"
 
 "${unit_command}" "${home}/.config/systemd/user/mcloving-controller.service" \
   --home "${home}" > "${workdir}/controller.derived.json"
