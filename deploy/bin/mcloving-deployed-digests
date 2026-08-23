@@ -33,6 +33,25 @@ if [[ ! -d "${home_dir}/.local/libexec/mcloving" ]]; then
   exit 1
 fi
 
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+
+# The ancestor set comes from the library's single derivation -- the same
+# lexical-plus-physical chain the installer refuses on -- so the inventory
+# and the refusal walk cannot drift apart. The roots listed here mirror the
+# trees the document walks below. A looping or dangling ancestor link is a
+# named failure: nothing behind it is readable to record.
+ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
+  "${home_dir}/.local/libexec/mcloving/releases" \
+  "${home_dir}/.local/libexec/mcloving/helpers" \
+  "${home_dir}/.config/systemd/user" \
+  "${home_dir}/.config/containers/systemd" \
+  "${home_dir}/.config/mcloving")" || {
+  echo "mcloving-deployed-digests: cannot derive the deployment ancestor chain" >&2
+  exit 1
+}
+export MCLOVING_ANCESTOR_DIRS="${ancestor_dirs}"
+
 python3 - "${home_dir}" <<'PY'
 import hashlib
 import json
@@ -76,7 +95,15 @@ def file_record(path: Path, root: Path) -> dict:
     # symlink yields the old target's bytes beside the new target's name, an
     # identity that never existed. The target is snapshotted before and
     # rechecked after; a link that moved under the read is retried.
-    relative = path.relative_to(root).as_posix()
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        # A physical ancestor outside the home tree -- the parent chain of a
+        # symlinked root's resolved target -- has no home-relative spelling.
+        # It is recorded under its absolute path: the document must pin its
+        # mode all the same, or relaxing it leaves the re-read blind to the
+        # one rename that swaps the whole deployment aside.
+        relative = path.as_posix()
 
     def identity(status: os.stat_result) -> tuple:
         # Everything a record asserts about a file, plus the inode and
@@ -283,37 +310,29 @@ def walk(root: Path) -> list[Path]:
     return sorted(found)
 
 
-def ancestor_directories(roots: tuple[Path, ...]) -> list[Path]:
-    """Every directory on the way from ``home`` down to each walked root.
-
-    The walked roots record their own subtrees, but the path leading to a
-    root is deployment state too: relaxing ``~/.local/libexec/mcloving``
-    itself (or ``~/.config``) to 0777 leaves every child record
-    byte-identical while another local user renames ``current``,
-    ``releases``, or ``helpers`` aside and substitutes deployed code. The
-    ancestors are derived by walking up each root's parent chain rather than
-    by enumerating names, so a root added later brings its ancestors with it
-    and none can be missed -- enumerating is how this class of gap has
-    happened twice before.
-    """
-    found: set[Path] = set()
-    for root in roots:
-        ancestor = root.parent
-        while True:
-            found.add(ancestor)
-            if ancestor == home or ancestor == ancestor.parent:
-                break
-            ancestor = ancestor.parent
-    return sorted(found)
-
+# Every directory on the way to each walked root is deployment state too:
+# relaxing ~/.local/libexec/mcloving itself (or ~/.config) to 0777 leaves
+# every child record byte-identical while another local user renames
+# current, releases, or helpers aside and substitutes deployed code -- and
+# the PHYSICAL parents of a symlinked root's resolved target permit the very
+# same rename from outside the home tree. The set is derived once, by the
+# shared deployment_ancestor_chain in mcloving-deploy-lib.sh (the same
+# lexical-plus-physical walk the installer refuses on), and handed in by the
+# wrapper above; deriving it here a second time is how the two views would
+# drift apart. Enumeration is how this class of gap has happened four times.
+ancestors_supplied = os.environ.get("MCLOVING_ANCESTOR_DIRS")
+if ancestors_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_ANCESTOR_DIRS is not set; "
+        "run this through its shell wrapper"
+    )
+ancestor_paths = sorted({line for line in ancestors_supplied.splitlines() if line})
 
 document = {
     "schema": "mcloving.deployed-digests/v1",
     "ancestors": [
-        file_record(path, home)
-        for path in ancestor_directories(
-            (libexec / "releases", libexec / "helpers", *unit_dirs, config)
-        )
+        file_record(Path(path), home)
+        for path in ancestor_paths
     ],
     "releases": [
         file_record(path, home)

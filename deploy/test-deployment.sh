@@ -1143,6 +1143,18 @@ ANCESTORS
 # re-check), this requires the returned document to carry the settled mode.
 race_mode_before="$(stat -c '%a' "${libexec}")"
 race_status=0
+# The driver executes the helper's payload directly, bypassing the shell
+# wrapper that normally derives and exports the ancestor set, so it supplies
+# the same set through the same library derivation.
+race_ancestors="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_ancestor_chain "${home}" \
+    "${libexec}/releases" "${libexec}/helpers" \
+    "${home}/.config/systemd/user" "${home}/.config/containers/systemd" \
+    "${home}/.config/mcloving"
+)"
+MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1463,6 +1475,69 @@ chmod 0755 "${preexisting_home}/.local"
   exit 1
 }
 rm -rf "${preexisting_home}"
+
+# The TARGET of a symlinked ancestor has parents of its own -- the fourth
+# instance of the ancestor class. With ~/.local -> stash/dot-local, checking
+# the target directory itself while never walking stash leaves the one
+# rename that swaps the whole deployment aside unexamined. The install must
+# refuse a writable target parent by name, create nothing, and accept the
+# same home once it is secured; the digest inventory must record it and
+# change when its mode changes.
+relocated_home="${workdir}/relocated-home"
+rm -rf "${relocated_home}"
+mkdir -p "${relocated_home}/stash/dot-local"
+ln -s "stash/dot-local" "${relocated_home}/.local"
+chmod 0777 "${relocated_home}/stash"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${relocated_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/relocated-ancestor.log" 2>&1; then
+  echo "install accepted a symlinked ancestor whose target parent is world-writable" >&2
+  exit 1
+fi
+grep -q "stash (mode 777)" "${workdir}/logs/relocated-ancestor.log" || {
+  echo "the writable target-parent refusal did not name the offender:" >&2
+  cat "${workdir}/logs/relocated-ancestor.log" >&2
+  exit 1
+}
+if [[ -e "${relocated_home}/stash/dot-local/libexec" ]]; then
+  echo "a refused install still created directories under the symlink target" >&2
+  exit 1
+fi
+chmod 0755 "${relocated_home}/stash"
+"${repo_root}/deploy/bin/mcloving-install" --home "${relocated_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -x "${relocated_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete through a secured symlinked ancestor" >&2
+  exit 1
+}
+# The inventory side of the same class: the resolved target's parent must be
+# a recorded ancestor, and relaxing it must change the canonical document.
+relocated_before="$("${relocated_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${relocated_home}")"
+chmod 0777 "${relocated_home}/stash"
+relocated_after="$("${relocated_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${relocated_home}")"
+chmod 0755 "${relocated_home}/stash"
+if [[ "${relocated_before}" == "${relocated_after}" ]]; then
+  echo "a world-writable symlink-target parent left the digest re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${relocated_after}" <<'TARGETPARENT'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("ancestors", [])}
+entry = records.get("stash")
+if entry is None:
+    raise SystemExit(
+        f"symlink-target parent missing from the ancestors: {sorted(records)}"
+    )
+if entry.get("mode") != 0o777:
+    raise SystemExit(f"symlink-target parent mode not recorded: {entry}")
+TARGETPARENT
+rm -rf "${relocated_home}"
 
 # The bootstrap's two halves must address one instance, not merely one database
 # name: provisioning runs podman exec into the local container.

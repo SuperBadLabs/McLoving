@@ -38,38 +38,129 @@ deploy_fail() {
 # manage. The diagnostic names every offending ancestor and its mode so one
 # operator action fixes the tree.
 #
-# The chain is derived by walking each root's parents up to HOME, never by
-# enumerating names: enumeration is how this class of gap has already
-# happened twice (the chmod-the-leaves miss fixed by the umask, and the
-# digest inventory's missing ancestors). Directories that do not exist yet
-# are skipped -- mkdir -p under the caller's umask decides those.
+# The chain is derived by deployment_ancestor_chain below -- lexical AND
+# physical, never an enumerated list: enumeration is how this class of gap
+# has already happened three times, and following a symlinked ancestor to
+# its target while never walking the target's own parents made it four.
+# Directories that do not exist yet are skipped -- mkdir -p under the
+# caller's umask decides those.
 require_secure_ancestors() {
-  local home_dir="${1%/}" root ancestor parent mode offending
+  local home_dir="${1%/}" ancestor mode offending chain
   shift
-  local -A ancestors=()
-  for root in "$@"; do
-    ancestor="${root}"
-    while [[ "${ancestor}" != "${home_dir}" && "${ancestor}" != "/" && -n "${ancestor}" ]]; do
-      parent="$(dirname "${ancestor}")"
-      [[ "${parent}" != "${ancestor}" ]] || break
-      ancestor="${parent}"
-      ancestors["${ancestor}"]=1
-    done
-  done
+  chain="$(deployment_ancestor_chain "${home_dir}" "$@")" \
+    || deploy_fail "cannot derive the deployment ancestor chain"
   offending=""
   while IFS= read -r ancestor; do
     # -d and stat -L follow a symlinked ancestor deliberately: the directory
     # the services traverse is the target, and a writable target permits the
-    # same rename regardless of how it is reached.
+    # same rename regardless of how it is reached. The target's own parents
+    # arrive through the physical half of the chain.
     [[ -n "${ancestor}" && -d "${ancestor}" ]] || continue
     mode="$(stat -Lc '%a' "${ancestor}")" || deploy_fail "cannot stat deployment ancestor ${ancestor}"
     if (( (8#${mode} & 8#022) != 0 )); then
       offending+="${ancestor} (mode ${mode}) "
     fi
-  done < <(printf '%s\n' "${!ancestors[@]}" | sort)
+  done <<<"${chain}"
   if [[ -n "${offending}" ]]; then
     deploy_fail "deployment ancestor(s) group- or world-writable: ${offending% }-- another local user could rename the protected subtree aside; run chmod go-w on them and retry"
   fi
+}
+
+# deployment_ancestor_chain HOME ROOT... -> every security-relevant ancestor
+# directory of the managed roots, one absolute path per line, sorted. The
+# single derivation consumed by BOTH the installer's refusal walk and the
+# deployed-digests inventory, so the two cannot drift apart.
+#
+# Each root contributes two chains, because a path has two spellings. The
+# LEXICAL parent chain up to HOME covers the components an operator sees --
+# any of which may itself be a symlink, checked and recorded through its
+# target. The PHYSICAL parent chain of the fully resolved root covers where
+# the deployment actually lives: following a symlinked ancestor to its
+# target without walking the target's OWN parents is how this class of gap
+# happened a fourth time -- ~/.local -> /srv/mcloving/user left /srv/mcloving
+# unexamined while its writability permits the same rename-substitution the
+# direct checks refuse. Resolving the whole root also covers every
+# intermediate link's target chain at once.
+#
+# Stop points: a chain inside the (resolved) home stops at the home
+# directory, whose own parents are the platform's -- the boundary the
+# installer has always drawn. A resolved chain that leaves the home has no
+# such anchor and is walked to "/" inclusive. That deliberately refuses a
+# deployment routed through a sticky world-writable directory such as /tmp:
+# the sticky bit only narrows who may rename, and any attacker-owned
+# component inside such a chain defeats it entirely. A looping or dangling
+# link on the way to a root is refused by name rather than resolved around.
+deployment_ancestor_chain() {
+  python3 - "$@" <<'CHAIN'
+import os
+import sys
+
+home = os.path.normpath(sys.argv[1])
+roots = sys.argv[2:]
+try:
+    resolved_home = os.path.realpath(home, strict=True)
+except OSError as error:
+    raise SystemExit(f"deployment home {home} does not resolve: {error}")
+
+
+def resolve_root(root):
+    # The deepest existing prefix is resolved strictly (os.stat succeeding
+    # proves the prefix is loop-free); missing trailing components are
+    # appended lexically, because mkdir -p will create them under the
+    # resolved prefix. A dangling or looping link is refused by name -- the
+    # services cannot read through it and mkdir cannot create through it.
+    remainder = []
+    probe = os.path.normpath(root)
+    while True:
+        try:
+            os.stat(probe)
+            break
+        except FileNotFoundError:
+            if os.path.islink(probe):
+                raise SystemExit(
+                    f"deployment path {root} crosses a dangling symlink at {probe}"
+                )
+            head, tail = os.path.split(probe)
+            if not tail or head == probe:
+                raise SystemExit(f"deployment path {root} has no existing ancestor")
+            probe = head
+            remainder.append(tail)
+        except OSError as error:
+            raise SystemExit(
+                f"deployment path {root} does not resolve at {probe}: {error}"
+            )
+    resolved = os.path.realpath(probe, strict=True)
+    for tail in reversed(remainder):
+        resolved = os.path.join(resolved, tail)
+    return resolved
+
+
+found = set()
+
+
+def ascend(path, stop):
+    current = os.path.normpath(path)
+    while True:
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        found.add(parent)
+        if parent == stop or parent == "/":
+            break
+        current = parent
+
+
+for root in roots:
+    ascend(root, home)
+    resolved_root = resolve_root(root)
+    inside_home = resolved_root == resolved_home or resolved_root.startswith(
+        resolved_home + os.sep
+    )
+    ascend(resolved_root, resolved_home if inside_home else "/")
+
+for path in sorted(found):
+    print(path)
+CHAIN
 }
 
 # verify_release_dir RELEASE_DIR (MANIFEST|"") (CHECKSUMS|"")
