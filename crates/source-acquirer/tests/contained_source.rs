@@ -1501,6 +1501,200 @@ async fn extra_retained_output_is_rejected_on_replay() {
     ));
 }
 
+// The standalone acquisition below runs end to end only where the sealed
+// launcher may create a usable user namespace: one it can both unshare and
+// then execute a memfd-backed (disconnected) file inside. Ubuntu's
+// `kernel.apparmor_restrict_unprivileged_userns=1` moves an unconfined,
+// unprivileged process that unshares into the `unprivileged_userns` profile,
+// whose exec rules never match disconnected paths; an unrelated confining
+// domain -- a container profile without `userns create`, say -- refuses the
+// unshare itself. In every such environment the suite must observe the named
+// `transport_namespace_unavailable` refusal -- the designed outcome there,
+// not a test environment defect -- while a run under the deployment profile
+// (`aa-exec -p mcloving-source-acquirer`, as CI runs it; see CONTRIBUTING.md),
+// a privileged run, and an unrestricted host all owe the full acquisition.
+//
+// Which outcome is the contract is therefore decided by attempting exactly
+// what the acquirer attempts, through the production transport launcher
+// itself: unshare a user namespace, then execute a sealed memfd-backed file
+// inside it. Classifying sysctls, confinement labels, or capability sets
+// cannot enumerate every domain that denies the namespace; those host facts
+// are reported as diagnostics beside a failing arm, never consulted for the
+// decision. Every protocol step that fails -- the unshare, the handshake, or
+// the disconnected exec -- classifies as denied. A transient probe failure
+// (EMFILE, ENOMEM) therefore selects the refusal arm, whose assertions then
+// fail loudly against the successful acquisition: no misclassification
+// anywhere here can pass silently, because the probe only selects which arm
+// runs and each arm asserts a definite outcome.
+#[cfg(target_os = "linux")]
+fn host_denies_sealed_launcher_userns() -> bool {
+    use std::io::Read as _;
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+    use std::process::Stdio;
+
+    let probe_executable = memfd_probe_executable();
+    let deadline = monotonic_deadline_after(Duration::from_secs(10));
+    let Ok(mut launcher) = Command::new(env!("CARGO_BIN_EXE_mcloving-source-acquirer"))
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER", "1")
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE",
+            format!("/proc/self/fd/{}", probe_executable.as_raw_fd()),
+        )
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS",
+            deadline.to_string(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return true;
+    };
+    let denied = |mut launcher: std::process::Child| {
+        let _ = launcher.kill();
+        let _ = launcher.wait();
+        true
+    };
+    let launcher_pid = launcher.id();
+    let mut output = launcher.stdout.take().unwrap();
+    let mut input = launcher.stdin.take().unwrap();
+    let mut stage = [0_u8; 1];
+    if output.read_exact(&mut stage).is_err() || stage != [1] {
+        return denied(launcher);
+    }
+    // The identity map makes the probe's uid the owner of the memfd inside
+    // the namespace; without it the exec would fail on file permissions even
+    // where policy admits it, and the probe would answer a different
+    // question than the one it is asked.
+    match std::fs::write(format!("/proc/{launcher_pid}/setgroups"), "deny\n") {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return denied(launcher),
+    }
+    if std::fs::write(
+        format!("/proc/{launcher_pid}/uid_map"),
+        format!("0 {} 1\n", nix::unistd::geteuid().as_raw()),
+    )
+    .is_err()
+        || std::fs::write(
+            format!("/proc/{launcher_pid}/gid_map"),
+            format!("0 {} 1\n", nix::unistd::getegid().as_raw()),
+        )
+        .is_err()
+        || input.write_all(&[1]).is_err()
+        || input.flush().is_err()
+        || output.read_exact(&mut stage).is_err()
+        || stage != [2]
+        || input.write_all(&[2]).is_err()
+        || input.flush().is_err()
+    {
+        return denied(launcher);
+    }
+    drop(input);
+    match launcher.wait() {
+        Ok(status) => !status.success(),
+        Err(_) => true,
+    }
+}
+
+// No kernel transport namespace exists to admit the launcher, and that is a
+// settled property of the platform, not a bad moment.
+#[cfg(not(target_os = "linux"))]
+fn host_denies_sealed_launcher_userns() -> bool {
+    true
+}
+
+// A copy of `true` behind a sealed, inheritable memfd, prepared the way the
+// acquirer prepares its own sealed executables: the smallest faithful
+// stand-in for the disconnected paths whose exec the restriction denies. The
+// memfd and the copy are infrastructure the probe cannot run without, so
+// their failures panic by name instead of classifying the host.
+#[cfg(target_os = "linux")]
+fn memfd_probe_executable() -> std::fs::File {
+    use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use nix::sys::stat::{Mode, fchmod};
+    use std::io::Write as _;
+    use std::os::fd::OwnedFd;
+
+    let descriptor: OwnedFd =
+        memfd_create("mcloving-userns-exec-probe", MFdFlags::MFD_ALLOW_SEALING)
+            .expect("memfd for the userns probe");
+    let mut probe_executable = std::fs::File::from(descriptor);
+    let smallest_true = std::fs::read("/usr/bin/true")
+        .or_else(|_| std::fs::read("/bin/true"))
+        .expect("a `true` executable for the userns probe");
+    probe_executable
+        .write_all(&smallest_true)
+        .expect("copy `true` into the probe memfd");
+    fchmod(&probe_executable, Mode::from_bits_truncate(0o500)).expect("probe memfd mode");
+    fcntl(
+        &probe_executable,
+        FcntlArg::F_ADD_SEALS(
+            SealFlag::F_SEAL_SEAL
+                | SealFlag::F_SEAL_SHRINK
+                | SealFlag::F_SEAL_GROW
+                | SealFlag::F_SEAL_WRITE,
+        ),
+    )
+    .expect("seal the probe memfd");
+    fcntl(&probe_executable, FcntlArg::F_SETFD(FdFlag::empty()))
+        .expect("make the probe memfd inheritable");
+    probe_executable
+}
+
+// Reported beside a failing arm so an operator can see why the probe decided
+// as it did; never consulted for the decision itself.
+fn userns_policy_diagnostics() -> String {
+    let sysctl = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map_or_else(|_| "unreadable".to_owned(), |value| value.trim().to_owned());
+    let confinement = std::fs::read_to_string("/proc/self/attr/apparmor/current")
+        .or_else(|_| std::fs::read_to_string("/proc/self/attr/current"))
+        .map_or_else(
+            |_| "unreadable".to_owned(),
+            |value| value.trim_end_matches('\0').trim().to_owned(),
+        );
+    let capabilities = std::fs::read_to_string("/proc/self/status")
+        .map_or(0, |status| effective_capability_mask(&status));
+    format!(
+        "kernel.apparmor_restrict_unprivileged_userns={sysctl}; \
+         confinement={confinement}; CapEff={capabilities:#018x} (CAP_SYS_ADMIN {})",
+        if capabilities & (1_u64 << CAP_SYS_ADMIN) == 0 {
+            "absent"
+        } else {
+            "present"
+        }
+    )
+}
+
+// Bit number from `linux/capability.h`.
+const CAP_SYS_ADMIN: u32 = 21;
+
+// An unreadable or malformed mask reads as unprivileged; this feeds the
+// diagnostics above, so the worst a bad read produces is a less specific
+// failure message.
+fn effective_capability_mask(status: &str) -> u64 {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn effective_capability_mask_reads_the_status_mask_and_defaults_to_unprivileged() {
+    assert_eq!(
+        effective_capability_mask("CapInh:\t0000000000000000\nCapEff:\t000001ffffffffff\n"),
+        0x0000_01ff_ffff_ffff
+    );
+    assert_eq!(effective_capability_mask("CapEff:\t0000000000000000\n"), 0);
+    assert_eq!(effective_capability_mask(""), 0);
+    assert_eq!(effective_capability_mask("CapEff:\tnot-hex\n"), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1698,11 +1892,58 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     assert!(!contains(&output.stdout, CREDENTIAL));
     assert!(!contains(&output.stderr, CREDENTIAL));
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    if host_denies_sealed_launcher_userns() {
+        // The refusal must be named, must carry the operator diagnostic, and
+        // must have happened before any credential-bearing request left the
+        // process. Asserting that -- rather than skipping -- keeps the
+        // refuse-by-name contract under test wherever the namespace is
+        // denied; the capable-path assertions below stay covered by the
+        // `aa-exec -p mcloving-source-acquirer` run CI performs.
+        assert_eq!(
+            response["ok"],
+            false,
+            "the namespace probe was denied, yet the acquisition succeeded: \
+             {response}; {}",
+            userns_policy_diagnostics()
+        );
+        assert_eq!(
+            response["code"],
+            "transport_namespace_unavailable",
+            "the denied namespace was refused without its name: {response}; \
+             {}; stderr: {}",
+            userns_policy_diagnostics(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            contains(&output.stderr, b"transport_namespace_unusable"),
+            "refusal arrived without the operator diagnostic; {}; stderr: {}",
+            userns_policy_diagnostics(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(authorized_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
+        assert!(!replacement_helper_marker.exists());
+        server.abort();
+        eprintln!(
+            "standalone acquisition asserted the named refusal only: this \
+             environment denies the sealed launcher a usable user namespace \
+             ({}). To exercise the full acquisition path, run the suite as \
+             CI does: `aa-exec -p mcloving-source-acquirer -- cargo test \
+             --locked -p mcloving-source-acquirer -- --test-threads=1` \
+             (CONTRIBUTING.md has the setup).",
+            userns_policy_diagnostics()
+        );
+        return;
+    }
     assert_eq!(
         response["ok"],
         true,
-        "standalone response: {response}; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "standalone response: {response}; stderr: {}\nThe namespace probe \
+         succeeded here ({}), so the full acquisition is the contract; if \
+         the code above is `transport_namespace_unavailable`, the launcher \
+         and the probe disagreed and neither outcome may be trusted.",
+        String::from_utf8_lossy(&output.stderr),
+        userns_policy_diagnostics()
     );
     assert_eq!(
         response["receipt"]["repository_trees"][0]["resolved_commit"],
