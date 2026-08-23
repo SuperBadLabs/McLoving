@@ -60,8 +60,13 @@ require_secret_paths() {
   local name value secret_paths=()
   for name in "$@"; do
     contract_into value "${name}"
+    # Empty means an unset OPTIONAL variable; requiredness is judged by the
+    # per-service require lists, and the binaries refuse set-but-empty on
+    # their own where they must.
+    [[ -n "${value}" ]] || continue
     secret_paths+=("${value}")
   done
+  [[ ${#secret_paths[@]} -gt 0 ]] || return 0
   require_secure_ancestors "${guard_home}" "${secret_paths[@]}"
   require_secret_files "${EUID}" "${secret_paths[@]}"
 }
@@ -82,8 +87,10 @@ require_secured_paths() {
   local name value mode_owner mode owner offending state_paths=()
   for name in "$@"; do
     contract_into value "${name}"
+    [[ -n "${value}" ]] || continue
     state_paths+=("${value}")
   done
+  [[ ${#state_paths[@]} -gt 0 ]] || return 0
   require_secure_ancestors "${guard_home}" "${state_paths[@]}"
   offending=""
   for value in "${state_paths[@]}"; do

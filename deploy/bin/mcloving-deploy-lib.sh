@@ -165,22 +165,34 @@ require_secret_files() {
 deployment_contract_path_variables() {
   case "$1" in
     controller)
+      # MCLOVING_EFFECT_RUNTIME_PLAN is secret-class because the controller
+      # itself refuses it unless mode & 077 == 0 -- the guard fails at start
+      # what the binary would fail at plan load. The mapping catalog is
+      # trust-class: the binary requires no group/other WRITE bit and pins
+      # the content with MCLOVING_EFFECT_MAPPING_CATALOG_SHA256, so read
+      # stays legal. Both are optional; empty means unset here, and the
+      # binary refuses set-but-empty on its own.
       printf '%s\n' \
         "secret MCLOVING_AGENT_SERVER_KEY_PATH" \
         "secret MCLOVING_AGENT_IDENTITY_BINDINGS_PATH" \
+        "secret MCLOVING_EFFECT_RUNTIME_PLAN" \
         "trust MCLOVING_AGENT_SERVER_CERT_PATH" \
         "trust MCLOVING_AGENT_CLIENT_CA_PATH" \
+        "trust MCLOVING_EFFECT_MAPPING_CATALOG" \
         "state MCLOVING_OBJECT_ROOT" \
         "state MCLOVING_WORKSPACE_ROOT" \
         "state MCLOVING_AGENT_JOURNAL"
       ;;
     agent)
+      # The session receipt is an optional durable output the agent writes;
+      # state-class like the journal, absence legal before first use.
       printf '%s\n' \
         "secret MCLOVING_AGENT_PRIVATE_KEY_PATH" \
         "trust MCLOVING_CONTROLLER_CA_PATH" \
         "trust MCLOVING_AGENT_CERTIFICATE_PATH" \
         "state MCLOVING_AGENT_WORKSPACE_ROOT" \
-        "state MCLOVING_AGENT_JOURNAL_PATH"
+        "state MCLOVING_AGENT_JOURNAL_PATH" \
+        "state MCLOVING_AGENT_SESSION_RECEIPT_PATH"
       ;;
     postgres | db-init)
       :
@@ -1095,6 +1107,54 @@ verify_staged_release() {
   actual="$(release_id "${release_path}")"
   [[ "${actual}" == "${expected}" ]] \
     || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
+}
+
+# require_deployment_integrity HOME
+#
+# The full shared validation the installer performs, rerun by the
+# TRANSITION entry points inside the transition lock and before any
+# mutation: an ancestor made writable or foreign-owned after installation
+# would otherwise let another local user rename the protected subtree
+# between release verification and the service restart. Same derivations,
+# same refusal messages as install; the unit-declared roots are parsed from
+# the INSTALLED units, because the deployed tree is what the transition is
+# about to touch.
+require_deployment_integrity() {
+  local home_dir="${1%/}" libexec_root config_root xdg_config_base
+  local unit_root quadlet_root unit_file
+  libexec_root="${home_dir}/.local/libexec/mcloving"
+  config_root="${home_dir}/.config/mcloving"
+  xdg_config_base="$(deployment_config_root "${home_dir}")"
+  unit_root="${xdg_config_base}/systemd/user"
+  quadlet_root="${xdg_config_base}/containers/systemd"
+  local managed_roots=(
+    "${libexec_root}"
+    "${libexec_root}/helpers"
+    "${libexec_root}/releases"
+    "${config_root}"
+    "${config_root}/pki"
+    "${unit_root}"
+    "${quadlet_root}"
+  )
+  local contract_destinations=(
+    "${config_root}/postgres.env"
+    "${config_root}/db-init.env"
+    "${config_root}/controller.env"
+    "${config_root}/agent.env"
+  )
+  local unit_files=()
+  for unit_file in "${unit_root}"/mcloving-*.service \
+    "${quadlet_root}"/mcloving-*.container "${quadlet_root}"/mcloving-*.volume; do
+    [[ -f "${unit_file}" ]] && unit_files+=("${unit_file}")
+  done
+  local unit_declared_roots=()
+  if [[ ${#unit_files[@]} -gt 0 ]]; then
+    mapfile -t unit_declared_roots < <(deployment_unit_declared_roots \
+      "${home_dir}" "${unit_files[@]}" | sort -u)
+  fi
+  require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
+    "${contract_destinations[@]}" "${unit_declared_roots[@]}"
+  require_secure_files "${home_dir}" "${contract_destinations[@]}"
 }
 
 # acquire_transition_lock LIBEXEC_ROOT

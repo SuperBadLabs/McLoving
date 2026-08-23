@@ -56,6 +56,10 @@ config_root="${home_dir}/.config/mcloving"
 # that is itself a symlink -- would route the services through a chain no
 # walk ever validated.
 acquire_transition_lock "${libexec_root}"
+# Revalidated before the services stop: a rollback that halts the fleet
+# and only then discovers a writable ancestor has already caused the
+# outage it exists to prevent.
+require_deployment_integrity "${home_dir}"
 current_target="$(require_release_link_target "${libexec_root}" current)"
 previous_target="$(require_release_link_target "${libexec_root}" previous)"
 [[ "${current_target}" != "${previous_target}" ]] \

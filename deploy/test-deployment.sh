@@ -131,6 +131,75 @@ for failure in failures:
 raise SystemExit(1 if failures else 0)
 LOCALSCOPE
 
+# Every MCLOVING_* environment variable the shipped binaries read must be
+# either classified in deployment_contract_path_variables (the guard's and
+# the inventory's one authority) or excluded HERE with a reviewed reason --
+# so a path-bearing variable added in Rust cannot ship unclassified.
+python3 - "${repo_root}" <<'CLASSCOVER'
+import pathlib
+import re
+import subprocess
+import sys
+
+repo_root = pathlib.Path(sys.argv[1])
+swept = set()
+for base in ["bins/agent/src", "bins/controller/src", "bins/cli/src"]:
+    for source in (repo_root / base).rglob("*.rs"):
+        swept |= set(re.findall(r"MCLOVING_[A-Z0-9_]+", source.read_text()))
+if not swept or "MCLOVING_CONTROLLER_CA_PATH" not in swept:
+    raise SystemExit("the variable sweep found nothing plausible; the scan went blind")
+classified = set()
+for service in ["postgres", "db-init", "controller", "agent"]:
+    listing = subprocess.run(
+        ["bash", "-ec",
+         'source "$0" && deployment_contract_path_variables "$1"',
+         str(repo_root / "deploy/bin/mcloving-deploy-lib.sh"), service],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    classified |= {line.split()[1] for line in listing.splitlines() if line}
+if not classified:
+    raise SystemExit("the classification enumeration is empty; the authority went blind")
+# Reviewed exclusions: value-typed variables that carry no filesystem path.
+excluded_patterns = [
+    r"^MCLOVING_OIDC_",         # OIDC endpoints, URLs, TTLs, and flags
+    r"^MCLOVING_TEST_",         # test-only toggles, never in shipped contracts
+    r"_FOR_TESTS$",             # test-only toggles
+    r"(_SECONDS|_MILLISECONDS|_HOURS|_EPOCH|_GENERATION|_BYTES|_OBJECTS)$",  # numerics
+    r"_TOKEN$",                 # bearer secrets passed by value, not path
+    r"(_URL|_URI)$",            # network addresses
+    r"_SHA256$",                # digest strings pinning a path variable's content
+]
+excluded_literals = {
+    "MCLOVING_AGENT_CAPABILITIES": "capability name list",
+    "MCLOVING_AGENT_ID": "agent identifier",
+    "MCLOVING_AGENT_LISTEN": "socket bind address",
+    "MCLOVING_LISTEN": "socket bind address",
+    "MCLOVING_AGENT_ORGANIZATION_ID": "uuid",
+    "MCLOVING_ORGANIZATION_ID": "uuid",
+    "MCLOVING_PROJECT_ID": "uuid",
+    "MCLOVING_AGENT_TRUST_POOL": "trust pool name",
+    "MCLOVING_CONTROLLER_DNS_NAME": "TLS server name, not a path",
+    "MCLOVING_ALLOW_INSECURE_LOOPBACK": "boolean flag",
+    # RETIRED: the controller refuses any value by name
+    # (bins/controller/src/main.rs); deliberately unclassified so setting
+    # it stays an error, never a validated configuration.
+    "MCLOVING_API_PRINCIPALS_PATH": "retired, refused by the controller",
+}
+unaccounted = []
+for name in sorted(swept - classified):
+    if name in excluded_literals:
+        continue
+    if any(re.search(pattern, name) for pattern in excluded_patterns):
+        continue
+    unaccounted.append(name)
+if unaccounted:
+    raise SystemExit(
+        "binaries read MCLOVING_* variables that are neither classified in "
+        "deployment_contract_path_variables nor excluded with a reviewed "
+        "reason: " + " ".join(unaccounted)
+    )
+CLASSCOVER
+
 echo "== [0/9] pinned-digest drift guard"
 quadlet_image="$(sed -n 's/^Image=//p' "${repo_root}/deploy/podman/mcloving-postgres.container")"
 if [[ "${quadlet_image}" != "${MCLOVING_POSTGRES_IMAGE}" ]]; then
@@ -413,6 +482,69 @@ chmod 0600 "${config}/agent.env"
   echo "env guard refused the restored absolute contract" >&2
   exit 1
 }
+
+# Optional variables inherit their class the moment they are set: a
+# relative session receipt refused as ambient (state class), a
+# group-readable effect plan refused as secret-class (the controller
+# itself demands owner-only), a group-readable mapping catalog accepted
+# as trust-class (read stays legal), and the unset originals untouched.
+receipt_env="${home}/receipt-relative.env"
+sed "s#^MCLOVING_AGENT_JOURNAL_PATH=#MCLOVING_AGENT_SESSION_RECEIPT_PATH=relative/receipt.json\nMCLOVING_AGENT_JOURNAL_PATH=#" \
+  "${config}/agent.env" > "${receipt_env}"
+chmod 0600 "${receipt_env}"
+grep -q "^MCLOVING_AGENT_SESSION_RECEIPT_PATH=relative/receipt.json\$" "${receipt_env}" || {
+  echo "receipt gate could not add MCLOVING_AGENT_SESSION_RECEIPT_PATH; contract shape changed" >&2
+  exit 1
+}
+if "${libexec}/helpers/mcloving-env-guard" agent "${receipt_env}" \
+  > "${workdir}/logs/guard-receipt-relative.log" 2>&1; then
+  echo "env guard accepted a relative session receipt path" >&2
+  exit 1
+fi
+grep -q "MCLOVING_AGENT_SESSION_RECEIPT_PATH must be an absolute path" \
+  "${workdir}/logs/guard-receipt-relative.log" || {
+  echo "the relative receipt refusal did not name the variable:" >&2
+  cat "${workdir}/logs/guard-receipt-relative.log" >&2
+  exit 1
+}
+rm -f "${receipt_env}"
+effect_plan="${home}/effect-plan.json"
+printf '{}' > "${effect_plan}"
+chmod 0644 "${effect_plan}"
+effect_env="${home}/effect-plan.env"
+sed "s#^MCLOVING_LISTEN=#MCLOVING_EFFECT_RUNTIME_PLAN=${effect_plan}\nMCLOVING_LISTEN=#" \
+  "${config}/controller.env" > "${effect_env}"
+chmod 0600 "${effect_env}"
+grep -q "^MCLOVING_EFFECT_RUNTIME_PLAN=${effect_plan}\$" "${effect_env}" || {
+  echo "effect gate could not add MCLOVING_EFFECT_RUNTIME_PLAN; contract shape changed" >&2
+  exit 1
+}
+if "${libexec}/helpers/mcloving-env-guard" controller "${effect_env}" \
+  > "${workdir}/logs/guard-effect-plan.log" 2>&1; then
+  echo "env guard accepted a group-readable effect runtime plan" >&2
+  exit 1
+fi
+grep -q "effect-plan.json (mode 644, expected owner-only)" \
+  "${workdir}/logs/guard-effect-plan.log" || {
+  echo "the effect-plan refusal did not name the path and mode:" >&2
+  cat "${workdir}/logs/guard-effect-plan.log" >&2
+  exit 1
+}
+chmod 0600 "${effect_plan}"
+"${libexec}/helpers/mcloving-env-guard" controller "${effect_env}" >/dev/null || {
+  echo "env guard refused an owner-only effect runtime plan" >&2
+  exit 1
+}
+catalog_env="${home}/effect-catalog.env"
+sed "s#^MCLOVING_LISTEN=#MCLOVING_EFFECT_MAPPING_CATALOG=${effect_plan}\nMCLOVING_LISTEN=#" \
+  "${config}/controller.env" > "${catalog_env}"
+chmod 0600 "${catalog_env}"
+chmod 0644 "${effect_plan}"
+"${libexec}/helpers/mcloving-env-guard" controller "${catalog_env}" >/dev/null || {
+  echo "env guard refused a world-READABLE mapping catalog; trust inputs are public to read" >&2
+  exit 1
+}
+rm -f "${effect_env}" "${catalog_env}" "${effect_plan}"
 
 run_with_env() { # ENV_FILE COMMAND...
   local env_file="$1"
@@ -2024,6 +2156,66 @@ rm -rf "${linktrap_home}"
 # the same transition through.
 lock_home="${workdir}/lock-home"
 rm -rf "${lock_home}"
+
+# An ancestor relaxed AFTER installation must refuse the next transition --
+# upgrade and rollback rerun the full shared validation inside the lock,
+# before anything mutates and before rollback stops any service.
+transguard_home="${workdir}/transguard-home"
+rm -rf "${transguard_home}"
+mkdir -p "${transguard_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${transguard_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+transguard_libexec="${transguard_home}/.local/libexec/mcloving"
+transguard_current="$(readlink "${transguard_libexec}/current")"
+chmod 0777 "${transguard_home}/.local"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${transguard_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/transguard-upgrade.log" 2>&1; then
+  echo "upgrade proceeded over an ancestor relaxed after installation" >&2
+  exit 1
+fi
+grep -q "\.local (mode 777)" "${workdir}/logs/transguard-upgrade.log" || {
+  echo "the upgrade transition refusal did not name the ancestor:" >&2
+  cat "${workdir}/logs/transguard-upgrade.log" >&2
+  exit 1
+}
+[[ "$(readlink "${transguard_libexec}/current")" == "${transguard_current}" ]] || {
+  echo "a refused upgrade transition still moved the current release" >&2
+  exit 1
+}
+chmod 0755 "${transguard_home}/.local"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${transguard_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+transguard_upgraded="$(readlink "${transguard_libexec}/current")"
+chmod 0777 "${transguard_home}/.local"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd > "${workdir}/logs/transguard-rollback.log" 2>&1; then
+  echo "rollback proceeded over an ancestor relaxed after installation" >&2
+  exit 1
+fi
+grep -q "\.local (mode 777)" "${workdir}/logs/transguard-rollback.log" || {
+  echo "the rollback transition refusal did not name the ancestor:" >&2
+  cat "${workdir}/logs/transguard-rollback.log" >&2
+  exit 1
+}
+if grep -q "rolling back" "${workdir}/logs/transguard-rollback.log"; then
+  echo "the rollback refusal came after the transition had begun" >&2
+  exit 1
+fi
+[[ "$(readlink "${transguard_libexec}/current")" == "${transguard_upgraded}" ]] || {
+  echo "a refused rollback transition still moved the current release" >&2
+  exit 1
+}
+chmod 0755 "${transguard_home}/.local"
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${transguard_libexec}/current")" == "${transguard_current}" ]] || {
+  echo "rollback did not restore the original release after the ancestor was secured" >&2
+  exit 1
+}
+rm -rf "${transguard_home}"
 mkdir -p "${lock_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${lock_home}" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
