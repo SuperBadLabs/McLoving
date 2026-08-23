@@ -149,14 +149,19 @@ def file_record(path: Path, root: Path) -> dict:
         relative = path.as_posix()
 
     def identity(status: os.stat_result) -> tuple:
-        # Everything a record asserts about a file, plus the inode and
-        # modification time that reveal an in-place change of the same size.
+        # Everything a record asserts about a file, plus the inode,
+        # modification time, and CHANGE time. mtime alone is forgeable: an
+        # in-place rewrite of the same size with the original mtime restored
+        # via utime() slides through the read window and the digest of the
+        # old (or mixed) bytes gets recorded as settled. ctime cannot be set
+        # back without clock-level privilege, so it anchors the tuple.
         return (
             status.st_dev,
             status.st_ino,
             status.st_size,
             status.st_mode,
             status.st_mtime_ns,
+            status.st_ctime_ns,
         )
 
     def link_target():

@@ -1444,6 +1444,84 @@ if [[ "${content_race_status}" -ne 0 ]]; then
   exit 1
 fi
 
+# mtime alone is forgeable. An in-place rewrite of the SAME size with the
+# original mtime restored via utime() slides through the read window unless
+# ctime -- which cannot be set back without clock-level privilege -- anchors
+# the post-read identity tuple. The hook fires the rewrite exactly at the
+# settled fstat, restores the mtime, and the record must still carry the
+# settled bytes (or the named instability), never the stale digest.
+printf 'ctime-probe-original' > "${config_dir}/ctime-probe.txt"
+chmod 0600 "${config_dir}/ctime-probe.txt"
+ctime_race_status=0
+MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
+MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
+MCLOVING_UNIT_DIRS="${smoke_unit_root}
+${smoke_quadlet_root}" \
+python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
+  "${config_dir}/ctime-probe.txt" <<'CTIMERACE' || ctime_race_status=$?
+import contextlib
+import hashlib
+import io
+import json
+import os
+import sys
+
+helper, home, target = sys.argv[1], sys.argv[2], sys.argv[3]
+source = open(helper, encoding="utf-8").read()
+payload = source.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+original = os.stat(target)
+new_bytes = b"ctime-probe-REWRITE!"
+state = {"fd": None, "fires": 0}
+real_open, real_fstat = os.open, os.fstat
+
+
+def hooked_open(path, flags, *args, **kwargs):
+    fd = real_open(path, flags, *args, **kwargs)
+    if state["fd"] is None and os.fspath(path) == target:
+        state["fd"] = fd
+    return fd
+
+
+def hooked_fstat(fd):
+    if fd == state["fd"]:
+        state["fires"] += 1
+        if state["fires"] == 2:
+            write_fd = real_open(target, os.O_WRONLY)
+            os.write(write_fd, new_bytes)
+            os.close(write_fd)
+            os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+    return real_fstat(fd)
+
+
+os.open, os.fstat = hooked_open, hooked_fstat
+buffer = io.StringIO()
+sys.argv = ["-", home]
+try:
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(payload, helper, "exec"), {"__name__": "__main__"})
+finally:
+    os.open, os.fstat = real_open, real_fstat
+if state["fires"] < 2:
+    raise SystemExit("the forged rewrite never fired; the hook missed the window")
+document = json.loads(buffer.getvalue())
+records = {
+    record["path"]: record
+    for record in document.get("environment_contracts", [])
+}
+entry = records.get(".config/mcloving/ctime-probe.txt")
+if entry is None:
+    raise SystemExit("probe file missing from the re-read")
+if entry.get("kind") == "unstable_entry":
+    raise SystemExit(0)
+if entry.get("sha256") != hashlib.sha256(new_bytes).hexdigest():
+    raise SystemExit(f"record kept the stale digest behind a forged mtime: {entry}")
+CTIMERACE
+rm -f "${config_dir}/ctime-probe.txt"
+if [[ "${ctime_race_status}" -ne 0 ]]; then
+  echo "digest re-read accepted a stale digest behind a forged mtime" >&2
+  exit 1
+fi
+
 # Ownership is identity too. An ancestor that changes hands can be re-moded
 # by its new owner at will, so the canonical document must change when the
 # owner does -- and the change must be visible in the record, both proven
