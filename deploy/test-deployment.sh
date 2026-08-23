@@ -333,6 +333,44 @@ chmod 0600 "${config}/agent-identity-bindings.txt"
   exit 1
 }
 
+# Trust inputs are public to READ and critical to WRITE: a writable CA lets
+# another local user choose what the TLS handshake trusts. The class
+# distinction from secret-file is pinned in both directions -- group/other
+# READ stays legal for the CA while the same mode is refused for a key.
+chmod 0666 "${pki}/controller-ca.pem"
+if "${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" \
+  > "${workdir}/logs/guard-ca-mode.log" 2>&1; then
+  echo "env guard accepted a world-writable controller CA" >&2
+  exit 1
+fi
+grep -q "controller-ca.pem (mode 666)" "${workdir}/logs/guard-ca-mode.log" || {
+  echo "the writable-CA refusal did not name the path and mode:" >&2
+  cat "${workdir}/logs/guard-ca-mode.log" >&2
+  exit 1
+}
+chmod 0644 "${pki}/controller-ca.pem"
+"${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" >/dev/null || {
+  echo "env guard refused a world-READABLE 0644 CA; trust inputs are public to read" >&2
+  exit 1
+}
+chmod 0644 "${pki}/agent-key.pem"
+if "${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" \
+  > "${workdir}/logs/guard-key-read.log" 2>&1; then
+  echo "env guard accepted a group/other-readable private key" >&2
+  exit 1
+fi
+grep -q "agent-key.pem (mode 644, expected owner-only)" \
+  "${workdir}/logs/guard-key-read.log" || {
+  echo "the readable-key refusal did not name the path and mode:" >&2
+  cat "${workdir}/logs/guard-key-read.log" >&2
+  exit 1
+}
+chmod 0600 "${pki}/agent-key.pem"
+"${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" >/dev/null || {
+  echo "env guard refused the restored key/CA pair" >&2
+  exit 1
+}
+
 run_with_env() { # ENV_FILE COMMAND...
   local env_file="$1"
   shift

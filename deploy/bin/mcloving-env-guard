@@ -100,8 +100,23 @@ require_secured_paths() {
     fi
   done
   if [[ -n "${offending}" ]]; then
-    fail "configured state path(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rewrite workload inputs or durable state; run chmod go-w (or restore ownership) and retry"
+    fail "configured state or trust-input path(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rewrite workload inputs, durable state, or the material TLS trust is built from; run chmod go-w (or restore ownership) and retry"
   fi
+}
+
+# require_trust_input_paths VAR...
+#
+# Trust inputs are public to READ and critical to WRITE. A CA bundle's
+# content is not a secret -- world-readable is legal, unlike the
+# secret-file class -- but whoever can REPLACE it chooses what the TLS
+# handshake trusts: a substituted controller CA lets another local user
+# stand up a fake controller endpoint bearing a certificate for the
+# configured DNS name, and the agent then accepts its work assignments.
+# The node rule and chain walk are the secured-path integrity class;
+# existence and readability were already required by
+# require_readable_file, which stays first for its precise diagnostics.
+require_trust_input_paths() {
+  require_secured_paths "$@"
 }
 
 fail() {
@@ -255,6 +270,8 @@ case "${service}" in
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
     require_secret_paths MCLOVING_AGENT_SERVER_KEY_PATH \
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    require_trust_input_paths MCLOVING_AGENT_SERVER_CERT_PATH \
+      MCLOVING_AGENT_CLIENT_CA_PATH
     require_secured_paths MCLOVING_OBJECT_ROOT MCLOVING_WORKSPACE_ROOT \
       MCLOVING_AGENT_JOURNAL
     ;;
@@ -268,6 +285,8 @@ case "${service}" in
     require_readable_file MCLOVING_CONTROLLER_CA_PATH \
       MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
     require_secret_paths MCLOVING_AGENT_PRIVATE_KEY_PATH
+    require_trust_input_paths MCLOVING_CONTROLLER_CA_PATH \
+      MCLOVING_AGENT_CERTIFICATE_PATH
     # The agent refuses to spawn work into a missing workspace root; require
     # it up front so the unit fails at start, not at first assignment.
     contract_into workspace_root MCLOVING_AGENT_WORKSPACE_ROOT
