@@ -141,6 +141,11 @@ chmod 0700 "${config_root}" "${config_root}/pki" \
   "${libexec_root}" "${libexec_root}/helpers"
 chmod go-w "${unit_root}" "${quadlet_root}"
 
+# Every release state transition in this process -- the current-release
+# snapshot below, staging, the symlink writes -- happens under the
+# deployment-wide transition lock, alongside upgrade and rollback.
+acquire_transition_lock "${libexec_root}"
+
 # Decided before staging, not after. Repointing current here would leave
 # running services executing the old binaries while the digest re-read reports
 # the new release as current -- a deployment that disagrees with its own
@@ -215,7 +220,7 @@ if [[ "${no_systemd}" != "1" ]]; then
     fi
   done
   if [[ -n "${asset_changed}" ]]; then
-    deploy_fail "${asset_changed} differs from this deployment tree and services may be active; stop the mcloving units, rerun with --no-systemd to replace the assets, then start them again"
+    deploy_fail "${asset_changed} differs from this deployment tree and services may be active; stop the mcloving units, rerun with --no-systemd to replace the assets, run systemctl --user daemon-reload so the manager and the Quadlet generator drop the cached configuration, then start the units again"
   fi
 fi
 
@@ -270,7 +275,9 @@ NEXT
 # start an unrelated deployment, or fail on units that are not there.
 if [[ "${no_systemd}" == "1" ]]; then
   cat <<NEXT
-  3. this install did not touch systemd (--no-systemd). The units under
+  3. this install did not touch systemd (--no-systemd), so any user manager
+     for this home still holds its previously generated configuration: run
+     systemctl --user daemon-reload before starting units. The units under
      ${config_root%/mcloving}/systemd/user resolve %h to the home of whichever
      user runs them, so they describe this deployment only when that user's
      home is ${home_dir}. Start it with a manager whose %h resolves there, or

@@ -989,6 +989,25 @@ verify_staged_release() {
     || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
 }
 
+# acquire_transition_lock LIBEXEC_ROOT
+#
+# One deployment-wide advisory lock, held for the remainder of the process
+# (the descriptor stays open until exit), across every release state
+# transition: snapshot, staging, both symlink writes, and the health gates.
+# Two concurrent upgrades otherwise both snapshot the same current release,
+# stage different targets, and interleave the previous/current writes --
+# the loser then health-checks the winner's release and reports its own as
+# installed. Non-blocking on purpose: a queued transition would run against
+# a snapshot taken before the winner rewrote the links, so the only honest
+# behavior is a named refusal.
+acquire_transition_lock() {
+  local libexec_root="$1"
+  exec 9>"${libexec_root}/.transition-lock" \
+    || deploy_fail "cannot open the deployment transition lock in ${libexec_root}"
+  flock -n 9 \
+    || deploy_fail "another deployment transition holds the lock for ${libexec_root}; refusing to interleave release state -- retry when it completes"
+}
+
 # require_release_link_target LIBEXEC_ROOT LINK_NAME -> the link's target
 #
 # The current/previous links are identity-bearing state the upgrade and

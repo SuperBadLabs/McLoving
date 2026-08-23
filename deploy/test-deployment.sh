@@ -17,7 +17,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/versions.env
 source "${repo_root}/tools/versions.env"
 
-for tool in podman openssl python3 curl jq cargo sha256sum; do
+for tool in podman openssl python3 curl jq cargo sha256sum flock; do
   command -v "${tool}" >/dev/null || {
     echo "missing required tool: ${tool}" >&2
     exit 1
@@ -876,12 +876,69 @@ GRAMMAR
   exit 1
 }
 
+# Install-time validation proves install-time state only: a contract
+# relaxed AFTER install must be refused at service start, before parsing.
+chmod 0644 "${config_dir}/agent.env"
+if "${libexec}/helpers/mcloving-env-guard" agent "${config_dir}/agent.env" \
+  > "${workdir}/logs/guard-contract-mode.log" 2>&1; then
+  echo "env guard parsed a contract that became group-readable after install" >&2
+  exit 1
+fi
+grep -q "agent.env (mode 644, expected owner-only)" \
+  "${workdir}/logs/guard-contract-mode.log" || {
+  echo "the guard's runtime contract refusal did not name the file and mode:" >&2
+  cat "${workdir}/logs/guard-contract-mode.log" >&2
+  exit 1
+}
+chmod 0600 "${config_dir}/agent.env"
+"${libexec}/helpers/mcloving-env-guard" agent "${config_dir}/agent.env" >/dev/null || {
+  echo "env guard refused the restored owner-only contract" >&2
+  exit 1
+}
+# Configured state is dereferenced directly by the binaries: a writable
+# workspace root or journal must refuse the start, and the agent's own
+# 0644 journal must keep passing.
+agent_workspace="${home}/.local/state/mcloving-agent/workspace"
+chmod 0777 "${agent_workspace}"
+if "${libexec}/helpers/mcloving-env-guard" agent "${config_dir}/agent.env" \
+  > "${workdir}/logs/guard-workspace-mode.log" 2>&1; then
+  echo "env guard accepted a world-writable agent workspace root" >&2
+  exit 1
+fi
+grep -q "workspace (mode 777)" "${workdir}/logs/guard-workspace-mode.log" || {
+  echo "the workspace refusal did not name the directory and mode:" >&2
+  cat "${workdir}/logs/guard-workspace-mode.log" >&2
+  exit 1
+}
+chmod 0755 "${agent_workspace}"
+agent_journal="${home}/.local/state/mcloving-agent/journal.db"
+if [[ -f "${agent_journal}" ]]; then
+  journal_mode="$(stat -c '%a' "${agent_journal}")"
+  chmod 0666 "${agent_journal}"
+  if "${libexec}/helpers/mcloving-env-guard" agent "${config_dir}/agent.env" \
+    > "${workdir}/logs/guard-journal-mode.log" 2>&1; then
+    echo "env guard accepted a world-writable agent journal" >&2
+    exit 1
+  fi
+  grep -q "journal.db (mode 666)" "${workdir}/logs/guard-journal-mode.log" || {
+    echo "the journal refusal did not name the file and mode:" >&2
+    cat "${workdir}/logs/guard-journal-mode.log" >&2
+    exit 1
+  }
+  chmod "${journal_mode}" "${agent_journal}"
+fi
+"${libexec}/helpers/mcloving-env-guard" agent "${config_dir}/agent.env" >/dev/null || {
+  echo "env guard refused the restored state paths" >&2
+  exit 1
+}
+
 # A file that parses partially must not be accepted. The required assignments
 # come first here, so a guard that ignored the parser's status would fill its
 # map, report the contract satisfied, and exit 0 on a malformed file.
-partial_env="${workdir}/partial.env"
+partial_env="${home}/partial.env"
 printf 'POSTGRES_USER=x\nPOSTGRES_DB=y\nPOSTGRES_PASSWORD=z\nthis line has no equals\n' \
   > "${partial_env}"
+chmod 0600 "${partial_env}"
 if "${libexec}/helpers/mcloving-env-guard" postgres "${partial_env}" >/dev/null 2>&1; then
   echo "guard accepted a contract whose parse failed after the required values" >&2
   exit 1
@@ -911,12 +968,13 @@ rm -f "${config_dir}/dangling.env"
 # Token length is measured in bytes, as the controller measures it. A
 # multi-byte token that satisfies the controller must satisfy the guard, or a
 # valid contract stops a service that could have run it.
-utf8_env="${workdir}/utf8-token.env"
+utf8_env="${home}/utf8-token.env"
 utf8_api="$(python3 -c "print('\u00e9' * 16)")"
 utf8_artifact="$(python3 -c "print('\u00fc' * 16)")"
 sed -e "s|^MCLOVING_API_TOKEN=.*|MCLOVING_API_TOKEN=${utf8_api}|" \
     -e "s|^MCLOVING_ARTIFACT_AGENT_TOKEN=.*|MCLOVING_ARTIFACT_AGENT_TOKEN=${utf8_artifact}|" \
     "${config_dir}/controller.env" > "${utf8_env}"
+chmod 0600 "${utf8_env}"
 "${libexec}/helpers/mcloving-env-guard" controller "${utf8_env}" >/dev/null || {
   echo "guard rejected a 32-byte token because it counted characters" >&2
   exit 1
@@ -924,10 +982,11 @@ sed -e "s|^MCLOVING_API_TOKEN=.*|MCLOVING_API_TOKEN=${utf8_api}|" \
 
 # Two spellings of one database role are one role. Comparing URL text would
 # accept them as distinct and let the controller run as the migration role.
-equivalent_env="${workdir}/equivalent.env"
+equivalent_env="${home}/equivalent.env"
 sed -e 's|^MCLOVING_DATABASE_URL=.*|MCLOVING_DATABASE_URL=postgres://mcloving_migration@127.0.0.1:5432/mcloving|' \
     -e 's|^MCLOVING_MIGRATION_DATABASE_URL=.*|MCLOVING_MIGRATION_DATABASE_URL=postgres://mcloving_migration@127.0.0.1/mcloving|' \
     "${config_dir}/controller.env" > "${equivalent_env}"
+chmod 0600 "${equivalent_env}"
 if "${libexec}/helpers/mcloving-env-guard" controller "${equivalent_env}" >/dev/null 2>&1; then
   echo "guard accepted two spellings of one database role as distinct" >&2
   exit 1
@@ -961,13 +1020,14 @@ NBSP
 # A contract-supplied name must not reach a helper's own control variables:
 # Bash is dynamically scoped, so an assignment named `service` could otherwise
 # rewrite the guard's dispatch selector and validate the wrong service.
-hijack_env="${workdir}/hijack.env"
+hijack_env="${home}/hijack.env"
 cat > "${hijack_env}" <<'HIJACK'
 service=postgres
 POSTGRES_USER=x
 POSTGRES_DB=x
 POSTGRES_PASSWORD=x
 HIJACK
+chmod 0600 "${hijack_env}"
 if "${libexec}/helpers/mcloving-env-guard" controller "${hijack_env}" >/dev/null 2>&1; then
   echo "a contract assignment hijacked the guard's service dispatch" >&2
   exit 1
@@ -1569,6 +1629,72 @@ rm -rf "${collision_home}"
 # directory.
 linktrap_home="${workdir}/linktrap-home"
 rm -rf "${linktrap_home}"
+
+# Release state transitions are serialized by one deployment-wide advisory
+# lock across install, upgrade, and rollback. A held lock must produce a
+# named refusal -- never a silent queue behind a snapshot that is about to
+# go stale -- and the release must be untouched; a released lock must let
+# the same transition through.
+lock_home="${workdir}/lock-home"
+rm -rf "${lock_home}"
+mkdir -p "${lock_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${lock_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+lock_libexec="${lock_home}/.local/libexec/mcloving"
+lock_current="$(readlink "${lock_libexec}/current")"
+# The holder is an UNRELATED process, exactly like a real concurrent
+# transition: a holder that spawned the upgrade would leak its locked
+# descriptor into the child, and inherited-descriptor flock semantics are
+# not the case this lock exists for.
+# `exec sleep` keeps the holder a single process: `flock -c` would hold
+# the lock in a child that survives killing the parent, and the gate could
+# never release it.
+( exec 200>"${lock_libexec}/.transition-lock" \
+  && flock -n 200 \
+  && exec sleep 60 ) &
+lock_holder=$!
+lock_taken=""
+for _ in $(seq 1 50); do
+  if ! flock -n "${lock_libexec}/.transition-lock" -c true 2>/dev/null; then
+    lock_taken=1
+    break
+  fi
+  sleep 0.1
+done
+[[ -n "${lock_taken}" ]] || {
+  echo "the lock gate's holder never took the transition lock" >&2
+  kill "${lock_holder}" 2>/dev/null || true
+  exit 1
+}
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/transition-lock.log" 2>&1; then
+  echo "an upgrade proceeded while another transition held the deployment lock" >&2
+  kill "${lock_holder}" 2>/dev/null || true
+  exit 1
+fi
+grep -q "another deployment transition holds the lock" \
+  "${workdir}/logs/transition-lock.log" || {
+  echo "the held-lock refusal did not name the lock:" >&2
+  cat "${workdir}/logs/transition-lock.log" >&2
+  exit 1
+}
+[[ "$(readlink "${lock_libexec}/current")" == "${lock_current}" ]] || {
+  echo "a lock-refused upgrade still moved the current release" >&2
+  kill "${lock_holder}" 2>/dev/null || true
+  exit 1
+}
+kill "${lock_holder}" 2>/dev/null || true
+wait "${lock_holder}" 2>/dev/null || true
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${lock_libexec}/current")" != "${lock_current}" ]] || {
+  echo "the released lock did not admit the same transition" >&2
+  exit 1
+}
+rm -rf "${lock_home}"
 mkdir -p "${linktrap_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${linktrap_home}" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
@@ -1731,7 +1857,7 @@ rm -rf "${retain_home}"
 # The bootstrap migrates through MCLOVING_MIGRATION_DATABASE_URL and provisions
 # through the container fields, so a URL naming a different database would
 # migrate one and modify another.
-db_mismatch="${workdir}/db-mismatch.env"
+db_mismatch="${home}/db-mismatch.env"
 cp "${config_dir}/db-init.env" "${db_mismatch}"
 sed -i "s#^MCLOVING_POSTGRES_DB=.*#MCLOVING_POSTGRES_DB=someotherdb#" "${db_mismatch}"
 if "${libexec}/helpers/mcloving-env-guard" db-init "${db_mismatch}" >/dev/null 2>&1; then
@@ -2262,7 +2388,7 @@ rm -rf "${relative_home}"
 # name: provisioning runs podman exec into the local container.
 for bad_url in "postgres://mcloving:pw@remote.example:5432/mcloving" \
   "postgres://someoneelse:pw@127.0.0.1:5432/mcloving"; do
-  endpoint_contract="${workdir}/endpoint.env"
+  endpoint_contract="${home}/endpoint.env"
   cp "${config_dir}/db-init.env" "${endpoint_contract}"
   sed -i "s#^MCLOVING_MIGRATION_DATABASE_URL=.*#MCLOVING_MIGRATION_DATABASE_URL=${bad_url}#" \
     "${endpoint_contract}"
@@ -2278,7 +2404,7 @@ done
 for endpoint_edit in \
   "s#\(^MCLOVING_DATABASE_URL=.*127.0.0.1\):[0-9]*#\\1:6543#" \
   "s#\(^MCLOVING_DATABASE_URL=.*\)/mcloving\$#\\1/otherdb#"; do
-  endpoint_contract="${workdir}/controller-endpoint.env"
+  endpoint_contract="${home}/controller-endpoint.env"
   cp "${config_dir}/controller.env" "${endpoint_contract}"
   sed -i "${endpoint_edit}" "${endpoint_contract}"
   if cmp -s "${endpoint_contract}" "${config_dir}/controller.env"; then
@@ -2294,7 +2420,7 @@ done
 
 # A readable directory is not a readable file. `-r` alone accepts one, and the
 # binary would then fail at startup on a contract the guard called satisfied.
-dir_contract="${workdir}/dir-contract.env"
+dir_contract="${home}/dir-contract.env"
 cp "${config_dir}/agent.env" "${dir_contract}"
 sed -i "s#^MCLOVING_AGENT_PRIVATE_KEY_PATH=.*#MCLOVING_AGENT_PRIVATE_KEY_PATH=${config_dir}/pki#" \
   "${dir_contract}"
@@ -2372,7 +2498,7 @@ rm -rf "${blocked_home}" "${blocked_release}"
 # Distinct database roles are not enough: the controller requires the runtime
 # session role to be exactly mcloving_tenant, so a second privileged role must
 # be refused before anything binds a listener.
-tenant_swap="${workdir}/tenant-swap.env"
+tenant_swap="${home}/tenant-swap.env"
 cp "${config_dir}/controller.env" "${tenant_swap}"
 sed -i "s#\(^MCLOVING_DATABASE_URL=.*\)mcloving_tenant#\1mcloving_admin#" "${tenant_swap}"
 if grep -q "mcloving_admin" "${tenant_swap}"; then
@@ -2571,6 +2697,19 @@ if grep -q -- "systemctl --user enable" <<<"${alternate_output}"; then
 fi
 grep -q "did not touch systemd" <<<"${alternate_output}" || {
   echo "install gave no operable next step for --no-systemd" >&2
+  exit 1
+}
+# The prescribed recovery path must carry the reload: a --no-systemd rerun
+# replaces assets but cannot reload the manager, so both the changed-assets
+# diagnostic and the --no-systemd epilogue must tell the operator to
+# daemon-reload before starting units, or the manager starts cached
+# previous configuration.
+grep -q "daemon-reload" <<<"${alternate_output}" || {
+  echo "the --no-systemd epilogue does not prescribe daemon-reload" >&2
+  exit 1
+}
+grep -q "daemon-reload so the manager" "${repo_root}/deploy/bin/mcloving-install" || {
+  echo "the changed-assets diagnostic does not prescribe daemon-reload" >&2
   exit 1
 }
 

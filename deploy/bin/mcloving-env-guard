@@ -21,13 +21,12 @@ fi
 
 # shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
-load_environment_file "${env_file}"
 
 # The deployment home anchors the ancestor walk's stop points for the
-# configured identity paths below. This guard is installed under
-# <home>/.local/libexec/mcloving/helpers and runs as the service user, so
-# the home is derived from where the guard itself lives; a copy running
-# from anywhere else falls back to the invoking user's HOME.
+# contract itself and the configured paths below. This guard is installed
+# under <home>/.local/libexec/mcloving/helpers and runs as the service
+# user, so the home is derived from where the guard itself lives; a copy
+# running from anywhere else falls back to the invoking user's HOME.
 guard_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "${guard_script_dir}" in
   */.local/libexec/mcloving/helpers)
@@ -35,6 +34,18 @@ case "${guard_script_dir}" in
   *)
     guard_home="${HOME}" ;;
 esac
+
+# The contract file is judged BEFORE it is parsed. Install-time validation
+# proves the state at install; a preserved contract -- an external symlink
+# included -- whose file or resolved ancestor is relaxed afterwards would
+# still parse cleanly at service start, so the runtime path applies the
+# same treatment: the shared lexical-plus-physical ancestor walk over the
+# contract's resolved chain, and the secret-file rules (contracts carry
+# database passwords and tokens) on the file itself.
+require_secure_ancestors "${guard_home}" "${env_file}"
+require_secret_files "${EUID}" "${env_file}"
+
+load_environment_file "${env_file}"
 
 # require_secret_paths VAR...
 #
@@ -53,6 +64,44 @@ require_secret_paths() {
   done
   require_secure_ancestors "${guard_home}" "${secret_paths[@]}"
   require_secret_files "${EUID}" "${secret_paths[@]}"
+}
+
+# require_secured_paths VAR...
+#
+# The integrity class for configured agent/controller state: workspace
+# roots, object roots, and journals are dereferenced directly by the
+# binaries, so another local user who can write them -- or any link of
+# their resolved chains -- can modify workload inputs or replace durable
+# journal state. Not secret-classified: the node itself must carry no
+# group/other WRITE bit and be owned by root or the service user, and its
+# resolved ancestor chain is walked; group/other READ stays legal (a
+# journal the agent creates 0644 must not wedge the next start), and a
+# journal file that does not exist yet is legal too -- its parent chain is
+# still walked through the configured path.
+require_secured_paths() {
+  local name value mode_owner mode owner offending state_paths=()
+  for name in "$@"; do
+    contract_into value "${name}"
+    state_paths+=("${value}")
+  done
+  require_secure_ancestors "${guard_home}" "${state_paths[@]}"
+  offending=""
+  for value in "${state_paths[@]}"; do
+    [[ -e "${value}" ]] || continue
+    mode_owner="$(stat -Lc '%a %u' "${value}")" \
+      || fail "cannot stat configured state path ${value}"
+    mode="${mode_owner%% *}"
+    owner="${mode_owner##* }"
+    if (( (8#${mode} & 8#022) != 0 )); then
+      offending+="${value} (mode ${mode}) "
+    fi
+    if [[ "${owner}" != "0" && "${owner}" != "${EUID}" ]]; then
+      offending+="${value} (owned by uid ${owner}, expected uid ${EUID} or root) "
+    fi
+  done
+  if [[ -n "${offending}" ]]; then
+    fail "configured state path(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rewrite workload inputs or durable state; run chmod go-w (or restore ownership) and retry"
+  fi
 }
 
 fail() {
@@ -206,6 +255,8 @@ case "${service}" in
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
     require_secret_paths MCLOVING_AGENT_SERVER_KEY_PATH \
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    require_secured_paths MCLOVING_OBJECT_ROOT MCLOVING_WORKSPACE_ROOT \
+      MCLOVING_AGENT_JOURNAL
     ;;
   agent)
     require MCLOVING_AGENT_ID MCLOVING_AGENT_TRUST_POOL \
@@ -223,6 +274,8 @@ case "${service}" in
     if [[ ! -d "${workspace_root}" ]]; then
       fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${workspace_root}"
     fi
+    require_secured_paths MCLOVING_AGENT_WORKSPACE_ROOT \
+      MCLOVING_AGENT_JOURNAL_PATH
     ;;
   *)
     usage
