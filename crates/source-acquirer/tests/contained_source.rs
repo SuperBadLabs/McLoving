@@ -1511,9 +1511,13 @@ async fn extra_retained_output_is_rejected_on_replay() {
 // environment defect. The deployment AppArmor profile grants `userns create`
 // and is inherited across exec, so a suite run under
 // `aa-exec -p mcloving-source-acquirer` (as CI runs it; see CONTRIBUTING.md)
-// must complete the full acquisition. This reads exactly the two host facts
-// that decide which outcome is the contract: the sysctl, and whether this
-// process is unconfined.
+// must complete the full acquisition. So must a privileged suite:
+// `CAP_SYS_ADMIN` exempts a process from the restriction, which exists to take
+// user-namespace creation away from unprivileged processes only, so a
+// root-run suite on a restricted host still owes the full path. This reads
+// exactly the three host facts that decide which outcome is the contract: the
+// sysctl, whether this process is unconfined, and whether it holds
+// `CAP_SYS_ADMIN`.
 fn host_denies_sealed_launcher_userns() -> bool {
     if !cfg!(target_os = "linux") {
         return false;
@@ -1521,12 +1525,77 @@ fn host_denies_sealed_launcher_userns() -> bool {
     let restricted =
         std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
             .is_ok_and(|value| value.trim() != "0");
-    if !restricted {
-        return false;
-    }
-    std::fs::read_to_string("/proc/self/attr/apparmor/current")
+    let confinement = std::fs::read_to_string("/proc/self/attr/apparmor/current")
         .or_else(|_| std::fs::read_to_string("/proc/self/attr/current"))
-        .is_ok_and(|confinement| confinement.trim_end_matches('\0').trim() == "unconfined")
+        .unwrap_or_default();
+    let effective_capabilities = std::fs::read_to_string("/proc/self/status")
+        .map(|status| effective_capability_mask(&status))
+        .unwrap_or(0);
+    sealed_launcher_refusal_expected(restricted, &confinement, effective_capabilities)
+}
+
+// Bit number from `linux/capability.h`.
+const CAP_SYS_ADMIN: u32 = 21;
+
+fn sealed_launcher_refusal_expected(
+    restricted: bool,
+    confinement: &str,
+    effective_capabilities: u64,
+) -> bool {
+    restricted
+        && confinement.trim_end_matches('\0').trim() == "unconfined"
+        && effective_capabilities & (1_u64 << CAP_SYS_ADMIN) == 0
+}
+
+// An unreadable or malformed mask classifies as unprivileged. No
+// misclassification anywhere in this predicate can pass silently: it only
+// selects which arm runs, and each arm asserts a definite outcome.
+fn effective_capability_mask(status: &str) -> u64 {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn refusal_contract_requires_restriction_unconfinement_and_no_privilege() {
+    assert!(sealed_launcher_refusal_expected(true, "unconfined\n", 0));
+    // `CAP_SYS_ADMIN` exempts the process from the restriction, alone or
+    // inside a full root capability set.
+    assert!(!sealed_launcher_refusal_expected(
+        true,
+        "unconfined\n",
+        1_u64 << CAP_SYS_ADMIN
+    ));
+    assert!(!sealed_launcher_refusal_expected(
+        true,
+        "unconfined\n",
+        0x0000_01ff_ffff_ffff
+    ));
+    // Unrelated capabilities do not.
+    assert!(sealed_launcher_refusal_expected(
+        true,
+        "unconfined\n",
+        1_u64 << 7
+    ));
+    assert!(!sealed_launcher_refusal_expected(false, "unconfined\n", 0));
+    assert!(!sealed_launcher_refusal_expected(
+        true,
+        "mcloving-source-acquirer (unconfined)\n",
+        0
+    ));
+}
+
+#[test]
+fn effective_capability_mask_reads_the_status_mask_and_defaults_to_unprivileged() {
+    assert_eq!(
+        effective_capability_mask("CapInh:\t0000000000000000\nCapEff:\t000001ffffffffff\n"),
+        0x0000_01ff_ffff_ffff
+    );
+    assert_eq!(effective_capability_mask("CapEff:\t0000000000000000\n"), 0);
+    assert_eq!(effective_capability_mask(""), 0);
+    assert_eq!(effective_capability_mask("CapEff:\tnot-hex\n"), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
