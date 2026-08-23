@@ -116,6 +116,13 @@ for contract_service in postgres db-init controller agent; do
           contract_into path_value "${path_variable}"
           case "${path_value}" in
             /*) printf '%s\n' "${path_value}" ;;
+            "") ;;
+            *)
+              # The guard refuses relative class paths outright; a contract
+              # carrying one anyway is drift the document must SHOW, never
+              # silently skip.
+              printf '!relative %s %s\n' "${path_variable}" "${path_value}"
+              ;;
           esac
         done
   )" || service_paths=""
@@ -158,6 +165,10 @@ unit_dirs = tuple(
 
 
 MAX_RECORD_ATTEMPTS = 3
+
+# Directories whose listings never settled within the attempt budget; each
+# becomes a named record rather than a silent gap or a failed run.
+LISTING_UNSTABLE: set = set()
 
 
 def file_record(path: Path, root: Path) -> dict:
@@ -260,6 +271,22 @@ def file_record(path: Path, root: Path) -> dict:
                     "uid": status.st_uid,
                     "gid": status.st_gid,
                 }
+                if stat.S_ISDIR(status.st_mode):
+                    # The entry-set digest gives a directory record listing
+                    # identity of its own: an entry added or renamed changes
+                    # this hash even when every surviving child record is
+                    # unchanged, so the document itself betrays a listing
+                    # that moved. Read through the already-classified
+                    # descriptor; the final pathname re-check (mtime/ctime)
+                    # retries the record if the listing changes under it.
+                    try:
+                        listing = sorted(os.listdir(descriptor))
+                    except OSError:
+                        listing = None
+                    if listing is not None:
+                        record["entries_sha256"] = hashlib.sha256(
+                            "\x00".join(listing).encode("utf-8", "surrogateescape")
+                        ).hexdigest()
             else:
                 digest = hashlib.sha256()
                 try:
@@ -380,10 +407,35 @@ def walk(root: Path) -> list[Path]:
         if key in seen:
             return
         seen.add(key)
-        try:
-            entries = sorted(directory.iterdir())
-        except OSError:
-            return
+        # A listing is a snapshot, and a file created right after it is
+        # taken would be present when this command returns yet absent from
+        # the document. The established identity-snapshot pattern applies:
+        # process the entries, re-list, and retry the whole directory --
+        # rolling back what this attempt appended -- when the entry set
+        # moved; a listing that never settles is named, not guessed at.
+        for _ in range(MAX_RECORD_ATTEMPTS):
+            found_mark = len(found)
+            seen_mark = set(seen)
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                return
+            names_before = [entry.name for entry in entries]
+            _process_entries(entries)
+            try:
+                names_after = sorted(
+                    child.name for child in directory.iterdir()
+                )
+            except OSError:
+                names_after = None
+            if names_after == names_before:
+                return
+            del found[found_mark:]
+            seen.clear()
+            seen.update(seen_mark)
+        LISTING_UNSTABLE.add(directory)
+
+    def _process_entries(entries: list) -> None:
         for entry in entries:
             try:
                 is_directory = entry.is_dir()
@@ -536,13 +588,23 @@ def inside_walked_trees(path: Path) -> bool:
 
 
 configured_supplied = os.environ.get("MCLOVING_CONFIGURED_PATHS", "")
-configured_paths = sorted(
-    {
-        Path(line)
-        for line in configured_supplied.splitlines()
-        if line and not inside_walked_trees(Path(line))
-    }
-)
+relative_configured = []
+absolute_configured = set()
+for line in configured_supplied.splitlines():
+    if not line:
+        continue
+    if line.startswith("!relative "):
+        # "!relative VARIABLE VALUE" -- a class path the guard refuses as
+        # relative; recorded by name so a malformed contract is visible in
+        # the document rather than invisibly skipped.
+        parts = line.split(" ", 2)
+        relative_configured.append((parts[1], parts[2] if len(parts) > 2 else ""))
+        continue
+    candidate = Path(line)
+    if not inside_walked_trees(candidate):
+        absolute_configured.add(candidate)
+configured_paths = sorted(absolute_configured)
+relative_configured.sort()
 for configured in configured_paths:
     if not collect_chain(configured):
         unresolvable_links.append(configured)
@@ -560,6 +622,14 @@ document = {
     "configured_paths": [
         file_record(path, home)
         for path in configured_paths
+    ]
+    + [
+        {
+            "path": relative_value,
+            "variable": variable_name,
+            "kind": "relative_configured_path",
+        }
+        for variable_name, relative_value in relative_configured
     ],
     "ancestors": [
         file_record(Path(path), home)
@@ -568,6 +638,10 @@ document = {
     + [
         {"path": home_relative(link), "kind": "unresolvable_link_chain"}
         for link in unresolvable_links
+    ]
+    + [
+        {"path": home_relative(directory), "kind": "unstable_listing"}
+        for directory in sorted(LISTING_UNSTABLE)
     ],
     "releases": [
         file_record(path, home)

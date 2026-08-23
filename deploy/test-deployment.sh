@@ -371,6 +371,49 @@ chmod 0600 "${pki}/agent-key.pem"
   exit 1
 }
 
+# A relative trust path means whatever the runtime working directory says
+# it means -- ambient-context substitution. The guard refuses it by name;
+# the inventory, which records drift rather than refusing, must SHOW it as
+# a named record instead of silently skipping the un-inventoried file.
+cp "${config}/agent.env" "${workdir}/agent.env.before-relative"
+sed -i "s#^MCLOVING_CONTROLLER_CA_PATH=.*#MCLOVING_CONTROLLER_CA_PATH=relative/ca.pem#" \
+  "${config}/agent.env"
+grep -q "^MCLOVING_CONTROLLER_CA_PATH=relative/ca.pem\$" "${config}/agent.env" || {
+  echo "relative-path gate could not rewrite MCLOVING_CONTROLLER_CA_PATH; contract shape changed" >&2
+  exit 1
+}
+if "${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" \
+  > "${workdir}/logs/guard-relative-path.log" 2>&1; then
+  echo "env guard accepted a relative trust path" >&2
+  exit 1
+fi
+grep -q "MCLOVING_CONTROLLER_CA_PATH must be an absolute path" \
+  "${workdir}/logs/guard-relative-path.log" || {
+  echo "the relative-path refusal did not name the variable:" >&2
+  cat "${workdir}/logs/guard-relative-path.log" >&2
+  exit 1
+}
+relative_doc="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${relative_doc}" <<'RELREC'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = [
+    record
+    for record in document.get("configured_paths", [])
+    if record.get("kind") == "relative_configured_path"
+]
+if not records or records[0].get("variable") != "MCLOVING_CONTROLLER_CA_PATH":
+    raise SystemExit(f"relative configured path not recorded by name: {records}")
+RELREC
+cp "${workdir}/agent.env.before-relative" "${config}/agent.env"
+chmod 0600 "${config}/agent.env"
+"${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" >/dev/null || {
+  echo "env guard refused the restored absolute contract" >&2
+  exit 1
+}
+
 run_with_env() { # ENV_FILE COMMAND...
   local env_file="$1"
   shift
@@ -1519,6 +1562,76 @@ CTIMERACE
 rm -f "${config_dir}/ctime-probe.txt"
 if [[ "${ctime_race_status}" -ne 0 ]]; then
   echo "digest re-read accepted a stale digest behind a forged mtime" >&2
+  exit 1
+fi
+
+# A listing is a snapshot: a file created right after iterdir() must still
+# reach the document (the walk re-lists after processing and retries) or be
+# named as an unstable listing -- never silently omitted while present on
+# disk when the command returns.
+listing_race_status=0
+MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
+MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
+MCLOVING_UNIT_DIRS="${smoke_unit_root}
+${smoke_quadlet_root}" \
+MCLOVING_CONFIGURED_PATHS="" \
+python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
+  "${config_dir}" <<'LISTRACE' || listing_race_status=$?
+import contextlib
+import io
+import json
+import os
+import sys
+
+helper, home, target = sys.argv[1], sys.argv[2], sys.argv[3]
+source = open(helper, encoding="utf-8").read()
+payload = source.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+born = os.path.join(target, "race-born.txt")
+state = {"fired": False}
+real_listdir = os.listdir
+
+
+def hooked_listdir(path=None):
+    result = real_listdir(path)
+    try:
+        same = path is not None and os.path.samefile(path, target)
+    except (OSError, TypeError):
+        same = False
+    if same and not state["fired"]:
+        state["fired"] = True
+        with open(born, "w") as handle:
+            handle.write("born-in-the-window")
+        os.chmod(born, 0o600)
+    return result
+
+
+os.listdir = hooked_listdir
+buffer = io.StringIO()
+sys.argv = ["-", home]
+try:
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(payload, helper, "exec"), {"__name__": "__main__"})
+finally:
+    os.listdir = real_listdir
+if not state["fired"]:
+    raise SystemExit("the racing creation never fired; the hook missed the window")
+document = json.loads(buffer.getvalue())
+present = any(
+    record["path"] == ".config/mcloving/race-born.txt"
+    for record in document.get("environment_contracts", [])
+)
+named_unstable = any(
+    record.get("kind") == "unstable_listing"
+    for record in document.get("ancestors", [])
+)
+if not (present or named_unstable):
+    raise SystemExit(
+        "a file created after the listing snapshot was silently omitted"
+    )
+LISTRACE
+rm -f "${config_dir}/race-born.txt"
+if [[ "${listing_race_status}" -ne 0 ]]; then
+  echo "digest re-read silently omitted a file created during the walk" >&2
   exit 1
 fi
 

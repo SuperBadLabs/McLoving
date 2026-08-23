@@ -174,6 +174,22 @@ require_min_bytes() {
   fi
 }
 
+# Every enumerated class path must be ABSOLUTE before anything dereferences
+# it -- checked ahead of the per-service branches, so the refusal names the
+# actual defect instead of whichever downstream check trips first. A
+# relative trust or secret path means whatever the runtime working
+# directory says it means: ambient-context substitution, the exact class
+# this lane refuses. The shipped contracts are all %h-absolute, so nothing
+# legitimate carries a relative spelling; emptiness is judged by the
+# per-service require lists.
+while IFS=' ' read -r _ path_variable; do
+  [[ -n "${path_variable:-}" ]] || continue
+  contract_into class_path_value "${path_variable}"
+  if [[ -n "${class_path_value}" && "${class_path_value}" != /* ]]; then
+    fail "${path_variable} must be an absolute path; ${class_path_value} depends on the runtime working directory"
+  fi
+done < <(deployment_contract_path_variables "${service}")
+
 case "${service}" in
   postgres)
     require POSTGRES_USER POSTGRES_DB POSTGRES_PASSWORD
