@@ -1260,6 +1260,8 @@ race_ancestors="$(
 )"
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
+MCLOVING_UNIT_DIRS="${home}/.config/systemd/user
+${home}/.config/containers/systemd" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1307,6 +1309,79 @@ MODERACE
 chmod "${race_mode_before}" "${libexec}"
 if [[ "${race_status}" -ne 0 ]]; then
   echo "digest re-read kept a stale directory mode across a racing chmod" >&2
+  exit 1
+fi
+
+# The same window, content edition: a write landing between the post-read
+# fstat and the pathname re-check leaves inode, mode, and owner untouched
+# while the bytes changed. Driven with a hook appending to the probe inside
+# that exact window, the returned record must carry the settled bytes.
+printf 'probe-content' > "${config_dir}/race-probe.txt"
+chmod 0600 "${config_dir}/race-probe.txt"
+content_race_status=0
+MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
+MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
+MCLOVING_UNIT_DIRS="${home}/.config/systemd/user
+${home}/.config/containers/systemd" \
+python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
+  "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
+import contextlib
+import hashlib
+import io
+import json
+import os
+import sys
+
+helper, home, target = sys.argv[1], sys.argv[2], sys.argv[3]
+source = open(helper, encoding="utf-8").read()
+payload = source.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+state = {"fd": None, "fired": False}
+real_open, real_close = os.open, os.close
+
+
+def hooked_open(path, flags, *args, **kwargs):
+    fd = real_open(path, flags, *args, **kwargs)
+    if not state["fired"] and os.fspath(path) == target:
+        state["fd"] = fd
+    return fd
+
+
+def hooked_close(fd):
+    if fd == state["fd"] and not state["fired"]:
+        state["fired"] = True
+        append_fd = real_open(target, os.O_WRONLY | os.O_APPEND)
+        os.write(append_fd, b"-appended")
+        real_close(append_fd)
+    return real_close(fd)
+
+
+os.open, os.close = hooked_open, hooked_close
+buffer = io.StringIO()
+sys.argv = ["-", home]
+try:
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(payload, helper, "exec"), {"__name__": "__main__"})
+finally:
+    os.open, os.close = real_open, real_close
+if not state["fired"]:
+    raise SystemExit("the racing append never fired; the hook missed the window")
+document = json.loads(buffer.getvalue())
+records = {
+    record["path"]: record
+    for record in document.get("environment_contracts", [])
+}
+entry = records.get(".config/mcloving/race-probe.txt")
+if entry is None:
+    raise SystemExit("probe file missing from the re-read")
+settled = b"probe-content-appended"
+if entry.get("sha256") != hashlib.sha256(settled).hexdigest() or entry.get(
+    "size_bytes"
+) != len(settled):
+    raise SystemExit(f"record kept the pre-append content identity: {entry}")
+CONTENTRACE
+rm -f "${config_dir}/race-probe.txt"
+if [[ "${content_race_status}" -ne 0 ]]; then
+  echo "digest re-read kept a stale content identity across a racing write" >&2
   exit 1
 fi
 
@@ -2089,6 +2164,96 @@ chmod 0755 "${state_home}/.local/state"
   exit 1
 }
 rm -rf "${state_home}"
+
+# The user manager honors XDG_CONFIG_HOME (the unit search root moves) and
+# XDG_STATE_HOME (StateDirectory leaves are created there), so the lane
+# derives every base the same way: units and quadlets land where systemctl
+# --user actually looks, the units-declared state roots are validated in
+# the tree systemd will actually use, and the inventory walks the same
+# dirs. Contracts stay at %h/.config/mcloving -- the literal text of the
+# units' EnvironmentFile= lines, which %h-expansion keeps XDG-independent.
+# A relative XDG value is ignored exactly as systemd ignores it.
+xdg_home="${workdir}/xdg-home"
+rm -rf "${xdg_home}"
+mkdir -p "${xdg_home}/custom-config" "${xdg_home}/custom-state"
+chmod 0777 "${xdg_home}/custom-state"
+if XDG_CONFIG_HOME="${xdg_home}/custom-config" \
+  XDG_STATE_HOME="${xdg_home}/custom-state" \
+  "${repo_root}/deploy/bin/mcloving-install" --home "${xdg_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/xdg-state-ancestor.log" 2>&1; then
+  echo "install accepted a world-writable custom XDG state root" >&2
+  exit 1
+fi
+grep -q "custom-state (mode 777)" "${workdir}/logs/xdg-state-ancestor.log" || {
+  echo "the custom-state refusal did not name the derived tree:" >&2
+  cat "${workdir}/logs/xdg-state-ancestor.log" >&2
+  exit 1
+}
+chmod 0755 "${xdg_home}/custom-state"
+XDG_CONFIG_HOME="${xdg_home}/custom-config" \
+  XDG_STATE_HOME="${xdg_home}/custom-state" \
+  "${repo_root}/deploy/bin/mcloving-install" --home "${xdg_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -f "${xdg_home}/custom-config/systemd/user/mcloving-controller.service" ]] || {
+  echo "units were not written under the manager's XDG configuration root" >&2
+  exit 1
+}
+[[ -f "${xdg_home}/custom-config/containers/systemd/mcloving-postgres.container" ]] || {
+  echo "quadlets were not written under the manager's XDG configuration root" >&2
+  exit 1
+}
+[[ ! -e "${xdg_home}/.config/systemd/user/mcloving-controller.service" ]] || {
+  echo "units were duplicated under the hard-coded default root" >&2
+  exit 1
+}
+[[ -f "${xdg_home}/.config/mcloving/agent.env" ]] || {
+  echo "contracts left %h/.config/mcloving, where the units' own text points" >&2
+  exit 1
+}
+xdg_digests="$(XDG_CONFIG_HOME="${xdg_home}/custom-config" \
+  XDG_STATE_HOME="${xdg_home}/custom-state" \
+  "${xdg_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${xdg_home}")"
+python3 - "${xdg_digests}" <<'XDGUNITS'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+paths = {record["path"] for record in document.get("units", [])}
+if not any(p.endswith("custom-config/systemd/user/mcloving-controller.service") for p in paths):
+    raise SystemExit(f"inventory did not walk the XDG unit root: {sorted(paths)}")
+XDGUNITS
+xdg_state_roots="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${xdg_home}/.local/libexec/mcloving/helpers/mcloving-deploy-lib.sh"
+  XDG_STATE_HOME="${xdg_home}/custom-state" deployment_unit_declared_roots \
+    "${xdg_home}" "${repo_root}"/deploy/systemd/*.service
+)"
+grep -q "^${xdg_home}/custom-state/mcloving-agent/workspace$" <<<"${xdg_state_roots}" || {
+  echo "the declared-roots parser did not follow XDG_STATE_HOME:" >&2
+  printf '%s\n' "${xdg_state_roots}" >&2
+  exit 1
+}
+rm -rf "${xdg_home}"
+# A relative XDG value is ignored, exactly as systemd ignores it.
+relative_xdg_home="${workdir}/relative-xdg-home"
+rm -rf "${relative_xdg_home}"
+mkdir -p "${relative_xdg_home}"
+XDG_CONFIG_HOME="relative-config" XDG_STATE_HOME="also/relative" \
+  "${repo_root}/deploy/bin/mcloving-install" --home "${relative_xdg_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -f "${relative_xdg_home}/.config/systemd/user/mcloving-controller.service" ]] || {
+  echo "a relative XDG_CONFIG_HOME was not ignored like systemd ignores it" >&2
+  exit 1
+}
+[[ ! -e "${relative_xdg_home}/relative-config" ]] || {
+  echo "a relative XDG_CONFIG_HOME was honored as a path" >&2
+  exit 1
+}
+rm -rf "${relative_xdg_home}"
 
 # One realpath of the whole root keeps only the FINAL chain. With
 # .local -> srv-a/user-local and user-local/libexec -> opt-m/libexec, the

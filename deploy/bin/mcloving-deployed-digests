@@ -60,11 +60,18 @@ acquire_transition_lock_shared "${home_dir}/.local/libexec/mcloving"
 # and the refusal walk cannot drift apart. The roots listed here mirror the
 # trees the document walks below. A looping or dangling ancestor link is a
 # named failure: nothing behind it is readable to record.
+# The unit roots follow the user manager's XDG configuration base, through
+# the same library derivation the installer writes with; the mcloving
+# contract root stays %h/.config/mcloving because that is the literal text
+# of the units' EnvironmentFile= lines.
+xdg_config_base="$(deployment_config_root "${home_dir}")"
+unit_root="${xdg_config_base}/systemd/user"
+quadlet_root="${xdg_config_base}/containers/systemd"
 ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
   "${home_dir}/.local/libexec/mcloving/releases" \
   "${home_dir}/.local/libexec/mcloving/helpers" \
-  "${home_dir}/.config/systemd/user" \
-  "${home_dir}/.config/containers/systemd" \
+  "${unit_root}" \
+  "${quadlet_root}" \
   "${home_dir}/.config/mcloving" \
   "${home_dir}/.config/mcloving/pki")" || {
   echo "mcloving-deployed-digests: cannot derive the deployment ancestor chain" >&2
@@ -76,6 +83,11 @@ export MCLOVING_ANCESTOR_DIRS="${ancestor_dirs}"
 # which the document builder invokes by path.
 MCLOVING_DEPLOY_LIB="$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 export MCLOVING_DEPLOY_LIB
+# The walker's unit roots are the derived ones above -- one derivation for
+# writer, validator, and inventory alike.
+MCLOVING_UNIT_DIRS="${unit_root}
+${quadlet_root}"
+export MCLOVING_UNIT_DIRS
 
 python3 - "${home_dir}" <<'PY'
 import hashlib
@@ -97,9 +109,14 @@ NODE_KINDS = {
 home = Path(sys.argv[1])
 libexec = home / ".local/libexec/mcloving"
 config = home / ".config/mcloving"
-unit_dirs = (
-    home / ".config/systemd/user",
-    home / ".config/containers/systemd",
+unit_dirs_supplied = os.environ.get("MCLOVING_UNIT_DIRS")
+if unit_dirs_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_DIRS is not set; "
+        "run this through its shell wrapper"
+    )
+unit_dirs = tuple(
+    Path(line) for line in unit_dirs_supplied.splitlines() if line
 )
 
 
@@ -257,10 +274,22 @@ def file_record(path: Path, root: Path) -> dict:
             stat.S_IMODE(current.st_mode),
             current.st_uid,
             current.st_gid,
+            # Content metadata too: a write landing after the post-read
+            # fstat leaves device, inode, mode, and owner untouched while
+            # the pathname already holds different bytes -- returning the
+            # old digest beside them would hand a cutover re-read a record
+            # that describes nothing on disk. Size and both timestamps
+            # against the recorded snapshot; retry re-reads the new bytes.
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
         ) != (
             stat.S_IMODE(recorded.st_mode),
             recorded.st_uid,
             recorded.st_gid,
+            recorded.st_size,
+            recorded.st_mtime_ns,
+            recorded.st_ctime_ns,
         ):
             continue
         after = link_target()

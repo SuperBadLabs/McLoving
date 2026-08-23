@@ -145,6 +145,49 @@ require_secret_files() {
   fi
 }
 
+# deployment_config_root HOME / deployment_state_root HOME /
+# deployment_cache_root HOME -> the XDG base directories as the user
+# manager resolves them, one per line on stdout.
+#
+# systemd's user instance roots its unit search under $XDG_CONFIG_HOME
+# (default ~/.config) and creates StateDirectory=/CacheDirectory= leaves
+# under $XDG_STATE_HOME (default ~/.local/state) and $XDG_CACHE_HOME
+# (default ~/.cache). A lane that hard-codes the defaults writes units the
+# manager cannot find and validates state trees systemd never uses. The
+# policy for the variables mirrors systemd exactly: a value that is unset,
+# empty, or NOT ABSOLUTE is ignored and the default applies -- the XDG
+# spec and systemd's basic/lookup-paths both discard relative values.
+# The mcloving contract root is deliberately NOT derived from
+# XDG_CONFIG_HOME: the shipped units reference it as %h/.config/mcloving
+# literally, and %h expands to the home regardless of XDG -- the lane must
+# resolve exactly as systemd resolves the units' own text.
+deployment_config_root() {
+  local home_dir="${1%/}" value="${XDG_CONFIG_HOME:-}"
+  if [[ "${value}" == /* ]]; then
+    printf '%s\n' "${value%/}"
+  else
+    printf '%s\n' "${home_dir}/.config"
+  fi
+}
+
+deployment_state_root() {
+  local home_dir="${1%/}" value="${XDG_STATE_HOME:-}"
+  if [[ "${value}" == /* ]]; then
+    printf '%s\n' "${value%/}"
+  else
+    printf '%s\n' "${home_dir}/.local/state"
+  fi
+}
+
+deployment_cache_root() {
+  local home_dir="${1%/}" value="${XDG_CACHE_HOME:-}"
+  if [[ "${value}" == /* ]]; then
+    printf '%s\n' "${value%/}"
+  else
+    printf '%s\n' "${home_dir}/.cache"
+  fi
+}
+
 # deployment_unit_declared_roots HOME UNIT_FILE... -> the home-relative
 # directories the DEPLOYMENT'S OWN unit declarations cause to exist, one per
 # line. The installer's managed_roots covers what the installer creates, but
@@ -159,8 +202,10 @@ require_secret_files() {
 # optional "-" prefix), and quadlet Volume= host paths contribute when they
 # resolve under the home after %h expansion; named quadlet volumes do not.
 deployment_unit_declared_roots() {
-  local home_dir="${1%/}" line key value entry path
+  local home_dir="${1%/}" line key value entry path state_base cache_base
   shift
+  state_base="$(deployment_state_root "${home_dir}")"
+  cache_base="$(deployment_cache_root "${home_dir}")"
   while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
@@ -168,19 +213,19 @@ deployment_unit_declared_roots() {
       StateDirectory)
         # shellcheck disable=SC2086  # systemd's value is space-separated names
         for entry in ${value}; do
-          printf '%s\n' "${home_dir}/.local/state/${entry}"
+          printf '%s\n' "${state_base}/${entry}"
         done
         ;;
       LogsDirectory)
         # shellcheck disable=SC2086  # systemd's value is space-separated names
         for entry in ${value}; do
-          printf '%s\n' "${home_dir}/.local/state/log/${entry}"
+          printf '%s\n' "${state_base}/log/${entry}"
         done
         ;;
       CacheDirectory)
         # shellcheck disable=SC2086  # systemd's value is space-separated names
         for entry in ${value}; do
-          printf '%s\n' "${home_dir}/.cache/${entry}"
+          printf '%s\n' "${cache_base}/${entry}"
         done
         ;;
       RuntimeDirectory)
