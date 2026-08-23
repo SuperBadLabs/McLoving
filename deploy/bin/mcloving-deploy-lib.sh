@@ -161,9 +161,29 @@ require_secret_files() {
 # XDG_CONFIG_HOME: the shipped units reference it as %h/.config/mcloving
 # literally, and %h expands to the home regardless of XDG -- the lane must
 # resolve exactly as systemd resolves the units' own text.
+# deployment_xdg_value_applies HOME VALUE -- whether an inherited XDG base
+# may speak for the deployment at HOME. It may when the target home IS the
+# invoking user's own home (the environment describes that account's
+# manager), or when the value lies inside the target home. An absolute
+# XDG_CONFIG_HOME inherited from some OTHER account's environment -- the
+# GitHub runner exports one, and CI proved the hazard by having the
+# installer write a scratch deployment's units into the runner's real
+# configuration root -- describes nobody's view of the target tree and is
+# ignored like a relative value.
+deployment_xdg_value_applies() {
+  local home_dir="${1%/}" value="${2%/}"
+  if [[ "${home_dir}" == "${HOME%/}" ]]; then
+    return 0
+  fi
+  if [[ "${value}" == "${home_dir}"/* ]]; then
+    return 0
+  fi
+  return 1
+}
+
 deployment_config_root() {
   local home_dir="${1%/}" value="${XDG_CONFIG_HOME:-}"
-  if [[ "${value}" == /* ]]; then
+  if [[ "${value}" == /* ]] && deployment_xdg_value_applies "${home_dir}" "${value}"; then
     printf '%s\n' "${value%/}"
   else
     printf '%s\n' "${home_dir}/.config"
@@ -172,7 +192,7 @@ deployment_config_root() {
 
 deployment_state_root() {
   local home_dir="${1%/}" value="${XDG_STATE_HOME:-}"
-  if [[ "${value}" == /* ]]; then
+  if [[ "${value}" == /* ]] && deployment_xdg_value_applies "${home_dir}" "${value}"; then
     printf '%s\n' "${value%/}"
   else
     printf '%s\n' "${home_dir}/.local/state"
@@ -181,7 +201,7 @@ deployment_state_root() {
 
 deployment_cache_root() {
   local home_dir="${1%/}" value="${XDG_CACHE_HOME:-}"
-  if [[ "${value}" == /* ]]; then
+  if [[ "${value}" == /* ]] && deployment_xdg_value_applies "${home_dir}" "${value}"; then
     printf '%s\n' "${value%/}"
   else
     printf '%s\n' "${home_dir}/.cache"

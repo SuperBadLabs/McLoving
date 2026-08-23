@@ -24,6 +24,16 @@ for tool in podman openssl python3 curl jq cargo sha256sum flock; do
   }
 done
 
+# The suite is hermetic against the invoking environment's XDG settings.
+# GitHub's runners export XDG_CONFIG_HOME, and an inherited value would --
+# and in CI did -- steer the installer's derived unit roots away from the
+# tree the harness reads. The inherited values are captured for the
+# preserved-workdir artifact (so this class of environmental question
+# answers itself), then cleared; the XDG gates set the variables
+# explicitly, per command, in subshell-confined prefixes.
+invoking_xdg_environment="$(env | grep -E '^XDG_' || true)"
+unset XDG_CONFIG_HOME XDG_STATE_HOME XDG_CACHE_HOME
+
 # The test's own directories must not depend on the invoking shell's umask.
 # An operator umask of 002 -- the Debian/Ubuntu user-private-group default --
 # would create every test home group-writable, and the installer's ancestor
@@ -134,6 +144,7 @@ echo "== [1/9] build deployable binaries"
 
 release_dir="${workdir}/release"
 mkdir -p "${release_dir}" "${workdir}/logs"
+printf '%s\n' "${invoking_xdg_environment}" > "${workdir}/logs/environment-xdg.log"
 for binary in mcloving-controller mcloving-agent mcloving-cli mcloving-identity-admin; do
   cp "${repo_root}/target/debug/${binary}" "${release_dir}/${binary}"
 done
@@ -142,6 +153,16 @@ done
 
 home="${workdir}/home"
 mkdir -p "${home}"
+# The harness reads unit and quadlet paths through the SAME library
+# derivation the installer writes with -- a hard-coded default here is how
+# a runner-exported XDG base made reader and writer disagree in CI.
+smoke_config_base="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  deployment_config_root "${home}"
+)"
+smoke_unit_root="${smoke_config_base}/systemd/user"
+smoke_quadlet_root="${smoke_config_base}/containers/systemd"
 
 echo "== [2/9] fail-closed install: tampered binary must be refused"
 tampered_dir="${workdir}/tampered"
@@ -332,7 +353,7 @@ derived_argv() { # OUT_ARRAY_NAME JSON_FILE JQ_PATH
 }
 
 echo "== [6/9] postgres (derived from quadlet) -> db-init -> controller -> agent"
-"${unit_command}" "${home}/.config/containers/systemd/mcloving-postgres.container" \
+"${unit_command}" "${smoke_quadlet_root}/mcloving-postgres.container" \
   --home "${home}" --publish-override "127.0.0.1:${pg_port}" \
   --name-override "${container_name}" --volume-override "${volume_name}" \
   > "${workdir}/postgres.derived.json"
@@ -389,7 +410,7 @@ podman exec "${container_name}" "${health_argv[@]}" || {
 }
 echo "postgres healthy; deriving db-init"
 
-"${unit_command}" "${home}/.config/systemd/user/mcloving-db-init.service" \
+"${unit_command}" "${smoke_unit_root}/mcloving-db-init.service" \
   --home "${home}" > "${workdir}/db-init.derived.json"
 db_init_env="$(jq -r '.environment_files[0]' "${workdir}/db-init.derived.json")"
 db_init_pre=()
@@ -564,7 +585,7 @@ grep -q "already provisioned" "${workdir}/logs/db-init-uppercase.log" || {
 }
 rm -f "${uppercase_env}"
 
-"${unit_command}" "${home}/.config/systemd/user/mcloving-controller.service" \
+"${unit_command}" "${smoke_unit_root}/mcloving-controller.service" \
   --home "${home}" > "${workdir}/controller.derived.json"
 controller_env="$(jq -r '.environment_files[0]' "${workdir}/controller.derived.json")"
 controller_pre=()
@@ -579,7 +600,7 @@ controller_post=()
 derived_argv controller_post "${workdir}/controller.derived.json" '.exec_start_post[0]'
 run_with_env "${controller_env}" "${controller_post[@]}"
 
-"${unit_command}" "${home}/.config/systemd/user/mcloving-agent.service" \
+"${unit_command}" "${smoke_unit_root}/mcloving-agent.service" \
   --home "${home}" > "${workdir}/agent.derived.json"
 agent_env="$(jq -r '.environment_files[0]' "${workdir}/agent.derived.json")"
 agent_guard=()
@@ -1255,13 +1276,13 @@ race_ancestors="$(
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
   deployment_ancestor_chain "${home}" \
     "${libexec}/releases" "${libexec}/helpers" \
-    "${home}/.config/systemd/user" "${home}/.config/containers/systemd" \
+    "${smoke_unit_root}" "${smoke_quadlet_root}" \
     "${home}/.config/mcloving" "${home}/.config/mcloving/pki"
 )"
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
-MCLOVING_UNIT_DIRS="${home}/.config/systemd/user
-${home}/.config/containers/systemd" \
+MCLOVING_UNIT_DIRS="${smoke_unit_root}
+${smoke_quadlet_root}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1321,8 +1342,8 @@ chmod 0600 "${config_dir}/race-probe.txt"
 content_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
-MCLOVING_UNIT_DIRS="${home}/.config/systemd/user
-${home}/.config/containers/systemd" \
+MCLOVING_UNIT_DIRS="${smoke_unit_root}
+${smoke_quadlet_root}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
 import contextlib
@@ -1503,8 +1524,8 @@ rm -rf "${home}/depot"
 # basename filter applied below the top level left the canonical document
 # byte-identical across it. Both unit trees follow the convention; both are
 # gated.
-dropin_service_dir="${home}/.config/systemd/user/mcloving-controller.service.d"
-dropin_quadlet_dir="${home}/.config/containers/systemd/mcloving-postgres.container.d"
+dropin_service_dir="${smoke_unit_root}/mcloving-controller.service.d"
+dropin_quadlet_dir="${smoke_quadlet_root}/mcloving-postgres.container.d"
 dropin_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
 mkdir -p "${dropin_service_dir}" "${dropin_quadlet_dir}"
 printf '[Service]\nRestart=always\n' > "${dropin_service_dir}/override.conf"
@@ -2254,6 +2275,27 @@ XDG_CONFIG_HOME="relative-config" XDG_STATE_HOME="also/relative" \
   exit 1
 }
 rm -rf "${relative_xdg_home}"
+# An absolute XDG base inherited from ANOTHER account's environment -- the
+# CI runner's exported XDG_CONFIG_HOME was exactly this -- must be ignored
+# for an alternate target home: it describes nobody's view of that tree,
+# and honoring it wrote a scratch deployment's units into the runner's
+# real configuration root.
+foreign_xdg_home="${workdir}/foreign-xdg-home"
+rm -rf "${foreign_xdg_home}" "${workdir}/foreign-config"
+mkdir -p "${foreign_xdg_home}"
+XDG_CONFIG_HOME="${workdir}/foreign-config" \
+  "${repo_root}/deploy/bin/mcloving-install" --home "${foreign_xdg_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -f "${foreign_xdg_home}/.config/systemd/user/mcloving-controller.service" ]] || {
+  echo "a foreign XDG base kept units out of the target home's default root" >&2
+  exit 1
+}
+[[ ! -e "${workdir}/foreign-config" ]] || {
+  echo "an install honored an XDG base belonging to another account's tree" >&2
+  exit 1
+}
+rm -rf "${foreign_xdg_home}"
 
 # One realpath of the whole root keeps only the FINAL chain. With
 # .local -> srv-a/user-local and user-local/libexec -> opt-m/libexec, the
@@ -2745,7 +2787,7 @@ fi
 # A symlinked unit root must survive the mcloving-* name filter: the root is
 # named `user`, so filtering it out would leave the document unchanged while
 # systemd read an entirely different tree.
-unit_root="${home}/.config/systemd/user"
+unit_root="${smoke_unit_root}"
 cp -a "${unit_root}" "${unit_root}.alias"
 mv "${unit_root}" "${unit_root}.real"
 ln -s "user.alias" "${unit_root}"
