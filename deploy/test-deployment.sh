@@ -1460,6 +1460,53 @@ rm -rf "${dir_dest_home}"
 # already be the retained rollback target.
 retain_home="${workdir}/retain-home"
 rm -rf "${retain_home}"
+
+# A retained release tree under the SAME truncated id as a newly verified
+# release must be byte-compared, never adopted by name: the id keeps only 48
+# digest bits, and without the comparison a colliding or substituted tree
+# would be reused while the newly verified staging copy is deleted. The
+# benign-reuse acceptance direction is the reinstall-the-current-release
+# gate above, which still passes with the comparison in place.
+collision_home="${workdir}/collision-home"
+rm -rf "${collision_home}"
+mkdir -p "${collision_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${collision_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+collision_libexec="${collision_home}/.local/libexec/mcloving"
+collision_current="$(readlink "${collision_libexec}/current")"
+collision_id="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  release_id "${release2_dir}"
+)"
+mkdir -p "${collision_libexec}/releases/${collision_id}"
+for imposter in mcloving-controller mcloving-agent mcloving-cli mcloving-identity-admin; do
+  printf 'imposter %s\n' "${imposter}" \
+    > "${collision_libexec}/releases/${collision_id}/${imposter}"
+  chmod 0755 "${collision_libexec}/releases/${collision_id}/${imposter}"
+done
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${collision_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/collision.log" 2>&1; then
+  echo "upgrade adopted a retained release tree whose bytes differ from the verified staging" >&2
+  exit 1
+fi
+grep -q "does not match the newly verified bytes" "${workdir}/logs/collision.log" || {
+  echo "the colliding retained tree was refused for the wrong reason:" >&2
+  cat "${workdir}/logs/collision.log" >&2
+  exit 1
+}
+[[ "$(readlink "${collision_libexec}/current")" == "${collision_current}" ]] || {
+  echo "a refused colliding upgrade still moved the current release" >&2
+  exit 1
+}
+grep -q "imposter mcloving-cli" \
+  "${collision_libexec}/releases/${collision_id}/mcloving-cli" || {
+  echo "the refusal altered the pre-existing tree it refused to adopt" >&2
+  exit 1
+}
+rm -rf "${collision_home}"
 mkdir -p "${retain_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${retain_home}" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
@@ -1841,9 +1888,25 @@ if "${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
   echo "install preserved a world-writable contract file" >&2
   exit 1
 fi
-grep -q "agent.env (mode 666)" "${workdir}/logs/contract-file-mode.log" || {
+grep -q "agent.env (mode 666, expected owner-only)" \
+  "${workdir}/logs/contract-file-mode.log" || {
   echo "the writable contract-file refusal did not name the file and mode:" >&2
   cat "${workdir}/logs/contract-file-mode.log" >&2
+  exit 1
+}
+# Read bits are secrets too: 0644 exposes database passwords and API tokens
+# to every user on the host even though nobody else can write the file.
+chmod 0644 "${ctlink_home}/ext/agent.env"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/contract-file-read.log" 2>&1; then
+  echo "install preserved a group/other-readable secret-bearing contract" >&2
+  exit 1
+fi
+grep -q "agent.env (mode 644, expected owner-only)" \
+  "${workdir}/logs/contract-file-read.log" || {
+  echo "the readable contract-file refusal did not name the file and mode:" >&2
+  cat "${workdir}/logs/contract-file-read.log" >&2
   exit 1
 }
 chmod 0600 "${ctlink_home}/ext/agent.env"

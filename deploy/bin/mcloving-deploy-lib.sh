@@ -103,8 +103,16 @@ require_secure_files() {
       || deploy_fail "cannot stat contract file ${file}"
     mode="${mode_owner%% *}"
     owner="${mode_owner##* }"
-    if (( (8#${mode} & 8#022) != 0 )); then
-      offending+="${file} (mode ${mode}) "
+    # Contracts carry database passwords and API tokens, so ANY group or
+    # other bit -- read included -- is refused, not just the write bits the
+    # directory walk cares about. The 0700 config root shields in-place
+    # contracts, but a preserved contract may be a symlink whose resolved
+    # file lives outside that shield entirely; the file's own bits are then
+    # the only thing standing between the secrets and every other user on
+    # the host. The deployment documentation promises 0600, and this makes
+    # the promise a precondition.
+    if (( (8#${mode} & 8#077) != 0 )); then
+      offending+="${file} (mode ${mode}, expected owner-only) "
     fi
     if [[ "${owner}" != "0" && "${owner}" != "${home_owner}" ]]; then
       offending+="${file} (owned by uid ${owner}, expected uid ${home_owner} or root) "
@@ -122,7 +130,7 @@ require_secure_files() {
     fi
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "contract file(s) group- or world-writable, foreign-owned, or unreadable: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
+    deploy_fail "contract file(s) not owner-only, foreign-owned, or unreadable: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
   fi
 }
 
@@ -833,6 +841,17 @@ stage_release() {
   local state="published"
   if [[ -d "${target}" ]]; then
     state="existing"
+    # The retained tree is reused only after its bytes are proven identical
+    # to the staging copy that just passed digest verification. The release
+    # id truncates the combined digest to 48 bits and verify_staged_release
+    # compares that truncated name, so without this a colliding or
+    # substituted tree under the same id would be adopted while the newly
+    # VERIFIED bytes are deleted -- the name is a claim; the bytes are the
+    # evidence, and they are still on disk to check at this moment.
+    for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+      cmp -s "${staging}/${binary}" "${target}/${binary}" \
+        || deploy_fail "retained release ${id} does not match the newly verified bytes for ${binary}; refusing a colliding or substituted release tree"
+    done
     # The release is already published, so the copy just made is redundant.
     # Removing it here rather than leaving it to the trap matters because the
     # trap is cleared before this function returns: otherwise reinstalling the
