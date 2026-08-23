@@ -24,6 +24,13 @@ for tool in podman openssl python3 curl jq cargo sha256sum; do
   }
 done
 
+# The test's own directories must not depend on the invoking shell's umask.
+# An operator umask of 002 -- the Debian/Ubuntu user-private-group default --
+# would create every test home group-writable, and the installer's ancestor
+# refusal would then fire for reasons unrelated to what each gate asserts.
+# Gates that need a hostile umask set one explicitly in a subshell.
+umask 022
+
 suffix="${RANDOM}-${RANDOM}"
 container_name="mcloving-smoke-postgres-${suffix}"
 volume_name="mcloving-smoke-pgdata-${suffix}"
@@ -1126,6 +1133,43 @@ for guarded_dir in \
   esac
 done
 rm -rf "${umask_home}"
+
+# A PRE-EXISTING writable ancestor is repaired by neither the umask nor the
+# chmods on the managed roots: the install must refuse it by name, create
+# nothing under it, and accept the same home once the ancestor is secured.
+preexisting_home="${workdir}/preexisting-home"
+rm -rf "${preexisting_home}"
+mkdir -p "${preexisting_home}/.local"
+chmod 0777 "${preexisting_home}/.local"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${preexisting_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/preexisting-ancestor.log" 2>&1; then
+  echo "install accepted a pre-existing world-writable ancestor" >&2
+  exit 1
+fi
+grep -q "group- or world-writable" "${workdir}/logs/preexisting-ancestor.log" || {
+  echo "the writable-ancestor refusal fired for the wrong reason:" >&2
+  cat "${workdir}/logs/preexisting-ancestor.log" >&2
+  exit 1
+}
+grep -q "\.local (mode 777)" "${workdir}/logs/preexisting-ancestor.log" || {
+  echo "the writable-ancestor refusal did not name the offender and its mode:" >&2
+  cat "${workdir}/logs/preexisting-ancestor.log" >&2
+  exit 1
+}
+if [[ -e "${preexisting_home}/.local/libexec" ]]; then
+  echo "a refused install still created deployment directories" >&2
+  exit 1
+fi
+chmod 0755 "${preexisting_home}/.local"
+"${repo_root}/deploy/bin/mcloving-install" --home "${preexisting_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -x "${preexisting_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete after the ancestor was secured" >&2
+  exit 1
+}
+rm -rf "${preexisting_home}"
 
 # The bootstrap's two halves must address one instance, not merely one database
 # name: provisioning runs podman exec into the local container.

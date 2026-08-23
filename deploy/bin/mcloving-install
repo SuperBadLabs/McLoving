@@ -65,6 +65,16 @@ config_root="${home_dir}/.config/mcloving"
 unit_root="${home_dir}/.config/systemd/user"
 quadlet_root="${home_dir}/.config/containers/systemd"
 
+# The umask below secures only the ancestors mkdir CREATES. An ancestor that
+# already exists writable -- a pre-existing 0777 ~/.local -- is untouched by
+# the umask and by the chmods on the managed roots, and permits the same
+# subtree-rename substitution, so it is refused by name before anything is
+# created. Refused rather than re-moded: these are shared locations holding
+# unrelated content, and checking before mkdir keeps a refused install free
+# of side effects.
+require_secure_ancestors "${home_dir}" \
+  "${libexec_root}" "${config_root}" "${unit_root}" "${quadlet_root}"
+
 # Set before the hierarchy is created, not after. `mkdir -p` builds every
 # missing ancestor -- .local, .local/libexec, .config, .config/systemd,
 # .config/containers -- with the caller's umask, and chmod-ing only the leaves

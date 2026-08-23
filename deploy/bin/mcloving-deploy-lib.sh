@@ -20,6 +20,58 @@ deploy_fail() {
   exit 1
 }
 
+# require_secure_ancestors HOME ROOT...
+#
+# Refuse every PRE-EXISTING directory on the way from HOME down to each
+# managed root that is group- or world-writable. `umask` before `mkdir -p`
+# secures only the ancestors that mkdir creates; an ancestor that already
+# exists writable -- a 0777 ~/.local, say -- is untouched by both the umask
+# and the explicit chmods on the managed roots, and a writable ancestor is as
+# good as a writable root: the protected subtree can simply be renamed aside
+# and replaced wholesale.
+#
+# Refused, not repaired: these are shared XDG locations (and the home itself)
+# that hold unrelated content, and an installer silently re-moding a
+# directory it did not create has side effects beyond this deployment -- the
+# same reasoning that keeps the unit roots at `chmod go-w` instead of a
+# forced mode applies with more force to directories this tool does not even
+# manage. The diagnostic names every offending ancestor and its mode so one
+# operator action fixes the tree.
+#
+# The chain is derived by walking each root's parents up to HOME, never by
+# enumerating names: enumeration is how this class of gap has already
+# happened twice (the chmod-the-leaves miss fixed by the umask, and the
+# digest inventory's missing ancestors). Directories that do not exist yet
+# are skipped -- mkdir -p under the caller's umask decides those.
+require_secure_ancestors() {
+  local home_dir="${1%/}" root ancestor parent mode offending
+  shift
+  local -A ancestors=()
+  for root in "$@"; do
+    ancestor="${root}"
+    while [[ "${ancestor}" != "${home_dir}" && "${ancestor}" != "/" && -n "${ancestor}" ]]; do
+      parent="$(dirname "${ancestor}")"
+      [[ "${parent}" != "${ancestor}" ]] || break
+      ancestor="${parent}"
+      ancestors["${ancestor}"]=1
+    done
+  done
+  offending=""
+  while IFS= read -r ancestor; do
+    # -d and stat -L follow a symlinked ancestor deliberately: the directory
+    # the services traverse is the target, and a writable target permits the
+    # same rename regardless of how it is reached.
+    [[ -n "${ancestor}" && -d "${ancestor}" ]] || continue
+    mode="$(stat -Lc '%a' "${ancestor}")" || deploy_fail "cannot stat deployment ancestor ${ancestor}"
+    if (( (8#${mode} & 8#022) != 0 )); then
+      offending+="${ancestor} (mode ${mode}) "
+    fi
+  done < <(printf '%s\n' "${!ancestors[@]}" | sort)
+  if [[ -n "${offending}" ]]; then
+    deploy_fail "deployment ancestor(s) group- or world-writable: ${offending% }-- another local user could rename the protected subtree aside; run chmod go-w on them and retry"
+  fi
+}
+
 # verify_release_dir RELEASE_DIR (MANIFEST|"") (CHECKSUMS|"")
 #
 # Diagnostics go to stderr. This runs inside stage_release, whose stdout is a
