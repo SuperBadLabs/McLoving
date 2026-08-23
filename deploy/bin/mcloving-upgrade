@@ -48,6 +48,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Anchored to the invoking directory once, up front. A relative --home
+# would otherwise reach path comparisons and the ancestor walk, where
+# component resolution anchored at "/" would inspect a tree that does not
+# exist and validate none of the real deployment's links. Absolutization
+# only -- symlink resolution stays the walk's job.
+case "${home_dir}" in /*) ;; *) home_dir="${PWD%/}/${home_dir}" ;; esac
+
 [[ -n "${release_dir}" ]] || deploy_fail "--release-dir is required"
 # systemd units resolve %h to the service account's real home and the manager
 # acted on below is this user's, so operating on a different tree while

@@ -1947,6 +1947,50 @@ if uncovered:
 TRACECOVER
 rm -rf "${trace_home}"
 
+# A RELATIVE --home must see exactly what the absolute spelling sees. The
+# component walk used to anchor resolution at "/", so relative-home/.local
+# was inspected as /relative-home/.local -- a tree that does not exist --
+# and an install through a relative home accepted a symlinked .local whose
+# target parent was world-writable. Refusal through the relative spelling,
+# acceptance once secured, and document identity across both spellings.
+relative_home_name="relative-home"
+relative_home="${workdir}/${relative_home_name}"
+rm -rf "${relative_home}"
+mkdir -p "${relative_home}/stash/dot-local"
+chmod 0755 "${relative_home}" "${relative_home}/stash" "${relative_home}/stash/dot-local"
+ln -s "stash/dot-local" "${relative_home}/.local"
+chmod 0777 "${relative_home}/stash"
+if ( cd "${workdir}" && "${repo_root}/deploy/bin/mcloving-install" \
+  --home "${relative_home_name}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd ) > "${workdir}/logs/relative-home.log" 2>&1; then
+  echo "a relative --home install accepted a writable symlink-target parent" >&2
+  exit 1
+fi
+grep -q "stash (mode 777)" "${workdir}/logs/relative-home.log" || {
+  echo "the relative-home refusal did not name the target parent:" >&2
+  cat "${workdir}/logs/relative-home.log" >&2
+  exit 1
+}
+chmod 0755 "${relative_home}/stash"
+( cd "${workdir}" && "${repo_root}/deploy/bin/mcloving-install" \
+  --home "${relative_home_name}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd ) >/dev/null
+[[ -x "${relative_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete through a relative --home once secured" >&2
+  exit 1
+}
+relative_doc="$( cd "${workdir}" && "${relative_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${relative_home_name}" )"
+absolute_doc="$("${relative_home}/.local/libexec/mcloving/helpers/mcloving-deployed-digests" \
+  --home "${relative_home}")"
+if [[ "${relative_doc}" != "${absolute_doc}" ]]; then
+  echo "the canonical document differs between relative and absolute --home spellings" >&2
+  exit 1
+fi
+rm -rf "${relative_home}"
+
 # The bootstrap's two halves must address one instance, not merely one database
 # name: provisioning runs podman exec into the local container.
 for bad_url in "postgres://mcloving:pw@remote.example:5432/mcloving" \

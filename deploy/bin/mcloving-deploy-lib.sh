@@ -157,8 +157,15 @@ deployment_ancestor_chain() {
 import os
 import sys
 
-home = os.path.normpath(sys.argv[1])
-roots = sys.argv[2:]
+# Anchored to the invoking directory FIRST, links resolved later: the two
+# are distinct steps, and skipping the first anchored the component walk at
+# "/" for a relative --home, so relative-home/.local was inspected as
+# /relative-home/.local -- a tree that does not exist -- and none of the
+# real deployment's links were ever seen. abspath is purely lexical
+# (cwd-join plus normpath); every symlink still goes through the recorded
+# component walk below.
+home = os.path.abspath(sys.argv[1])
+roots = [os.path.abspath(root) for root in sys.argv[2:]]
 try:
     resolved_home = os.path.realpath(home, strict=True)
 except OSError as error:

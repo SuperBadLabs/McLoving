@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -163,6 +164,10 @@ def main() -> None:
     parser.add_argument("--volume-override")
     parser.add_argument("--print", dest="print_key")
     arguments = parser.parse_args()
+    # %h substitutions and EnvironmentFile paths must be absolute: derived
+    # invocations run from arbitrary directories. Lexical absolutization
+    # only, consistent with the deploy library's convention.
+    arguments.home = os.path.abspath(arguments.home)
 
     sections = parse_unit(arguments.unit.read_text(encoding="utf-8"))
     if arguments.unit.suffix == ".container":

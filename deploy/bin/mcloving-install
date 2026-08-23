@@ -51,6 +51,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${release_dir}" ]] || deploy_fail "--release-dir is required"
+
+# Anchored to the invoking directory once, up front. A relative --home
+# would otherwise reach path comparisons and the ancestor walk, where
+# component resolution anchored at "/" would inspect a tree that does not
+# exist and validate none of the real deployment's links. Absolutization
+# only -- symlink resolution stays the walk's job.
+case "${home_dir}" in /*) ;; *) home_dir="${PWD%/}/${home_dir}" ;; esac
 [[ -d "${home_dir}" ]] || deploy_fail "--home ${home_dir} does not exist"
 
 
