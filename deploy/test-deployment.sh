@@ -347,6 +347,29 @@ derived_argv db_init_argv "${workdir}/db-init.derived.json" '.exec_start'
 run_with_env "${db_init_env}" "${db_init_argv[@]}" | tee "${workdir}/logs/db-init.log"
 # The bootstrap must be idempotent: run it twice.
 run_with_env "${db_init_env}" "${db_init_argv[@]}" >> "${workdir}/logs/db-init.log"
+# The pre-migration endpoint check must compare the complete published
+# host-and-port, not the port alone: a URL reaching another loopback address
+# at the same port is a different PostgreSQL server. The accepting direction
+# is proven by the two runs above; this is the refusing one, against the same
+# live container.
+wrong_endpoint_env="${workdir}/db-init-wrong-endpoint.env"
+sed 's#^\(MCLOVING_MIGRATION_DATABASE_URL=.*\)@127\.0\.0\.1:#\1@127.0.0.2:#' \
+  "${db_init_env}" > "${wrong_endpoint_env}"
+if cmp -s "${wrong_endpoint_env}" "${db_init_env}"; then
+  echo "endpoint refusal gate could not rewrite MCLOVING_MIGRATION_DATABASE_URL; contract shape changed" >&2
+  exit 1
+fi
+if run_with_env "${wrong_endpoint_env}" "${db_init_argv[@]}" \
+  > "${workdir}/logs/db-init-wrong-endpoint.log" 2>&1; then
+  echo "db-init migrated through a URL addressing a different loopback endpoint" >&2
+  exit 1
+fi
+grep -q "different PostgreSQL instance" "${workdir}/logs/db-init-wrong-endpoint.log" || {
+  echo "db-init refused the mismatched endpoint for the wrong reason:" >&2
+  cat "${workdir}/logs/db-init-wrong-endpoint.log" >&2
+  exit 1
+}
+rm -f "${wrong_endpoint_env}"
 
 "${unit_command}" "${home}/.config/systemd/user/mcloving-controller.service" \
   --home "${home}" > "${workdir}/controller.derived.json"

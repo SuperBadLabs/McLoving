@@ -31,6 +31,8 @@ for id in "${MCLOVING_ORGANIZATION_ID}" "${MCLOVING_PROJECT_ID}"; do
 done
 
 libexec_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 identity_admin="${libexec_root}/current/mcloving-identity-admin"
 if [[ ! -x "${identity_admin}" ]]; then
   echo "mcloving-db-init: ${identity_admin} is missing; run mcloving-install first" >&2
@@ -69,23 +71,37 @@ fi
 # PostgreSQL, and a post-migration schema check cannot tell "the URL reached
 # this container" from "this container was already initialized" -- by then the
 # other server has been migrated regardless. The container's published host
-# port is the one fact that settles it in advance, and this script already
+# endpoint is the one fact that settles it in advance, and this script already
 # talks to podman.
-published="$(podman port "${MCLOVING_POSTGRES_CONTAINER}" 5432/tcp | head -n 1)"
-if [[ -z "${published}" ]]; then
-  echo "mcloving-db-init: ${MCLOVING_POSTGRES_CONTAINER} publishes no host port for 5432/tcp; cannot confirm MCLOVING_MIGRATION_DATABASE_URL reaches it" >&2
+#
+# The COMPLETE host-and-port endpoint is compared, not the port alone: a URL
+# addressing another loopback address at the same port -- 127.0.0.2:5432
+# beside a Quadlet publishing 127.0.0.1:5432 -- is a different PostgreSQL
+# server that a port comparison would wave through. The published address must
+# therefore appear in the URL verbatim; a URL spelled "localhost" is refused
+# rather than resolved, because what it reaches depends on the resolver, not
+# on what this container publishes.
+published_endpoints="$(podman port "${MCLOVING_POSTGRES_CONTAINER}" 5432/tcp)"
+if [[ -z "${published_endpoints}" ]]; then
+  echo "mcloving-db-init: ${MCLOVING_POSTGRES_CONTAINER} publishes no host endpoint for 5432/tcp; cannot confirm MCLOVING_MIGRATION_DATABASE_URL reaches it" >&2
   exit 1
 fi
-published_port="${published##*:}"
-url_port="$(python3 - "${MCLOVING_MIGRATION_DATABASE_URL}" <<'URLPORT'
-import sys
-from urllib.parse import urlsplit
-
-print(urlsplit(sys.argv[1]).port or 5432)
-URLPORT
-)"
-if [[ "${url_port}" != "${published_port}" ]]; then
-  echo "mcloving-db-init: MCLOVING_MIGRATION_DATABASE_URL uses port ${url_port} but ${MCLOVING_POSTGRES_CONTAINER} publishes ${published_port}; migrating would modify a different PostgreSQL instance than the one this bootstrap provisions" >&2
+url_endpoint="$(database_url_endpoint "${MCLOVING_MIGRATION_DATABASE_URL}")"
+if [[ -z "${url_endpoint}" ]]; then
+  echo "mcloving-db-init: MCLOVING_MIGRATION_DATABASE_URL names no host and database; cannot confirm it reaches ${MCLOVING_POSTGRES_CONTAINER}" >&2
+  exit 1
+fi
+url_host_port="${url_endpoint%%/*}"
+endpoint_confirmed=""
+while IFS= read -r published; do
+  [[ -n "${published}" ]] || continue
+  if [[ "${url_host_port}" == "${published}" ]]; then
+    endpoint_confirmed=1
+    break
+  fi
+done <<<"${published_endpoints}"
+if [[ -z "${endpoint_confirmed}" ]]; then
+  echo "mcloving-db-init: MCLOVING_MIGRATION_DATABASE_URL addresses ${url_host_port} but ${MCLOVING_POSTGRES_CONTAINER} publishes ${published_endpoints//$'\n'/ }; migrating would modify a different PostgreSQL instance than the one this bootstrap provisions" >&2
   exit 1
 fi
 
