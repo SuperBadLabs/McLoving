@@ -1501,6 +1501,34 @@ async fn extra_retained_output_is_rejected_on_replay() {
     ));
 }
 
+// The standalone acquisition below runs end to end only where the sealed
+// launcher may create a usable user namespace. Ubuntu's
+// `kernel.apparmor_restrict_unprivileged_userns=1` moves an unconfined process
+// that unshares into the `unprivileged_userns` profile, whose exec rules never
+// match the sealed memfd-backed executables, so an unconfined suite on such a
+// host must observe the named `transport_namespace_unavailable` refusal
+// instead -- that refusal is the designed outcome there, not a test
+// environment defect. The deployment AppArmor profile grants `userns create`
+// and is inherited across exec, so a suite run under
+// `aa-exec -p mcloving-source-acquirer` (as CI runs it; see CONTRIBUTING.md)
+// must complete the full acquisition. This reads exactly the two host facts
+// that decide which outcome is the contract: the sysctl, and whether this
+// process is unconfined.
+fn host_denies_sealed_launcher_userns() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|value| value.trim() != "0");
+    if !restricted {
+        return false;
+    }
+    std::fs::read_to_string("/proc/self/attr/apparmor/current")
+        .or_else(|_| std::fs::read_to_string("/proc/self/attr/current"))
+        .is_ok_and(|confinement| confinement.trim_end_matches('\0').trim() == "unconfined")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1698,10 +1726,53 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     assert!(!contains(&output.stdout, CREDENTIAL));
     assert!(!contains(&output.stderr, CREDENTIAL));
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    if host_denies_sealed_launcher_userns() {
+        // The refusal must be named, must carry the operator diagnostic, and
+        // must have happened before any credential-bearing request left the
+        // process. Asserting that -- rather than skipping -- keeps the
+        // refuse-by-name contract under test on restricted hosts; the
+        // capable-path assertions below stay covered by the
+        // `aa-exec -p mcloving-source-acquirer` run CI performs.
+        assert_eq!(
+            response["ok"], false,
+            "restricted host completed an acquisition the sealed launcher \
+             cannot have performed: {response}"
+        );
+        assert_eq!(
+            response["code"],
+            "transport_namespace_unavailable",
+            "restricted host refused without the namespace's name: \
+             {response}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            contains(&output.stderr, b"transport_namespace_unusable"),
+            "refusal arrived without the operator diagnostic; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(authorized_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
+        assert!(!replacement_helper_marker.exists());
+        server.abort();
+        eprintln!(
+            "standalone acquisition asserted the named refusal only: this \
+             host sets kernel.apparmor_restrict_unprivileged_userns and the \
+             suite is running unconfined. To exercise the full acquisition \
+             path, run the suite as CI does: `aa-exec -p \
+             mcloving-source-acquirer -- cargo test --locked -p \
+             mcloving-source-acquirer -- --test-threads=1` (CONTRIBUTING.md \
+             has the setup)."
+        );
+        return;
+    }
     assert_eq!(
         response["ok"],
         true,
-        "standalone response: {response}; stderr: {}",
+        "standalone response: {response}; stderr: {}\nIf the code above is \
+         `transport_namespace_unavailable`, this host denies the sealed \
+         launcher a usable user namespace outside the deployment profile; \
+         run the suite under `aa-exec -p mcloving-source-acquirer` as \
+         described in CONTRIBUTING.md.",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
