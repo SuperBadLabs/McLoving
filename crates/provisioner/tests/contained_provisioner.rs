@@ -33,8 +33,16 @@ const PROVIDER_TOKEN: &str = "contained-provider-token";
 const RECEIPT_KEY: &[u8] = b"contained-receipt-signing-key-000000000000000000000000";
 
 /// Lifetime every `provision_request` grants its request and its instance.
-const REQUEST_LIFETIME_MS: i64 = 120_000;
-const REQUEST_INSTANCE_LIFETIME_MS: i64 = 90_000;
+///
+/// Durations are `u64` milliseconds throughout this file; the protocol carries
+/// timestamps as `i64`, so cross over with [`millis`] rather than casting.
+const REQUEST_LIFETIME_MS: u64 = 120_000;
+const REQUEST_INSTANCE_LIFETIME_MS: u64 = 90_000;
+
+/// Ceiling the contained configuration puts on instance lifetime and identity
+/// TTL. It has to cover `REQUEST_LIFETIME_MS`, because every request this
+/// suite builds asks for exactly that much.
+const POLICY_MAX_INSTANCE_LIFETIME_MS: u64 = REQUEST_LIFETIME_MS;
 
 /// Startup budget for cases whose asserted outcome is *not* the startup
 /// timeout.
@@ -52,7 +60,7 @@ const REQUEST_INSTANCE_LIFETIME_MS: i64 = 90_000;
 /// startup budget then stops being a second, shorter clock that host load can
 /// exhaust, and these tests assert their outcome against the only expiry they
 /// actually care about.
-const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS as u64;
+const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS;
 
 /// Delay the fixture holds a delayed-create response open for before
 /// answering. The startup budgets below are derived from it.
@@ -882,7 +890,7 @@ fn configuration(
             audience: "mcloving-agent".to_owned(),
             role: "contained-agent-role".to_owned(),
             iam_policy_sha256: digest(b"contained-iam-policy"),
-            max_ttl_ms: 120_000,
+            max_ttl_ms: POLICY_MAX_INSTANCE_LIFETIME_MS,
         },
         quotas: QuotaPolicy {
             max_active_global: maximum,
@@ -890,9 +898,9 @@ fn configuration(
             max_active_per_project: maximum,
         },
         provider_timeout_ms: 300,
-        startup_timeout_ms: 150,
+        startup_timeout_ms: STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
         startup_poll_interval_ms: 10,
-        max_instance_lifetime_ms: 120_000,
+        max_instance_lifetime_ms: POLICY_MAX_INSTANCE_LIFETIME_MS,
         state_dir,
         ca_bundle_path: None,
         ca_bundle_sha256: None,
@@ -992,8 +1000,8 @@ fn provision_request(config: &ProvisionerConfig, implementation_sha256: &str) ->
         provider_grant_scope: config.provider_grant_scope.clone(),
         agent: config.agent.clone(),
         requested_at_unix_ms: now,
-        expires_at_unix_ms: now + REQUEST_LIFETIME_MS,
-        instance_expires_at_unix_ms: now + REQUEST_INSTANCE_LIFETIME_MS,
+        expires_at_unix_ms: now + millis(REQUEST_LIFETIME_MS),
+        instance_expires_at_unix_ms: now + millis(REQUEST_INSTANCE_LIFETIME_MS),
         audit_lineage: format!("contained-audit:{}", Uuid::new_v4()),
     }
 }
@@ -1098,8 +1106,9 @@ async fn ready_replay_cancel_and_fences_are_exact() {
     assert_eq!(context.fixture.counts().1, 1);
 
     newer.requested_at_unix_ms = now_ms();
-    newer.expires_at_unix_ms = newer.requested_at_unix_ms + 120_000;
-    newer.instance_expires_at_unix_ms = newer.requested_at_unix_ms + 90_000;
+    newer.expires_at_unix_ms = newer.requested_at_unix_ms + millis(REQUEST_LIFETIME_MS);
+    newer.instance_expires_at_unix_ms =
+        newer.requested_at_unix_ms + millis(REQUEST_INSTANCE_LIFETIME_MS);
     newer.audit_lineage = "contained-newer-fence".to_owned();
     let next = context
         .provisioner
@@ -2637,7 +2646,7 @@ async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
             "UPDATE requests SET created_at_unix_ms = ?2 WHERE request_id = ?1",
             rusqlite::params![
                 request.request_id.to_string(),
-                now_ms() - (STARTUP_BUDGET_BEYOND_TEST_WORK_MS as i64) - 1_000,
+                now_ms() - millis(STARTUP_BUDGET_BEYOND_TEST_WORK_MS) - 1_000,
             ],
         )
         .expect("retire the admission behind its startup deadline");
@@ -2935,7 +2944,7 @@ async fn recovery_anchors_startup_timeout_to_immutable_admission_time() {
              WHERE request_id = ?1",
             rusqlite::params![
                 request.request_id.to_string(),
-                now_ms() - (STARTUP_BUDGET_UNDER_TEST_MS as i64) - 1_000,
+                now_ms() - millis(STARTUP_BUDGET_UNDER_TEST_MS) - 1_000,
                 now_ms(),
             ],
         )
@@ -3523,6 +3532,13 @@ fn digest(bytes: &[u8]) -> String {
         let _ = write!(&mut encoded, "{byte:02x}");
     }
     encoded
+}
+
+/// Widen a `u64` millisecond duration into the `i64` the protocol timestamps
+/// use. Checked rather than cast, so a duration that could not round-trip
+/// fails here instead of wrapping into a nonsensical deadline.
+fn millis(value: u64) -> i64 {
+    i64::try_from(value).expect("duration fits in a protocol timestamp")
 }
 
 fn now_ms() -> i64 {
