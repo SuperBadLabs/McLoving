@@ -45,24 +45,38 @@ deploy_fail() {
 # Directories that do not exist yet are skipped -- mkdir -p under the
 # caller's umask decides those.
 require_secure_ancestors() {
-  local home_dir="${1%/}" ancestor mode offending chain
+  local home_dir="${1%/}" ancestor mode_owner mode owner home_owner offending chain
   shift
   chain="$(deployment_ancestor_chain "${home_dir}" "$@")" \
     || deploy_fail "cannot derive the deployment ancestor chain"
+  home_owner="$(stat -Lc '%u' "${home_dir}")" \
+    || deploy_fail "cannot stat deployment home ${home_dir}"
   offending=""
   while IFS= read -r ancestor; do
     # -d and stat -L follow a symlinked ancestor deliberately: the directory
     # the services traverse is the target, and a writable target permits the
     # same rename regardless of how it is reached. The target's own parents
-    # arrive through the physical half of the chain.
+    # arrive through the physical half of the chain, and following the link
+    # means the OWNERSHIP judged below is the target's too.
     [[ -n "${ancestor}" && -d "${ancestor}" ]] || continue
-    mode="$(stat -Lc '%a' "${ancestor}")" || deploy_fail "cannot stat deployment ancestor ${ancestor}"
+    mode_owner="$(stat -Lc '%a %u' "${ancestor}")" \
+      || deploy_fail "cannot stat deployment ancestor ${ancestor}"
+    mode="${mode_owner%% *}"
+    owner="${mode_owner##* }"
     if (( (8#${mode} & 8#022) != 0 )); then
       offending+="${ancestor} (mode ${mode}) "
     fi
+    # Ownership is judged independently of mode: a chain component owned by
+    # a third user is unsafe at ANY mode, because its owner can chmod it
+    # writable at will and then rename children exactly as a writable
+    # ancestor permits. Only root and the home's owning uid may hold a link
+    # of the chain.
+    if [[ "${owner}" != "0" && "${owner}" != "${home_owner}" ]]; then
+      offending+="${ancestor} (owned by uid ${owner}, expected uid ${home_owner} or root) "
+    fi
   done <<<"${chain}"
   if [[ -n "${offending}" ]]; then
-    deploy_fail "deployment ancestor(s) group- or world-writable: ${offending% }-- another local user could rename the protected subtree aside; run chmod go-w on them and retry"
+    deploy_fail "deployment ancestor(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rename the protected subtree aside; run chmod go-w (or restore ownership) on them and retry"
   fi
 }
 

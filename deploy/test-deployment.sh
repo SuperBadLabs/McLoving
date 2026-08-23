@@ -1205,6 +1205,54 @@ if [[ "${race_status}" -ne 0 ]]; then
   exit 1
 fi
 
+# Ownership is identity too. An ancestor that changes hands can be re-moded
+# by its new owner at will, so the canonical document must change when the
+# owner does -- and the change must be visible in the record, both proven
+# with a REAL foreign uid via `podman unshare chown` (no root needed). The
+# foreign-owned directory is opened to 0755 for the duration: at the
+# installed 0700 the invoking user could no longer traverse its own
+# deployment to run the helper at all -- which is the attack in miniature,
+# but not what this gate measures.
+owner_gate_dir="${home}/.local"
+owner_gate_mode="$(stat -c '%a' "${owner_gate_dir}")"
+owner_doc_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+podman unshare sh -c "chown 1:1 '${owner_gate_dir}' && chmod 0755 '${owner_gate_dir}'"
+# Ownership is restored on the failure path too: a workdir preserved with a
+# subuid-owned directory inside cannot be removed by the invoking user, and
+# the next run's cleanup would fail on it.
+owner_doc_after="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")" || {
+  podman unshare chown 0:0 "${owner_gate_dir}" || true
+  chmod "${owner_gate_mode}" "${owner_gate_dir}" || true
+  echo "digest re-read failed while an ancestor was foreign-owned" >&2
+  exit 1
+}
+podman unshare chown 0:0 "${owner_gate_dir}"
+chmod "${owner_gate_mode}" "${owner_gate_dir}"
+if [[ "${owner_doc_before}" == "${owner_doc_after}" ]]; then
+  echo "a re-owned ancestor left the digest re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${owner_doc_after}" <<'OWNERSHIP'
+import json
+import os
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("ancestors", [])}
+entry = records.get(".local")
+if entry is None:
+    raise SystemExit(f"ancestor .local missing from the re-read: {sorted(records)}")
+if entry.get("uid") in (None, os.getuid()):
+    raise SystemExit(f"foreign owner not recorded on the ancestor: {entry}")
+if entry.get("gid") in (None, os.getgid()):
+    raise SystemExit(f"foreign group not recorded on the ancestor: {entry}")
+OWNERSHIP
+owner_doc_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+if [[ "${owner_doc_before}" != "${owner_doc_restored}" ]]; then
+  echo "the re-read did not return to baseline after ownership was restored" >&2
+  exit 1
+fi
+
 # Content is not the whole identity. A deployed binary that loses its execute
 # bit keeps its digest and size while systemd can no longer run it, and the
 # release manifest records executable: true per component, so the re-read has
@@ -1538,6 +1586,42 @@ if entry.get("mode") != 0o777:
     raise SystemExit(f"symlink-target parent mode not recorded: {entry}")
 TARGETPARENT
 rm -rf "${relocated_home}"
+
+# Ownership is the fifth face of the same class: a chain component owned by
+# a third user is unsafe at ANY mode, because its owner can chmod it
+# writable at will and then rename children like any writable ancestor
+# permits. `podman unshare chown` writes a REAL foreign uid (the first
+# subuid) to disk without root, and the suite already requires rootless
+# podman, so this gate exercises genuine ownership rather than a stub.
+foreign_home="${workdir}/foreign-owner-home"
+rm -rf "${foreign_home}"
+mkdir -p "${foreign_home}/.local"
+podman unshare chown 1:1 "${foreign_home}/.local"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${foreign_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/foreign-owner.log" 2>&1; then
+  echo "install accepted an ancestor owned by a third user" >&2
+  exit 1
+fi
+grep -q "\.local (owned by uid .*, expected uid $(id -u) or root)" \
+  "${workdir}/logs/foreign-owner.log" || {
+  echo "the foreign-owner refusal did not name the component and uids:" >&2
+  cat "${workdir}/logs/foreign-owner.log" >&2
+  exit 1
+}
+if [[ -e "${foreign_home}/.local/libexec" ]]; then
+  echo "a refused install still created directories under a foreign-owned ancestor" >&2
+  exit 1
+fi
+podman unshare chown 0:0 "${foreign_home}/.local"
+"${repo_root}/deploy/bin/mcloving-install" --home "${foreign_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -x "${foreign_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete after ownership was restored" >&2
+  exit 1
+}
+rm -rf "${foreign_home}"
 
 # The bootstrap's two halves must address one instance, not merely one database
 # name: provisioning runs podman exec into the local container.

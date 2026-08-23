@@ -8,10 +8,12 @@
 # usage: mcloving-deployed-digests [--home DIR]
 #
 # Covered identities:
-#   ancestors         mode of every directory from ~ down to each walked
-#                     tree; a relaxed ancestor lets another local user
-#                     rename a protected subtree aside wholesale
-#   releases/*        sha256 + size of every staged binary set
+#   ancestors         mode and owner of every directory on the lexical AND
+#                     physical chain down to each walked tree; a relaxed or
+#                     re-owned ancestor lets another local user rename a
+#                     protected subtree aside wholesale
+#   releases/*        sha256 + size of every staged binary set (all records
+#                     carry mode, uid, and gid)
 #   current/previous  active and rollback release symlink targets
 #   units             sha256 of every installed mcloving-* unit/quadlet file
 #   config            sha256 of every file under ~/.config/mcloving
@@ -168,6 +170,12 @@ def file_record(path: Path, root: Path) -> dict:
                     "path": relative,
                     "kind": kind,
                     "mode": stat.S_IMODE(status.st_mode),
+                    # Ownership is identity too: a directory that changes
+                    # hands can be re-moded by its new owner at will, so a
+                    # record omitting the owner stays byte-identical across
+                    # the one change that makes every other field revocable.
+                    "uid": status.st_uid,
+                    "gid": status.st_gid,
                 }
             else:
                 digest = hashlib.sha256()
@@ -195,6 +203,8 @@ def file_record(path: Path, root: Path) -> dict:
                     "size_bytes": settled.st_size,
                     "mode": stat.S_IMODE(settled.st_mode),
                     "executable": bool(settled.st_mode & 0o111),
+                    "uid": settled.st_uid,
+                    "gid": settled.st_gid,
                 }
         finally:
             os.close(descriptor)
