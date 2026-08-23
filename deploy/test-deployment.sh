@@ -33,6 +33,7 @@ agent_pid=""
 
 cleanup() {
   local status=$?
+  local preserved
   if [[ -n "${agent_pid}" ]]; then
     kill "${agent_pid}" >/dev/null 2>&1 || true
     wait "${agent_pid}" 2>/dev/null || true
@@ -41,11 +42,38 @@ cleanup() {
     kill "${controller_pid}" >/dev/null 2>&1 || true
     wait "${controller_pid}" 2>/dev/null || true
   fi
+  if [[ ${status} -ne 0 ]]; then
+    # Capture the container's own account of the failure BEFORE the forced
+    # removal below destroys it. Without this, the single most informative
+    # log on a runner -- what PostgreSQL itself printed -- exists only inside
+    # a container this trap is about to delete, and the preserved ${workdir}
+    # never held it.
+    {
+      echo "== podman ps --all"
+      podman ps --all 2>&1 || true
+      echo "== podman inspect ${container_name}"
+      podman inspect "${container_name}" \
+        --format 'status={{.State.Status}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} error={{.State.Error}}' 2>&1 || true
+      echo "== podman logs ${container_name}"
+      podman logs "${container_name}" 2>&1 || true
+    } > "${workdir}/logs/postgres-container-state.log" 2>&1 || true
+    podman info > "${workdir}/logs/podman-info.log" 2>&1 || true
+  fi
   podman rm --force "${container_name}" >/dev/null 2>&1 || true
   podman volume rm --force "${volume_name}" >/dev/null 2>&1 || true
   if [[ ${status} -ne 0 ]]; then
-    echo "smoke test FAILED; logs preserved under ${workdir}" >&2
-    tail -n 40 "${workdir}"/logs/*.log 2>/dev/null || true
+    # Everything below goes to stderr, in full. A CI runner's /tmp does not
+    # survive the job, so "logs preserved under ${workdir}" names files
+    # nobody can read unless they are printed here and uploaded as a job
+    # artifact by the workflow.
+    {
+      echo "smoke test FAILED with status ${status}; logs preserved under ${workdir}"
+      for preserved in "${workdir}"/logs/*; do
+        [[ -f "${preserved}" ]] || continue
+        printf '===> %s <===\n' "${preserved}"
+        cat "${preserved}" || true
+      done
+    } >&2
   else
     rm -rf "${workdir}"
   fi
@@ -278,13 +306,35 @@ derived_argv postgres_argv "${workdir}/postgres.derived.json" '.exec_start'
 }
 health_argv=()
 derived_argv health_argv "${workdir}/postgres.derived.json" '.health_cmd'
+echo "postgres container started; waiting for the derived health command"
+# Two consecutive successes, exactly like mcloving-db-init's ready() wait:
+# the pinned image's entrypoint starts a temporary server during
+# initialization and restarts it, and a single success can land in that
+# window -- after which the settling re-check below meets a server that is
+# gone again.
 for _ in $(seq 1 120); do
   if podman exec "${container_name}" "${health_argv[@]}" >/dev/null 2>&1; then
-    break
+    sleep 0.5
+    if podman exec "${container_name}" "${health_argv[@]}" >/dev/null 2>&1; then
+      break
+    fi
   fi
   sleep 0.5
 done
-podman exec "${container_name}" "${health_argv[@]}" >/dev/null
+# The settling re-check used to discard its output and had no failure
+# handler, so the one failure CI actually produced was pg_isready's exit
+# status with every diagnostic thrown away: neither the loop above nor this
+# line said which of them gave up, and the container holding the answer was
+# force-removed before anything read its logs. Failures on this path must
+# describe themselves like the volume-create and container-start paths do.
+podman exec "${container_name}" "${health_argv[@]}" || {
+  echo "postgres never reported healthy within the wait budget:" >&2
+  podman ps --all --filter "name=${container_name}" >&2 || true
+  podman logs "${container_name}" >&2 || true
+  podman info --format '{{.Host.CgroupsVersion}} {{.Host.CgroupManager}} {{.Host.OCIRuntime.Name}}' >&2 2>&1 || true
+  exit 1
+}
+echo "postgres healthy; deriving db-init"
 
 "${unit_command}" "${home}/.config/systemd/user/mcloving-db-init.service" \
   --home "${home}" > "${workdir}/db-init.derived.json"
