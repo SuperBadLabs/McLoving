@@ -23,6 +23,38 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 load_environment_file "${env_file}"
 
+# The deployment home anchors the ancestor walk's stop points for the
+# configured identity paths below. This guard is installed under
+# <home>/.local/libexec/mcloving/helpers and runs as the service user, so
+# the home is derived from where the guard itself lives; a copy running
+# from anywhere else falls back to the invoking user's HOME.
+guard_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${guard_script_dir}" in
+  */.local/libexec/mcloving/helpers)
+    guard_home="${guard_script_dir%/.local/libexec/mcloving/helpers}" ;;
+  *)
+    guard_home="${HOME}" ;;
+esac
+
+# require_secret_paths VAR...
+#
+# The configured private keys and identity bindings are stealable and
+# replaceable identity material: readable-regular-file is not enough. Each
+# gets the full treatment the installer gives preserved contracts --
+# owner-only mode, root-or-service-uid ownership, effective readability,
+# and the shared lexical-plus-physical ancestor walk over its resolved
+# chain -- refusing by name with the path, mode, and uid. Certificates and
+# CA bundles are public material and keep the readable-regular-file rule.
+require_secret_paths() {
+  local name value secret_paths=()
+  for name in "$@"; do
+    contract_into value "${name}"
+    secret_paths+=("${value}")
+  done
+  require_secure_ancestors "${guard_home}" "${secret_paths[@]}"
+  require_secret_files "${EUID}" "${secret_paths[@]}"
+}
+
 fail() {
   echo "mcloving-env-guard[${service}]: $1" >&2
   exit 1
@@ -172,6 +204,8 @@ case "${service}" in
     require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
       MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    require_secret_paths MCLOVING_AGENT_SERVER_KEY_PATH \
+      MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
     ;;
   agent)
     require MCLOVING_AGENT_ID MCLOVING_AGENT_TRUST_POOL \
@@ -182,6 +216,7 @@ case "${service}" in
     require_uuid MCLOVING_AGENT_ORGANIZATION_ID
     require_readable_file MCLOVING_CONTROLLER_CA_PATH \
       MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
+    require_secret_paths MCLOVING_AGENT_PRIVATE_KEY_PATH
     # The agent refuses to spawn work into a missing workspace root; require
     # it up front so the unit fails at start, not at first assignment.
     contract_into workspace_root MCLOVING_AGENT_WORKSPACE_ROOT

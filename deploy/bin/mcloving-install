@@ -111,8 +111,16 @@ contract_destinations=(
   "${config_root}/controller.env"
   "${config_root}/agent.env"
 )
+# The units themselves declare directories this installer never touches --
+# systemd creates StateDirectory= leaves under ~/.local/state at service
+# start -- so their roots are derived from the staged unit files and walked
+# alongside everything else. A future directive lands here automatically.
+mapfile -t unit_declared_roots < <(deployment_unit_declared_roots "${home_dir}" \
+  "${deploy_root}"/systemd/*.service \
+  "${deploy_root}"/podman/*.container \
+  "${deploy_root}"/podman/*.volume | sort -u)
 require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
-  "${contract_destinations[@]}"
+  "${contract_destinations[@]}" "${unit_declared_roots[@]}"
 require_secure_files "${home_dir}" "${contract_destinations[@]}"
 
 # Set before the hierarchy is created, not after. `mkdir -p` builds every

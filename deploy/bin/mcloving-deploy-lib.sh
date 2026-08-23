@@ -92,10 +92,21 @@ require_secure_ancestors() {
 # caller's job via require_secure_ancestors, which accepts file paths as
 # roots (the final component resolves like any other).
 require_secure_files() {
-  local home_dir="${1%/}" file mode_owner mode owner home_owner offending
+  local home_dir="${1%/}" home_owner
   shift
   home_owner="$(stat -Lc '%u' "${home_dir}")" \
     || deploy_fail "cannot stat deployment home ${home_dir}"
+  require_secret_files "${home_owner}" "$@"
+}
+
+# require_secret_files EXPECTED_UID FILE...
+#
+# The uid-parametrized core of require_secure_files, callable where no home
+# directory is at hand -- mcloving-env-guard runs as the service user at
+# ExecStartPre and passes its own EUID. Same rules, same named refusals.
+require_secret_files() {
+  local home_owner="$1" file mode_owner mode owner offending
+  shift
   offending=""
   for file in "$@"; do
     [[ -e "${file}" ]] || continue
@@ -130,8 +141,67 @@ require_secure_files() {
     fi
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "contract file(s) not owner-only, foreign-owned, or unreadable: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
+    deploy_fail "secret-bearing file(s) not owner-only, foreign-owned, or unreadable: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
   fi
+}
+
+# deployment_unit_declared_roots HOME UNIT_FILE... -> the home-relative
+# directories the DEPLOYMENT'S OWN unit declarations cause to exist, one per
+# line. The installer's managed_roots covers what the installer creates, but
+# systemd creates StateDirectory= (and kin) leaves on its own at service
+# start -- so those roots are derived from the staged unit files themselves,
+# and a directive added later brings its root into the refusal walk without
+# anyone remembering a list. Mappings follow systemd's USER-unit bases:
+# StateDirectory under ~/.local/state, LogsDirectory under
+# ~/.local/state/log, CacheDirectory under ~/.cache. RuntimeDirectory lands
+# under $XDG_RUNTIME_DIR -- outside the home on a root-managed tmpfs -- and
+# is deliberately skipped. WorkingDirectory=, EnvironmentFile= (with its
+# optional "-" prefix), and quadlet Volume= host paths contribute when they
+# resolve under the home after %h expansion; named quadlet volumes do not.
+deployment_unit_declared_roots() {
+  local home_dir="${1%/}" line key value entry path
+  shift
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "${key}" in
+      StateDirectory)
+        # shellcheck disable=SC2086  # systemd's value is space-separated names
+        for entry in ${value}; do
+          printf '%s\n' "${home_dir}/.local/state/${entry}"
+        done
+        ;;
+      LogsDirectory)
+        # shellcheck disable=SC2086  # systemd's value is space-separated names
+        for entry in ${value}; do
+          printf '%s\n' "${home_dir}/.local/state/log/${entry}"
+        done
+        ;;
+      CacheDirectory)
+        # shellcheck disable=SC2086  # systemd's value is space-separated names
+        for entry in ${value}; do
+          printf '%s\n' "${home_dir}/.cache/${entry}"
+        done
+        ;;
+      RuntimeDirectory)
+        :
+        ;;
+      WorkingDirectory | EnvironmentFile)
+        path="${value#-}"
+        path="${path//%h/${home_dir}}"
+        case "${path}" in
+          "${home_dir}"/*) printf '%s\n' "${path}" ;;
+        esac
+        ;;
+      Volume)
+        path="${value%%:*}"
+        path="${path//%h/${home_dir}}"
+        case "${path}" in
+          "${home_dir}"/*) printf '%s\n' "${path}" ;;
+        esac
+        ;;
+    esac
+  done < <(grep -hE '^(StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|EnvironmentFile|Volume)=' "$@" | sed -e 's/[[:space:]]*$//')
 }
 
 # deployment_ancestor_chain HOME ROOT... -> every security-relevant ancestor

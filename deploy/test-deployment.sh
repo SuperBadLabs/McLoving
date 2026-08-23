@@ -219,6 +219,8 @@ openssl x509 -in "${pki}/agent.pem" -outform DER -out "${pki}/agent.der" >/dev/n
 agent_cert_sha256="$(sha256sum "${pki}/agent.der" | awk '{print $1}')"
 printf '%s %s trusted-linux %s\n' "${agent_cert_sha256}" "${agent_id}" \
   "${organization_id}" > "${config}/agent-identity-bindings.txt"
+# Identity bindings are identity material: the guard requires owner-only.
+chmod 0600 "${config}/agent-identity-bindings.txt"
 
 # Fill the installed placeholder contracts. The examples are the contract:
 # only placeholder values, endpoints, and the example home prefix change.
@@ -267,6 +269,48 @@ for guarded in controller agent; do
     exit 1
   }
 done
+
+# Private keys and identity bindings are stealable and replaceable identity
+# material: readable-regular-file is not enough, and the guard now applies
+# the installer's full secret-file treatment to the configured paths. A
+# 0666 key must be refused by name at ExecStartPre; restored to 0600, the
+# same contract must satisfy the guard again.
+chmod 0666 "${pki}/agent-key.pem"
+if "${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" \
+  > "${workdir}/logs/guard-key-mode.log" 2>&1; then
+  echo "env guard accepted a world-writable agent private key" >&2
+  exit 1
+fi
+grep -q "agent-key.pem (mode 666, expected owner-only)" \
+  "${workdir}/logs/guard-key-mode.log" || {
+  echo "the guard's key-mode refusal did not name the path and mode:" >&2
+  cat "${workdir}/logs/guard-key-mode.log" >&2
+  exit 1
+}
+chmod 0600 "${pki}/agent-key.pem"
+"${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" >/dev/null || {
+  echo "env guard refused the restored 0600 agent private key" >&2
+  exit 1
+}
+# Group-readable bindings leak nothing secret but invite substitution
+# confusion; they are identity material and get the same owner-only rule.
+chmod 0640 "${config}/agent-identity-bindings.txt"
+if "${libexec}/helpers/mcloving-env-guard" controller "${config}/controller.env" \
+  > "${workdir}/logs/guard-bindings-mode.log" 2>&1; then
+  echo "env guard accepted group-readable identity bindings" >&2
+  exit 1
+fi
+grep -q "agent-identity-bindings.txt (mode 640, expected owner-only)" \
+  "${workdir}/logs/guard-bindings-mode.log" || {
+  echo "the guard's bindings-mode refusal did not name the path and mode:" >&2
+  cat "${workdir}/logs/guard-bindings-mode.log" >&2
+  exit 1
+}
+chmod 0600 "${config}/agent-identity-bindings.txt"
+"${libexec}/helpers/mcloving-env-guard" controller "${config}/controller.env" >/dev/null || {
+  echo "env guard refused the restored owner-only bindings" >&2
+  exit 1
+}
 
 run_with_env() { # ENV_FILE COMMAND...
   local env_file="$1"
@@ -1861,6 +1905,35 @@ podman unshare chown 0:0 "${foreign_home}/.local"
 }
 rm -rf "${foreign_home}"
 
+# systemd, not the installer, creates the StateDirectory= leaves under
+# ~/.local/state -- so the validator derives those roots from the staged
+# unit declarations themselves, and a pre-existing writable state ancestor
+# must refuse the install even though no install command ever touches it.
+state_home="${workdir}/state-ancestor-home"
+rm -rf "${state_home}"
+mkdir -p "${state_home}/.local/state"
+chmod 0777 "${state_home}/.local/state"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${state_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/state-ancestor.log" 2>&1; then
+  echo "install accepted a pre-existing world-writable runtime-state ancestor" >&2
+  exit 1
+fi
+grep -q "\.local/state (mode 777)" "${workdir}/logs/state-ancestor.log" || {
+  echo "the state-ancestor refusal did not name the directory and mode:" >&2
+  cat "${workdir}/logs/state-ancestor.log" >&2
+  exit 1
+}
+chmod 0755 "${state_home}/.local/state"
+"${repo_root}/deploy/bin/mcloving-install" --home "${state_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -x "${state_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "install did not complete after the state ancestor was secured" >&2
+  exit 1
+}
+rm -rf "${state_home}"
+
 # One realpath of the whole root keeps only the FINAL chain. With
 # .local -> srv-a/user-local and user-local/libexec -> opt-m/libexec, the
 # opt-m chain is walked but srv-a is the directory whose writability lets
@@ -2120,6 +2193,11 @@ if not touched:
     raise SystemExit("trace parsing found no touched paths; the xtrace format drifted")
 if not any(path.endswith("/pki") for path in touched):
     raise SystemExit(f"expected core paths missing from the parsed trace: {sorted(touched)}")
+if not any("/.local/state/" in root for root in roots):
+    raise SystemExit(
+        "no units-derived runtime-state root reached the ancestor walk; "
+        "the unit-declaration parser has gone blind: " + " ".join(sorted(roots))
+    )
 uncovered = []
 for path in sorted(touched):
     covered = path == home or any(
