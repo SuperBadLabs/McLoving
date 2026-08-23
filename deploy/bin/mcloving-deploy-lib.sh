@@ -109,9 +109,20 @@ require_secure_files() {
     if [[ "${owner}" != "0" && "${owner}" != "${home_owner}" ]]; then
       offending+="${file} (owned by uid ${owner}, expected uid ${home_owner} or root) "
     fi
+    # Readability is the symmetric precondition: writability and ownership
+    # guard against SUBSTITUTION, readability guards AVAILABILITY. A
+    # root-owned 0600 contract is perfectly secure and perfectly useless --
+    # the service user cannot read it, so every dependent unit's
+    # EnvironmentFile= fails at start while the install reported success.
+    # `-r` judges effective access as the invoking user (the service user in
+    # this rootless lane), so ACLs and group paths decide correctly where
+    # mode arithmetic would not.
+    if [[ ! -r "${file}" ]]; then
+      offending+="${file} (unreadable by uid ${EUID}) "
+    fi
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "contract file(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rewrite the environment systemd loads; run chmod go-w (or restore ownership) on them and retry"
+    deploy_fail "contract file(s) group- or world-writable, foreign-owned, or unreadable: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
   fi
 }
 

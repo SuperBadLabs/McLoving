@@ -1860,6 +1860,17 @@ grep -q "agent.env (owned by uid .*, expected uid $(id -u) or root)" \
   cat "${workdir}/logs/contract-file-owner.log" >&2
   exit 1
 }
+# The same subuid-owned 0600 file is genuinely unreadable by this user, so
+# the availability annotation must appear beside the ownership one:
+# writability and ownership guard substitution, readability guards
+# availability, and an install must accept no contract the runtime cannot
+# read.
+grep -q "agent.env (unreadable by uid $(id -u))" \
+  "${workdir}/logs/contract-file-owner.log" || {
+  echo "the unreadable contract-file refusal did not name the file and uid:" >&2
+  cat "${workdir}/logs/contract-file-owner.log" >&2
+  exit 1
+}
 podman unshare chown 0:0 "${ctlink_home}/ext/agent.env"
 "${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
