@@ -1685,8 +1685,38 @@ grep -q "another deployment transition holds the lock" \
   kill "${lock_holder}" 2>/dev/null || true
   exit 1
 }
+# The digest reader participates in the same lock, shared side: while a
+# transition holds it exclusively the read is a named refusal -- a document
+# captured between the two symlink writes could describe a deployment that
+# never existed.
+if "${lock_libexec}/helpers/mcloving-deployed-digests" --home "${lock_home}" \
+  > "${workdir}/logs/digests-under-lock.log" 2>&1; then
+  echo "the digest reader ran while a transition held the lock exclusively" >&2
+  kill "${lock_holder}" 2>/dev/null || true
+  exit 1
+fi
+grep -q "a deployment transition is in progress" \
+  "${workdir}/logs/digests-under-lock.log" || {
+  echo "the under-transition digest refusal was not named:" >&2
+  cat "${workdir}/logs/digests-under-lock.log" >&2
+  kill "${lock_holder}" 2>/dev/null || true
+  exit 1
+}
 kill "${lock_holder}" 2>/dev/null || true
 wait "${lock_holder}" 2>/dev/null || true
+# Shared holders coexist: a concurrent digest read must not block another.
+( exec 200>>"${lock_libexec}/.transition-lock" \
+  && flock -s -n 200 \
+  && exec sleep 60 ) &
+shared_holder=$!
+sleep 0.3
+"${lock_libexec}/helpers/mcloving-deployed-digests" --home "${lock_home}" >/dev/null || {
+  echo "a shared lock holder blocked a digest read" >&2
+  kill "${shared_holder}" 2>/dev/null || true
+  exit 1
+}
+kill "${shared_holder}" 2>/dev/null || true
+wait "${shared_holder}" 2>/dev/null || true
 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null

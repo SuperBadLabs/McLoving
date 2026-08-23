@@ -45,6 +45,16 @@ fi
 # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 
+# The whole inventory read -- link reads, walks, and the document build --
+# happens under a SHARED acquisition of the deployment transition lock, so
+# it can never capture the half-written previous/current pair a concurrent
+# upgrade or rollback produces between its two symlink writes. Chosen over
+# read-then-confirm because a single acquisition makes the whole document
+# one consistent observation, not two reads with an argument about the
+# interval between them; concurrent digest readers coexist (shared), and a
+# transition in progress is a named refusal rather than a silent queue.
+acquire_transition_lock_shared "${home_dir}/.local/libexec/mcloving"
+
 # The ancestor set comes from the library's single derivation -- the same
 # lexical-plus-physical chain the installer refuses on -- so the inventory
 # and the refusal walk cannot drift apart. The roots listed here mirror the

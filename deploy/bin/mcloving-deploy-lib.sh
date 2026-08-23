@@ -1008,6 +1008,27 @@ acquire_transition_lock() {
     || deploy_fail "another deployment transition holds the lock for ${libexec_root}; refusing to interleave release state -- retry when it completes"
 }
 
+# acquire_transition_lock_shared LIBEXEC_ROOT
+#
+# The reader's side of the transition lock: held SHARED for the remainder
+# of the process, so concurrent digest reads coexist while any release
+# transition -- which holds the lock exclusively across snapshot, staging,
+# and both symlink writes -- excludes them. Without this, a digest read
+# overlapping an upgrade (previous written before current) or a rollback
+# (the opposite order) can capture an impossible pair such as both links
+# naming one release: a document describing no deployment that ever
+# existed, exactly where a cutover drift snapshot needs a stable one.
+# Non-blocking like the exclusive side: a named refusal, never a silent
+# queue. Opened with append, not truncate -- a reader must not disturb the
+# lockfile a writer may be about to open.
+acquire_transition_lock_shared() {
+  local libexec_root="$1"
+  exec 9>>"${libexec_root}/.transition-lock" \
+    || deploy_fail "cannot open the deployment transition lock in ${libexec_root}"
+  flock -s -n 9 \
+    || deploy_fail "a deployment transition is in progress for ${libexec_root}; retry when it completes"
+}
+
 # require_release_link_target LIBEXEC_ROOT LINK_NAME -> the link's target
 #
 # The current/previous links are identity-bearing state the upgrade and
