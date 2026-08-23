@@ -1469,6 +1469,86 @@ rm -rf "${retain_home}"
 # gate above, which still passes with the comparison in place.
 collision_home="${workdir}/collision-home"
 rm -rf "${collision_home}"
+
+# A symlink where a retained release directory belongs has no legitimate
+# state -- stage_release only publishes real directories -- and -d, cmp,
+# and the digest re-verification would all follow it into an unvalidated
+# external chain. Refused by name at stage time; and the current/previous
+# links the upgrade and rollback paths trust are validated the same way:
+# targets must be releases/<id> entries, and the entry must be a real
+# directory.
+linktrap_home="${workdir}/linktrap-home"
+rm -rf "${linktrap_home}"
+mkdir -p "${linktrap_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${linktrap_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+linktrap_libexec="${linktrap_home}/.local/libexec/mcloving"
+linktrap_current="$(readlink "${linktrap_libexec}/current")"
+linktrap_idb="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  release_id "${release2_dir}"
+)"
+mkdir -p "${linktrap_home}/evil-parent"
+cp -r "${release2_dir}" "${linktrap_home}/evil-parent/tree"
+chmod 0777 "${linktrap_home}/evil-parent"
+ln -s "../../../../evil-parent/tree" "${linktrap_libexec}/releases/${linktrap_idb}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${linktrap_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/linktrap.log" 2>&1; then
+  echo "upgrade adopted a symlinked retained release directory" >&2
+  exit 1
+fi
+grep -q "releases/${linktrap_idb} is a symlink" "${workdir}/logs/linktrap.log" || {
+  echo "the symlinked retained target was refused for the wrong reason:" >&2
+  cat "${workdir}/logs/linktrap.log" >&2
+  exit 1
+}
+[[ "$(readlink "${linktrap_libexec}/current")" == "${linktrap_current}" ]] || {
+  echo "a refused symlinked retained target still moved the current release" >&2
+  exit 1
+}
+rm -f "${linktrap_libexec}/releases/${linktrap_idb}"
+rm -rf "${linktrap_home}/evil-parent"
+# Legitimate upgrade, then tamper with the links rollback trusts.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${linktrap_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+linktrap_previous="$(readlink "${linktrap_libexec}/previous")"
+ln -sfn "../evil-rel" "${linktrap_libexec}/previous"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${linktrap_home}" \
+  --no-systemd > "${workdir}/logs/linktrap-rollback.log" 2>&1; then
+  echo "rollback followed a previous link pointing outside releases/" >&2
+  exit 1
+fi
+grep -q "not a releases/<id> entry" "${workdir}/logs/linktrap-rollback.log" || {
+  echo "the escaping previous link was refused for the wrong reason:" >&2
+  cat "${workdir}/logs/linktrap-rollback.log" >&2
+  exit 1
+}
+ln -sfn "${linktrap_previous}" "${linktrap_libexec}/previous"
+mv "${linktrap_libexec}/${linktrap_previous}" "${linktrap_libexec}/releases/.aside"
+ln -s ".aside" "${linktrap_libexec}/${linktrap_previous}"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${linktrap_home}" \
+  --no-systemd > "${workdir}/logs/linktrap-rollback2.log" 2>&1; then
+  echo "rollback followed a symlinked release entry" >&2
+  exit 1
+fi
+grep -q "is itself a symlink" "${workdir}/logs/linktrap-rollback2.log" || {
+  echo "the symlinked release entry was refused for the wrong reason:" >&2
+  cat "${workdir}/logs/linktrap-rollback2.log" >&2
+  exit 1
+}
+rm -f "${linktrap_libexec}/${linktrap_previous}"
+mv "${linktrap_libexec}/releases/.aside" "${linktrap_libexec}/${linktrap_previous}"
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${linktrap_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${linktrap_libexec}/current")" == "${linktrap_previous}" ]] || {
+  echo "rollback did not restore the validated previous release" >&2
+  exit 1
+}
+rm -rf "${linktrap_home}"
 mkdir -p "${collision_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${collision_home}" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \

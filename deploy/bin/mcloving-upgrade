@@ -65,7 +65,7 @@ libexec_root="${home_dir}/.local/libexec/mcloving"
 config_root="${home_dir}/.config/mcloving"
 [[ -L "${libexec_root}/current" ]] || deploy_fail "no installed release; run mcloving-install first"
 
-old_target="$(readlink "${libexec_root}/current")"
+old_target="$(require_release_link_target "${libexec_root}" current)"
 
 # Stage and verify before stopping anything: the release identity is the
 # identity of the verified copy, so it is not known until the copy exists, and

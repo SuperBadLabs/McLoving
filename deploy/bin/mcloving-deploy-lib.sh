@@ -839,6 +839,15 @@ stage_release() {
   id="$(release_id "${staging}")"
   target="${libexec_root}/releases/${id}"
   local state="published"
+  # This deployment's own staging only ever publishes REAL directories (the
+  # mv -T below), so a symlink at the retained target has no legitimate
+  # state -- and -d, cmp, and verify_staged_release would all follow it,
+  # adopting a tree beneath whatever external chain the link points at.
+  # Refused by name rather than validating an arbitrary external chain for
+  # a case that cannot occur legitimately.
+  if [[ -L "${target}" ]]; then
+    deploy_fail "retained release target releases/${id} is a symlink; stage_release only publishes real directories, refusing to reuse it"
+  fi
   if [[ -d "${target}" ]]; then
     state="existing"
     # The retained tree is reused only after its bytes are proven identical
@@ -908,6 +917,28 @@ verify_staged_release() {
   actual="$(release_id "${release_path}")"
   [[ "${actual}" == "${expected}" ]] \
     || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
+}
+
+# require_release_link_target LIBEXEC_ROOT LINK_NAME -> the link's target
+#
+# The current/previous links are identity-bearing state the upgrade and
+# rollback paths trust: their targets must be releases/<id> entries INSIDE
+# the validated releases root (never absolute, never ..-escaping), and the
+# named release directory must be a real directory -- stage_release only
+# publishes real directories, so a symlink there is never legitimate and
+# would route every later read through an unvalidated external chain.
+# Diagnostics go to stderr; the validated target is the stdout protocol.
+require_release_link_target() {
+  local libexec_root="$1" link_name="$2" target
+  target="$(readlink "${libexec_root}/${link_name}")" \
+    || deploy_fail "cannot read the ${link_name} link"
+  [[ "${target}" =~ ^releases/[0-9a-f]{12}$ ]] \
+    || deploy_fail "${link_name} points at ${target}, not a releases/<id> entry inside this deployment; refusing to trust it"
+  [[ ! -L "${libexec_root}/${target}" ]] \
+    || deploy_fail "${link_name} target ${target} is itself a symlink; stage_release only publishes real directories, refusing to trust it"
+  [[ -d "${libexec_root}/${target}" ]] \
+    || deploy_fail "${link_name} target ${target} is not a directory; refusing to trust it"
+  printf '%s\n' "${target}"
 }
 
 # point_symlink LINK TARGET (atomic replace)
