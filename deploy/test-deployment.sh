@@ -546,6 +546,99 @@ if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${home}" \
   exit 1
 fi
 
+# The manifest is the other first-class digest source and gets both
+# directions too: a valid manifest must install, and a digest source that is
+# not a regular file must be refused promptly rather than read -- an
+# ordinary open blocks forever on a writerless FIFO, and the verification
+# would hang exactly when the source has been swapped out from under it.
+manifest_home="${workdir}/manifest-home"
+rm -rf "${manifest_home}"
+mkdir -p "${manifest_home}"
+python3 - "${release_dir}" "${workdir}/release-manifest.json" <<'MANIFEST'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+source_dir, out = sys.argv[1], sys.argv[2]
+components = []
+for name in [
+    "mcloving-controller",
+    "mcloving-agent",
+    "mcloving-cli",
+    "mcloving-identity-admin",
+]:
+    payload = (Path(source_dir) / name).read_bytes()
+    components.append(
+        {
+            "path": f"components/{name}",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+    )
+Path(out).write_text(
+    json.dumps({"manifest": {"components": components}}), encoding="utf-8"
+)
+MANIFEST
+"${repo_root}/deploy/bin/mcloving-install" --home "${manifest_home}" \
+  --release-dir "${release_dir}" --manifest "${workdir}/release-manifest.json" \
+  --no-systemd >/dev/null
+[[ -x "${manifest_home}/.local/libexec/mcloving/current/mcloving-cli" ]] || {
+  echo "manifest-verified install did not complete" >&2
+  exit 1
+}
+rm -rf "${manifest_home}"
+
+fifo_source="${workdir}/digest-source.fifo"
+for digest_flag in --manifest --checksums; do
+  rm -f "${fifo_source}"
+  mkfifo "${fifo_source}"
+  fifo_digest_home="${workdir}/fifo-digest-home"
+  rm -rf "${fifo_digest_home}"
+  mkdir -p "${fifo_digest_home}"
+  digest_status=0
+  timeout 60 "${repo_root}/deploy/bin/mcloving-install" --home "${fifo_digest_home}" \
+    --release-dir "${release_dir}" "${digest_flag}" "${fifo_source}" \
+    --no-systemd > "${workdir}/logs/fifo-digest-source.log" 2>&1 || digest_status=$?
+  if [[ "${digest_status}" -eq 0 ]]; then
+    echo "install accepted a ${digest_flag} source that is not a regular file" >&2
+    exit 1
+  fi
+  if [[ "${digest_status}" -eq 124 ]]; then
+    echo "install hung reading a FIFO ${digest_flag} source" >&2
+    exit 1
+  fi
+  grep -q "is not a regular file" "${workdir}/logs/fifo-digest-source.log" || {
+    echo "the FIFO ${digest_flag} source was refused for the wrong reason:" >&2
+    cat "${workdir}/logs/fifo-digest-source.log" >&2
+    exit 1
+  }
+  rm -rf "${fifo_digest_home}"
+  rm -f "${fifo_source}"
+done
+
+# Every required entry must be present in the SAME snapshot sha256sum
+# verifies. --ignore-missing used to make a vanished entry a silent pass, so
+# a checksums file missing one binary must now be refused by name.
+partial_checksums="${workdir}/partial-checksums.sha256"
+grep -v "mcloving-agent" "${workdir}/checksums.sha256" > "${partial_checksums}"
+partial_checksums_home="${workdir}/partial-checksums-home"
+rm -rf "${partial_checksums_home}"
+mkdir -p "${partial_checksums_home}"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${partial_checksums_home}" \
+  --release-dir "${release_dir}" --checksums "${partial_checksums}" \
+  --no-systemd > "${workdir}/logs/partial-checksums.log" 2>&1; then
+  echo "install verified against a checksums file missing a required entry" >&2
+  exit 1
+fi
+grep -q "no entry for mcloving-agent" "${workdir}/logs/partial-checksums.log" || {
+  echo "the incomplete checksums file was refused for the wrong reason:" >&2
+  cat "${workdir}/logs/partial-checksums.log" >&2
+  exit 1
+}
+rm -rf "${partial_checksums_home}"
+rm -f "${partial_checksums}"
+
 tampered="${libexec}/${second_release}/mcloving-cli"
 cp "${tampered}" "${workdir}/untampered-cli"
 printf '\n' >> "${tampered}"

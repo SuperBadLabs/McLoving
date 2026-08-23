@@ -105,15 +105,38 @@ verify_release_dir() {
     [[ -f "${release_dir}/${binary}" ]] || deploy_fail "release directory is missing ${binary}"
   done
   if [[ -n "${manifest}" ]]; then
-    [[ -f "${manifest}" ]] || deploy_fail "manifest ${manifest} does not exist"
     python3 - "${manifest}" "${release_dir}" "${MCLOVING_DEPLOY_BINARIES[@]}" <<'PY'
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
 manifest_path, release_dir, *binaries = sys.argv[1:]
-document = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+# The manifest is operator-supplied and read at a time the operator does not
+# control, so the classification happens on the descriptor that is read, not
+# on the pathname -- the same race copy_regular_file and release_id already
+# refuse. A pathname check followed by an ordinary open leaves a window in
+# which the manifest becomes a FIFO (read_text blocks forever) or a device
+# such as /dev/zero (read_text exhausts memory), both before the release is
+# accepted or refused.
+try:
+    descriptor = os.open(manifest_path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as error:
+    raise SystemExit(f"cannot open manifest {manifest_path}: {error}")
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(f"manifest {manifest_path} is not a regular file")
+    os.set_blocking(descriptor, True)
+    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+        payload = handle.read()
+finally:
+    os.close(descriptor)
+try:
+    document = json.loads(payload.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"manifest {manifest_path} is not parseable JSON: {error}")
 manifest = document.get("manifest", document)
 components = {
     Path(component["path"]).name: component
@@ -142,16 +165,48 @@ if failures:
 print(f"verified {len(binaries)} binaries against manifest {manifest_path}", file=sys.stderr)
 PY
   else
-    [[ -f "${checksums}" ]] || deploy_fail "checksums file ${checksums} does not exist"
-    local resolved_checksums
-    resolved_checksums="$(cd "$(dirname "${checksums}")" && pwd)/$(basename "${checksums}")"
+    # One snapshot, taken once, decides everything. The previous shape read
+    # the pathname twice -- per-binary greps, then a fresh open by
+    # `sha256sum --ignore-missing`, which does not fail on entries missing
+    # from its input -- so a checksums file replaced between the two reads
+    # could pass the presence checks and then verify only whatever the
+    # replacement still contained. The snapshot is read through a classified
+    # descriptor for the same reason the manifest is: the file is
+    # operator-supplied, and a FIFO or device swapped in must be refused, not
+    # blocked on. The required entries are then selected from the snapshot
+    # and that same selection is what sha256sum verifies, with
+    # --ignore-missing gone: every line handed over must check.
+    local checksum_snapshot required_lines entry_lines
+    checksum_snapshot="$(python3 - "${checksums}" <<'SNAPSHOT'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as error:
+    raise SystemExit(f"cannot open checksums file {path}: {error}")
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(f"checksums file {path} is not a regular file")
+    os.set_blocking(descriptor, True)
+    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+        sys.stdout.buffer.write(handle.read())
+finally:
+    os.close(descriptor)
+SNAPSHOT
+    )" || deploy_fail "checksums file ${checksums} could not be read"
+    required_lines=""
     for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
-      grep -Eq "^[0-9a-f]{64}[[:space:]]+\*?${binary}\$" "${resolved_checksums}" \
+      entry_lines="$(grep -E "^[0-9a-f]{64}[[:space:]]+\*?${binary}\$" \
+        <<<"${checksum_snapshot}")" \
         || deploy_fail "checksums file has no entry for ${binary}"
+      required_lines+="${entry_lines}"$'\n'
     done
     (
       cd "${release_dir}"
-      sha256sum --check --strict --ignore-missing "${resolved_checksums}" >/dev/null
+      sha256sum --check --strict - <<<"${required_lines%$'\n'}" >/dev/null
     ) || deploy_fail "sha256 verification against ${checksums} failed"
     echo "verified ${#MCLOVING_DEPLOY_BINARIES[@]} binaries against checksums ${checksums}" >&2
   fi
