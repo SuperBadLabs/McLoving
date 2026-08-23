@@ -80,6 +80,41 @@ require_secure_ancestors() {
   fi
 }
 
+# require_secure_files HOME FILE...
+#
+# Judge each EXISTING file -- through its link when it is one -- by the same
+# mode and ownership rules the ancestor walk applies to directories: a
+# group- or world-writable or foreign-owned contract file is rewritable by
+# another local user, which controls the environment systemd loads no matter
+# how well its directory chain is secured. Files that do not exist are
+# skipped: the installer decides those. The files' ancestor chains --
+# including the resolved target chains of every link component -- are the
+# caller's job via require_secure_ancestors, which accepts file paths as
+# roots (the final component resolves like any other).
+require_secure_files() {
+  local home_dir="${1%/}" file mode_owner mode owner home_owner offending
+  shift
+  home_owner="$(stat -Lc '%u' "${home_dir}")" \
+    || deploy_fail "cannot stat deployment home ${home_dir}"
+  offending=""
+  for file in "$@"; do
+    [[ -e "${file}" ]] || continue
+    mode_owner="$(stat -Lc '%a %u' "${file}")" \
+      || deploy_fail "cannot stat contract file ${file}"
+    mode="${mode_owner%% *}"
+    owner="${mode_owner##* }"
+    if (( (8#${mode} & 8#022) != 0 )); then
+      offending+="${file} (mode ${mode}) "
+    fi
+    if [[ "${owner}" != "0" && "${owner}" != "${home_owner}" ]]; then
+      offending+="${file} (owned by uid ${owner}, expected uid ${home_owner} or root) "
+    fi
+  done
+  if [[ -n "${offending}" ]]; then
+    deploy_fail "contract file(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rewrite the environment systemd loads; run chmod go-w (or restore ownership) on them and retry"
+  fi
+}
+
 # deployment_ancestor_chain HOME ROOT... -> every security-relevant ancestor
 # directory of the managed roots, one absolute path per line, sorted. The
 # single derivation consumed by BOTH the installer's refusal walk and the

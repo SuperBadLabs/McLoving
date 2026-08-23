@@ -90,7 +90,23 @@ managed_roots=(
   "${unit_root}"
   "${quadlet_root}"
 )
-require_secure_ancestors "${home_dir}" "${managed_roots[@]}"
+# The four preserved contract destinations are validated as roots too: the
+# preserve branch below keeps a pre-existing contract exactly as it is, and
+# `-f` follows a symlink, so a contract that is a link into an external
+# directory would otherwise be kept with its whole target chain unexamined
+# -- and whoever can write that chain controls the environment systemd
+# loads. The chain derivation resolves a file's final component like any
+# other, and require_secure_files judges the resolved file itself by the
+# same mode and ownership rules.
+contract_destinations=(
+  "${config_root}/postgres.env"
+  "${config_root}/db-init.env"
+  "${config_root}/controller.env"
+  "${config_root}/agent.env"
+)
+require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
+  "${contract_destinations[@]}"
+require_secure_files "${home_dir}" "${contract_destinations[@]}"
 
 # Set before the hierarchy is created, not after. `mkdir -p` builds every
 # missing ancestor -- .local, .local/libexec, .config, .config/systemd,

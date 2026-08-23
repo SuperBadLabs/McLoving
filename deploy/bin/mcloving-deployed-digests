@@ -54,11 +54,17 @@ ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
   exit 1
 }
 export MCLOVING_ANCESTOR_DIRS="${ancestor_dirs}"
+# Nested symlinks are discovered only while walking, so their target chains
+# are derived at that point -- through the same shared library function,
+# which the document builder invokes by path.
+MCLOVING_DEPLOY_LIB="$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+export MCLOVING_DEPLOY_LIB
 
 python3 - "${home_dir}" <<'PY'
 import hashlib
 import json
 import stat
+import subprocess
 import sys
 import os
 from pathlib import Path
@@ -337,21 +343,86 @@ if ancestors_supplied is None:
         "mcloving-deployed-digests: MCLOVING_ANCESTOR_DIRS is not set; "
         "run this through its shell wrapper"
     )
-ancestor_paths = sorted({line for line in ancestors_supplied.splitlines() if line})
+deploy_lib = os.environ.get("MCLOVING_DEPLOY_LIB")
+if deploy_lib is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_DEPLOY_LIB is not set; "
+        "run this through its shell wrapper"
+    )
+
+release_entries = walk(libexec / "releases")
+helper_entries = walk(libexec / "helpers")
+unit_entries = [
+    path
+    for unit_dir in unit_dirs
+    for path in walk(unit_dir)
+    if path.name.startswith("mcloving-") or path in unit_dirs
+]
+contract_entries = walk(config)
+
+# Every symlink the walks follow contributes its resolved target's parent
+# chain, through the same shared collector the roots go through: a nested
+# pki/certs -> /srv/shared/certs is followed and its bytes inventoried, but
+# without this the mode or owner of /srv/shared could change while the
+# document stayed byte-identical -- the ancestor class, one level down.
+# Totality differs from the root chains deliberately: a nested link whose
+# chain does not resolve (dangling, looping) yields an unresolvable_link_chain
+# RECORD rather than failing the run, because losing the whole canonical
+# document to one bad in-tree link would deny CUTOVER-001 its re-read
+# precisely while drift is present. Root ancestors keep their named,
+# fail-closed refusal: nothing behind a broken root chain is recordable.
+chain_directories = {line for line in ancestors_supplied.splitlines() if line}
+unresolvable_links = []
+for link in sorted(
+    {
+        entry
+        for entry in (
+            *release_entries,
+            *helper_entries,
+            *unit_entries,
+            *contract_entries,
+        )
+        if entry.is_symlink()
+    }
+):
+    derived = subprocess.run(
+        ["bash", "-ec", 'source "$0" && deployment_ancestor_chain "$1" "$2"',
+         deploy_lib, str(home), str(link)],
+        capture_output=True,
+        text=True,
+    )
+    if derived.returncode != 0:
+        unresolvable_links.append(link)
+        continue
+    chain_directories.update(
+        line for line in derived.stdout.splitlines() if line
+    )
+
+
+def home_relative(path: Path) -> str:
+    try:
+        return path.relative_to(home).as_posix()
+    except ValueError:
+        return path.as_posix()
+
 
 document = {
     "schema": "mcloving.deployed-digests/v1",
     "ancestors": [
         file_record(Path(path), home)
-        for path in ancestor_paths
+        for path in sorted(chain_directories)
+    ]
+    + [
+        {"path": home_relative(link), "kind": "unresolvable_link_chain"}
+        for link in unresolvable_links
     ],
     "releases": [
         file_record(path, home)
-        for path in walk(libexec / "releases")
+        for path in release_entries
     ],
     "helpers": [
         file_record(path, home)
-        for path in walk(libexec / "helpers")
+        for path in helper_entries
     ],
     "current_release": (
         (libexec / "current").readlink().as_posix()
@@ -364,20 +435,19 @@ document = {
         else None
     ),
     "units": [
+        # The name filter (applied when unit_entries was built) selects the
+        # units this deployment owns out of a directory it shares with
+        # everything else the user runs, and keeps the unit root itself:
+        # `~/.config/systemd/user` is named `user`, not `mcloving-*`, so
+        # repointing that live root at managed storage holding identical
+        # unit bytes would otherwise leave this document unchanged while
+        # systemd or Quadlet reads an entirely different tree.
         file_record(path, home)
-        for unit_dir in unit_dirs
-        for path in walk(unit_dir)
-        # The name filter selects the units this deployment owns out of a
-        # directory it shares with everything else the user runs. It must not
-        # discard the unit root itself: `~/.config/systemd/user` is named
-        # `user`, not `mcloving-*`, so repointing that live root at managed
-        # storage holding identical unit bytes would leave this document
-        # unchanged while systemd or Quadlet reads an entirely different tree.
-        if path.name.startswith("mcloving-") or path in unit_dirs
+        for path in unit_entries
     ],
     "environment_contracts": [
         file_record(path, home)
-        for path in walk(config)
+        for path in contract_entries
     ],
 }
 

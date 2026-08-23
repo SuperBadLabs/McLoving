@@ -1155,6 +1155,7 @@ race_ancestors="$(
     "${home}/.config/mcloving" "${home}/.config/mcloving/pki"
 )"
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
+MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1252,6 +1253,70 @@ if [[ "${owner_doc_before}" != "${owner_doc_restored}" ]]; then
   echo "the re-read did not return to baseline after ownership was restored" >&2
   exit 1
 fi
+
+# Nested symlinks discovered by the walk feed their resolved target's
+# parent chain into the ancestors too: pki/certs -> ~/depot/certs is
+# followed and inventoried, and without this the mode of ~/depot could
+# change while the document stayed byte-identical. Both directions, plus
+# the totality rule: an unresolvable nested link becomes a RECORD, never a
+# failed run.
+mkdir -p "${home}/depot/certs"
+chmod 0755 "${home}/depot" "${home}/depot/certs"
+ln -s "${home}/depot/certs" "${config_dir}/pki/certs-link"
+nested_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${nested_before}" <<'NESTED'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("ancestors", [])}
+if "depot" not in records:
+    raise SystemExit(f"nested link target parent missing: {sorted(records)}")
+NESTED
+chmod 0777 "${home}/depot"
+nested_after="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+chmod 0755 "${home}/depot"
+if [[ "${nested_before}" == "${nested_after}" ]]; then
+  echo "a relaxed nested-link target parent left the re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${nested_after}" <<'NESTEDMODE'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("ancestors", [])}
+if records.get("depot", {}).get("mode") != 0o777:
+    raise SystemExit(f"nested target parent mode not recorded: {records.get('depot')}")
+NESTEDMODE
+nested_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+[[ "${nested_before}" == "${nested_restored}" ]] || {
+  echo "the nested-link re-read did not return to baseline" >&2
+  exit 1
+}
+# Totality: an unresolvable nested link is recorded, not fatal.
+ln -s "${workdir}/definitely-absent-target" "${config_dir}/pki/broken-link"
+nested_unresolvable="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")" || {
+  echo "an unresolvable nested link failed the whole re-read" >&2
+  rm -f "${config_dir}/pki/broken-link" "${config_dir}/pki/certs-link"
+  exit 1
+}
+python3 - "${nested_unresolvable}" <<'NESTEDBROKEN'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+entries = [
+    record
+    for record in document.get("ancestors", [])
+    if record.get("kind") == "unresolvable_link_chain"
+    and record["path"].endswith("pki/broken-link")
+]
+if not entries:
+    raise SystemExit("unresolvable nested link chain was not recorded")
+NESTEDBROKEN
+rm -f "${config_dir}/pki/broken-link" "${config_dir}/pki/certs-link"
+rm -rf "${home}/depot"
 
 # Content is not the whole identity. A deployed binary that loses its execute
 # bit keeps its digest and size while systemd can no longer run it, and the
@@ -1742,6 +1807,72 @@ podman unshare chown 0:0 "${pki_home}/shared"
   exit 1
 }
 rm -rf "${pki_home}"
+
+# A PRESERVED contract may be a pre-existing symlink: `-f` follows it, the
+# preserve branch keeps it, and whoever can write its target chain -- or
+# the resolved target file itself -- controls the environment systemd
+# loads. The contract destinations are therefore validated as roots (chain)
+# and as files (mode/ownership), in both directions.
+ctlink_home="${workdir}/contract-link-home"
+rm -rf "${ctlink_home}"
+mkdir -p "${ctlink_home}/ext" "${ctlink_home}/.config/mcloving"
+chmod 0755 "${ctlink_home}" "${ctlink_home}/ext" \
+  "${ctlink_home}/.config" "${ctlink_home}/.config/mcloving"
+printf 'PRESERVED_MARKER=%s\n' "${suffix}" > "${ctlink_home}/ext/agent.env"
+chmod 0600 "${ctlink_home}/ext/agent.env"
+ln -s "${ctlink_home}/ext/agent.env" "${ctlink_home}/.config/mcloving/agent.env"
+chmod 0777 "${ctlink_home}/ext"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/contract-link.log" 2>&1; then
+  echo "install preserved a contract symlink whose target parent is world-writable" >&2
+  exit 1
+fi
+grep -q "ext (mode 777)" "${workdir}/logs/contract-link.log" || {
+  echo "the contract target-parent refusal did not name ext:" >&2
+  cat "${workdir}/logs/contract-link.log" >&2
+  exit 1
+}
+chmod 0755 "${ctlink_home}/ext"
+chmod 0666 "${ctlink_home}/ext/agent.env"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/contract-file-mode.log" 2>&1; then
+  echo "install preserved a world-writable contract file" >&2
+  exit 1
+fi
+grep -q "agent.env (mode 666)" "${workdir}/logs/contract-file-mode.log" || {
+  echo "the writable contract-file refusal did not name the file and mode:" >&2
+  cat "${workdir}/logs/contract-file-mode.log" >&2
+  exit 1
+}
+chmod 0600 "${ctlink_home}/ext/agent.env"
+podman unshare chown 1:1 "${ctlink_home}/ext/agent.env"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/contract-file-owner.log" 2>&1; then
+  echo "install preserved a foreign-owned contract file" >&2
+  exit 1
+fi
+grep -q "agent.env (owned by uid .*, expected uid $(id -u) or root)" \
+  "${workdir}/logs/contract-file-owner.log" || {
+  echo "the foreign-owned contract-file refusal did not name the file and uids:" >&2
+  cat "${workdir}/logs/contract-file-owner.log" >&2
+  exit 1
+}
+podman unshare chown 0:0 "${ctlink_home}/ext/agent.env"
+"${repo_root}/deploy/bin/mcloving-install" --home "${ctlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+[[ -L "${ctlink_home}/.config/mcloving/agent.env" ]] || {
+  echo "install replaced a secured preserved contract symlink" >&2
+  exit 1
+}
+grep -q "PRESERVED_MARKER=${suffix}" "${ctlink_home}/.config/mcloving/agent.env" || {
+  echo "install did not preserve the secured contract's content" >&2
+  exit 1
+}
+rm -rf "${ctlink_home}"
 
 # The managed-roots list stays honest mechanically: an install is traced
 # with xtrace, every directory-touching command's path under its home is
