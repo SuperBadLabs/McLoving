@@ -359,11 +359,33 @@ if deploy_lib is None:
 
 release_entries = walk(libexec / "releases")
 helper_entries = walk(libexec / "helpers")
+def unit_owned(path: Path, unit_dir: Path) -> bool:
+    """Whether an entry under a shared unit directory belongs to this
+    deployment.
+
+    The mcloving- name filter applies to the TOP-LEVEL entry only: systemd
+    (and Quadlet, which follows the same convention on the containers side)
+    reads every file inside a matching drop-in directory such as
+    mcloving-controller.service.d/ regardless of its basename, so a
+    basename filter applied at every depth silently discarded
+    override.conf -- an active Restart= or ExecStart= override changing the
+    real configuration while the canonical document stayed byte-identical.
+    The unit root itself is kept, as before.
+    """
+    if path == unit_dir:
+        return True
+    try:
+        first_component = path.relative_to(unit_dir).parts[0]
+    except ValueError:
+        return False
+    return first_component.startswith("mcloving-")
+
+
 unit_entries = [
     path
     for unit_dir in unit_dirs
     for path in walk(unit_dir)
-    if path.name.startswith("mcloving-") or path in unit_dirs
+    if unit_owned(path, unit_dir)
 ]
 contract_entries = walk(config)
 
@@ -442,13 +464,13 @@ document = {
         else None
     ),
     "units": [
-        # The name filter (applied when unit_entries was built) selects the
-        # units this deployment owns out of a directory it shares with
-        # everything else the user runs, and keeps the unit root itself:
-        # `~/.config/systemd/user` is named `user`, not `mcloving-*`, so
-        # repointing that live root at managed storage holding identical
-        # unit bytes would otherwise leave this document unchanged while
-        # systemd or Quadlet reads an entirely different tree.
+        # unit_owned (applied when unit_entries was built) selects the
+        # top-level entries this deployment owns out of a directory it
+        # shares with everything else the user runs, keeps the unit root
+        # itself (`~/.config/systemd/user` is named `user`, not
+        # `mcloving-*`), and keeps EVERYTHING beneath a matched drop-in
+        # directory, because systemd and Quadlet read those files no matter
+        # what they are called.
         file_record(path, home)
         for path in unit_entries
     ],

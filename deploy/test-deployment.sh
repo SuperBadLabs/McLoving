@@ -1318,6 +1318,52 @@ NESTEDBROKEN
 rm -f "${config_dir}/pki/broken-link" "${config_dir}/pki/certs-link"
 rm -rf "${home}/depot"
 
+# systemd and Quadlet read every file inside a matching drop-in directory
+# regardless of its basename, so the inventory must too: an override.conf
+# changing Restart= or ExecStart= alters the real configuration, and a
+# basename filter applied below the top level left the canonical document
+# byte-identical across it. Both unit trees follow the convention; both are
+# gated.
+dropin_service_dir="${home}/.config/systemd/user/mcloving-controller.service.d"
+dropin_quadlet_dir="${home}/.config/containers/systemd/mcloving-postgres.container.d"
+dropin_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+mkdir -p "${dropin_service_dir}" "${dropin_quadlet_dir}"
+printf '[Service]\nRestart=always\n' > "${dropin_service_dir}/override.conf"
+printf '[Container]\nEnvironment=SMOKE=1\n' > "${dropin_quadlet_dir}/tweak.conf"
+dropin_added="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+if [[ "${dropin_before}" == "${dropin_added}" ]]; then
+  echo "adding unit drop-ins left the digest re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${dropin_added}" <<'DROPIN'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+paths = {record["path"] for record in document.get("units", [])}
+required = {
+    ".config/systemd/user/mcloving-controller.service.d",
+    ".config/systemd/user/mcloving-controller.service.d/override.conf",
+    ".config/containers/systemd/mcloving-postgres.container.d",
+    ".config/containers/systemd/mcloving-postgres.container.d/tweak.conf",
+}
+missing = required - paths
+if missing:
+    raise SystemExit(f"drop-in records missing from the unit inventory: {sorted(missing)}")
+DROPIN
+printf '[Service]\nRestart=no\n' > "${dropin_service_dir}/override.conf"
+dropin_changed="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+if [[ "${dropin_added}" == "${dropin_changed}" ]]; then
+  echo "changing a drop-in's content left the digest re-read unchanged" >&2
+  exit 1
+fi
+rm -rf "${dropin_service_dir}" "${dropin_quadlet_dir}"
+dropin_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+[[ "${dropin_before}" == "${dropin_restored}" ]] || {
+  echo "the re-read did not return to baseline after the drop-ins were removed" >&2
+  exit 1
+}
+
 # Content is not the whole identity. A deployed binary that loses its execute
 # bit keeps its digest and size while systemd can no longer run it, and the
 # release manifest records executable: true per component, so the re-read has
