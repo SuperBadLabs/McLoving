@@ -1522,6 +1522,68 @@ if [[ "${ctime_race_status}" -ne 0 ]]; then
   exit 1
 fi
 
+# Identity material configured OUTSIDE the walked trees must be in the
+# inventory: the guard validates an external CA at service start, and a
+# document that recorded only the path string would stay byte-identical
+# across its substitution. Both directions, against the real agent
+# contract, restored afterwards.
+external_baseline="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${external_baseline}" <<'EXTBASE'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+if document.get("configured_paths") != []:
+    raise SystemExit(
+        f"in-tree config produced configured_paths records: {document.get('configured_paths')}"
+    )
+EXTBASE
+mkdir -p "${home}/external-trust"
+chmod 0755 "${home}/external-trust"
+cp "${pki}/controller-ca.pem" "${home}/external-trust/controller-ca.pem"
+chmod 0644 "${home}/external-trust/controller-ca.pem"
+cp "${config_dir}/agent.env" "${workdir}/agent.env.before-external"
+sed -i "s#^MCLOVING_CONTROLLER_CA_PATH=.*#MCLOVING_CONTROLLER_CA_PATH=${home}/external-trust/controller-ca.pem#" \
+  "${config_dir}/agent.env"
+grep -q "^MCLOVING_CONTROLLER_CA_PATH=${home}/external-trust/controller-ca.pem\$" \
+  "${config_dir}/agent.env" || {
+  echo "external-CA gate could not rewrite MCLOVING_CONTROLLER_CA_PATH; contract shape changed" >&2
+  exit 1
+}
+external_doc="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${external_doc}" <<'EXTREC'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("configured_paths", [])}
+entry = records.get("external-trust/controller-ca.pem")
+if entry is None:
+    raise SystemExit(f"external CA missing from configured_paths: {sorted(records)}")
+if "sha256" not in entry or "mode" not in entry:
+    raise SystemExit(f"external CA record lacks digest or mode: {entry}")
+ancestors = {record["path"] for record in document.get("ancestors", [])}
+if "external-trust" not in ancestors:
+    raise SystemExit(f"external CA ancestor chain missing: {sorted(ancestors)}")
+EXTREC
+printf 'SUBSTITUTED-TRUST-ROOT-BYTES\n' > "${home}/external-trust/controller-ca.pem"
+chmod 0644 "${home}/external-trust/controller-ca.pem"
+external_substituted="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+if [[ "${external_doc}" == "${external_substituted}" ]]; then
+  echo "substituting the external CA left the digest re-read unchanged" >&2
+  exit 1
+fi
+cp "${pki}/controller-ca.pem" "${home}/external-trust/controller-ca.pem"
+chmod 0644 "${home}/external-trust/controller-ca.pem"
+cp "${workdir}/agent.env.before-external" "${config_dir}/agent.env"
+chmod 0600 "${config_dir}/agent.env"
+rm -rf "${home}/external-trust"
+external_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+[[ "${external_baseline}" == "${external_restored}" ]] || {
+  echo "the re-read did not return to baseline after the external CA was removed" >&2
+  exit 1
+}
+
 # Ownership is identity too. An ancestor that changes hands can be re-moded
 # by its new owner at will, so the canonical document must change when the
 # owner does -- and the change must be visible in the record, both proven

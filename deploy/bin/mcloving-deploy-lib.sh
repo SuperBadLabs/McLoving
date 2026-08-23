@@ -145,6 +145,49 @@ require_secret_files() {
   fi
 }
 
+# deployment_contract_path_variables SERVICE -> "CLASS VARIABLE" lines
+#
+# The single authority for which contract variables carry filesystem paths
+# and which protection class each belongs to, shared by mcloving-env-guard
+# (which enforces the classes at service start) and
+# mcloving-deployed-digests (which inventories the configured files that
+# live outside the walked trees). Two copies of this table is how a
+# variable added to one consumer would silently escape the other.
+#
+# Classes: "secret" -- owner-only, root-or-service-uid owner, readable,
+# resolved-chain walk (private keys, identity bindings). "trust" -- public
+# to read, critical to write: no group/other write, ownership, chain
+# (certificates and CA bundles). "state" -- the integrity class for
+# workspace/object roots and journals: no group/other write, ownership,
+# chain, absence legal for journals. The migration URL is a network
+# address, not a filesystem path, and the postgres/db-init contracts carry
+# no path variables.
+deployment_contract_path_variables() {
+  case "$1" in
+    controller)
+      printf '%s\n' \
+        "secret MCLOVING_AGENT_SERVER_KEY_PATH" \
+        "secret MCLOVING_AGENT_IDENTITY_BINDINGS_PATH" \
+        "trust MCLOVING_AGENT_SERVER_CERT_PATH" \
+        "trust MCLOVING_AGENT_CLIENT_CA_PATH" \
+        "state MCLOVING_OBJECT_ROOT" \
+        "state MCLOVING_WORKSPACE_ROOT" \
+        "state MCLOVING_AGENT_JOURNAL"
+      ;;
+    agent)
+      printf '%s\n' \
+        "secret MCLOVING_AGENT_PRIVATE_KEY_PATH" \
+        "trust MCLOVING_CONTROLLER_CA_PATH" \
+        "trust MCLOVING_AGENT_CERTIFICATE_PATH" \
+        "state MCLOVING_AGENT_WORKSPACE_ROOT" \
+        "state MCLOVING_AGENT_JOURNAL_PATH"
+      ;;
+    postgres | db-init)
+      :
+      ;;
+  esac
+}
+
 # deployment_config_root HOME / deployment_state_root HOME /
 # deployment_cache_root HOME -> the XDG base directories as the user
 # manager resolves them, one per line on stdout.

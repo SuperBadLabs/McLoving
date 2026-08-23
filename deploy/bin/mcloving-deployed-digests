@@ -89,6 +89,43 @@ MCLOVING_UNIT_DIRS="${unit_root}
 ${quadlet_root}"
 export MCLOVING_UNIT_DIRS
 
+# The contracts may point their identity material OUTSIDE the walked trees
+# -- an external CA, an external bindings file -- and the runtime guard
+# validates those files while a config-tree-only inventory would record
+# nothing but the unchanged path string. The path-bearing variables come
+# from the library's single classification enumeration (the same table the
+# guard enforces); the secret and trust classes are inventoried, because
+# they are stable identity material. The state class (workspace and object
+# roots, journals) is deliberately NOT digested: journals are live flux the
+# services rewrite in normal operation, and a canonical document that
+# changed on every poll would be useless as a drift baseline. Each contract
+# is parsed in a subshell so a malformed one costs its own paths, never the
+# whole document -- its bytes are still recorded by the walk.
+configured_paths=""
+for contract_service in postgres db-init controller agent; do
+  contract_file="${home_dir}/.config/mcloving/${contract_service}.env"
+  [[ -f "${contract_file}" ]] || continue
+  service_paths="$(
+    load_environment_file "${contract_file}" 2>/dev/null || exit 0
+    deployment_contract_path_variables "${contract_service}" \
+      | while IFS=' ' read -r path_class path_variable; do
+          case "${path_class}" in
+            secret | trust) ;;
+            *) continue ;;
+          esac
+          contract_into path_value "${path_variable}"
+          case "${path_value}" in
+            /*) printf '%s\n' "${path_value}" ;;
+          esac
+        done
+  )" || service_paths=""
+  if [[ -n "${service_paths}" ]]; then
+    configured_paths+="${service_paths}"$'\n'
+  fi
+done
+MCLOVING_CONFIGURED_PATHS="${configured_paths%$'\n'}"
+export MCLOVING_CONFIGURED_PATHS
+
 python3 - "${home_dir}" <<'PY'
 import hashlib
 import json
@@ -446,6 +483,28 @@ contract_entries = walk(config)
 # fail-closed refusal: nothing behind a broken root chain is recordable.
 chain_directories = {line for line in ancestors_supplied.splitlines() if line}
 unresolvable_links = []
+
+
+def collect_chain(path: Path) -> bool:
+    """Feed ``path``'s ancestor chain through the shared collector.
+
+    Tolerant like the nested-link handling: a chain that does not resolve
+    is reported by the caller as a record, never as a failed run.
+    """
+    derived = subprocess.run(
+        ["bash", "-ec", 'source "$0" && deployment_ancestor_chain "$1" "$2"',
+         deploy_lib, str(home), str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if derived.returncode != 0:
+        return False
+    chain_directories.update(
+        line for line in derived.stdout.splitlines() if line
+    )
+    return True
+
+
 for link in sorted(
     {
         entry
@@ -458,18 +517,35 @@ for link in sorted(
         if entry.is_symlink()
     }
 ):
-    derived = subprocess.run(
-        ["bash", "-ec", 'source "$0" && deployment_ancestor_chain "$1" "$2"',
-         deploy_lib, str(home), str(link)],
-        capture_output=True,
-        text=True,
-    )
-    if derived.returncode != 0:
+    if not collect_chain(link):
         unresolvable_links.append(link)
-        continue
-    chain_directories.update(
-        line for line in derived.stdout.splitlines() if line
-    )
+
+# Identity material the contracts configure OUTSIDE the walked trees: the
+# guard validates these files at service start, so the inventory must pin
+# their bytes and metadata too -- substituting an external CA while
+# preserving its mode must change this document. In-tree paths are already
+# recorded by the walks and are deduplicated here, not double-recorded.
+walked_roots = (libexec / "releases", libexec / "helpers", *unit_dirs, config)
+
+
+def inside_walked_trees(path: Path) -> bool:
+    for walked_root in walked_roots:
+        if path == walked_root or str(path).startswith(str(walked_root) + "/"):
+            return True
+    return False
+
+
+configured_supplied = os.environ.get("MCLOVING_CONFIGURED_PATHS", "")
+configured_paths = sorted(
+    {
+        Path(line)
+        for line in configured_supplied.splitlines()
+        if line and not inside_walked_trees(Path(line))
+    }
+)
+for configured in configured_paths:
+    if not collect_chain(configured):
+        unresolvable_links.append(configured)
 
 
 def home_relative(path: Path) -> str:
@@ -481,6 +557,10 @@ def home_relative(path: Path) -> str:
 
 document = {
     "schema": "mcloving.deployed-digests/v1",
+    "configured_paths": [
+        file_record(path, home)
+        for path in configured_paths
+    ],
     "ancestors": [
         file_record(Path(path), home)
         for path in sorted(chain_directories)

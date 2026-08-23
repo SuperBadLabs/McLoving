@@ -268,12 +268,6 @@ case "${service}" in
     require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
       MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
       MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
-    require_secret_paths MCLOVING_AGENT_SERVER_KEY_PATH \
-      MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
-    require_trust_input_paths MCLOVING_AGENT_SERVER_CERT_PATH \
-      MCLOVING_AGENT_CLIENT_CA_PATH
-    require_secured_paths MCLOVING_OBJECT_ROOT MCLOVING_WORKSPACE_ROOT \
-      MCLOVING_AGENT_JOURNAL
     ;;
   agent)
     require MCLOVING_AGENT_ID MCLOVING_AGENT_TRUST_POOL \
@@ -284,21 +278,36 @@ case "${service}" in
     require_uuid MCLOVING_AGENT_ORGANIZATION_ID
     require_readable_file MCLOVING_CONTROLLER_CA_PATH \
       MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
-    require_secret_paths MCLOVING_AGENT_PRIVATE_KEY_PATH
-    require_trust_input_paths MCLOVING_CONTROLLER_CA_PATH \
-      MCLOVING_AGENT_CERTIFICATE_PATH
     # The agent refuses to spawn work into a missing workspace root; require
     # it up front so the unit fails at start, not at first assignment.
     contract_into workspace_root MCLOVING_AGENT_WORKSPACE_ROOT
     if [[ ! -d "${workspace_root}" ]]; then
       fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${workspace_root}"
     fi
-    require_secured_paths MCLOVING_AGENT_WORKSPACE_ROOT \
-      MCLOVING_AGENT_JOURNAL_PATH
     ;;
   *)
     usage
     ;;
 esac
+
+# The path-bearing variables and their protection classes come from the
+# library's single enumeration -- the same table the digest inventory
+# consumes -- so a variable added there inherits enforcement here without
+# anyone remembering a second list.
+mapfile -t class_secret < <(deployment_contract_path_variables "${service}" \
+  | sed -n 's/^secret //p')
+mapfile -t class_trust < <(deployment_contract_path_variables "${service}" \
+  | sed -n 's/^trust //p')
+mapfile -t class_state < <(deployment_contract_path_variables "${service}" \
+  | sed -n 's/^state //p')
+if [[ ${#class_secret[@]} -gt 0 ]]; then
+  require_secret_paths "${class_secret[@]}"
+fi
+if [[ ${#class_trust[@]} -gt 0 ]]; then
+  require_trust_input_paths "${class_trust[@]}"
+fi
+if [[ ${#class_state[@]} -gt 0 ]]; then
+  require_secured_paths "${class_state[@]}"
+fi
 
 echo "mcloving-env-guard[${service}]: contract satisfied (${env_file})"
