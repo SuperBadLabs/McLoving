@@ -8,6 +8,9 @@
 # usage: mcloving-deployed-digests [--home DIR]
 #
 # Covered identities:
+#   ancestors         mode of every directory from ~ down to each walked
+#                     tree; a relaxed ancestor lets another local user
+#                     rename a protected subtree aside wholesale
 #   releases/*        sha256 + size of every staged binary set
 #   current/previous  active and rollback release symlink targets
 #   units             sha256 of every installed mcloving-* unit/quadlet file
@@ -258,8 +261,38 @@ def walk(root: Path) -> list[Path]:
     return sorted(found)
 
 
+def ancestor_directories(roots: tuple[Path, ...]) -> list[Path]:
+    """Every directory on the way from ``home`` down to each walked root.
+
+    The walked roots record their own subtrees, but the path leading to a
+    root is deployment state too: relaxing ``~/.local/libexec/mcloving``
+    itself (or ``~/.config``) to 0777 leaves every child record
+    byte-identical while another local user renames ``current``,
+    ``releases``, or ``helpers`` aside and substitutes deployed code. The
+    ancestors are derived by walking up each root's parent chain rather than
+    by enumerating names, so a root added later brings its ancestors with it
+    and none can be missed -- enumerating is how this class of gap has
+    happened twice before.
+    """
+    found: set[Path] = set()
+    for root in roots:
+        ancestor = root.parent
+        while True:
+            found.add(ancestor)
+            if ancestor == home or ancestor == ancestor.parent:
+                break
+            ancestor = ancestor.parent
+    return sorted(found)
+
+
 document = {
     "schema": "mcloving.deployed-digests/v1",
+    "ancestors": [
+        file_record(path, home)
+        for path in ancestor_directories(
+            (libexec / "releases", libexec / "helpers", *unit_dirs, config)
+        )
+    ],
     "releases": [
         file_record(path, home)
         for path in walk(libexec / "releases")

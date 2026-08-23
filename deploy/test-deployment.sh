@@ -850,6 +850,49 @@ if entry[0].get("mode") != 0o777:
     raise SystemExit(f"configuration root mode not recorded: {entry[0]}")
 DIRMODE
 
+# The ANCESTORS of the walked trees are deployment state too. Relaxing
+# ${libexec} itself to 0777 leaves every walked child record byte-identical
+# while another local user renames current, releases, or helpers aside and
+# substitutes deployed code; the same holds for ~/.config over the contract
+# trees. The re-read must record the whole chain from ~ down to each walked
+# root, and a mode change on any link of it must change the document.
+libexec_mode="$(stat -c '%a' "${libexec}")"
+ancestor_before="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+chmod 0777 "${libexec}"
+ancestor_after="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+chmod "${libexec_mode}" "${libexec}"
+if [[ "${ancestor_before}" == "${ancestor_after}" ]]; then
+  echo "a world-writable libexec root left the re-read unchanged" >&2
+  exit 1
+fi
+python3 - "${ancestor_after}" <<'ANCESTORS'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {item["path"]: item for item in document.get("ancestors", [])}
+relaxed = records.get(".local/libexec/mcloving")
+if relaxed is None:
+    raise SystemExit("libexec root missing from the ancestor records")
+if relaxed.get("mode") != 0o777:
+    raise SystemExit(f"libexec root mode not recorded: {relaxed}")
+# Coverage of the whole chain, not just the directory this gate relaxed:
+# every directory between ~ and a walked root is a place where a rename
+# swaps a protected subtree aside.
+required = {
+    ".",
+    ".local",
+    ".local/libexec",
+    ".local/libexec/mcloving",
+    ".config",
+    ".config/systemd",
+    ".config/containers",
+}
+missing = required - set(records)
+if missing:
+    raise SystemExit(f"ancestor records missing: {sorted(missing)}")
+ANCESTORS
+
 # Content is not the whole identity. A deployed binary that loses its execute
 # bit keeps its digest and size while systemd can no longer run it, and the
 # release manifest records executable: true per component, so the re-read has
