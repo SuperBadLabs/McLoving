@@ -377,6 +377,90 @@ grep -q "different PostgreSQL instance" "${workdir}/logs/db-init-wrong-endpoint.
   exit 1
 }
 rm -f "${wrong_endpoint_env}"
+# A refused bootstrap must not rotate live credentials. Point the contract at
+# a project the organization does not have, with a canary password: the
+# refusal must fire before ALTER ROLE. Detection compares the role's stored
+# password hash rather than attempting logins -- container-internal loopback
+# is `trust` in this image's default pg_hba, so any password "authenticates"
+# from inside. The detector itself is then proven able to see a rotation, by
+# rotating through the accepting path and requiring the hash to change.
+tenant_hash() {
+  printf "SELECT rolpassword FROM pg_authid WHERE rolname = 'mcloving_tenant';\n" \
+    | podman exec --interactive "${container_name}" \
+      psql --username mcloving --dbname mcloving \
+      --set ON_ERROR_STOP=1 --no-psqlrc --quiet --tuples-only --no-align --file -
+}
+tenant_hash_before="$(tenant_hash)"
+[[ -n "${tenant_hash_before}" ]] || {
+  echo "mcloving_tenant has no stored password after a successful bootstrap" >&2
+  exit 1
+}
+stale_project_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+canary_password="rotation-canary-${suffix}"
+stale_project_env="${workdir}/db-init-stale-project.env"
+sed -e "s#^MCLOVING_PROJECT_ID=.*#MCLOVING_PROJECT_ID=${stale_project_id}#" \
+    -e "s#^MCLOVING_TENANT_PASSWORD=.*#MCLOVING_TENANT_PASSWORD=${canary_password}#" \
+  "${db_init_env}" > "${stale_project_env}"
+grep -q "^MCLOVING_PROJECT_ID=${stale_project_id}\$" "${stale_project_env}" || {
+  echo "credential-rotation gate could not rewrite MCLOVING_PROJECT_ID; contract shape changed" >&2
+  exit 1
+}
+grep -q "^MCLOVING_TENANT_PASSWORD=${canary_password}\$" "${stale_project_env}" || {
+  echo "credential-rotation gate could not rewrite MCLOVING_TENANT_PASSWORD; contract shape changed" >&2
+  exit 1
+}
+if run_with_env "${stale_project_env}" "${db_init_argv[@]}" \
+  > "${workdir}/logs/db-init-stale-project.log" 2>&1; then
+  echo "db-init reported success for a project the organization does not have" >&2
+  exit 1
+fi
+grep -q "provision the project explicitly" "${workdir}/logs/db-init-stale-project.log" || {
+  echo "db-init refused the missing project for the wrong reason:" >&2
+  cat "${workdir}/logs/db-init-stale-project.log" >&2
+  exit 1
+}
+[[ "$(tenant_hash)" == "${tenant_hash_before}" ]] || {
+  echo "a refused bootstrap rotated the tenant password" >&2
+  exit 1
+}
+# Prove the detector detects: an ACCEPTED bootstrap carrying the canary
+# password must change the stored hash -- without this, a hash comparison
+# that always reported "unchanged" would pass the refusal check above even
+# against a bootstrap that rotates on every path.
+canary_accept_env="${workdir}/db-init-canary-accept.env"
+sed "s#^MCLOVING_TENANT_PASSWORD=.*#MCLOVING_TENANT_PASSWORD=${canary_password}#" \
+  "${db_init_env}" > "${canary_accept_env}"
+run_with_env "${canary_accept_env}" "${db_init_argv[@]}" \
+  >> "${workdir}/logs/db-init.log"
+[[ "$(tenant_hash)" != "${tenant_hash_before}" ]] || {
+  echo "an accepted bootstrap did not rotate the tenant password; the rotation detector is blind" >&2
+  exit 1
+}
+# Restore the contract's password for the controller started below.
+run_with_env "${db_init_env}" "${db_init_argv[@]}" >> "${workdir}/logs/db-init.log"
+rm -f "${stale_project_env}" "${canary_accept_env}"
+# Provisioned identity includes the slugs. UUIDs that exist under different
+# slugs are a different deployment identity wearing the configured ids, and
+# reporting them as provisioned would silently discard both requested slugs.
+slug_mismatch_env="${workdir}/db-init-slug-mismatch.env"
+sed "s#^MCLOVING_ORGANIZATION_SLUG=.*#MCLOVING_ORGANIZATION_SLUG=smoke-org-imposter#" \
+  "${db_init_env}" > "${slug_mismatch_env}"
+grep -q "^MCLOVING_ORGANIZATION_SLUG=smoke-org-imposter\$" "${slug_mismatch_env}" || {
+  echo "slug gate could not rewrite MCLOVING_ORGANIZATION_SLUG; contract shape changed" >&2
+  exit 1
+}
+if run_with_env "${slug_mismatch_env}" "${db_init_argv[@]}" \
+  > "${workdir}/logs/db-init-slug-mismatch.log" 2>&1; then
+  echo "db-init reported provisioned for an organization holding a different slug" >&2
+  exit 1
+fi
+grep -q "refusing to report a different identity as provisioned" \
+  "${workdir}/logs/db-init-slug-mismatch.log" || {
+  echo "db-init refused the slug mismatch for the wrong reason:" >&2
+  cat "${workdir}/logs/db-init-slug-mismatch.log" >&2
+  exit 1
+}
+rm -f "${slug_mismatch_env}"
 
 "${unit_command}" "${home}/.config/systemd/user/mcloving-controller.service" \
   --home "${home}" > "${workdir}/controller.derived.json"

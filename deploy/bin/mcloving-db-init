@@ -7,7 +7,10 @@
 #      (mcloving-identity-admin migrate)
 #   3. enable LOGIN with a password on the constrained mcloving_tenant role
 #      created NOLOGIN by migration 0002, preserving every other restriction
-#   4. ensure the configured organization/project pair exists
+#   4. ensure the configured organization/project pair exists, slugs included
+#
+# Step 4's preconditions are checked BEFORE step 3 runs: a bootstrap that is
+# going to refuse must refuse without having rotated live credentials.
 #
 # Environment contract: deploy/env/db-init.env.example (validated by
 # mcloving-env-guard before this script runs, and re-checked here).
@@ -126,6 +129,56 @@ if [[ "${migrated_tables}" != "1" ]]; then
   exit 1
 fi
 
+# The provisioning preflight runs BEFORE the password rotation below. Every
+# refusal this bootstrap can reach from here is decided by these reads, and a
+# refusal that has already rotated the live mcloving_tenant password exits as
+# "operator action required" having mutated running credentials -- breaking
+# new controller connections when the paired contract was not updated in the
+# same operation.
+#
+# The configured slugs are validated too, not just the UUIDs: an existing
+# organization/project pair under DIFFERENT slugs is a different deployment
+# identity wearing the configured ids, and reporting it as "already
+# provisioned" would silently discard both requested slug values. The
+# database's values are read out and compared here rather than interpolating
+# contract-supplied slugs into SQL. The 'slug=' prefix distinguishes an
+# absent row from an empty value.
+organization_slug_row="$(printf "SELECT 'slug=' || slug FROM organizations WHERE id = '%s';\n" \
+  "${MCLOVING_ORGANIZATION_ID}" | psql_in_container --tuples-only --no-align --file -)"
+project_org_row="$(printf "SELECT 'org=' || organization_id FROM projects WHERE id = '%s';\n" \
+  "${MCLOVING_PROJECT_ID}" | psql_in_container --tuples-only --no-align --file -)"
+project_slug_row="$(printf "SELECT 'slug=' || slug FROM projects WHERE id = '%s';\n" \
+  "${MCLOVING_PROJECT_ID}" | psql_in_container --tuples-only --no-align --file -)"
+
+provision="0"
+if [[ -z "${organization_slug_row}" ]]; then
+  if [[ -n "${project_org_row}" ]]; then
+    echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} does not exist but project ${MCLOVING_PROJECT_ID} already does (${project_org_row}); provisioning would collide, resolve the project id first" >&2
+    exit 1
+  fi
+  provision="1"
+else
+  if [[ "${organization_slug_row}" != "slug=${MCLOVING_ORGANIZATION_SLUG}" ]]; then
+    echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} exists with ${organization_slug_row} but the contract configures slug=${MCLOVING_ORGANIZATION_SLUG}; refusing to report a different identity as provisioned" >&2
+    exit 1
+  fi
+  if [[ -z "${project_org_row}" ]]; then
+    # create-project inserts organization and project together and is not
+    # partially reentrant; adding a project to an existing organization is an
+    # operator decision, not something this bootstrap may improvise.
+    echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} exists but project ${MCLOVING_PROJECT_ID} does not; provision the project explicitly" >&2
+    exit 1
+  fi
+  if [[ "${project_org_row}" != "org=${MCLOVING_ORGANIZATION_ID}" ]]; then
+    echo "mcloving-db-init: project ${MCLOVING_PROJECT_ID} exists under a different organization (${project_org_row}); refusing to report it as provisioned" >&2
+    exit 1
+  fi
+  if [[ "${project_slug_row}" != "slug=${MCLOVING_PROJECT_SLUG}" ]]; then
+    echo "mcloving-db-init: project ${MCLOVING_PROJECT_ID} exists with ${project_slug_row} but the contract configures slug=${MCLOVING_PROJECT_SLUG}; refusing to report a different identity as provisioned" >&2
+    exit 1
+  fi
+fi
+
 echo "mcloving-db-init: enabling constrained runtime login for mcloving_tenant"
 # SQL string literal with doubled single quotes; standard_conforming_strings
 # is on by default, so no other character is special inside the literal.
@@ -133,25 +186,13 @@ escaped_password="${MCLOVING_TENANT_PASSWORD//\'/\'\'}"
 printf 'ALTER ROLE mcloving_tenant LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '\''%s'\'';\n' \
   "${escaped_password}" | psql_in_container --file -
 
-organization_exists="$(printf "SELECT count(*) FROM organizations WHERE id = '%s';\n" \
-  "${MCLOVING_ORGANIZATION_ID}" | psql_in_container --tuples-only --no-align --file -)"
-project_exists="$(printf "SELECT count(*) FROM projects WHERE id = '%s' AND organization_id = '%s';\n" \
-  "${MCLOVING_PROJECT_ID}" "${MCLOVING_ORGANIZATION_ID}" \
-  | psql_in_container --tuples-only --no-align --file -)"
-
-if [[ "${organization_exists}" == "0" ]]; then
+if [[ "${provision}" == "1" ]]; then
   echo "mcloving-db-init: provisioning organization ${MCLOVING_ORGANIZATION_SLUG} and project ${MCLOVING_PROJECT_SLUG}"
   "${identity_admin}" create-project \
     --organization "${MCLOVING_ORGANIZATION_ID}" \
     --organization-slug "${MCLOVING_ORGANIZATION_SLUG}" \
     --project "${MCLOVING_PROJECT_ID}" \
     --project-slug "${MCLOVING_PROJECT_SLUG}"
-elif [[ "${project_exists}" == "0" ]]; then
-  # create-project inserts organization and project together and is not
-  # partially reentrant; adding a project to an existing organization is an
-  # operator decision, not something this bootstrap may improvise.
-  echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} exists but project ${MCLOVING_PROJECT_ID} does not; provision the project explicitly" >&2
-  exit 1
 else
   echo "mcloving-db-init: organization and project already provisioned"
 fi
