@@ -29,11 +29,24 @@ fi
 libexec_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
-load_environment_file "${env_file}"
+# THE EFFECTIVE CONTRACT, through the same derivation the guard uses.
+# The shipped controller unit runs this helper as ExecStartPost, so systemd
+# has already composed the environment the controller was started with. A
+# drop-in appending another EnvironmentFile= that overrides MCLOVING_LISTEN
+# makes systemd start the controller on THAT address while this helper, when
+# it reparsed only the original contract, probed the stale one -- and then
+# killed a perfectly healthy controller as a startup failure. Run by hand
+# (the smoke suite, an operator) nothing is composed and the parsed contract
+# stands, unchanged.
+load_effective_contract "${env_file}"
 
 case "${service}" in
   controller)
     contract_into listen MCLOVING_LISTEN
+    if [[ -n "${MCLOVING_CONTRACT_DROPPED[MCLOVING_LISTEN]:-}" ]]; then
+      echo "mcloving-health: MCLOVING_LISTEN is declared in ${env_file} but the effective environment this unit was started with does not carry it, so the address the controller is actually listening on is unknown; reconcile the unit EnvironmentFile= declarations with ${env_file} and retry" >&2
+      exit 1
+    fi
     [[ -n "${listen}" ]] || {
       echo "mcloving-health: MCLOVING_LISTEN is required in ${env_file}" >&2
       exit 1
@@ -54,6 +67,10 @@ case "${service}" in
     ;;
   agent)
     contract_into journal MCLOVING_AGENT_JOURNAL_PATH
+    if [[ -n "${MCLOVING_CONTRACT_DROPPED[MCLOVING_AGENT_JOURNAL_PATH]:-}" ]]; then
+      echo "mcloving-health: MCLOVING_AGENT_JOURNAL_PATH is declared in ${env_file} but the effective environment this unit was started with does not carry it, so the journal the agent actually opened is unknown; reconcile the unit EnvironmentFile= declarations with ${env_file} and retry" >&2
+      exit 1
+    fi
     [[ -n "${journal}" ]] || {
       echo "mcloving-health: MCLOVING_AGENT_JOURNAL_PATH is required in ${env_file}" >&2
       exit 1

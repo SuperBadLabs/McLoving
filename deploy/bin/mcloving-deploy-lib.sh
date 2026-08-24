@@ -2317,6 +2317,75 @@ ENDPOINT
 # `contract_value` is the only way to read one.
 declare -gA MCLOVING_CONTRACT=()
 
+# deployment_unit_invocation_is_authoritative -- 0 when THIS PROCESS is the
+# one systemd executed for a unit, so its environment IS the environment the
+# service receives.
+#
+# The distinction matters because the same helpers are legitimately run two
+# ways, and the correct answer differs:
+#
+#   INSIDE THE UNIT (ExecStartPre / ExecStart / ExecStartPost). systemd has
+#   already composed the environment from the manager environment,
+#   Environment= in the unit and its drop-ins, and every EnvironmentFile= in
+#   order. That composition is what the binaries will read, so a required
+#   variable ABSENT from it will not reach the service no matter what the
+#   contract file says.
+#
+#   BY HAND (the smoke suite, an operator checking a contract before
+#   installing it). Nothing has composed anything; the parsed contract is
+#   the only statement of intent available and must stand, exactly as it did
+#   before round 32.
+#
+# The marker is systemd's own, and is two-part on purpose. INVOCATION_ID is
+# set for every unit invocation but is INHERITED by descendants, so a helper
+# a human ran from a shell that happens to sit inside a unit would inherit
+# it. SYSTEMD_EXEC_PID names the process systemd actually executed, so
+# requiring it to be OUR pid closes that loophole: it is true only for the
+# process systemd started, not for anything further down. Verified on
+# systemd 255 -- run by hand both are unset; run as ExecStartPre,
+# INVOCATION_ID is set and SYSTEMD_EXEC_PID equals the script's own $$.
+#
+# Where SYSTEMD_EXEC_PID is absent but INVOCATION_ID is present (systemd
+# older than v248) the invocation is still treated as authoritative: that is
+# the best evidence available, and declining would leave the very gap this
+# closes. Only an explicit MISMATCH -- a descendant of the executed process
+# -- declines, and it declines to the lenient side, which is the pre-round-32
+# behaviour rather than a new refusal.
+deployment_unit_invocation_is_authoritative() {
+  [[ -n "${INVOCATION_ID:-}" ]] || return 1
+  [[ -z "${SYSTEMD_EXEC_PID:-}" || "${SYSTEMD_EXEC_PID}" == "$$" ]] || return 1
+  return 0
+}
+
+# load_effective_contract ENV_FILE -- the ONE derivation every in-unit
+# consumer uses to learn what the service will actually receive.
+#
+# Parses the contract, then overlays the process environment. Inside a unit
+# the environment is authoritative in BOTH directions: a key it carries wins
+# (round 32), and a key it does NOT carry is REMOVED from the map, because
+# the service will not receive it. The removed names are recorded in
+# MCLOVING_CONTRACT_DROPPED so a consumer can say WHY a declared variable is
+# missing instead of reporting it as an empty contract value.
+#
+# Run by hand, nothing is overlaid and nothing is dropped: the parsed
+# contract stands unchanged.
+declare -A MCLOVING_CONTRACT_DROPPED=()
+load_effective_contract() {
+  local contract_key
+  load_environment_file "$1"
+  MCLOVING_CONTRACT_DROPPED=()
+  deployment_unit_invocation_is_authoritative || return 0
+  for contract_key in "${!MCLOVING_CONTRACT[@]}"; do
+    if [[ -v "${contract_key}" ]]; then
+      MCLOVING_CONTRACT["${contract_key}"]="${!contract_key}"
+    else
+      MCLOVING_CONTRACT_DROPPED["${contract_key}"]=1
+      unset 'MCLOVING_CONTRACT[${contract_key}]'
+    fi
+  done
+  return 0
+}
+
 load_environment_file() {
   local name value parsed status
   # The parser's exit status has to be checked before any value is accepted.

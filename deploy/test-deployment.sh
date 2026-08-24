@@ -903,9 +903,16 @@ MCLOVING_AGENT_WORKSPACE_ROOT="${ambient_workspace}" \
   exit 1
 }
 # (4) The composition is actually APPLIED, not merely compared: a contract
-# whose non-path variable still carries its placeholder is admitted when
-# the environment supplies the real value, because that is what the binary
-# receives. Same mechanism, observed from the other side.
+# whose non-path variable still carries its placeholder is admitted when the
+# SERVICE'S environment supplies the real value, because that is what the
+# binary receives. Same mechanism, observed from the other side.
+#
+# The overlay is scoped to the invocation mode where it is TRUE. Run by
+# hand, an ambient MCLOVING_AGENT_ID in an operator's shell is not what the
+# service will receive -- systemd will hand the binary the contract's value
+# through EnvironmentFile= -- so judging the ambient one would report a
+# contract satisfied that is not. That is asserted here too, because it is
+# the direction that was previously wrong.
 placeholder_env="${home}/placeholder-ambient.env"
 sed 's/^MCLOVING_AGENT_ID=.*/MCLOVING_AGENT_ID=__SET_ME_AGENT_ID__/' \
   "${config}/agent.env" > "${placeholder_env}"
@@ -914,12 +921,192 @@ if "${libexec}/helpers/mcloving-env-guard" agent "${placeholder_env}" >/dev/null
   echo "env guard accepted a placeholder with nothing overriding it" >&2
   exit 1
 fi
-MCLOVING_AGENT_ID=smoke-agent \
-  "${libexec}/helpers/mcloving-env-guard" agent "${placeholder_env}" >/dev/null || {
+if MCLOVING_AGENT_ID=smoke-agent \
+  "${libexec}/helpers/mcloving-env-guard" agent "${placeholder_env}" >/dev/null 2>&1; then
+  echo "env guard judged an ambient value as though the service would receive it, outside any unit" >&2
+  exit 1
+fi
+( set -a
+  # shellcheck disable=SC1090
+  . "${placeholder_env}"
+  set +a
+  export MCLOVING_AGENT_ID=smoke-agent
+  INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+    "${libexec}/helpers/mcloving-env-guard" agent "${placeholder_env}" \
+  ) >/dev/null || {
   echo "env guard judged the contract placeholder rather than the value the service receives" >&2
   exit 1
 }
 rm -rf "${ambient_env}" "${placeholder_env}" "${home}/ambient-wide"
+# THE EFFECTIVE ENVIRONMENT IN BOTH DIRECTIONS. Round 32 taught the guard
+# that a variable the environment CARRIES wins over the contract. The other
+# half is that a variable the environment does NOT carry will not reach the
+# service at all -- which is what a drop-in resetting EnvironmentFile=, or
+# replacing it with a file omitting a variable, produces. These gates run the
+# helpers with systemd's own markers reproduced exactly (INVOCATION_ID set and
+# SYSTEMD_EXEC_PID equal to the helper's own pid, via `exec` so the pid
+# survives) rather than through any test-only switch, so what is proven here
+# is what systemd will do.
+effective_env_file="${home}/effective-agent.env"
+cp "${config}/agent.env" "${effective_env_file}"
+chmod 0600 "${effective_env_file}"
+# (1) ExecStartPre mode, one required variable missing from the effective
+# environment: refused by name, and the message must say the variable will
+# not REACH the service rather than that it is unset in the file.
+if ( set -a
+     # shellcheck disable=SC1090
+     . "${effective_env_file}"
+     set +a
+     unset MCLOVING_AGENT_ID
+     INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+       "${libexec}/helpers/mcloving-env-guard" agent "${effective_env_file}" \
+     ) > "${workdir}/logs/guard-effective-missing.log" 2>&1; then
+  echo "env guard reported satisfied for a required variable the service will never receive" >&2
+  exit 1
+fi
+grep -q "required variable MCLOVING_AGENT_ID is declared in ${effective_env_file} but will NOT reach this service" \
+  "${workdir}/logs/guard-effective-missing.log" || {
+  echo "the unreachable required variable was not named:" >&2
+  cat "${workdir}/logs/guard-effective-missing.log" >&2
+  exit 1
+}
+# (2) ExecStartPre mode with the full effective environment: satisfied. This
+# is what every real start looks like, so a rule that refused here would
+# refuse every start.
+( set -a
+  # shellcheck disable=SC1090
+  . "${effective_env_file}"
+  set +a
+  INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+    "${libexec}/helpers/mcloving-env-guard" agent "${effective_env_file}" \
+  ) >/dev/null || {
+  echo "env guard refused a complete effective environment" >&2
+  exit 1
+}
+# (3) BY HAND, nothing composed: the parsed contract stands, unchanged from
+# before round 32. This is how the suite and operators invoke the guard, and
+# it is the acceptance case the strict rule must not break.
+"${libexec}/helpers/mcloving-env-guard" agent "${effective_env_file}" >/dev/null || {
+  echo "env guard refused a hand-run contract that declares everything" >&2
+  exit 1
+}
+# (4) A DESCENDANT of the executed process is not the executed process:
+# INVOCATION_ID is inherited, SYSTEMD_EXEC_PID names someone else, so the
+# strict rule must not engage and the contract must stand. This is the
+# loophole the two-part marker closes.
+( set -a
+  # shellcheck disable=SC1090
+  . "${effective_env_file}"
+  set +a
+  unset MCLOVING_AGENT_ID
+  INVOCATION_ID=mcloving-smoke SYSTEMD_EXEC_PID=1 \
+    "${libexec}/helpers/mcloving-env-guard" agent "${effective_env_file}" \
+  ) >/dev/null || {
+  echo "the strict effective-environment rule engaged for a process systemd did not execute" >&2
+  exit 1
+}
+rm -f "${effective_env_file}"
+# The health helper probes the EFFECTIVE listen address. The shipped
+# controller unit runs it as ExecStartPost, so a drop-in overriding
+# MCLOVING_LISTEN means systemd started the controller somewhere the original
+# contract does not name -- and a helper reparsing only that contract kills a
+# healthy controller as a startup failure.
+health_env="${home}/effective-controller.env"
+reserve_port health_stale_port
+reserve_port health_live_port
+# shellcheck disable=SC2154 # assigned through reserve_port's nameref
+printf 'MCLOVING_LISTEN=127.0.0.1:%s\n' "${health_stale_port}" > "${health_env}"
+chmod 0600 "${health_env}"
+# shellcheck disable=SC2154 # assigned through reserve_port's nameref
+python3 - "${health_live_port}" > "${workdir}/logs/health-effective-server.log" 2>&1 <<'HEALTHSRV' &
+import http.server
+import socketserver
+import sys
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), Handler) as server:
+    server.serve_forever()
+HEALTHSRV
+health_server_pid=$!
+for _ in $(seq 1 40); do
+  curl --silent --fail --max-time 1 --noproxy '*' \
+    "http://127.0.0.1:${health_live_port}/openapi.json" >/dev/null 2>&1 && break
+  sleep 0.25
+done
+health_effective_status=0
+timeout 20 env INVOCATION_ID=mcloving-smoke \
+  MCLOVING_LISTEN="127.0.0.1:${health_live_port}" \
+  bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+  "${libexec}/helpers/mcloving-health" controller "${health_env}" \
+  > "${workdir}/logs/health-effective.log" 2>&1 || health_effective_status=$?
+kill "${health_server_pid}" >/dev/null 2>&1 || true
+wait "${health_server_pid}" 2>/dev/null || true
+if [[ "${health_effective_status}" -ne 0 ]]; then
+  echo "the health helper did not probe the address the unit was actually started on (exit ${health_effective_status}):" >&2
+  cat "${workdir}/logs/health-effective.log" >&2
+  exit 1
+fi
+grep -q "public API answers on 127.0.0.1:${health_live_port}" \
+  "${workdir}/logs/health-effective.log" || {
+  echo "the health helper reported success against the wrong address:" >&2
+  cat "${workdir}/logs/health-effective.log" >&2
+  exit 1
+}
+rm -f "${health_env}"
+# THE CLASS, not the two instances: a helper that runs INSIDE a unit must
+# read the effective contract, never reparse the declared one. Static, so a
+# new in-unit consumer cannot reopen this by copying the old idiom.
+python3 - "${repo_root}" <<'EFFECTIVE'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "deploy"
+# Helpers systemd executes as a unit command, from the shipped unit files.
+in_unit = set()
+for unit in list((root / "systemd").glob("*.service")) + list((root / "podman").glob("*.container")):
+    for line in unit.read_text().splitlines():
+        match = re.match(r"\s*Exec[A-Za-z]*\s*=\s*(.*)", line)
+        if not match:
+            continue
+        for token in match.group(1).split():
+            name = token.rsplit("/", 1)[-1]
+            if name.startswith("mcloving-"):
+                in_unit.add(name)
+            break
+if not in_unit:
+    raise SystemExit("the in-unit helper sweep found nothing; the unit shape changed")
+for name in sorted(in_unit):
+    helper = root / "bin" / name
+    if not helper.exists():
+        continue
+    body = helper.read_text()
+    if "load_environment_file" not in body and "load_effective_contract" not in body:
+        continue
+    if "load_effective_contract" not in body:
+        raise SystemExit(
+            f"{name} runs inside a unit but parses the declared contract with "
+            "load_environment_file; an in-unit consumer must read the effective "
+            "environment through load_effective_contract"
+        )
+    for hit in re.findall(r"^\s*load_environment_file\b.*$", body, re.M):
+        raise SystemExit(
+            f"{name} runs inside a unit and still calls load_environment_file "
+            f"directly ({hit.strip()}); route it through load_effective_contract"
+        )
+EFFECTIVE
 effect_plan="${home}/effect-plan.json"
 printf '{}' > "${effect_plan}"
 chmod 0644 "${effect_plan}"

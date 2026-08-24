@@ -45,7 +45,7 @@ esac
 require_secure_ancestors "${guard_home}" "${env_file}"
 require_secret_files "${EUID}" "${env_file}"
 
-load_environment_file "${env_file}"
+load_effective_contract "${env_file}"
 
 # The EXPECTED-KIND column of the shared classification table, indexed by
 # variable, built once. Every class check below reads its node-kind rule
@@ -183,6 +183,12 @@ require() {
   local name value
   for name in "$@"; do
     contract_into value "${name}"
+    if [[ -n "${MCLOVING_CONTRACT_DROPPED[${name}]:-}" ]]; then
+      # Declared in the file and absent from what the service will get: a
+      # different failure from "you forgot to set it", and it needs its own
+      # sentence or the operator edits the contract and nothing changes.
+      fail "required variable ${name} is declared in ${env_file} but will NOT reach this service: the effective environment systemd composed for this unit does not carry it, which is what a drop-in that resets EnvironmentFile= -- or replaces it with a file omitting the variable -- produces; reconcile the unit EnvironmentFile= declarations with ${env_file} and retry"
+    fi
     if [[ -z "${value}" ]]; then
       fail "required variable ${name} is unset or empty in ${env_file}"
     fi
@@ -283,14 +289,15 @@ if [[ -n "${guard_env_offending}" ]]; then
   fail "classified path variable(s) reach this service from outside its contract file: ${guard_env_offending% }-- the binary opens what the ENVIRONMENT carries, while the deployment's digest inventory pins what the CONTRACT declares, so a value supplied ambiently or by a unit Environment= override is validated once here and then unwatched; declare it in ${env_file} (or remove the override) and retry"
 fi
 
-# With the asymmetry refused, anything still set in the environment agrees
-# with the contract or is a non-path variable the service will actually
-# receive. Either way the environment is what the binary reads, so it is
-# what every check below judges.
-for guard_name in "${!MCLOVING_CONTRACT[@]}"; do
-  [[ -v "${guard_name}" ]] || continue
-  MCLOVING_CONTRACT["${guard_name}"]="${!guard_name}"
-done
+# The overlay itself is load_effective_contract's job now -- one derivation
+# shared with mcloving-health rather than a second copy here -- and it is
+# two-directional: a contract key the effective environment does NOT carry
+# is REMOVED, because the service will not receive it. That is the half this
+# guard was missing: the old `continue` left the value parsed from the
+# original contract in place, so a drop-in that reset EnvironmentFile= or
+# replaced it with a file omitting a required variable still reported
+# satisfied, and the binary then failed after an upgrade had already stopped
+# the services.
 
 # Every enumerated class path must be ABSOLUTE before anything dereferences
 # it -- checked ahead of the per-service branches, so the refusal names the
