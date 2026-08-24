@@ -5125,6 +5125,113 @@ rm -f "${reset_dropin_dir}/reset.conf"
   exit 1
 }
 rm -f "${workdir}/allow-agent.env.orig"
+# CHILD SANITIZATION. The unit cannot be given a clean environment (round
+# 40), but a child THIS LANE spawns can: its environment is ours to build
+# rather than to subtract from. Every interpreter the lane invokes therefore
+# gets `env -i` plus exactly what that invocation needs, which is
+# enumeration-independent -- PYTHONHOME, PYTHONUSERBASE, PYTHONPATH and
+# whatever Python ships next are absent because nothing is inherited, not
+# because each was named.
+poison_root="${workdir}/python-poison"
+poison_py="$(python3 -c 'import sys; print("python%d.%d" % sys.version_info[:2])')"
+rm -rf "${poison_root}"
+mkdir -p "${poison_root}/lib/${poison_py}/encodings" \
+  "${poison_root}/lib/${poison_py}/site-packages"
+printf 'raise SystemExit("poisoned interpreter executed")\n' \
+  > "${poison_root}/lib/${poison_py}/site-packages/usercustomize.py"
+# (1) End to end: a transition must complete with the whole PYTHON* family
+# pointing at an attacker tree. Under the pre-fix library the interpreter
+# dies loading encodings from there before any payload runs.
+PYTHONHOME="${poison_root}" PYTHONUSERBASE="${poison_root}" \
+  PYTHONPATH="${poison_root}" PYTHONSTARTUP="${poison_root}/start.py" \
+  "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/poisoned-upgrade.log" 2>&1 || {
+  echo "a transition could not complete with a poisoned Python environment; its interpreter children are not sanitized:" >&2
+  cat "${workdir}/logs/poisoned-upgrade.log" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the poisoned-environment gate" >&2
+  exit 1
+}
+# (2) What the child actually receives. Nothing inherited, and only the
+# variables the wrapper sets on purpose.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  child_seen="$(
+    PYTHONHOME="${poison_root}" PYTHONUSERBASE="${poison_root}" \
+      PYTHONPATH="${poison_root}" LD_PRELOAD="${poison_root}/x.so" \
+      BASH_ENV="${poison_root}/hook.sh" \
+      deployment_python - <<'CHILDENV'
+import os
+print(" ".join(sorted(
+    name for name in os.environ
+    if name.startswith(("PYTHON", "LD_")) or name in ("BASH_ENV", "ENV")
+)))
+CHILDENV
+  )"
+  [[ "${child_seen}" == "PYTHONUTF8" ]] || {
+    echo "an interpreter child inherited environment it should not have: [${child_seen}]" >&2
+    exit 1
+  }
+  # And the byte-exactness the sanitized locale must preserve: this lane
+  # carries arbitrary bytes in paths, so a child that lost surrogateescape
+  # round-tripping would corrupt them silently.
+  weird_encoded="$(printf '/tmp/we\xffird' | base64 -w0)"
+  weird_back="$(deployment_python - "${weird_encoded}" <<'ROUNDTRIP'
+import base64
+import os
+import sys
+
+path = os.fsdecode(base64.b64decode(sys.argv[1]))
+sys.stdout.write(base64.b64encode(os.fsencode(path)).decode("ascii"))
+ROUNDTRIP
+  )"
+  [[ "${weird_back}" == "${weird_encoded}" ]] || {
+    echo "a sanitized interpreter child lost byte-exact path round-tripping" >&2
+    exit 1
+  }
+)
+rm -rf "${poison_root}"
+# (3) THE CLASS, not the instances: no helper in this lane may invoke an
+# interpreter directly. Every call goes through deployment_python, which is
+# where the environment is built, so a new payload cannot reopen this by
+# copying the old idiom.
+python3 - "${repo_root}" <<'SANITIZED'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "deploy" / "bin"
+offenders = []
+for helper in sorted(root.iterdir()):
+    if not helper.is_file():
+        continue
+    for number, raw in enumerate(helper.read_text().splitlines(), 1):
+        if number == 1 and raw.startswith("#!"):
+            continue  # a shebang is not an invocation this lane makes
+        code = raw.split("#", 1)[0]
+        if (
+            "command -v python3" in code
+            or "MCLOVING_PYTHON_BIN" in code
+            or "MCLOVING_TRUSTED_PATH" in code
+        ):
+            # The wrapper's own resolution, and its refusal message, which
+            # names the interpreter it could not find on the trusted path.
+            continue
+        if re.search(r"(?<![-\w/])python3(?=[ \t])", code):
+            offenders.append(f"{helper.name}:{number}: {raw.strip()}")
+if offenders:
+    raise SystemExit(
+        "helper(s) invoke an interpreter directly instead of through "
+        "deployment_python, which is where the child environment is built:\n  "
+        + "\n  ".join(offenders)
+    )
+SANITIZED
 # INSTALLATION ROOTS come from the running manager where it can say. Writing
 # to the wrong root is the one failure that is silent and total: units land
 # where the manager never searches and daemon-reload finds nothing.

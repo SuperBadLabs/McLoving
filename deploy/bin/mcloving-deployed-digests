@@ -185,7 +185,23 @@ done
 MCLOVING_CONFIGURED_PATHS="${configured_paths%$'\n'}"
 export MCLOVING_CONFIGURED_PATHS
 
-python3 - "${home_dir}" <<'PY'
+# SANITIZED CHILD, with exactly what this payload needs named explicitly.
+# The seven MCLOVING_ variables below are the walker's inputs and are passed
+# on this one invocation rather than inherited; nothing else crosses, so an
+# inherited PYTHONHOME, PYTHONUSERBASE or PYTHONPATH cannot redirect the
+# interpreter that builds the canonical document. They carry no secrets --
+# they are encoded path lists -- so an environment variable is the right
+# channel; the contract values this document records are read from the
+# files by the payload itself, never handed across on a command line.
+deployment_python \
+  MCLOVING_ANCESTOR_DIRS="${MCLOVING_ANCESTOR_DIRS}" \
+  MCLOVING_DEPLOY_LIB="${MCLOVING_DEPLOY_LIB}" \
+  MCLOVING_UNIT_DIRS="${MCLOVING_UNIT_DIRS}" \
+  MCLOVING_UNIT_DROPIN_DIRS="${MCLOVING_UNIT_DROPIN_DIRS}" \
+  MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${MCLOVING_UNIT_SYSTEM_DROPIN_DIRS}" \
+  MCLOVING_SHADOWING_UNITS="${MCLOVING_SHADOWING_UNITS}" \
+  MCLOVING_CONFIGURED_PATHS="${MCLOVING_CONFIGURED_PATHS}" \
+  -- - "${home_dir}" <<'PY'
 import base64
 import hashlib
 import json

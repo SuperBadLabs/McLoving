@@ -19,7 +19,7 @@ After=mcloving-controller.service
 # and one this unit's own EnvironmentFile= declares alike. Validation
 # refuses such a declaration as well; this is the layer that protects the
 # guard itself.
-UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS PYTHONUSERBASE
+UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS PYTHONUSERBASE PYTHONHOME
 Type=exec
 # EnvironmentFile without "-" fails the unit when the contract file is absent.
 EnvironmentFile=%h/.config/mcloving/agent.env

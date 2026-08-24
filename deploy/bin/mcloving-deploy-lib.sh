@@ -54,6 +54,71 @@ MCLOVING_DEPLOY_CONTRACTS=(
   agent.env
 )
 
+# A TRUSTED PATH for resolving the interpreters this lane spawns, and the
+# sanitized invocation that runs them.
+#
+# THE CHILD CASE IS DIFFERENT FROM THE UNIT CASE, and that difference is the
+# whole point. Round 40 established that the UNIT cannot be given a clean
+# environment -- there is no such directive, PassEnvironment= is inapplicable
+# to a user manager, and re-supplying the contract on an ExecStart command
+# line would publish secrets through world-readable /proc/PID/cmdline. All of
+# that is true of a process systemd starts. None of it is true of a process
+# THIS LANE starts: for a child, the environment is ours to build rather than
+# to subtract from, and nothing has to travel on the command line because we
+# can set exactly the variables that one invocation needs.
+#
+# So every interpreter this lane invokes gets `env -i` plus an explicit list.
+# That is enumeration-INDEPENDENT for children: PYTHONHOME, PYTHONUSERBASE,
+# PYTHONPATH, PYTHONSTARTUP and whatever Python ships next are all absent
+# because nothing is inherited, not because each was named. The name-based
+# layers stay for what cannot be sanitized from inside -- the guard's own
+# process and the service binaries -- and PYTHONHOME is on them too.
+#
+# What each variable below is for, since an allowlist that nobody can
+# justify becomes a denylist with extra steps:
+#
+#   PATH         the payloads shell out (the digest walker runs bash to
+#                reach deployment_ancestor_chain), and a child with no PATH
+#                cannot find it. A FIXED trusted value, not the inherited
+#                one -- which also settles which python3 runs, since
+#                resolving the interpreter by name through an inherited
+#                PATH is the same class of defect one level down.
+#   HOME         the bash grandchildren source this library, and its XDG
+#                applicability rule reads HOME under `set -u`.
+#   LC_ALL       pinned so the filesystem encoding cannot follow an
+#                inherited locale.
+#   PYTHONUTF8   the actual guarantee: verified here that fsencoding stays
+#                utf-8 even when LC_ALL names a locale that does not exist,
+#                which is what keeps os.fsencode/fsdecode byte-exact for the
+#                arbitrary-byte paths this lane deliberately supports.
+MCLOVING_TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+MCLOVING_PYTHON_BIN=""
+
+# deployment_python ARG... -- run the trusted python3 with a built
+# environment. Extra variables for one invocation are passed by the caller
+# as NAME=VALUE arguments before a lone `--`.
+deployment_python() {
+  local -a extra=()
+  while [[ $# -gt 0 && "$1" == *=* && "$1" != -* ]]; do
+    extra+=("$1")
+    shift
+  done
+  [[ "${1:-}" != "--" ]] || shift
+  if [[ -z "${MCLOVING_PYTHON_BIN}" ]]; then
+    MCLOVING_PYTHON_BIN="$(PATH="${MCLOVING_TRUSTED_PATH}" command -v python3 2>/dev/null)" \
+      || MCLOVING_PYTHON_BIN=""
+    [[ -n "${MCLOVING_PYTHON_BIN}" ]] \
+      || deploy_fail "python3 was not found on the trusted path ${MCLOVING_TRUSTED_PATH}; this deployment resolves its interpreter there rather than through an inherited PATH, so that an inherited value cannot decide which python runs"
+  fi
+  env -i \
+    PATH="${MCLOVING_TRUSTED_PATH}" \
+    HOME="${HOME:-/nonexistent}" \
+    LC_ALL=C.UTF-8 \
+    PYTHONUTF8=1 \
+    ${extra[@]+"${extra[@]}"} \
+    "${MCLOVING_PYTHON_BIN}" "$@"
+}
+
 deploy_fail() {
   echo "$(basename "$0"): $1" >&2
   exit 1
@@ -397,7 +462,7 @@ lexical_normalized_path_into() {
   # shellcheck disable=SC2178  # nameref assignment
   local -n normalize_target_ref="$1"
   normalize_target_ref="$(
-    python3 -c 'import posixpath, sys; sys.stdout.write(posixpath.normpath(sys.argv[1]))' "$2" \
+    deployment_python -c 'import posixpath, sys; sys.stdout.write(posixpath.normpath(sys.argv[1]))' "$2" \
       && printf x
   )" || deploy_fail "cannot normalize a path spelling"
   normalize_target_ref="${normalize_target_ref%x}"
@@ -1403,6 +1468,7 @@ MCLOVING_EXECUTION_HOOK_VARIABLES=(
   RUBYOPT           # carries -r, which requires a library at start
   NODE_OPTIONS      # carries --require, which loads a module at start
   PYTHONUSERBASE    # python imports usercustomize.py from its site-packages
+  PYTHONHOME        # python loads its whole stdlib, encodings first, from it
 )
 
 # THE VARIABLES A CONTRACT OR UNIT MAY LEGITIMATELY DECLARE, as a
@@ -1697,7 +1763,7 @@ deployment_unit_declared_contracts() {
 # performs. Being NARROWER would be the dangerous direction: a match
 # systemd loads that this never validates.
 deployment_glob_matches() {
-  python3 - "$1" <<'GLOB'
+  deployment_python - "$1" <<'GLOB'
 import base64
 import glob
 import os
@@ -1790,7 +1856,7 @@ GLOB
 # character. Round 29's loud refusals still govern the EXECUTABLE token,
 # which is unchanged.
 deployment_exec_argument_paths() {
-  python3 - "$1" "$2" <<'ARGPATHS'
+  deployment_python - "$1" "$2" <<'ARGPATHS'
 import base64
 import os
 import sys
@@ -2003,7 +2069,7 @@ deployment_unit_declared_roots() {
 # link on the way to a root is refused by name rather than resolved around,
 # with resolution bounded like the kernel bounds ELOOP.
 deployment_ancestor_chain() {
-  python3 - "$@" <<'CHAIN'
+  deployment_python - "$@" <<'CHAIN'
 import base64
 import os
 import sys
@@ -2136,7 +2202,7 @@ verify_release_dir() {
     [[ -f "${release_dir}/${binary}" ]] || deploy_fail "release directory is missing ${binary}"
   done
   if [[ -n "${manifest}" ]]; then
-    python3 - "${manifest}" "${release_dir}" "${MCLOVING_DEPLOY_BINARIES[@]}" <<'PY'
+    deployment_python - "${manifest}" "${release_dir}" "${MCLOVING_DEPLOY_BINARIES[@]}" <<'PY'
 import hashlib
 import json
 import os
@@ -2208,7 +2274,7 @@ PY
     # and that same selection is what sha256sum verifies, with
     # --ignore-missing gone: every line handed over must check.
     local checksum_snapshot required_lines entry_lines
-    checksum_snapshot="$(python3 - "${checksums}" <<'SNAPSHOT'
+    checksum_snapshot="$(deployment_python - "${checksums}" <<'SNAPSHOT'
 import os
 import stat
 import sys
@@ -2256,7 +2322,7 @@ SNAPSHOT
 # writer-less FIFO returns instead of hanging, then fstat, then the copy from
 # that same descriptor.
 copy_regular_file() {
-  python3 - "$1" "$2" "$3" <<'COPY'
+  deployment_python - "$1" "$2" "$3" <<'COPY'
 import os
 import stat
 import sys
@@ -2302,7 +2368,7 @@ COPY
 # a source directory the caller does not control the timing of, so the
 # classification has to be part of the read rather than a check before it.
 release_id() {
-  python3 - "$1" "${MCLOVING_DEPLOY_BINARIES[@]}" <<'ID'
+  deployment_python - "$1" "${MCLOVING_DEPLOY_BINARIES[@]}" <<'ID'
 import hashlib
 import os
 import stat
@@ -2352,7 +2418,7 @@ release_dir_is_complete() {
 # Emits NUL-separated name/value pairs so no value can be mistaken for a
 # delimiter.
 parse_environment_file() {
-  python3 - "$1" <<'PARSE'
+  deployment_python - "$1" <<'PARSE'
 import sys
 
 # systemd's EnvironmentFile= grammar, not Bash's. A value is a concatenation of
@@ -2510,7 +2576,7 @@ PARSE
 # Compares roles rather than URL text, so two spellings of one role do not read
 # as two roles.
 database_url_role() {
-  python3 - "$1" <<'ROLE'
+  deployment_python - "$1" <<'ROLE'
 import sys
 from urllib.parse import unquote, urlsplit
 
@@ -2525,7 +2591,7 @@ ROLE
 
 # database_url_database URL -> the database name, or empty.
 database_url_database() {
-  python3 - "$1" <<'DBNAME'
+  deployment_python - "$1" <<'DBNAME'
 import sys
 from urllib.parse import unquote, urlsplit
 
@@ -2540,7 +2606,7 @@ DBNAME
 
 # database_url_host URL -> the host, or empty.
 database_url_host() {
-  python3 - "$1" <<'DBHOST'
+  deployment_python - "$1" <<'DBHOST'
 import sys
 from urllib.parse import urlsplit
 
@@ -2555,7 +2621,7 @@ DBHOST
 
 # database_url_is_loopback URL -> success when the host is a loopback address.
 database_url_is_loopback() {
-  python3 - "$1" <<'LOOPBACK'
+  deployment_python - "$1" <<'LOOPBACK'
 import ipaddress
 import sys
 from urllib.parse import urlsplit
@@ -2575,7 +2641,7 @@ LOOPBACK
 # The identity of the server and database a URL addresses, with the role and
 # credentials left out, so two URLs meant to reach one instance can be compared.
 database_url_endpoint() {
-  python3 - "$1" <<'ENDPOINT'
+  deployment_python - "$1" <<'ENDPOINT'
 import sys
 from urllib.parse import unquote, urlsplit
 
