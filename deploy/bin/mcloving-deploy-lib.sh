@@ -55,8 +55,7 @@ require_secure_ancestors() {
   local encoded_ancestor
   while IFS= read -r encoded_ancestor; do
     [[ -n "${encoded_ancestor}" ]] || continue
-    ancestor="$(base64 -d <<<"${encoded_ancestor}")" \
-      || deploy_fail "cannot decode a deployment ancestor chain item"
+    decode_path_item_into ancestor "${encoded_ancestor}"
     # -d and stat -L follow a symlinked ancestor deliberately: the directory
     # the services traverse is the target, and a writable target permits the
     # same rename regardless of how it is reached. The target's own parents
@@ -259,12 +258,26 @@ deployment_xdg_value_applies() {
 # NUL, and over ad-hoc escaping because the base64 alphabet contains
 # neither newline nor NUL, so an item carrying either -- a quoted multiline
 # contract value is legal to the parser and to systemd -- CANNOT regress to
-# splitting: whatever the bytes, one item is one line. Decoding through
-# command substitution strips one trailing newline; a directory NAME ending
-# in a newline is therefore out of scope, stated.
+# splitting: whatever the bytes, one item is one line. Decoding goes through
+# decode_path_item_into, whose sentinel survives command substitution, so a
+# trailing newline in a component round-trips too.
 encode_path_item() {
   printf '%s' "$1" | base64 -w0
   printf '\n'
+}
+
+# decode_path_item_into VARIABLE ENCODED -- the only sanctioned decoder.
+#
+# A bare $(base64 -d ...) strips the decoded value's trailing newline, so a
+# directory NAME ending in one would be examined under a truncated pathname
+# and its mode never judged. The sentinel byte survives the substitution
+# and is stripped afterwards, so the decoded bytes are exact.
+decode_path_item_into() {
+  # shellcheck disable=SC2178  # nameref assignment
+  local -n decode_target_ref="$1"
+  decode_target_ref="$(base64 -d <<<"$2" && printf x)" \
+    || deploy_fail "cannot decode a path transport item"
+  decode_target_ref="${decode_target_ref%x}"
 }
 
 deployment_config_root() {
@@ -309,9 +322,23 @@ deployment_cache_root() {
 # resolve under the home after %h expansion; named quadlet volumes do not.
 deployment_unit_declared_roots() {
   local home_dir="${1%/}" line key value entry path state_base cache_base
+  local unit_file dropin source_files=()
   shift
   state_base="$(deployment_state_root "${home_dir}")"
   cache_base="$(deployment_cache_root "${home_dir}")"
+  # systemd and Quadlet merge <unit>.d/*.conf drop-ins into the unit, so a
+  # drop-in adding EnvironmentFile= declares a path the transition is about
+  # to trust -- the round-12 lesson (drop-in descendants count) applied to
+  # this parser. Validation is additive, so the union of path-bearing
+  # directives across unit and drop-ins suffices; no precedence resolution.
+  for unit_file in "$@"; do
+    [[ -f "${unit_file}" ]] || continue
+    source_files+=("${unit_file}")
+    for dropin in "${unit_file}.d"/*.conf; do
+      [[ -f "${dropin}" ]] && source_files+=("${dropin}")
+    done
+  done
+  [[ ${#source_files[@]} -gt 0 ]] || return 0
   while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
@@ -352,7 +379,7 @@ deployment_unit_declared_roots() {
         esac
         ;;
     esac
-  done < <(grep -hE '^(StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|EnvironmentFile|Volume)=' "$@" | sed -e 's/[[:space:]]*$//')
+  done < <(grep -hE '^(StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|EnvironmentFile|Volume)=' "${source_files[@]}" | sed -e 's/[[:space:]]*$//')
 }
 
 # deployment_ancestor_chain HOME ROOT... -> every security-relevant ancestor
@@ -1194,9 +1221,11 @@ require_deployment_integrity() {
   done
   local unit_declared_roots=() encoded_root
   if [[ ${#unit_files[@]} -gt 0 ]]; then
+    local decoded_declared_root
     while IFS= read -r encoded_root; do
       [[ -n "${encoded_root}" ]] || continue
-      unit_declared_roots+=("$(base64 -d <<<"${encoded_root}")")
+      decode_path_item_into decoded_declared_root "${encoded_root}"
+      unit_declared_roots+=("${decoded_declared_root}")
     done < <(deployment_unit_declared_roots "${home_dir}" "${unit_files[@]}" | sort -u)
   fi
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \

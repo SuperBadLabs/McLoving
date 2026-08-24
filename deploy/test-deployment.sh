@@ -492,6 +492,51 @@ chmod 0600 "${config}/agent.env"
   exit 1
 }
 
+# A directory NAME ending in a newline must still be judged: a bare
+# command-substitution decode truncated the pathname, and a 0777 directory
+# named "evil\n" holding an owner-only key was examined under the wrong
+# name and accepted. The sentinel decoder round-trips the exact bytes.
+trailnl_dir="${home}/evil-trail
+"
+trailnl_inner="${trailnl_dir}/inner"
+mkdir -p "${trailnl_inner}"
+chmod 0777 "${trailnl_dir}"
+chmod 0700 "${trailnl_inner}"
+cp "${pki}/ca.pem" "${trailnl_inner}/ca.pem"
+chmod 0644 "${trailnl_inner}/ca.pem"
+trailnl_env="${home}/trailnl.env"
+python3 - "${config}/agent.env" "${trailnl_env}" "${trailnl_inner}/ca.pem" <<'TRAILNL'
+import sys
+from pathlib import Path
+
+source, target, ca = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = []
+for line in Path(source).read_text().splitlines():
+    if line.startswith("MCLOVING_CONTROLLER_CA_PATH="):
+        lines.append("MCLOVING_CONTROLLER_CA_PATH='" + ca + "'")
+    else:
+        lines.append(line)
+Path(target).write_text("\n".join(lines) + "\n")
+TRAILNL
+chmod 0600 "${trailnl_env}"
+if "${libexec}/helpers/mcloving-env-guard" agent "${trailnl_env}" \
+  > "${workdir}/logs/guard-trailnl.log" 2>&1; then
+  echo "env guard accepted a CA beneath a 0777 trailing-newline directory" >&2
+  exit 1
+fi
+grep -q "(mode 777)" "${workdir}/logs/guard-trailnl.log" || {
+  echo "the trailing-newline ancestor refusal did not carry the mode:" >&2
+  cat "${workdir}/logs/guard-trailnl.log" >&2
+  exit 1
+}
+chmod 0755 "${trailnl_dir}"
+"${libexec}/helpers/mcloving-env-guard" agent "${trailnl_env}" >/dev/null || {
+  echo "env guard refused the secured trailing-newline ancestor" >&2
+  exit 1
+}
+rm -f "${trailnl_env}"
+rm -rf "${trailnl_dir}"
+
 # Optional variables inherit their class the moment they are set: a
 # relative session receipt refused as ambient (state class), a
 # group-readable effect plan refused as secret-class (the controller
@@ -2241,6 +2286,47 @@ rm -rf "${lock_home}"
 # before anything mutates and before rollback stops any service.
 transguard_home="${workdir}/transguard-home"
 rm -rf "${transguard_home}"
+
+# A drop-in merges into its unit, so a drop-in-declared EnvironmentFile is
+# a path the transition trusts: its chain joins the validated set through
+# the same parser, and a writable parent refuses the transition by name.
+dropin_root_home="${workdir}/dropin-root-home"
+rm -rf "${dropin_root_home}"
+mkdir -p "${dropin_root_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${dropin_root_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+dropin_root_libexec="${dropin_root_home}/.local/libexec/mcloving"
+dropin_root_current="$(readlink "${dropin_root_libexec}/current")"
+mkdir -p "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d"
+printf '[Service]\nEnvironmentFile=%%h/dropin-shared/controller-extra.env\n' \
+  > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/override.conf"
+mkdir -p "${dropin_root_home}/dropin-shared"
+chmod 0777 "${dropin_root_home}/dropin-shared"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/dropin-root.log" 2>&1; then
+  echo "upgrade proceeded over a writable drop-in-declared environment root" >&2
+  exit 1
+fi
+grep -q "dropin-shared (mode 777)" "${workdir}/logs/dropin-root.log" || {
+  echo "the drop-in-declared root refusal did not name the parent:" >&2
+  cat "${workdir}/logs/dropin-root.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused drop-in-root upgrade still moved the current release" >&2
+  exit 1
+}
+chmod 0755 "${dropin_root_home}/dropin-shared"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured drop-in root did not admit the transition" >&2
+  exit 1
+}
+rm -rf "${dropin_root_home}"
 mkdir -p "${transguard_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${transguard_home}" \
   --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
@@ -2858,8 +2944,9 @@ xdg_state_roots="$(
     "${xdg_home}" "${repo_root}"/deploy/systemd/*.service \
     | while IFS= read -r encoded_root; do
         [[ -n "${encoded_root}" ]] || continue
-        base64 -d <<<"${encoded_root}"
-        echo
+        decode_path_item_into decoded_root "${encoded_root}"
+        # shellcheck disable=SC2154  # decoded_root is set via the nameref above
+        printf '%s\n' "${decoded_root}"
       done
 )"
 grep -q "^${xdg_home}/custom-state/mcloving-agent/workspace$" <<<"${xdg_state_roots}" || {
@@ -3299,31 +3386,82 @@ rm -rf "${staging_home}"
 # Publication must fail loudly. Both callers run stage_release inside command
 # substitution, where bash clears errexit, so a failed mv would otherwise fall
 # through and report a staged release that is not there -- after the upgrade
-# has already stopped the services.
-blocked_release="${workdir}/blocked-release"
-rm -rf "${blocked_release}"
-cp -r "${release_dir}" "${blocked_release}"
+# has already stopped the services. Driven through the upgrade path: an
+# install into a releases-populated home without a current link is now the
+# established-deployment refusal, a different gate.
 blocked_home="${workdir}/blocked-home"
 rm -rf "${blocked_home}"
-mkdir -p "${blocked_home}/.local/libexec/mcloving/releases"
+mkdir -p "${blocked_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${blocked_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+blocked_libexec="${blocked_home}/.local/libexec/mcloving"
+blocked_current="$(readlink "${blocked_libexec}/current")"
 blocked_id="$(
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
-  release_id "${blocked_release}"
+  release_id "${release2_dir}"
 )"
 # A regular file sitting where the release directory must go.
-printf 'not a directory\n' > "${blocked_home}/.local/libexec/mcloving/releases/${blocked_id}"
-if "${repo_root}/deploy/bin/mcloving-install" --home "${blocked_home}" \
-  --release-dir "${blocked_release}" --checksums "${workdir}/checksums.sha256" \
+printf 'not a directory\n' > "${blocked_libexec}/releases/${blocked_id}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${blocked_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null 2>&1; then
-  echo "install reported success when the release could not be published" >&2
+  echo "upgrade reported success when the release could not be published" >&2
   exit 1
 fi
-if [[ -e "${blocked_home}/.local/libexec/mcloving/current" ]]; then
-  echo "a failed publication still produced a current release" >&2
+[[ "$(readlink "${blocked_libexec}/current")" == "${blocked_current}" ]] || {
+  echo "a failed publication still moved the current release" >&2
+  exit 1
+}
+if compgen -G "${blocked_libexec}/releases/.staging.*" >/dev/null; then
+  echo "a failed publication left staging behind" >&2
   exit 1
 fi
-rm -rf "${blocked_home}" "${blocked_release}"
+rm -rf "${blocked_home}"
+
+# An established deployment that lost its current link is refused by name,
+# never re-initialized as fresh -- and restoring the link by hand readmits
+# the normal paths, which is the only sanctioned repair.
+lostlink_home="${workdir}/lostlink-home"
+rm -rf "${lostlink_home}"
+mkdir -p "${lostlink_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${lostlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd >/dev/null
+lostlink_libexec="${lostlink_home}/.local/libexec/mcloving"
+lostlink_target="$(readlink "${lostlink_libexec}/current")"
+rm -f "${lostlink_libexec}/current"
+if "${repo_root}/deploy/bin/mcloving-install" --home "${lostlink_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/lostlink.log" 2>&1; then
+  echo "install re-initialized an established deployment missing its current link" >&2
+  exit 1
+fi
+grep -q "established (releases are present) but the current link is missing" \
+  "${workdir}/logs/lostlink.log" || {
+  echo "the lost-link refusal was not named:" >&2
+  cat "${workdir}/logs/lostlink.log" >&2
+  exit 1
+}
+grep -q "No sanctioned automated repair exists" "${workdir}/logs/lostlink.log" || {
+  echo "the lost-link refusal did not state the repair posture:" >&2
+  cat "${workdir}/logs/lostlink.log" >&2
+  exit 1
+}
+[[ -d "${lostlink_libexec}/releases/$(basename "${lostlink_target}")" ]] || {
+  echo "the lost-link refusal disturbed the retained releases" >&2
+  exit 1
+}
+ln -s "${lostlink_target}" "${lostlink_libexec}/current"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${lostlink_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${lostlink_libexec}/current")" != "${lostlink_target}" ]] || {
+  echo "the restored link did not readmit the upgrade path" >&2
+  exit 1
+}
+rm -rf "${lostlink_home}"
 
 # systemd accepts a quoted multiline value that ends in a newline and passes it
 # to the service intact. A guard reading contracts through command substitution

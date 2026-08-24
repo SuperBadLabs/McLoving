@@ -124,7 +124,8 @@ contract_destinations=(
 unit_declared_roots=()
 while IFS= read -r encoded_declared_root; do
   [[ -n "${encoded_declared_root}" ]] || continue
-  unit_declared_roots+=("$(base64 -d <<<"${encoded_declared_root}")")
+  decode_path_item_into decoded_declared_root "${encoded_declared_root}"
+  unit_declared_roots+=("${decoded_declared_root}")
 done < <(deployment_unit_declared_roots "${home_dir}" \
   "${deploy_root}"/systemd/*.service \
   "${deploy_root}"/podman/*.container \
@@ -155,6 +156,18 @@ chmod go-w "${unit_root}" "${quadlet_root}"
 # snapshot below, staging, the symlink writes -- happens under the
 # deployment-wide transition lock, alongside upgrade and rollback.
 acquire_transition_lock "${libexec_root}"
+
+# An established deployment that has lost its current link is NOT a fresh
+# install: releases on disk mean services may be running on them, and
+# staging a release plus planting a new current here would skip every stop,
+# restart, and health gate the transition paths exist for -- running
+# processes on old binaries while the canonical document reports the new
+# release active. No sanctioned automated repair exists for this state:
+# upgrade and rollback both require the link. It is refused by name.
+if [[ ! -L "${libexec_root}/current" ]] \
+  && compgen -G "${libexec_root}/releases/*" >/dev/null; then
+  deploy_fail "deployment at ${libexec_root} is established (releases are present) but the current link is missing; refusing to reinstall over it as if fresh. No sanctioned automated repair exists: restore current to a verified releases/<id> by hand (mcloving-deployed-digests identifies the candidates), then use mcloving-upgrade or mcloving-rollback"
+fi
 
 # Decided before staging, not after. Repointing current here would leave
 # running services executing the old binaries while the digest re-read reports
