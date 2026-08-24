@@ -2306,17 +2306,21 @@ async fn reconciliation_uses_inventory_observation_for_the_create_peer_window() 
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation() {
-    // The reconcile arm below sleeps out the create peer window — the
-    // provider timeout plus one second — and must then observe the row while
-    // it is still pending, so the startup budget is derived from the peer
-    // window it has to outlive, with margin for the reconcile itself. The
+    // The reconcile arm below sleeps out the create peer window and must then
+    // observe the row while it is still pending, so the startup budget is the
+    // peer window it has to outlive plus margin for the reconcile itself. The
     // provision arm's `StartupTimeoutCleaned` outcome only needs the deadline
     // to fire eventually.
+    let provider_timeout_ms = PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS;
+    // The provisioner grants an in-flight create peer the provider timeout
+    // plus one second before an absence may be acted on.
+    let create_peer_window_ms = provider_timeout_ms + 1_000;
+    let reconcile_margin_ms = 4_000;
     let context = Context::with_limits(
         FixtureMode::DelayedPendingRefreshAfterInitialSnapshot,
         4,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS + 5_000,
+        provider_timeout_ms,
+        create_peer_window_ms + reconcile_margin_ms,
     )
     .await;
     let request = context.request();
