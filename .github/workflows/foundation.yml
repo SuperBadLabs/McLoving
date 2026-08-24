@@ -381,3 +381,50 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run isolated logical backup and restore drill
         run: bash scripts/test-backup-restore.sh docker
+
+  # DEPLOY-001's acceptance is that a scripted install on a clean host brings
+  # the spine up and its upgrade and rollback paths hold. Nothing ran that
+  # script here, so every fail-closed gate in it -- tampered releases,
+  # placeholder contracts, the environment-file grammar, digest drift, the
+  # recovery command -- was asserted and never executed.
+  deployment:
+    name: Deployment lane
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
+      - name: Run the deployment smoke test
+        # The smoke test preserves its working directory on failure, but a
+        # runner's /tmp does not survive the job. A fixed TMPDIR gives the
+        # preserved tree a path the artifact upload below can name.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/mcloving-smoke"
+          TMPDIR="${RUNNER_TEMP}/mcloving-smoke" bash deploy/test-deployment.sh
+      - name: Upload the preserved smoke-test working directory
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-smoke-workdir
+          # The deployed trees are hidden directories under the preserved
+          # home, and the four debug binaries are copied into every release
+          # directory the test stages -- gigabytes that carry no diagnostic
+          # value, excluded by name.
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/mcloving-smoke/
+            !${{ runner.temp }}/mcloving-smoke/**/mcloving-controller
+            !${{ runner.temp }}/mcloving-smoke/**/mcloving-agent
+            !${{ runner.temp }}/mcloving-smoke/**/mcloving-cli
+            !${{ runner.temp }}/mcloving-smoke/**/mcloving-identity-admin
+          if-no-files-found: warn
+          retention-days: 7

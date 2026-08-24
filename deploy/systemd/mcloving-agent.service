@@ -1,0 +1,51 @@
+# McLoving Linux agent: outbound-only mTLS worker.
+#
+# Install to ~/.config/systemd/user/ for the mcloving service user.
+
+[Unit]
+Description=McLoving agent (outbound-only mTLS worker)
+# Ordering only: the agent is outbound-only and reconnects on its own, so a
+# controller restart must not tear the agent down.
+Wants=mcloving-controller.service
+After=mcloving-controller.service
+
+[Service]
+# EXECUTION HOOKS ARE STRIPPED BEFORE ANY OF THIS UNIT'S PROCESSES START.
+# bash sources BASH_ENV before the first line of a script, and the dynamic
+# loader runs an LD_PRELOAD constructor before main(), so the pre-start
+# guard cannot defend itself from inside itself -- by the time its code
+# runs, the hook has already executed. systemd applies UnsetEnvironment= to
+# the composed environment before exec, which beats a manager-level value
+# and one this unit's own EnvironmentFile= declares alike. Validation
+# refuses such a declaration as well; this is the layer that protects the
+# guard itself.
+UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS PYTHONUSERBASE PYTHONHOME
+Type=exec
+# EnvironmentFile without "-" fails the unit when the contract file is absent.
+EnvironmentFile=%h/.config/mcloving/agent.env
+# Fail fast on unset or placeholder variables before the binary starts.
+ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard agent %h/.config/mcloving/agent.env
+# `probe` opens one authenticated session, replays any durable finalization,
+# and exits. It proves the mTLS identity, controller reachability, and journal
+# health before the long-running service starts. It must run while the
+# foreground service is NOT running: both take the journal instance lock.
+ExecStartPre=%h/.local/libexec/mcloving/current/mcloving-agent probe
+ExecStart=%h/.local/libexec/mcloving/current/mcloving-agent foreground
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=120
+# Named state directories: %h/.local/state/mcloving-agent holds the agent
+# journal, and the nested workspace directory must exist before the agent
+# accepts work (the spawn path refuses a missing workspace root).
+StateDirectory=mcloving-agent mcloving-agent/workspace
+# The agent journal, checked-out source, build outputs, and spool files
+# all live here. StateDirectory would otherwise be 0755 and the files
+# created inside would follow the ambient umask, so on a multi-user host
+# another local user could read private repository contents and
+# execution records.
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

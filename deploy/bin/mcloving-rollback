@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Roll the deployed McLoving binaries back to the previous release set.
+#
+# usage: mcloving-rollback [--home DIR] [--no-systemd]
+#
+# Swaps the current/previous symlinks (the previous release's binaries were
+# digest-verified when they were installed and remain on disk unmodified),
+# restarts services in dependency order, and requires the same health gates
+# as an upgrade.
+set -euo pipefail
+
+# Locate the shared library beside this script when installed as a helper, and
+# under bin/ when run from the repository. The installer places helpers and the
+# library together, so a repository-only assumption makes the installed
+# recovery command exit before it touches anything.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${script_dir}/mcloving-deploy-lib.sh" ]]; then
+  deploy_lib="${script_dir}/mcloving-deploy-lib.sh"
+else
+  deploy_lib="$(cd "${script_dir}/.." && pwd)/bin/mcloving-deploy-lib.sh"
+fi
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "${deploy_lib}"
+
+
+home_dir="${HOME}"
+no_systemd="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --home) home_dir="${2:?}"; shift 2 ;;
+    --no-systemd) no_systemd="1"; shift ;;
+    *) deploy_fail "unknown argument: $1" ;;
+  esac
+done
+
+# Anchored to the invoking directory once, up front. A relative --home
+# would otherwise reach path comparisons and the ancestor walk, where
+# component resolution anchored at "/" would inspect a tree that does not
+# exist and validate none of the real deployment's links. Absolutization
+# only -- symlink resolution stays the walk's job.
+case "${home_dir}" in /*) ;; *) home_dir="${PWD%/}/${home_dir}" ;; esac
+
+# systemd units resolve %h to the service account's real home and the manager
+# acted on below is this user's, so operating on a different tree while
+# expecting systemd to follow would stop and start units that point elsewhere.
+require_systemd_home "${home_dir}" "${no_systemd}"
+
+libexec_root="${home_dir}/.local/libexec/mcloving"
+config_root="${home_dir}/.config/mcloving"
+[[ -L "${libexec_root}/current" ]] || deploy_fail "no installed release; nothing to roll back"
+[[ -L "${libexec_root}/previous" ]] || deploy_fail "no previous release recorded; cannot roll back"
+
+# Validated, not merely read: rollback is about to make the previous
+# target current, and a target outside releases/<id> -- or a release entry
+# that is itself a symlink -- would route the services through a chain no
+# walk ever validated.
+acquire_transition_lock "${libexec_root}"
+# Revalidated before the services stop: a rollback that halts the fleet
+# and only then discovers a writable ancestor has already caused the
+# outage it exists to prevent.
+require_deployment_integrity "${home_dir}"
+# Before anything is stopped: what MUST be here, not merely what is.
+require_deployment_assets_present "${home_dir}"
+current_target="$(require_release_link_target "${libexec_root}" current)"
+previous_target="$(require_release_link_target "${libexec_root}" previous)"
+[[ "${current_target}" != "${previous_target}" ]] \
+  || deploy_fail "current and previous point at the same release"
+for binary in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+  [[ -x "${libexec_root}/${previous_target}/${binary}" ]] \
+    || deploy_fail "previous release is missing ${binary}; refusing to roll back"
+done
+# Present and executable is not the same as unmodified. Rollback claims to
+# restore the release that was verified at installation, so it recomputes the
+# digests rather than trusting the directory it is about to make current.
+verify_staged_release "${libexec_root}/${previous_target}"
+
+echo "rolling back ${current_target} -> ${previous_target}"
+service_control "${no_systemd}" stop mcloving-agent.service
+service_control "${no_systemd}" stop mcloving-controller.service
+
+point_symlink "${libexec_root}/current" "${previous_target}"
+point_symlink "${libexec_root}/previous" "${current_target}"
+echo "current release: ${previous_target} (previous: ${current_target})"
+
+if [[ "${no_systemd}" == "1" ]]; then
+  echo "binaries swapped; service restart and health checks skipped (--no-systemd)"
+  exit 0
+fi
+
+service_control "${no_systemd}" start mcloving-controller.service
+# A transition is not the unit, so its own environment says nothing about
+# what the services received. Under systemd the manager is asked instead
+# (mcloving-health --unit, which refuses rather than guessing when the
+# manager cannot answer); under --no-systemd there is no unit and no manager
+# by construction, so the contract stands and the probe is best-effort.
+health_controller_args=(controller "${config_root}/controller.env")
+health_agent_args=(agent "${config_root}/agent.env")
+if [[ "${no_systemd}" != "1" ]]; then
+  health_controller_args+=(--unit mcloving-controller.service)
+  health_agent_args+=(--unit mcloving-agent.service)
+fi
+"${libexec_root}/helpers/mcloving-health" "${health_controller_args[@]}"
+require_service_stable "${no_systemd}" mcloving-controller.service
+service_control "${no_systemd}" start mcloving-agent.service
+"${libexec_root}/helpers/mcloving-health" "${health_agent_args[@]}"
+# The agent's gate reads its journal; only this observes the process. A
+# rollback that lands on a release the host cannot run would otherwise report
+# itself healthy, which is the one report an operator must be able to trust.
+require_service_stable "${no_systemd}" mcloving-agent.service
+echo "rollback to ${previous_target} complete and healthy"

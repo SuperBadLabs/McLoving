@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# One-shot database bootstrap for the McLoving deployment lane.
+#
+# Order of operations (each step fail-closed and idempotent):
+#   1. wait until PostgreSQL answers pg_isready inside the pinned container
+#   2. apply schema migrations with the migration role
+#      (mcloving-identity-admin migrate)
+#   3. enable LOGIN with a password on the constrained mcloving_tenant role
+#      created NOLOGIN by migration 0002, preserving every other restriction
+#   4. ensure the configured organization/project pair exists, slugs included
+#
+# Step 4's preconditions are checked BEFORE step 3 runs: a bootstrap that is
+# going to refuse must refuse without having rotated live credentials.
+#
+# Environment contract: deploy/env/db-init.env.example (validated by
+# mcloving-env-guard before this script runs, and re-checked here).
+set -euo pipefail
+
+: "${MCLOVING_MIGRATION_DATABASE_URL:?MCLOVING_MIGRATION_DATABASE_URL is required}"
+: "${MCLOVING_TENANT_PASSWORD:?MCLOVING_TENANT_PASSWORD is required}"
+: "${MCLOVING_ORGANIZATION_ID:?MCLOVING_ORGANIZATION_ID is required}"
+: "${MCLOVING_ORGANIZATION_SLUG:?MCLOVING_ORGANIZATION_SLUG is required}"
+: "${MCLOVING_PROJECT_ID:?MCLOVING_PROJECT_ID is required}"
+: "${MCLOVING_PROJECT_SLUG:?MCLOVING_PROJECT_SLUG is required}"
+: "${MCLOVING_POSTGRES_CONTAINER:?MCLOVING_POSTGRES_CONTAINER is required}"
+: "${MCLOVING_POSTGRES_SUPERUSER:?MCLOVING_POSTGRES_SUPERUSER is required}"
+: "${MCLOVING_POSTGRES_DB:?MCLOVING_POSTGRES_DB is required}"
+
+for id in "${MCLOVING_ORGANIZATION_ID}" "${MCLOVING_PROJECT_ID}"; do
+  if [[ ! "${id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "mcloving-db-init: ${id} is not a UUID" >&2
+    exit 1
+  fi
+done
+# Normalized ONCE, at the source. Every comparison below is textual against
+# PostgreSQL's canonical lowercase uuid rendering, so a valid uppercase UUID
+# in the contract would provision fine and then be refused on the next
+# bootstrap as belonging to a different identity -- blocking the controller
+# unit behind a spelling. Rust's uuid parser accepts either case, so the
+# lowercased form reaches identity-admin unchanged in meaning.
+MCLOVING_ORGANIZATION_ID="${MCLOVING_ORGANIZATION_ID,,}"
+MCLOVING_PROJECT_ID="${MCLOVING_PROJECT_ID,,}"
+
+libexec_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+identity_admin="${libexec_root}/current/mcloving-identity-admin"
+if [[ ! -x "${identity_admin}" ]]; then
+  echo "mcloving-db-init: ${identity_admin} is missing; run mcloving-install first" >&2
+  exit 1
+fi
+
+psql_in_container() {
+  podman exec --interactive "${MCLOVING_POSTGRES_CONTAINER}" \
+    psql --username "${MCLOVING_POSTGRES_SUPERUSER}" \
+    --dbname "${MCLOVING_POSTGRES_DB}" \
+    --set ON_ERROR_STOP=1 --no-psqlrc --quiet "$@"
+}
+
+ready() {
+  podman exec "${MCLOVING_POSTGRES_CONTAINER}" pg_isready \
+    --username "${MCLOVING_POSTGRES_SUPERUSER}" \
+    --dbname "${MCLOVING_POSTGRES_DB}" >/dev/null 2>&1
+}
+
+echo "mcloving-db-init: waiting for PostgreSQL in ${MCLOVING_POSTGRES_CONTAINER}"
+for _ in $(seq 1 120); do
+  if ready; then
+    sleep 0.5
+    if ready; then
+      break
+    fi
+  fi
+  sleep 0.5
+done
+if ! ready; then
+  echo "mcloving-db-init: PostgreSQL did not become ready within bound" >&2
+  exit 1
+fi
+
+# Before migrating, not after. The URL and the container are two routes to
+# PostgreSQL, and a post-migration schema check cannot tell "the URL reached
+# this container" from "this container was already initialized" -- by then the
+# other server has been migrated regardless. The container's published host
+# endpoint is the one fact that settles it in advance, and this script already
+# talks to podman.
+#
+# The COMPLETE host-and-port endpoint is compared, not the port alone: a URL
+# addressing another loopback address at the same port -- 127.0.0.2:5432
+# beside a Quadlet publishing 127.0.0.1:5432 -- is a different PostgreSQL
+# server that a port comparison would wave through. The published address must
+# therefore appear in the URL verbatim; a URL spelled "localhost" is refused
+# rather than resolved, because what it reaches depends on the resolver, not
+# on what this container publishes.
+published_endpoints="$(podman port "${MCLOVING_POSTGRES_CONTAINER}" 5432/tcp)"
+if [[ -z "${published_endpoints}" ]]; then
+  echo "mcloving-db-init: ${MCLOVING_POSTGRES_CONTAINER} publishes no host endpoint for 5432/tcp; cannot confirm MCLOVING_MIGRATION_DATABASE_URL reaches it" >&2
+  exit 1
+fi
+url_endpoint="$(database_url_endpoint "${MCLOVING_MIGRATION_DATABASE_URL}")"
+if [[ -z "${url_endpoint}" ]]; then
+  echo "mcloving-db-init: MCLOVING_MIGRATION_DATABASE_URL names no host and database; cannot confirm it reaches ${MCLOVING_POSTGRES_CONTAINER}" >&2
+  exit 1
+fi
+url_host_port="${url_endpoint%%/*}"
+endpoint_confirmed=""
+while IFS= read -r published; do
+  [[ -n "${published}" ]] || continue
+  if [[ "${url_host_port}" == "${published}" ]]; then
+    endpoint_confirmed=1
+    break
+  fi
+done <<<"${published_endpoints}"
+if [[ -z "${endpoint_confirmed}" ]]; then
+  echo "mcloving-db-init: MCLOVING_MIGRATION_DATABASE_URL addresses ${url_host_port} but ${MCLOVING_POSTGRES_CONTAINER} publishes ${published_endpoints//$'\n'/ }; migrating would modify a different PostgreSQL instance than the one this bootstrap provisions" >&2
+  exit 1
+fi
+
+echo "mcloving-db-init: applying schema migrations with the migration role"
+"${identity_admin}" migrate
+
+# The two halves of this bootstrap reach PostgreSQL by different routes:
+# migrations go through MCLOVING_MIGRATION_DATABASE_URL over the network, and
+# everything below runs `podman exec` into the container. The environment guard
+# checks the URL names a loopback host, the configured superuser, and the
+# configured database, but it cannot see the container's published port, so a
+# URL pointing at a different local server with the same database name would
+# migrate one instance and provision another.
+#
+# Prove they are the same instance rather than asserting it: the tables the
+# migration just created must be visible through the container.
+migrated_tables="$(printf '%s\n' \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'organizations';" \
+  | psql_in_container --tuples-only --no-align --file -)"
+if [[ "${migrated_tables}" != "1" ]]; then
+  echo "mcloving-db-init: migrations applied through MCLOVING_MIGRATION_DATABASE_URL are not visible in ${MCLOVING_POSTGRES_CONTAINER}; the URL and the container are different PostgreSQL instances" >&2
+  exit 1
+fi
+
+# The provisioning preflight runs BEFORE the password rotation below. Every
+# refusal this bootstrap can reach from here is decided by these reads, and a
+# refusal that has already rotated the live mcloving_tenant password exits as
+# "operator action required" having mutated running credentials -- breaking
+# new controller connections when the paired contract was not updated in the
+# same operation.
+#
+# The configured slugs are validated too, not just the UUIDs: an existing
+# organization/project pair under DIFFERENT slugs is a different deployment
+# identity wearing the configured ids, and reporting it as "already
+# provisioned" would silently discard both requested slug values. The
+# database's values are read out and compared here rather than interpolating
+# contract-supplied slugs into SQL. The 'slug=' prefix distinguishes an
+# absent row from an empty value.
+organization_slug_row="$(printf "SELECT 'slug=' || slug FROM organizations WHERE id = '%s';\n" \
+  "${MCLOVING_ORGANIZATION_ID}" | psql_in_container --tuples-only --no-align --file -)"
+project_org_row="$(printf "SELECT 'org=' || organization_id FROM projects WHERE id = '%s';\n" \
+  "${MCLOVING_PROJECT_ID}" | psql_in_container --tuples-only --no-align --file -)"
+project_slug_row="$(printf "SELECT 'slug=' || slug FROM projects WHERE id = '%s';\n" \
+  "${MCLOVING_PROJECT_ID}" | psql_in_container --tuples-only --no-align --file -)"
+
+# Ownership runs the other direction too: the requested SLUGS may already
+# belong to other ids. organizations.slug is globally unique and
+# projects(organization_id, slug) is unique, so a slug owned by a different
+# id makes create-project fail on the constraint AFTER this bootstrap has
+# already been classified as a clean provision -- the same
+# mutate-then-refuse interval the id checks close. Slugs are interpolated as
+# SQL literals with doubled single quotes, the same escaping the ALTER ROLE
+# password uses; the ids they resolve to are compared in the shell.
+#
+# Checked on the PROVISION path only: on the existing-identity path the
+# slug-match checks below already pin both slugs to the configured ids (the
+# unique constraints make owner and holder one fact), and the project-missing
+# branch refuses on its own precise diagnosis before ownership could add one.
+escaped_organization_slug="${MCLOVING_ORGANIZATION_SLUG//\'/\'\'}"
+escaped_project_slug="${MCLOVING_PROJECT_SLUG//\'/\'\'}"
+organization_slug_owner="$(printf "SELECT 'id=' || id FROM organizations WHERE slug = '%s';\n" \
+  "${escaped_organization_slug}" | psql_in_container --tuples-only --no-align --file -)"
+project_slug_owner="$(printf "SELECT 'id=' || id FROM projects WHERE organization_id = '%s' AND slug = '%s';\n" \
+  "${MCLOVING_ORGANIZATION_ID}" "${escaped_project_slug}" \
+  | psql_in_container --tuples-only --no-align --file -)"
+
+provision="0"
+if [[ -z "${organization_slug_row}" ]]; then
+  if [[ -n "${project_org_row}" ]]; then
+    echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} does not exist but project ${MCLOVING_PROJECT_ID} already does (${project_org_row}); provisioning would collide, resolve the project id first" >&2
+    exit 1
+  fi
+  if [[ -n "${organization_slug_owner}" && "${organization_slug_owner}" != "id=${MCLOVING_ORGANIZATION_ID}" ]]; then
+    echo "mcloving-db-init: organization slug ${MCLOVING_ORGANIZATION_SLUG} is already owned by another organization (${organization_slug_owner}); provisioning would fail on the unique slug constraint after mutating credentials" >&2
+    exit 1
+  fi
+  if [[ -n "${project_slug_owner}" && "${project_slug_owner}" != "id=${MCLOVING_PROJECT_ID}" ]]; then
+    echo "mcloving-db-init: project slug ${MCLOVING_PROJECT_SLUG} is already owned by another project (${project_slug_owner}) in organization ${MCLOVING_ORGANIZATION_ID}; refusing before any credential mutation" >&2
+    exit 1
+  fi
+  provision="1"
+else
+  if [[ "${organization_slug_row}" != "slug=${MCLOVING_ORGANIZATION_SLUG}" ]]; then
+    echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} exists with ${organization_slug_row} but the contract configures slug=${MCLOVING_ORGANIZATION_SLUG}; refusing to report a different identity as provisioned" >&2
+    exit 1
+  fi
+  if [[ -z "${project_org_row}" ]]; then
+    # create-project inserts organization and project together and is not
+    # partially reentrant; adding a project to an existing organization is an
+    # operator decision, not something this bootstrap may improvise.
+    echo "mcloving-db-init: organization ${MCLOVING_ORGANIZATION_ID} exists but project ${MCLOVING_PROJECT_ID} does not; provision the project explicitly" >&2
+    exit 1
+  fi
+  if [[ "${project_org_row}" != "org=${MCLOVING_ORGANIZATION_ID}" ]]; then
+    echo "mcloving-db-init: project ${MCLOVING_PROJECT_ID} exists under a different organization (${project_org_row}); refusing to report it as provisioned" >&2
+    exit 1
+  fi
+  if [[ "${project_slug_row}" != "slug=${MCLOVING_PROJECT_SLUG}" ]]; then
+    echo "mcloving-db-init: project ${MCLOVING_PROJECT_ID} exists with ${project_slug_row} but the contract configures slug=${MCLOVING_PROJECT_SLUG}; refusing to report a different identity as provisioned" >&2
+    exit 1
+  fi
+fi
+
+echo "mcloving-db-init: enabling constrained runtime login for mcloving_tenant"
+# SQL string literal with doubled single quotes; standard_conforming_strings
+# is on by default, so no other character is special inside the literal.
+escaped_password="${MCLOVING_TENANT_PASSWORD//\'/\'\'}"
+printf 'ALTER ROLE mcloving_tenant LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '\''%s'\'';\n' \
+  "${escaped_password}" | psql_in_container --file -
+
+if [[ "${provision}" == "1" ]]; then
+  echo "mcloving-db-init: provisioning organization ${MCLOVING_ORGANIZATION_SLUG} and project ${MCLOVING_PROJECT_SLUG}"
+  "${identity_admin}" create-project \
+    --organization "${MCLOVING_ORGANIZATION_ID}" \
+    --organization-slug "${MCLOVING_ORGANIZATION_SLUG}" \
+    --project "${MCLOVING_PROJECT_ID}" \
+    --project-slug "${MCLOVING_PROJECT_SLUG}"
+else
+  echo "mcloving-db-init: organization and project already provisioned"
+fi
+
+echo "mcloving-db-init: bootstrap complete"
