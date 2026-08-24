@@ -2768,12 +2768,65 @@ PARSE
 render_contract_template() {
   deployment_python - "$1" "$2" "$3" "$4" "${MCLOVING_CONTRACT_TEMPLATE_HOME}" <<'RENDER'
 import os
+import re
 import stat
 import sys
 
 source, destination = sys.argv[1], sys.argv[2]
 home, state_root, template_home = (os.fsencode(value) for value in sys.argv[3:6])
 template_state = template_home + b"/.local/state"
+
+# systemd's WHITESPACE set, exactly as parse_environment_file spells it, and
+# the characters its grammar gives meaning to inside a value.
+WHITESPACE = b" \t\n\r\v\f"
+GRAMMAR = b"\\'\"`$"
+
+
+def serialize(value):
+    """One EnvironmentFile value, spelled so the parser returns these bytes.
+
+    A PATH IS NOT A VALUE until it is spelled as one. The rendered roots are
+    arbitrary bytes -- this lane supports that deliberately -- and inserting
+    them raw hands the parser its own syntax: a home spelled `/home/na\\me`
+    is written out literally and read back as `/home/name`, because the
+    backslash is an escape to systemd and to parse_environment_file alike.
+    The agent then looks for a workspace that is not the one systemd made,
+    which is the failure this rendering exists to prevent, arriving by a
+    different road.
+
+    Double quotes rather than single, because a single-quoted run cannot
+    carry a single quote at all, while a double-quoted one can carry every
+    byte -- newline included, which the parser continues onto the next line
+    -- once the four characters it escapes are escaped. Quoting is applied
+    only when the value needs it, so an ordinary path renders byte-identical
+    to what it always did and stays readable to the operator who has to
+    edit this file.
+    """
+    if not value:
+        return b'""'
+    if not any(byte in GRAMMAR or byte in WHITESPACE for byte in value):
+        return value
+    out = bytearray(b'"')
+    for byte in value:
+        char = bytes([byte])
+        if char in b'"\\$`':
+            out += b"\\"
+        out += char
+    out += b'"'
+    return bytes(out)
+
+
+# ONE PASS, NEVER RESCANNING WHAT IT INSERTS. Two sequential replaces let the
+# second rewrite bytes the first had just put down: with home /srv/account
+# and state root /mnt/home/mcloving/state -- a state root that happens to
+# contain the template prefix -- the state substitution inserted
+# /mnt/home/mcloving/state and the home substitution then chewed through it
+# to /mnt/srv/account/state. re.sub scans left to right and continues AFTER
+# each replacement, so inserted bytes are never candidates. The state prefix
+# is listed first because it extends the home prefix and alternation prefers
+# the earlier branch at a given position.
+SUBSTITUTIONS = {template_state: state_root.rstrip(b"/"), template_home: home.rstrip(b"/")}
+TEMPLATE_PREFIXES = re.compile(b"|".join(re.escape(prefix) for prefix in (template_state, template_home)))
 
 try:
     descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -2788,16 +2841,32 @@ try:
 finally:
     os.close(descriptor)
 
-# The state prefix FIRST, because it begins with the home prefix and
-# rewriting the home first would leave the state paths under the real home
-# rather than under the manager's state root -- which is the whole defect.
-body = body.replace(template_state, state_root.rstrip(b"/"))
-body = body.replace(template_home, home.rstrip(b"/"))
-if template_home in body:
-    raise SystemExit(
-        f"contract template {source} still names {os.fsdecode(template_home)} "
-        "after rendering"
-    )
+# LINE BY LINE, and only inside a value. A comment that mentions the example
+# home is documentation ABOUT the template and stays true of it; rewriting
+# comments -- which the whole-body replace did -- turned that documentation
+# into a statement about a deployment it was never describing. Only an
+# assignment's value is rendered, and only a value that actually changed is
+# re-serialized, so every other byte of the template survives exactly.
+rendered = bytearray()
+for line in body.splitlines(keepends=True):
+    probe = line.strip(WHITESPACE)
+    if not probe or probe.startswith(b"#") or probe.startswith(b";"):
+        rendered += line
+        continue
+    name, separator, value = line.partition(b"=")
+    if not separator:
+        rendered += line
+        continue
+    ending = b""
+    while value.endswith(b"\n") or value.endswith(b"\r"):
+        ending = value[-1:] + ending
+        value = value[:-1]
+    substituted = TEMPLATE_PREFIXES.sub(lambda match: SUBSTITUTIONS[match.group(0)], value)
+    if substituted == value:
+        rendered += line
+        continue
+    rendered += name + b"=" + serialize(substituted) + ending
+body = bytes(rendered)
 
 try:
     out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

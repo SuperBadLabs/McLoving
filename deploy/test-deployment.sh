@@ -312,10 +312,20 @@ unit_command="${libexec}/helpers/mcloving-unit-command"
 (
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
-  if grep -rlF "${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${config}/"; then
-    echo "the files listed above still name the example home after installation" >&2
+  # ASSIGNMENTS ONLY. A COMMENT that mentions the example home is
+  # documentation about the TEMPLATE and stays true of it -- rendering
+  # deliberately leaves comments alone, because rewriting them turned a
+  # sentence about the example into a false claim about this deployment.
+  if grep -rnE "^[A-Za-z_][A-Za-z0-9_]*=.*${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${config}/"; then
+    echo "the assignments listed above still name the example home after installation" >&2
     exit 1
   fi
+  # ...and the comment really is still there, so "assignments only" is a
+  # narrowed assertion rather than a disabled one.
+  grep -qF "example home ${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${config}/agent.env" || {
+    echo "the template's explanatory comment did not survive installation" >&2
+    exit 1
+  }
 )
 installed_workspace="$(sed -n 's/^MCLOVING_AGENT_WORKSPACE_ROOT=//p' "${config}/agent.env")"
 [[ "${installed_workspace}" == "${home}/.local/state/mcloving-agent/workspace" ]] || {
@@ -5503,6 +5513,104 @@ rm -f "${workdir}/parse-agent.env.orig"
   echo "rollback did not restore the original release after the PATH-boundary gates" >&2
   exit 1
 }
+# THE RENDERED CONTRACT MUST PARSE BACK TO THE PATHS IT WAS RENDERED FOR.
+# That is the only property that matters, and this round's two rendering
+# findings broke it from opposite sides -- one by letting a substitution
+# chew through bytes an earlier substitution had inserted, the other by
+# handing the parser its own syntax inside a path. So it is asserted by
+# ROUND-TRIP through the lane's own parser, the authority the guard and the
+# inventory already read these files with, rather than against a spelling
+# written out here that could agree with a wrong renderer.
+render_probe="${workdir}/render-probe"
+rm -rf "${render_probe}"
+mkdir -p "${render_probe}"
+chmod go-w "${render_probe}"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  # Reads one value through the NUL transport, so a path carrying newlines,
+  # quotes or backslashes is compared as bytes rather than as a line.
+  rendered_value_into() { # VARIABLE FILE NAME
+    # shellcheck disable=SC2178,SC2034  # nameref: written here, read by the caller
+    local -n rendered_value_ref="$1"
+    local file="$2" wanted="$3" key value
+    rendered_value_ref=""
+    while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+      [[ "${key}" == "${wanted}" ]] || continue
+      # shellcheck disable=SC2034  # nameref: read by the caller, not here
+      rendered_value_ref="${value}"
+      return 0
+    done < <(parse_environment_file "${file}")
+    return 1
+  }
+  # (1) A STATE ROOT THAT CONTAINS THE TEMPLATE PREFIX. Sequential replaces
+  # let the home substitution rewrite the state root the first one inserted.
+  nested_state="/mnt/home/mcloving/state"
+  render_contract_template "${repo_root}/deploy/env/agent.env.example" \
+    "${render_probe}/nested.env" /srv/account "${nested_state}"
+  nested_workspace=""
+  rendered_value_into nested_workspace "${render_probe}/nested.env" \
+    MCLOVING_AGENT_WORKSPACE_ROOT
+  [[ "${nested_workspace}" == "${nested_state}/mcloving-agent/workspace" ]] || {
+    echo "a state root containing the template prefix was rewritten by the home substitution: ${nested_workspace}" >&2
+    exit 1
+  }
+  # ...and the home substitution still reached the paths that are not state,
+  # so preventing the overlap did not simply stop the second substitution.
+  nested_cert=""
+  rendered_value_into nested_cert "${render_probe}/nested.env" \
+    MCLOVING_AGENT_CERTIFICATE_PATH
+  [[ "${nested_cert}" == "/srv/account/.config/mcloving/pki/agent.pem" ]] || {
+    echo "the home substitution did not reach a non-state path: ${nested_cert}" >&2
+    exit 1
+  }
+  # (2) EVERY CHARACTER THE GRAMMAR GIVES MEANING TO, in one home: backslash
+  # (the reported case -- an escape to the parser), both quote kinds, a
+  # dollar, a space, and a newline, which a double-quoted run continues onto
+  # the next line. This lane carries arbitrary bytes in paths on purpose.
+  weird_home='/home/na\me/q'"'"'uo"te/$dollar/with space'"${MCLOVING_BACKSLASH}"'tick`'
+  weird_home="${weird_home}"$'\n'"second-line"
+  render_contract_template "${repo_root}/deploy/env/agent.env.example" \
+    "${render_probe}/weird.env" "${weird_home}" "${weird_home}/.local/state"
+  weird_workspace=""
+  rendered_value_into weird_workspace "${render_probe}/weird.env" \
+    MCLOVING_AGENT_WORKSPACE_ROOT
+  [[ "${weird_workspace}" == "${weird_home}/.local/state/mcloving-agent/workspace" ]] || {
+    echo "a rendered path carrying grammar characters did not survive the round trip:" >&2
+    printf 'wrote back: %q\nexpected:   %q\n' "${weird_workspace}" \
+      "${weird_home}/.local/state/mcloving-agent/workspace" >&2
+    exit 1
+  }
+  # The pre-fix spelling, asserted inline so the check above cannot go
+  # vacuous: the reviewer's own example, inserted raw, really is read back
+  # as something else -- `/home/na\me` returns as `/home/name`.
+  raw_probe_home="/home/na${MCLOVING_BACKSLASH}me"
+  printf 'MCLOVING_PROBE=%s\n' "${raw_probe_home}" > "${render_probe}/raw.env"
+  raw_back=""
+  rendered_value_into raw_back "${render_probe}/raw.env" MCLOVING_PROBE || raw_back=""
+  [[ "${raw_back}" != "${raw_probe_home}" ]] || {
+    echo "a raw backslash in a value now round-trips intact; this gate's premise is gone" >&2
+    exit 1
+  }
+  # (3) AN ORDINARY PATH STAYS UNQUOTED, so the operator who has to edit
+  # this file is not handed quoting they never needed.
+  render_contract_template "${repo_root}/deploy/env/agent.env.example" \
+    "${render_probe}/plain.env" /home/plain-probe /home/plain-probe/.local/state
+  grep -qxF 'MCLOVING_AGENT_WORKSPACE_ROOT=/home/plain-probe/.local/state/mcloving-agent/workspace' \
+    "${render_probe}/plain.env" || {
+    echo "an ordinary rendered path did not stay unquoted:" >&2
+    grep '^MCLOVING_AGENT_WORKSPACE_ROOT=' "${render_probe}/plain.env" >&2
+    exit 1
+  }
+  # (4) A COMMENT ABOUT THE TEMPLATE IS DOCUMENTATION ABOUT THE TEMPLATE.
+  # The whole-body replace rewrote comments too, turning a sentence about
+  # the example home into a false statement about this deployment.
+  grep -qF "example home ${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${render_probe}/plain.env" || {
+    echo "the template's own explanatory comment was rewritten by rendering" >&2
+    exit 1
+  }
+)
+rm -rf "${render_probe}"
 # THE COMPLETE CONTRACT OR NONE OF IT. os.write() is one write(2): it
 # reports how many bytes it took, and taking fewer than it was given is a
 # SUCCESS rather than an error, so ignoring the result reported a truncated
