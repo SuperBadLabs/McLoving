@@ -1065,6 +1065,144 @@ grep -q "public API answers on 127.0.0.1:${health_live_port}" \
   exit 1
 }
 rm -f "${health_env}"
+# BOTH MAPS. The overlay must not destroy the DECLARED value: round 32's
+# refusal for a classified path whose effective value disagrees with the
+# contract compares the two, and an overlay written straight onto
+# MCLOVING_CONTRACT made it compare a value with itself, so it could never
+# fire. Semantics are round 32's, unchanged: refuse by name, both values
+# shown.
+declared_env_file="${home}/declared-vs-effective.env"
+cp "${config}/agent.env" "${declared_env_file}"
+chmod 0600 "${declared_env_file}"
+declared_workspace="$(sed -n 's/^MCLOVING_AGENT_WORKSPACE_ROOT=//p' "${declared_env_file}")"
+[[ -n "${declared_workspace}" ]] || {
+  echo "the declared/effective gate could not read the workspace root; contract shape changed" >&2
+  exit 1
+}
+mkdir -p "${home}/effective-elsewhere"
+if ( set -a
+     # shellcheck disable=SC1090
+     . "${declared_env_file}"
+     set +a
+     export MCLOVING_AGENT_WORKSPACE_ROOT="${home}/effective-elsewhere"
+     INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+       "${libexec}/helpers/mcloving-env-guard" agent "${declared_env_file}" \
+     ) > "${workdir}/logs/guard-declared-mismatch.log" 2>&1; then
+  echo "env guard accepted a classified path whose effective value disagrees with the contract" >&2
+  exit 1
+fi
+grep -q "MCLOVING_AGENT_WORKSPACE_ROOT (service environment says ${home}/effective-elsewhere, ${declared_env_file} says ${declared_workspace})" \
+  "${workdir}/logs/guard-declared-mismatch.log" || {
+  echo "the declared/effective mismatch did not name BOTH values:" >&2
+  cat "${workdir}/logs/guard-declared-mismatch.log" >&2
+  exit 1
+}
+# Acceptance: agreement is not a mismatch. This is what every real start
+# looks like, since systemd loads the contract into the environment itself.
+( set -a
+  # shellcheck disable=SC1090
+  . "${declared_env_file}"
+  set +a
+  INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+    "${libexec}/helpers/mcloving-env-guard" agent "${declared_env_file}" \
+  ) >/dev/null || {
+  echo "env guard refused an effective environment that agrees with the contract" >&2
+  exit 1
+}
+rm -rf "${declared_env_file}" "${home}/effective-elsewhere"
+# A TRANSITION is not the unit. It must ask the manager what the service is
+# actually running with, and refuse rather than probe an address it cannot
+# ground -- the release has already moved by then.
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_manager_is_reachable
+); then
+  reserve_port transition_stale_port
+  reserve_port transition_live_port
+  transition_env="${home}/transition-health.env"
+  # shellcheck disable=SC2154 # assigned through reserve_port's nameref
+  printf 'MCLOVING_LISTEN=127.0.0.1:%s\n' "${transition_stale_port}" > "${transition_env}"
+  chmod 0600 "${transition_env}"
+  transition_srv="${workdir}/transition-health-server.py"
+  cat > "${transition_srv}" <<'TRANSSRV'
+import http.server
+import os
+import socketserver
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+socketserver.TCPServer.allow_reuse_address = True
+port = int(os.environ["MCLOVING_LISTEN"].rsplit(":", 1)[1])
+with socketserver.TCPServer(("127.0.0.1", port), Handler) as server:
+    server.serve_forever()
+TRANSSRV
+  transition_unit="mcloving-smoke-health-$$.service"
+  # shellcheck disable=SC2154 # assigned through reserve_port's nameref
+  systemd-run --user --quiet --unit="${transition_unit}" --property=Type=simple \
+    --property="Environment=MCLOVING_LISTEN=127.0.0.1:${transition_live_port}" \
+    /usr/bin/python3 "${transition_srv}" >/dev/null 2>&1 || {
+    echo "the transition-health gate could not start its probe unit" >&2
+    exit 1
+  }
+  for _ in $(seq 1 40); do
+    curl --silent --fail --max-time 1 --noproxy '*' \
+      "http://127.0.0.1:${transition_live_port}/openapi.json" >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+  transition_health_status=0
+  timeout 20 "${libexec}/helpers/mcloving-health" controller "${transition_env}" \
+    --unit "${transition_unit}" > "${workdir}/logs/transition-health.log" 2>&1 \
+    || transition_health_status=$?
+  if [[ "${transition_health_status}" -ne 0 ]]; then
+    systemctl --user stop "${transition_unit}" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "${transition_unit}" >/dev/null 2>&1 || true
+    echo "a transition health check did not probe the address the unit is running on (exit ${transition_health_status}):" >&2
+    cat "${workdir}/logs/transition-health.log" >&2
+    exit 1
+  fi
+  grep -q "public API answers on 127.0.0.1:${transition_live_port}" \
+    "${workdir}/logs/transition-health.log" || {
+    systemctl --user stop "${transition_unit}" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "${transition_unit}" >/dev/null 2>&1 || true
+    echo "the transition health check reported success against the wrong address:" >&2
+    cat "${workdir}/logs/transition-health.log" >&2
+    exit 1
+  }
+  # With the unit stopped the manager cannot say what it was running with, so
+  # the verdict is REFUSED rather than derived from the contract. A derived
+  # "healthy" here would conclude success for a deployment nobody probed,
+  # after the release has already moved.
+  systemctl --user stop "${transition_unit}" >/dev/null 2>&1 || true
+  systemctl --user reset-failed "${transition_unit}" >/dev/null 2>&1 || true
+  transition_unreachable_status=0
+  timeout 20 "${libexec}/helpers/mcloving-health" controller "${transition_env}" \
+    --unit "${transition_unit}" > "${workdir}/logs/transition-health-gone.log" 2>&1 \
+    || transition_unreachable_status=$?
+  [[ "${transition_unreachable_status}" -ne 0 ]] || {
+    echo "a transition health check rendered a verdict for a unit the manager could not describe" >&2
+    exit 1
+  }
+  grep -q "refusing to render a health verdict from the declared contract alone" \
+    "${workdir}/logs/transition-health-gone.log" || {
+    echo "the ungroundable health verdict was not refused by name:" >&2
+    cat "${workdir}/logs/transition-health-gone.log" >&2
+    exit 1
+  }
+  rm -f "${transition_env}" "${transition_srv}"
+else
+  echo "transition health gate skipped: no reachable systemctl --user on this host; the --no-systemd path (no --unit, contract stands) is what runs here"
+fi
 # THE CLASS, not the two instances: a helper that runs INSIDE a unit must
 # read the effective contract, never reparse the declared one. Static, so a
 # new in-unit consumer cannot reopen this by copying the old idiom.

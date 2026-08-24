@@ -13,13 +13,25 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: mcloving-health {controller|agent} ENV_FILE" >&2
+  echo "usage: mcloving-health {controller|agent} ENV_FILE [--unit UNIT]" >&2
   exit 64
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -ge 2 ]] || usage
 service="$1"
 env_file="$2"
+shift 2
+health_unit=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --unit)
+      [[ $# -ge 2 ]] || usage
+      health_unit="$2"
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
 
 if [[ ! -f "${env_file}" ]]; then
   echo "mcloving-health: environment file ${env_file} does not exist" >&2
@@ -38,7 +50,29 @@ source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 # killed a perfectly healthy controller as a startup failure. Run by hand
 # (the smoke suite, an operator) nothing is composed and the parsed contract
 # stands, unchanged.
-load_effective_contract "${env_file}"
+# --unit means a TRANSITION is asking, from outside the unit. Its own
+# environment says nothing about what the service received, so the manager
+# is asked for the running service's actual environment.
+#
+# WHEN THE MANAGER CANNOT ANSWER, THIS REFUSES rather than falling back to
+# the contract. A health check invoked here is a verdict that GATES a
+# transition -- the release has already moved and the services have already
+# been restarted -- and the two ways of being wrong are not symmetric. A
+# derived "healthy" against a stale address is the expensive one: it
+# concludes success for a deployment nobody probed. Refusing costs the
+# operator a named failure at the point where the deployment is still
+# recoverable, and says exactly what it could not establish. The
+# --no-systemd path passes no --unit at all, because there is no unit and no
+# manager by construction; there the contract IS the statement of intent and
+# the probe is best-effort by design.
+health_environ_file=""
+if [[ -n "${health_unit}" ]]; then
+  health_environ_file="$(deployment_unit_process_environment "${health_unit}")" || {
+    echo "mcloving-health: cannot obtain the environment ${health_unit} is running with (the service manager did not answer, or the unit is not running); refusing to render a health verdict from the declared contract alone, because a transition has already moved the release and a probe of the wrong address would report success for a deployment nobody checked" >&2
+    exit 1
+  }
+fi
+load_effective_contract "${env_file}" "${health_environ_file}"
 
 case "${service}" in
   controller)

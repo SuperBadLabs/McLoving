@@ -746,6 +746,21 @@ require_usable_unit_search_path() {
 # two are never confused in diagnostics: deployment_unit_path_source
 # reports "manager" or "derived", the transition says which it used, and a
 # derived answer is never described as authoritative.
+# deployment_manager_is_reachable -- 0 when a user manager answers at all.
+#
+# Deliberately separate from deployment_manager_speaks_for, because the two
+# answer DIFFERENT questions. "Do this manager's unit search paths describe
+# the deployment at HOME?" needs the identity check. "What environment is
+# the unit named X running with?" does not: the answer is about that unit,
+# the kernel gates /proc/PID/environ by uid anyway, and requiring a home
+# match there would refuse a question the manager can answer perfectly well.
+deployment_manager_is_reachable() {
+  [[ "${MCLOVING_ASSUME_NO_MANAGER:-}" != "1" ]] || return 1
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl --user show -p UnitPath --value >/dev/null 2>&1 9>&- || return 1
+  return 0
+}
+
 deployment_manager_speaks_for() {
   local home_dir="${1%/}" manager_home
   [[ "${MCLOVING_ASSUME_NO_MANAGER:-}" != "1" ]] || return 1
@@ -2369,15 +2384,112 @@ deployment_unit_invocation_is_authoritative() {
 #
 # Run by hand, nothing is overlaid and nothing is dropped: the parsed
 # contract stands unchanged.
+# deployment_unit_process_environment UNIT -> the PATH of the running
+# service's own environment dump (/proc/PID/environ), NUL-delimited exactly
+# as the kernel holds it. Non-zero and nothing on stdout when the manager
+# cannot answer. A path rather than the bytes, because bash cannot carry NUL
+# through a variable.
+#
+# This is "ask the manager" carried to its conclusion. `systemctl show UNIT
+# -p Environment` is NOT sufficient and was checked rather than assumed: it
+# reports only Environment= directives and omits EnvironmentFile= contents
+# entirely, which is precisely the override this fix exists for.
+# -p EnvironmentFiles returns the file LIST, and recomposing from that is
+# modelling again. The manager does, however, name the process it started,
+# and /proc/PID/environ is what that process actually received -- not a
+# model of it. Readable because the transition runs as the same uid that
+# owns the service.
+deployment_unit_process_environment() {
+  local unit_name="$1" main_pid
+  deployment_manager_is_reachable || return 1
+  main_pid="$(systemctl --user show "${unit_name}" -p ExecMainPID --value 2>/dev/null 9>&-)" \
+    || return 1
+  [[ "${main_pid}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${main_pid}" -gt 0 ]] || return 1
+  [[ -r "/proc/${main_pid}/environ" ]] || return 1
+  printf '%s\n' "/proc/${main_pid}/environ"
+  return 0
+}
+
+# MCLOVING_CONTRACT          the EFFECTIVE value of each contract key
+# MCLOVING_CONTRACT_DECLARED the value the contract FILE declares
+# MCLOVING_CONTRACT_DROPPED  keys the effective environment does not carry
+# MCLOVING_EFFECTIVE_ENV     the effective environment itself, by name
 declare -A MCLOVING_CONTRACT_DROPPED=()
+declare -A MCLOVING_CONTRACT_DECLARED=()
+declare -A MCLOVING_EFFECTIVE_ENV=()
+MCLOVING_CONTRACT_SOURCE="declared"
+
+# load_effective_contract ENV_FILE [ENVIRON_BLOB]
+#
+# BOTH MAPS ARE KEPT. An earlier draft overlaid the effective value straight
+# onto MCLOVING_CONTRACT, which destroyed the only copy of the DECLARED
+# value -- and the round-32 check that refuses a classified path whose
+# ambient value disagrees with the contract was then comparing a value with
+# itself and could never fire. Anything that judges what the service will
+# DO reads MCLOVING_CONTRACT; anything that compares intent against reality
+# reads MCLOVING_CONTRACT_DECLARED.
+#
+# The effective environment comes from one of two authorities, and the map
+# is built the same way from either, so every consumer is source-agnostic:
+#
+#   ENVIRON_FILE given -- a FILE holding the running service's own
+#     environment, NUL-delimited, written by a caller that asked the manager
+#     for it. This is how a TRANSITION learns what the service actually got,
+#     since the transition process is not the unit and its own environment
+#     says nothing. A file rather than a string because bash variables
+#     CANNOT HOLD NUL -- the same constraint that made encode_path_item
+#     necessary, and passing the dump through a command substitution
+#     silently loses every separator.
+#
+#   otherwise, and only when this process IS the one systemd executed --
+#     our own environment, which systemd composed for the unit.
+#
+# Run by hand with neither, nothing is overlaid and the parsed contract
+# stands, exactly as before round 32.
 load_effective_contract() {
-  local contract_key
-  load_environment_file "$1"
+  local contract_file="$1" environ_file="${2-}" environ_temp=""
+  local contract_key environ_entry
+  load_environment_file "${contract_file}"
+  MCLOVING_CONTRACT_DECLARED=()
   MCLOVING_CONTRACT_DROPPED=()
-  deployment_unit_invocation_is_authoritative || return 0
+  MCLOVING_EFFECTIVE_ENV=()
+  MCLOVING_CONTRACT_SOURCE="declared"
   for contract_key in "${!MCLOVING_CONTRACT[@]}"; do
-    if [[ -v "${contract_key}" ]]; then
-      MCLOVING_CONTRACT["${contract_key}"]="${!contract_key}"
+    MCLOVING_CONTRACT_DECLARED["${contract_key}"]="${MCLOVING_CONTRACT[${contract_key}]}"
+  done
+  # THE OBSERVED ENVIRONMENT IS ALWAYS RECORDED, in every mode. The OVERLAY
+  # is a different question from the OBSERVATION, and conflating them broke a
+  # round-32 gate: the asymmetry refusal -- a classified path that reaches
+  # the service from outside the contract, or disagrees with it -- has always
+  # fired in both modes, and operators have been told that. Only the overlay
+  # is restricted to the mode where the environment is authoritative, which
+  # is round 35's rule and is preserved below.
+  if [[ -n "${environ_file}" ]]; then
+    MCLOVING_CONTRACT_SOURCE="service-process"
+  else
+    environ_temp="$(mktemp)" \
+      || deploy_fail "cannot create a temporary file for the effective environment"
+    env -0 > "${environ_temp}"
+    environ_file="${environ_temp}"
+    if deployment_unit_invocation_is_authoritative; then
+      MCLOVING_CONTRACT_SOURCE="unit-invocation"
+    else
+      MCLOVING_CONTRACT_SOURCE="observed"
+    fi
+  fi
+  while IFS= read -r -d '' environ_entry; do
+    [[ "${environ_entry}" == *=* ]] || continue
+    MCLOVING_EFFECTIVE_ENV["${environ_entry%%=*}"]="${environ_entry#*=}"
+  done < "${environ_file}"
+  [[ -z "${environ_temp}" ]] || rm -f "${environ_temp}"
+  # "observed" means: seen in THIS process, which is not the service. It is
+  # evidence for the asymmetry check and nothing else -- the parsed contract
+  # stands as the effective value, exactly as it did before round 32.
+  [[ "${MCLOVING_CONTRACT_SOURCE}" != "observed" ]] || return 0
+  for contract_key in "${!MCLOVING_CONTRACT[@]}"; do
+    if [[ -v "MCLOVING_EFFECTIVE_ENV[${contract_key}]" ]]; then
+      MCLOVING_CONTRACT["${contract_key}"]="${MCLOVING_EFFECTIVE_ENV[${contract_key}]}"
     else
       MCLOVING_CONTRACT_DROPPED["${contract_key}"]=1
       unset 'MCLOVING_CONTRACT[${contract_key}]'

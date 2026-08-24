@@ -105,7 +105,18 @@ if ! service_control "${no_systemd}" start mcloving-controller.service; then
   echo "controller failed to start after upgrade; ${rollback_hint}" >&2
   exit 1
 fi
-if ! "${libexec_root}/helpers/mcloving-health" controller "${config_root}/controller.env"; then
+# A transition is not the unit, so its own environment says nothing about
+# what the services received. Under systemd the manager is asked instead
+# (mcloving-health --unit, which refuses rather than guessing when the
+# manager cannot answer); under --no-systemd there is no unit and no manager
+# by construction, so the contract stands and the probe is best-effort.
+health_controller_args=(controller "${config_root}/controller.env")
+health_agent_args=(agent "${config_root}/agent.env")
+if [[ "${no_systemd}" != "1" ]]; then
+  health_controller_args+=(--unit mcloving-controller.service)
+  health_agent_args+=(--unit mcloving-agent.service)
+fi
+if ! "${libexec_root}/helpers/mcloving-health" "${health_controller_args[@]}"; then
   echo "controller health gate failed after upgrade; ${rollback_hint}" >&2
   exit 1
 fi
@@ -117,7 +128,7 @@ if ! service_control "${no_systemd}" start mcloving-agent.service; then
   echo "agent failed to start after upgrade; ${rollback_hint}" >&2
   exit 1
 fi
-if ! "${libexec_root}/helpers/mcloving-health" agent "${config_root}/agent.env"; then
+if ! "${libexec_root}/helpers/mcloving-health" "${health_agent_args[@]}"; then
   echo "agent health gate failed after upgrade; ${rollback_hint}" >&2
   exit 1
 fi

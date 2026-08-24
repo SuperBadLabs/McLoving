@@ -275,14 +275,22 @@ while IFS=' ' read -r _ _ guard_path_variable _; do
   guard_classified+=("${guard_path_variable}")
 done < <(deployment_contract_path_variables "${service}")
 
+# COMPARED AGAINST THE DECLARED MAP, never against MCLOVING_CONTRACT. The
+# latter now holds the EFFECTIVE value, so comparing to it would compare the
+# environment against itself and this refusal could never fire -- which is
+# exactly what the first draft of the overlay did. Semantics are unchanged
+# from round 32, which is what operators have been told: a classified path
+# that reaches the service from outside the contract, or disagrees with it,
+# is REFUSED by name with both values shown, because the digest inventory
+# pins what the CONTRACT declares and an ambient value is watched by nothing.
 guard_env_offending=""
 for guard_name in "${guard_classified[@]}"; do
-  [[ -v "${guard_name}" ]] || continue
-  guard_env_value="${!guard_name}"
-  if [[ ! -v "MCLOVING_CONTRACT[${guard_name}]" ]]; then
+  [[ -v "MCLOVING_EFFECTIVE_ENV[${guard_name}]" ]] || continue
+  guard_env_value="${MCLOVING_EFFECTIVE_ENV[${guard_name}]}"
+  if [[ ! -v "MCLOVING_CONTRACT_DECLARED[${guard_name}]" ]]; then
     guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} does not declare it) "
-  elif [[ "${guard_env_value}" != "${MCLOVING_CONTRACT[${guard_name}]}" ]]; then
-    guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} says ${MCLOVING_CONTRACT[${guard_name}]}) "
+  elif [[ "${guard_env_value}" != "${MCLOVING_CONTRACT_DECLARED[${guard_name}]}" ]]; then
+    guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} says ${MCLOVING_CONTRACT_DECLARED[${guard_name}]}) "
   fi
 done
 if [[ -n "${guard_env_offending}" ]]; then
