@@ -938,6 +938,134 @@ fi
   exit 1
 }
 rm -rf "${ambient_env}" "${placeholder_env}" "${home}/ambient-wide"
+# EVERY GUARD, IN THE ENVIRONMENT ITS OWN UNIT WILL GIVE IT.
+#
+# This is the gate whose absence let a total breakage ship: the suite ran
+# every guard BY HAND, where nothing is composed and the parsed contract
+# stands, so it never exercised the path a real start takes. With the
+# invocation markers present the effective-environment rule is
+# two-directional, and a unit that does not put its contract into its OWN
+# environment makes the guard refuse -- on every start, taking the service
+# and its dependents with it. The postgres quadlet did exactly that:
+# [Container] EnvironmentFile= becomes podman's --env-file and reaches the
+# CONTAINER, while quadlet copies that section into an inert [X-Container]
+# record the manager ignores, so ExecStartPre saw none of it.
+#
+# The environment is derived SECTION-AWARE from each unit, because the whole
+# defect is that a declaration in the wrong section looks identical to one
+# in the right section.
+guard_env_probe="${workdir}/guard-unit-env"
+mkdir -p "${guard_env_probe}"
+while IFS='|' read -r probe_unit probe_service probe_contract; do
+  [[ -n "${probe_unit}" ]] || continue
+  probe_env_file="${guard_env_probe}/${probe_service}.env"
+  python3 - "${probe_unit}" "${home}" > "${probe_env_file}" <<'UNITENV'
+import pathlib
+import sys
+
+unit, home = pathlib.Path(sys.argv[1]), sys.argv[2]
+section = ""
+env_files = []
+inline = []
+for raw in unit.read_text().splitlines():
+    line = raw.strip()
+    if line.startswith("[") and line.endswith("]"):
+        section = line
+        continue
+    if section != "[Service]" or "=" not in line or line.startswith(("#", ";")):
+        continue
+    key, _, value = line.partition("=")
+    key = key.strip()
+    value = value.strip()
+    # ONLY the unit's own [Service] section. A [Container] declaration is
+    # podman's, not the manager's, which is precisely the confusion here.
+    if key == "EnvironmentFile":
+        env_files.append(value.lstrip("-").replace("%h", home))
+    elif key == "Environment":
+        inline.append(value)
+for path in env_files:
+    try:
+        for raw in pathlib.Path(path).read_text().splitlines():
+            line = raw.strip()
+            if line and not line.startswith(("#", ";")) and "=" in line:
+                print(line)
+    except OSError:
+        pass
+for entry in inline:
+    print(entry.replace("%h", home))
+UNITENV
+  probe_status=0
+  ( set -a
+    # shellcheck disable=SC1090
+    . "${probe_env_file}"
+    set +a
+    INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+      "${libexec}/helpers/mcloving-env-guard" "${probe_service}" "${probe_contract}" \
+  ) > "${workdir}/logs/guard-unit-env-${probe_service}.log" 2>&1 || probe_status=$?
+  if [[ "${probe_status}" -ne 0 ]]; then
+    echo "the ${probe_service} guard refuses in the environment its own unit provides (exit ${probe_status}); a real start of that unit would fail:" >&2
+    cat "${workdir}/logs/guard-unit-env-${probe_service}.log" >&2
+    exit 1
+  fi
+  grep -q "contract satisfied" "${workdir}/logs/guard-unit-env-${probe_service}.log" || {
+    echo "the ${probe_service} guard did not report the contract satisfied under its own unit environment:" >&2
+    cat "${workdir}/logs/guard-unit-env-${probe_service}.log" >&2
+    exit 1
+  }
+  # The gate must be able to FAIL: with the unit's own environment withheld,
+  # the same guard must refuse. Otherwise a unit that provides nothing would
+  # pass this check for the wrong reason.
+  withheld_status=0
+  INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+    "${libexec}/helpers/mcloving-env-guard" "${probe_service}" "${probe_contract}" \
+    > "${workdir}/logs/guard-unit-env-${probe_service}-withheld.log" 2>&1 \
+    || withheld_status=$?
+  [[ "${withheld_status}" -ne 0 ]] || {
+    echo "the ${probe_service} guard accepted an empty effective environment; this gate cannot detect the defect it exists for" >&2
+    exit 1
+  }
+done <<UNITENVPROBE
+${smoke_quadlet_root}/mcloving-postgres.container|postgres|${config}/postgres.env
+${smoke_unit_root}/mcloving-db-init.service|db-init|${config}/db-init.env
+${smoke_unit_root}/mcloving-controller.service|controller|${config}/controller.env
+${smoke_unit_root}/mcloving-agent.service|agent|${config}/agent.env
+UNITENVPROBE
+rm -rf "${guard_env_probe}"
+# And the container still gets its own variables: the [Container]
+# declaration must survive as podman's --env-file, or the guard fix would
+# have traded one break for another.
+grep -qE '^\[Container\]' "${smoke_quadlet_root}/mcloving-postgres.container" || {
+  echo "the postgres quadlet lost its [Container] section" >&2
+  exit 1
+}
+python3 - "${smoke_quadlet_root}/mcloving-postgres.container" <<'BOTHHALVES'
+import pathlib
+import sys
+
+section = ""
+seen = {}
+for raw in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    line = raw.strip()
+    if line.startswith("[") and line.endswith("]"):
+        section = line
+        continue
+    if line.startswith("EnvironmentFile="):
+        seen.setdefault(section, []).append(line.split("=", 1)[1])
+for section_name in ("[Container]", "[Service]"):
+    if section_name not in seen:
+        raise SystemExit(
+            f"the postgres quadlet has no EnvironmentFile= in {section_name}; "
+            "[Container] feeds the container through podman --env-file and "
+            "[Service] feeds the unit's own ExecStartPre guard, and both are "
+            "required"
+        )
+if seen["[Container]"] != seen["[Service]"]:
+    raise SystemExit(
+        f"the postgres quadlet points its two EnvironmentFile= declarations at "
+        f"different files ({seen['[Container]']} vs {seen['[Service]']}); the "
+        "container and its guard must validate the same contract"
+    )
+BOTHHALVES
 # THE EFFECTIVE ENVIRONMENT IN BOTH DIRECTIONS. Round 32 taught the guard
 # that a variable the environment CARRIES wins over the contract. The other
 # half is that a variable the environment does NOT carry will not reach the
@@ -4694,6 +4822,78 @@ chmod 0644 "${exec_hook_dropin}/hook.conf"
   done
 )
 rm -rf "${exec_hook_dir}" "${exec_hook_dropin}/hook.conf"
+# AN ABSENT ARGUMENT STILL HAS A CREATION BOUND. Round 37 ignored absolute
+# arguments that do not exist; round 28 had already settled that absence
+# means "bound who may create it", not "ignore" -- a wildcard match does not
+# exist at validation time either. A user who can write the directory
+# creates the script after validation and the interpreter executes it
+# during the restart.
+absent_hook_dir="${dropin_root_home}/absent-hook"
+absent_hook_dropin="${dropin_unit_root}/mcloving-controller.service.d"
+mkdir -p "${absent_hook_dir}" "${absent_hook_dropin}"
+chmod 0755 "${absent_hook_dir}" "${absent_hook_dropin}"
+printf '[Service]\nExecStartPre=/bin/sh %%h/absent-hook/hook.sh\n' \
+  > "${absent_hook_dropin}/absent.conf"
+chmod 0644 "${absent_hook_dropin}/absent.conf"
+[[ ! -e "${absent_hook_dir}/hook.sh" ]] || {
+  echo "the absent-argument gate expected no script to exist" >&2
+  exit 1
+}
+chmod 0777 "${absent_hook_dir}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/absent-arg-chain.log" 2>&1; then
+  echo "upgrade proceeded although anyone could create the script the interpreter will run" >&2
+  exit 1
+fi
+grep -q "absent-hook (mode 777)" "${workdir}/logs/absent-arg-chain.log" || {
+  echo "the absent argument's directory was not walked:" >&2
+  cat "${workdir}/logs/absent-arg-chain.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused absent-argument upgrade still moved the current release" >&2
+  exit 1
+}
+# Acceptance: the same absent argument under a secured directory admits the
+# transition -- the bound is on WHO MAY CREATE, not on absence itself.
+chmod 0755 "${absent_hook_dir}"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the absent-argument gate" >&2
+  exit 1
+}
+# The policy boundaries, asserted directly: an absent bare absolute argument
+# IS emitted (creation bound), an existing directory is not (it has an owner
+# already), and a flag form is not (it is one token that does not start with
+# "/", which is what keeps this from sweeping in every option value).
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  absent_seen=""
+  while IFS= read -r encoded_absent; do
+    [[ -n "${encoded_absent}" ]] || continue
+    decode_path_item_into decoded_absent "${encoded_absent}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    absent_seen+="${decoded_absent}"$'\n'
+  done < <(deployment_exec_argument_paths "${dropin_root_home}" \
+    "/bin/sh ${absent_hook_dir}/hook.sh ${absent_hook_dir} --out=${absent_hook_dir}/other.sh")
+  grep -qx "${absent_hook_dir}/hook.sh" <<<"${absent_seen}" || {
+    echo "an absent absolute argument lost its creation bound: ${absent_seen}" >&2
+    exit 1
+  }
+  for ignored_absent in "${absent_hook_dir}" "--out=${absent_hook_dir}/other.sh"; do
+    if grep -qx "${ignored_absent}" <<<"${absent_seen}"; then
+      echo "the argument extractor claimed ${ignored_absent}, which the stated policy ignores" >&2
+      exit 1
+    fi
+  done
+)
+rm -rf "${absent_hook_dir}" "${absent_hook_dropin}/absent.conf"
 # INSTALLATION ROOTS come from the running manager where it can say. Writing
 # to the wrong root is the one failure that is silent and total: units land
 # where the manager never searches and daemon-reload finds nothing.

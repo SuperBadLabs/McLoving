@@ -1675,13 +1675,25 @@ GLOB
 #
 #   ABSOLUTE AND EXISTS AS A REGULAR FILE -- validated. Trust-input file
 #     rule plus the shared ancestor walk, exactly like the executable.
-#   ABSOLUTE BUT ABSENT -- ignored. systemd passes it to the process as a
-#     string; nothing reads it. Walking the ancestors of every path-shaped
-#     argument would refuse transitions over directories the deployment
-#     never touches, which is a false refusal rather than a caught risk.
-#   ABSOLUTE BUT NOT A REGULAR FILE -- ignored. A directory argument is a
-#     data root, not executable input, and the classes that own such roots
-#     validate them through their own declarations.
+#   ABSOLUTE BUT ABSENT -- its ANCESTOR CHAIN is walked, though no file rule
+#     can apply to a file that is not there. Round 37 ignored these, which
+#     contradicted round 28: a wildcard EnvironmentFile= match does not
+#     exist at validation time either, and the whole point there was that
+#     the CONTAINING DIRECTORY must be non-writable-by-others, because what
+#     is observable is not the file but WHO MAY CREATE ONE. An absent
+#     /srv/shared/hook.sh is exactly that shape -- another local user who
+#     can write /srv/shared creates it after validation and the interpreter
+#     executes it during the restart. The flag forms are unaffected:
+#     --out=/srv/x is one token that does not begin with "/", so only a
+#     BARE absolute argument is considered, which keeps this from sweeping
+#     in every path-shaped option value.
+#   ABSOLUTE AND PRESENT BUT NOT A REGULAR FILE -- ignored. A directory
+#     argument is a data root, not executable input, and the classes that
+#     own such roots validate them through their own declarations.
+#     Deliberately narrower than the absent case: absence is
+#     indistinguishable from a file-about-to-exist and takes the creation
+#     bound, while an existing directory is a thing that already has an
+#     owner and a mode of its own.
 #   %h-ANCHORED -- expanded, the same leading-%h grammar the executable uses.
 #   RELATIVE -- ignored. systemd does not resolve it against anything this
 #     validator can observe, and round 33 settled that guessing a
@@ -1746,7 +1758,10 @@ for token in tokenize(value)[1:]:
         token = home + token[2:]
     if not token.startswith("/"):
         continue
-    if not os.path.isfile(token):
+    # A regular file takes the file rule AND the chain; an ABSENT path takes
+    # the chain alone, which is the creation bound. Anything else that
+    # exists -- a directory, a device -- belongs to another class.
+    if os.path.exists(token) and not os.path.isfile(token):
         continue
     if token in seen:
         continue

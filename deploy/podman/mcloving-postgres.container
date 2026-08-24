@@ -25,6 +25,23 @@ HealthStartPeriod=10s
 Notify=healthy
 
 [Service]
+# TWO EnvironmentFile= declarations, for two different consumers, and both
+# are required.
+#
+# The one in [Container] above becomes `--env-file` on the podman command
+# line: it sets the variables INSIDE the container, which is what PostgreSQL
+# itself reads. It does NOT put them in the generated unit's own
+# environment -- quadlet copies that section into an inert [X-Container]
+# record for provenance, and systemd ignores [X-...] sections entirely.
+#
+# This one is passed through to the generated [Service] verbatim, so the
+# variables reach the unit's own processes -- which is what ExecStartPre
+# below is. Without it the guard runs with systemd's invocation markers and
+# none of the POSTGRES_* variables, so the effective-environment rule
+# (rounds 35/36) correctly concludes that every declared variable will not
+# reach the service and refuses -- on every real start, taking PostgreSQL
+# and everything that depends on it with it.
+EnvironmentFile=%h/.config/mcloving/postgres.env
 # A missing environment file must stop the unit, not start it half-configured.
 ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard postgres %h/.config/mcloving/postgres.env
 Restart=on-failure
