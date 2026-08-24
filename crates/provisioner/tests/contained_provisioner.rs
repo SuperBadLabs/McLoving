@@ -92,6 +92,27 @@ const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
 /// the one direction these tests depend on.
 const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
 
+/// Provider round-trip budget for cases whose asserted outcome does not put
+/// the provider timeout under test.
+///
+/// `provider_timeout_ms` bounds every loopback HTTP call to the fixture —
+/// connect and full round trip — so the old 300 ms default made each provider
+/// call a race against host load: a slow but *successful* create, lookup,
+/// inventory or delete exhausts the budget, and the outcome under test
+/// degrades into `ReconciliationRequired` or an unconfirmed cleanup.
+///
+/// Unlike the startup budget above, this figure cannot borrow the request
+/// lifetime. It also feeds the observation-freshness window
+/// (`provider_timeout_ms` plus clock skew), which the stale-observation case
+/// must stay outside of with its 60 s backdate, and the configuration ceiling
+/// rejects anything over 60 s. 5 s clears the longest delay the fixture
+/// injects on a default-path call — the 3 s held-open pending snapshot — with
+/// seconds of headroom while staying an order of magnitude inside both
+/// ceilings. Cases that bound a specific fixture delay (the 5.1 s slow
+/// inventory, the held-open rendezvous create) keep their own derived
+/// timeouts.
+const PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS: u64 = 5_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FixtureMode {
     Ready,
@@ -798,9 +819,18 @@ impl Context {
     /// The default startup budget deliberately exceeds anything the contained
     /// harness can spend, so a test only observes `StartupTimeoutCleaned` when
     /// it asked for it. Tests that put the timeout itself under test opt in
-    /// with [`Context::with_startup_timeout`].
+    /// with [`Context::with_startup_timeout`]. The default provider timeout
+    /// likewise clears every round trip the fixture serves on the default
+    /// path; tests that bound a specific fixture delay opt in with
+    /// [`Context::with_provider_timeout`] or [`Context::with_limits`].
     async fn with_quota(mode: FixtureMode, maximum: u32) -> Self {
-        Self::with_limits(mode, maximum, 300, STARTUP_BUDGET_BEYOND_TEST_WORK_MS).await
+        Self::with_limits(
+            mode,
+            maximum,
+            PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+            STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
+        )
+        .await
     }
 
     async fn with_provider_timeout(mode: FixtureMode, provider_timeout_ms: u64) -> Self {
@@ -814,7 +844,13 @@ impl Context {
     }
 
     async fn with_startup_timeout(mode: FixtureMode, startup_timeout_ms: u64) -> Self {
-        Self::with_limits(mode, 4, 300, startup_timeout_ms).await
+        Self::with_limits(
+            mode,
+            4,
+            PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+            startup_timeout_ms,
+        )
+        .await
     }
 
     async fn with_limits(
@@ -897,7 +933,7 @@ fn configuration(
             max_active_per_tenant: maximum,
             max_active_per_project: maximum,
         },
-        provider_timeout_ms: 300,
+        provider_timeout_ms: PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         startup_timeout_ms: STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
         startup_poll_interval_ms: 10,
         max_instance_lifetime_ms: POLICY_MAX_INSTANCE_LIFETIME_MS,
@@ -1466,7 +1502,7 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
 
 #[tokio::test]
 async fn final_inventory_substitution_is_reported_as_escaped_compute() {
-    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
+    let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
     context
         .provisioner
@@ -1597,7 +1633,13 @@ async fn duplicate_initial_inventory_instance_id_is_rejected_before_cleanup() {
 
 #[tokio::test]
 async fn quota_and_all_certified_bindings_fail_before_provider_access() {
-    let context = Context::with_limits(FixtureMode::Ready, 1, 300, 5_000).await;
+    let context = Context::with_limits(
+        FixtureMode::Ready,
+        1,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+        5_000,
+    )
+    .await;
     let first = context.request();
     context
         .provisioner
@@ -1917,7 +1959,7 @@ async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
     let context = Context::with_limits(
         FixtureMode::DelayedSnapshotPendingThenMalformed,
         4,
-        5_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         10_000,
     )
     .await;
@@ -1949,7 +1991,7 @@ async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
     let context = Context::with_limits(
         FixtureMode::DelayedSnapshotPendingThenMalformed,
         4,
-        5_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         10_000,
     )
     .await;
@@ -1993,7 +2035,7 @@ async fn post_lookup_timeout_cannot_reactivate_confirmed_cleanup() {
     let context = Context::with_limits(
         FixtureMode::DelayedSnapshotPendingThenMalformed,
         4,
-        5_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         2_000,
     )
     .await;
@@ -2264,9 +2306,17 @@ async fn reconciliation_uses_inventory_observation_for_the_create_peer_window() 
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation() {
-    let context = Context::with_startup_timeout(
+    // The reconcile arm below sleeps out the create peer window — the
+    // provider timeout plus one second — and must then observe the row while
+    // it is still pending, so the startup budget is derived from the peer
+    // window it has to outlive, with margin for the reconcile itself. The
+    // provision arm's `StartupTimeoutCleaned` outcome only needs the deadline
+    // to fire eventually.
+    let context = Context::with_limits(
         FixtureMode::DelayedPendingRefreshAfterInitialSnapshot,
-        3_000,
+        4,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS + 5_000,
     )
     .await;
     let request = context.request();
@@ -2336,7 +2386,7 @@ async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation()
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observation() {
-    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
+    let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
     let provisioned = context
         .provisioner
@@ -2471,7 +2521,7 @@ async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_s
     let context = Context::with_limits(
         FixtureMode::DelayedCreateAfterInitialSnapshot,
         4,
-        1_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         1_000,
     )
     .await;
@@ -2512,7 +2562,7 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
     let context = Context::with_limits(
         FixtureMode::DelayedCreateAfterFinalSnapshot,
         4,
-        1_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         1_000,
     )
     .await;
@@ -2563,7 +2613,13 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
 
 #[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
-    let context = Context::with_limits(FixtureMode::DelayedCreateReady, 4, 5_000, 5_000).await;
+    let context = Context::with_limits(
+        FixtureMode::DelayedCreateReady,
+        4,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+        5_000,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2603,16 +2659,9 @@ async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
 #[tokio::test]
 async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
     // The assertion below counts a *confirmed* cleanup, so the reconciling
-    // delete has to complete inside `provider_timeout_ms`. The default 300 ms
-    // is a provider-RPC bound, not the subject here, and a loaded host can
-    // exhaust it and downgrade the cleanup to ambiguous.
-    let context = Context::with_limits(
-        FixtureMode::DelayedMalformedCreateOnce,
-        4,
-        5_000,
-        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
-    )
-    .await;
+    // delete has to complete inside `provider_timeout_ms` — which the default
+    // budget now guarantees against host load.
+    let context = Context::new(FixtureMode::DelayedMalformedCreateOnce).await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
