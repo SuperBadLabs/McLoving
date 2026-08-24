@@ -122,7 +122,28 @@ require_secured_paths() {
 # The node rule and chain walk are the secured-path integrity class;
 # existence and readability were already required by
 # require_readable_file, which stays first for its precise diagnostics.
+#
+# Trust inputs are always FILES (certificates, CA bundles, the mapping
+# catalog), so an existing non-regular node is refused by name on top of
+# the shared class: the secured-path rule serves the state class too,
+# where directories are legal, and cannot carry this requirement itself.
+# The two required CA/certificate variables already hit require_readable_file's
+# -f, but the optional trust inputs reached only the mode/owner checks --
+# where a 0644 FIFO passes and the consuming binary then blocks on the
+# read after ExecStartPre reported the contract satisfied.
 require_trust_input_paths() {
+  local name value offending=""
+  for name in "$@"; do
+    contract_into value "${name}"
+    [[ -n "${value}" ]] || continue
+    [[ -e "${value}" ]] || continue
+    if [[ ! -f "${value}" ]]; then
+      offending+="${value} (not a regular file: $(stat -Lc '%F' "${value}" 2>/dev/null || echo "unknown node")) "
+    fi
+  done
+  if [[ -n "${offending}" ]]; then
+    fail "configured trust-input path(s) not regular files: ${offending% }-- the consuming binary reads these as files, and a special node blocks or streams foreign bytes into that read; restore regular files and retry"
+  fi
   require_secured_paths "$@"
 }
 

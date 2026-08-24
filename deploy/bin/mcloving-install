@@ -121,6 +121,14 @@ contract_destinations=(
 # systemd creates StateDirectory= leaves under ~/.local/state at service
 # start -- so their roots are derived from the staged unit files and walked
 # alongside everything else. A future directive lands here automatically.
+# Parse-refusals first, in the main shell: a construct systemd would
+# consume that the assignment parser does not model must refuse the
+# install loudly, not die inside the derivation subshells below while the
+# install continues on partial output.
+require_parseable_unit_sources \
+  "${deploy_root}"/systemd/*.service \
+  "${deploy_root}"/podman/*.container \
+  "${deploy_root}"/podman/*.volume
 unit_declared_roots=()
 while IFS= read -r encoded_declared_root; do
   [[ -n "${encoded_declared_root}" ]] || continue

@@ -113,6 +113,16 @@ require_secret_files() {
   offending=""
   for file in "$@"; do
     [[ -e "${file}" ]] || continue
+    # A regular file, through the link when it is one -- mode, owner, and
+    # readability all hold for an owner-only 0600 FIFO, but a contract that
+    # is a FIFO blocks (or streams another process's bytes into) the next
+    # read: systemd loading EnvironmentFile=, the guard's own parse, a key
+    # read. Node type is identity, judged here rather than left to
+    # whichever consumer happens to open the path first.
+    if [[ ! -f "${file}" ]]; then
+      offending+="${file} (not a regular file: $(stat -Lc '%F' "${file}" 2>/dev/null || echo "unknown node")) "
+      continue
+    fi
     mode_owner="$(stat -Lc '%a %u' "${file}")" \
       || deploy_fail "cannot stat contract file ${file}"
     mode="${mode_owner%% *}"
@@ -144,7 +154,7 @@ require_secret_files() {
     fi
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "secret-bearing file(s) not owner-only, foreign-owned, or unreadable: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
+    deploy_fail "secret-bearing file(s) not owner-only, foreign-owned, unreadable, or not regular files: ${offending% }-- an unwritable-by-others AND readable-by-the-service-user contract is required; run chmod go-w (or restore ownership/readability) on them and retry"
   fi
 }
 
@@ -230,6 +240,15 @@ require_integrity_files() {
   offending=""
   for file in "$@"; do
     [[ -e "${file}" ]] || continue
+    # Same node-type rule as the contract class: every path handed to this
+    # rule is a file the next start reads or executes, and a FIFO or
+    # device node here blocks or streams foreign bytes into that read.
+    # The producers filter with -f already; this keeps the rule total
+    # rather than trusting every caller's enumeration.
+    if [[ ! -f "${file}" ]]; then
+      offending+="${file} (not a regular file: $(stat -Lc '%F' "${file}" 2>/dev/null || echo "unknown node")) "
+      continue
+    fi
     mode_owner="$(stat -Lc '%a %u' "${file}")" \
       || deploy_fail "cannot stat trust-input file ${file}"
     mode="${mode_owner%% *}"
@@ -245,7 +264,7 @@ require_integrity_files() {
     fi
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "trust-input file(s) (unit, drop-in, or retained release binary) group- or world-writable, foreign-owned, or unreadable: ${offending% }-- another local user could control what the next service start executes; run chmod go-w (or restore ownership) on them and retry"
+    deploy_fail "trust-input file(s) (unit, drop-in, or retained release binary) group- or world-writable, foreign-owned, unreadable, or not regular files: ${offending% }-- another local user could control what the next service start executes; run chmod go-w (or restore ownership) on them and retry"
   fi
 }
 
@@ -382,15 +401,109 @@ deployment_unit_source_files() {
   return 0
 }
 
+# The path-bearing unit directives this deployment extracts. One list,
+# shared by the assignment parser's loud pre-check, both extraction
+# consumers, and the suite's parse-coverage gate.
+# shellcheck disable=SC2034  # read by the smoke suite's coverage gate too
+MCLOVING_UNIT_PATH_DIRECTIVES="EnvironmentFile|StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|Volume"
+
+# One backslash, named: spelling it inline in a [[ pattern draws
+# quoting advisories from the linter, and the continuation check reads better
+# against a named constant anyway.
+MCLOVING_BACKSLASH=$'\\'
+
+# deployment_unit_assignment_lines FILE... -> "KEY=VALUE" lines, parsed the
+# way systemd parses assignments (systemd.syntax(7), config_parse_line):
+# leading and trailing whitespace of the line is stripped; empty lines and
+# lines starting with '#' or ';' are comments; '[...]' lines are section
+# headers; the line splits at the FIRST '='; whitespace immediately before
+# and after the '=' is stripped. `EnvironmentFile = /path` and
+# `<TAB>StateDirectory =<TAB>name` are therefore the same declarations
+# systemd consumes, where the previous exact-prefix greps emitted nothing
+# and the declared path escaped validation entirely. This is the ONE
+# parsing helper every directive extraction goes through -- per-key
+# regexes are how one legal spelling escapes one consumer.
+#
+# Deliberately NOT modeled, and refused loudly by
+# require_parseable_unit_sources instead of silently mis-extracted: line
+# continuations (a trailing '\' joins lines in systemd, so a fragment
+# parse would validate half a value) and quote characters in path-bearing
+# values (systemd's extract_first_word unquotes list-valued path options,
+# so "a b" would word-split here into two wrong paths that do not exist
+# and silently skip validation). A mid-line '#' is NOT a comment to
+# systemd and stays part of the value, mirrored here.
+deployment_unit_assignment_lines() {
+  local file line key value
+  for file in "$@"; do
+    [[ -f "${file}" ]] || continue
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      case "${line}" in
+        '' | '#'* | ';'* | '['*) continue ;;
+      esac
+      [[ "${line}" == *=* ]] || continue
+      key="${line%%=*}"
+      value="${line#*=}"
+      key="${key%"${key##*[![:space:]]}"}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      [[ -n "${key}" ]] || continue
+      printf '%s=%s\n' "${key}" "${value}"
+    done < "${file}"
+  done
+  return 0
+}
+
+# require_parseable_unit_sources UNIT_FILE... -- the loud half of the
+# parsing contract, run in the MAIN shell (never inside a command
+# substitution, where deploy_fail dies with the subshell and the caller
+# would continue on partial output): any construct systemd would consume
+# but the assignment parser does not model is a NAMED refusal, never a
+# silent partial validation. Two constructs qualify: line continuations,
+# and quote characters in the values of path-bearing directives.
+require_parseable_unit_sources() {
+  local file line key value encoded_source
+  local source_files=()
+  while IFS= read -r encoded_source; do
+    [[ -n "${encoded_source}" ]] || continue
+    decode_path_item_into file "${encoded_source}"
+    source_files+=("${file}")
+  done < <(deployment_unit_source_files "$@")
+  [[ ${#source_files[@]} -gt 0 ]] || return 0
+  for file in "${source_files[@]}"; do
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      case "${line}" in
+        '' | '#'* | ';'* | '['*) continue ;;
+      esac
+      if [[ "${line}" == *"${MCLOVING_BACKSLASH}" ]]; then
+        deploy_fail "unit source ${file} ends a line with the continuation backslash; systemd joins continued lines but this deployment's parser does not model that, and validating a fragment of the merged directive would be silent under-validation -- rewrite the directive on one line and retry"
+      fi
+      [[ "${line}" == *=* ]] || continue
+      key="${line%%=*}"
+      key="${key%"${key##*[![:space:]]}"}"
+      value="${line#*=}"
+      if [[ "${key}" =~ ^(${MCLOVING_UNIT_PATH_DIRECTIVES})$ ]] \
+        && [[ "${value}" == *[\"\']* ]]; then
+        deploy_fail "unit source ${file} declares ${key} with a quote character in its value; systemd unquotes path values but this deployment's parser does not model quoting, and word-splitting a quoted path would validate paths that do not exist -- spell the path unquoted and retry"
+      fi
+    done < "${file}"
+  done
+  return 0
+}
+
 # deployment_unit_declared_contracts HOME UNIT_FILE... -> encoded items:
 # every EnvironmentFile= value the units and their drop-ins declare, with
 # the optional "-" prefix stripped and %h expanded, WHEREVER it points --
 # an EnvironmentFile IS a contract, and one declared outside the home is
 # validated under the same rules as any contract, with its chain walked to
 # "/" per the outside-home stop rule. Non-absolute values are dropped here
-# because systemd itself refuses them.
+# because systemd itself refuses them. Extraction goes through
+# deployment_unit_assignment_lines, so every separator spelling systemd
+# accepts is the same declaration here.
 deployment_unit_declared_contracts() {
-  local home_dir="${1%/}" line value path encoded_source decoded_source
+  local home_dir="${1%/}" line key value path encoded_source decoded_source
   local source_files=()
   shift
   while IFS= read -r encoded_source; do
@@ -400,13 +513,15 @@ deployment_unit_declared_contracts() {
   done < <(deployment_unit_source_files "$@")
   [[ ${#source_files[@]} -gt 0 ]] || return 0
   while IFS= read -r line; do
-    value="${line#EnvironmentFile=}"
+    key="${line%%=*}"
+    [[ "${key}" == "EnvironmentFile" ]] || continue
+    value="${line#*=}"
     path="${value#-}"
     path="${path//%h/${home_dir}}"
     case "${path}" in
       /*) encode_path_item "${path}" ;;
     esac
-  done < <(grep -hE '^EnvironmentFile=' "${source_files[@]}" | sed -e 's/[[:space:]]*$//')
+  done < <(deployment_unit_assignment_lines "${source_files[@]}")
 }
 
 # deployment_unit_declared_roots HOME UNIT_FILE... -> the home-relative
@@ -489,7 +604,7 @@ deployment_unit_declared_roots() {
         esac
         ;;
     esac
-  done < <(grep -hE '^(StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|EnvironmentFile|Volume)=' "${source_files[@]}" | sed -e 's/[[:space:]]*$//')
+  done < <(deployment_unit_assignment_lines "${source_files[@]}")
 }
 
 # deployment_ancestor_chain HOME ROOT... -> every security-relevant ancestor
@@ -1332,6 +1447,11 @@ require_deployment_integrity() {
   local unit_declared_roots=() declared_contracts=() unit_source_files=()
   local dropin_dirs=() encoded_root encoded_item decoded_item
   if [[ ${#unit_files[@]} -gt 0 ]]; then
+    # BEFORE anything parses: constructs systemd would consume that the
+    # assignment parser does not model are a loud refusal here in the main
+    # shell -- inside the derivation substitutions below a refusal would
+    # die with its subshell and validation would continue on partial output.
+    require_parseable_unit_sources "${unit_files[@]}"
     local decoded_declared_root
     while IFS= read -r encoded_root; do
       [[ -n "${encoded_root}" ]] || continue
@@ -1393,6 +1513,13 @@ require_deployment_integrity() {
       release_walk+=("${release_node}"/*)
     elif [[ -f "${release_node}" ]]; then
       release_binaries+=("${release_node}")
+    else
+      # A FIFO, socket, or device node in the retained inventory has no
+      # legitimate state -- stage_release publishes only real directories
+      # and regular files -- and skipping it silently would leave exactly
+      # one node class outside the walk.
+      (( dotglob_was_set )) || shopt -u dotglob
+      deploy_fail "retained release entry ${release_node} is not a regular file or directory ($(stat -c '%F' "${release_node}" 2>/dev/null || echo "unknown node")); stage_release never publishes such a node -- refusing to trust the retained inventory"
     fi
   done
   (( dotglob_was_set )) || shopt -u dotglob
@@ -1459,6 +1586,18 @@ open_transition_lock_fd() {
   lock_path="${libexec_root}/.transition-lock"
   if [[ -L "${lock_path}" ]]; then
     deploy_fail "transition lock ${lock_path} is a symlink; the deployment only ever creates it as a regular file -- refusing to open it"
+  fi
+  # ANY existing non-regular node is refused before the open, not only a
+  # symlink: a write-only open of a reader-less FIFO blocks forever, so a
+  # FIFO planted at the lock path would hang every transition and every
+  # digest read before the post-open identity check or any integrity
+  # refusal could run. A directory, socket, or device node has no
+  # legitimate state here either. The same lstat->open residual window as
+  # the symlink case applies and carries the same argument: its
+  # precondition is a writable libexec_root, which the integrity check
+  # immediately following every exclusive acquisition refuses.
+  if [[ -e "${lock_path}" && ! -f "${lock_path}" ]]; then
+    deploy_fail "transition lock ${lock_path} is not a regular file ($(stat -c '%F' "${lock_path}" 2>/dev/null || echo "unknown node")); the deployment only ever creates it as a regular file -- refusing to open it"
   fi
   pre_identity=""
   if [[ -e "${lock_path}" ]]; then

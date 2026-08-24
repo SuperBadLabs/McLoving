@@ -617,6 +617,24 @@ chmod 0644 "${effect_plan}"
   echo "env guard refused a world-READABLE mapping catalog; trust inputs are public to read" >&2
   exit 1
 }
+# A trust input that exists must be a REGULAR file: mode, owner, and
+# readability all hold for a 0644 FIFO, and the consuming binary would
+# then block on the read after ExecStartPre reported the contract
+# satisfied. The optional trust inputs never pass require_readable_file,
+# so the class itself must carry the node-type rule.
+rm -f "${effect_plan}"
+mkfifo "${effect_plan}"
+chmod 0644 "${effect_plan}"
+if "${libexec}/helpers/mcloving-env-guard" controller "${catalog_env}" \
+  > "${workdir}/logs/guard-catalog-fifo.log" 2>&1; then
+  echo "env guard accepted a FIFO mapping catalog" >&2
+  exit 1
+fi
+grep -q "not a regular file: fifo" "${workdir}/logs/guard-catalog-fifo.log" || {
+  echo "the FIFO catalog refusal was not named:" >&2
+  cat "${workdir}/logs/guard-catalog-fifo.log" >&2
+  exit 1
+}
 rm -f "${effect_env}" "${catalog_env}" "${effect_plan}"
 
 run_with_env() { # ENV_FILE COMMAND...
@@ -2390,6 +2408,174 @@ grep -q "controller-extra.env (mode 644, expected owner-only)" \
   exit 1
 }
 chmod 0600 "${dropin_root_home}/dropin-shared/controller-extra.env"
+# An existing contract must be a REGULAR file: an owner-only 0600 FIFO
+# passes every mode/owner/readability check while systemd's later
+# EnvironmentFile= load would block or stream another process's bytes --
+# after the transition already stopped the services. The timeout is the
+# gate's own regression net: a validation that OPENS the node would hang
+# here instead of refusing.
+rm -f "${dropin_root_home}/dropin-shared/controller-extra.env"
+mkfifo "${dropin_root_home}/dropin-shared/controller-extra.env"
+chmod 0600 "${dropin_root_home}/dropin-shared/controller-extra.env"
+dropin_fifo_status=0
+timeout 60 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/dropin-contract-fifo.log" 2>&1 \
+  || dropin_fifo_status=$?
+if [[ "${dropin_fifo_status}" -eq 0 ]]; then
+  echo "upgrade proceeded over a FIFO drop-in-declared contract" >&2
+  exit 1
+fi
+if [[ "${dropin_fifo_status}" -eq 124 ]]; then
+  echo "transition validation hung opening a FIFO contract instead of refusing it" >&2
+  exit 1
+fi
+grep -q "controller-extra.env (not a regular file: fifo)" \
+  "${workdir}/logs/dropin-contract-fifo.log" || {
+  echo "the FIFO contract refusal was not named:" >&2
+  cat "${workdir}/logs/dropin-contract-fifo.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused FIFO-contract upgrade still moved the current release" >&2
+  exit 1
+}
+rm -f "${dropin_root_home}/dropin-shared/controller-extra.env"
+printf 'MCLOVING_EXTRA=1\n' > "${dropin_root_home}/dropin-shared/controller-extra.env"
+chmod 0600 "${dropin_root_home}/dropin-shared/controller-extra.env"
+# systemd strips whitespace around the '=' separator, so
+# `EnvironmentFile = path` is the SAME declaration as the exact-prefix
+# spelling -- and it must reach the same validation. The spaced contract
+# is declared through a second drop-in, left at 0644: a parser that
+# extracts the spaced spelling refuses under the contract rule; the old
+# per-key grep emitted nothing and the transition proceeded with the
+# declared contract entirely unvalidated.
+printf '[Service]\nEnvironmentFile = %%h/dropin-shared/spaced-extra.env\n' \
+  > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/spaced.conf"
+printf 'MCLOVING_SPACED=1\n' > "${dropin_root_home}/dropin-shared/spaced-extra.env"
+chmod 0644 "${dropin_root_home}/dropin-shared/spaced-extra.env"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/spaced-contract.log" 2>&1; then
+  echo "upgrade proceeded over a spaced-assignment declared contract at 0644" >&2
+  exit 1
+fi
+grep -q "spaced-extra.env (mode 644, expected owner-only)" \
+  "${workdir}/logs/spaced-contract.log" || {
+  echo "the spaced-assignment contract escaped extraction or the refusal was unnamed:" >&2
+  cat "${workdir}/logs/spaced-contract.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused spaced-contract upgrade still moved the current release" >&2
+  exit 1
+}
+# Acceptance direction: secured owner-only, the spaced declaration admits
+# the transition; rolled back and removed to restore the section's state.
+chmod 0600 "${dropin_root_home}/dropin-shared/spaced-extra.env"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured spaced-assignment contract did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the spaced-contract gate" >&2
+  exit 1
+}
+rm -f "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/spaced.conf" \
+  "${dropin_root_home}/dropin-shared/spaced-extra.env"
+# Constructs systemd consumes that the parser deliberately does not model
+# must refuse LOUDLY, never silently under-validate: a line continuation
+# joins lines in systemd, and quoting unwraps path values -- each is a
+# named refusal until spelled plainly.
+printf '[Service]\nEnvironmentFile=%%h/dropin-shared/controller-extra.env \\\n' \
+  > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/continued.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/continued-dropin.log" 2>&1; then
+  echo "upgrade proceeded over a continuation-line drop-in the parser cannot model" >&2
+  exit 1
+fi
+grep -q "ends a line with the continuation backslash" \
+  "${workdir}/logs/continued-dropin.log" || {
+  echo "the continuation-line refusal was not named:" >&2
+  cat "${workdir}/logs/continued-dropin.log" >&2
+  exit 1
+}
+rm -f "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/continued.conf"
+printf '[Service]\nStateDirectory="quoted name"\n' \
+  > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/quoted.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/quoted-dropin.log" 2>&1; then
+  echo "upgrade proceeded over a quoted path value the parser cannot model" >&2
+  exit 1
+fi
+grep -q "declares StateDirectory with a quote character" \
+  "${workdir}/logs/quoted-dropin.log" || {
+  echo "the quoted-value refusal was not named:" >&2
+  cat "${workdir}/logs/quoted-dropin.log" >&2
+  exit 1
+}
+rm -f "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/quoted.conf"
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused unparseable-source upgrade still moved the current release" >&2
+  exit 1
+}
+# Parse coverage, the class-closing check: any installed-source line that
+# even LOOKS like a path-bearing directive (sloppy match: optional
+# whitespace, key, optional whitespace, '=') must be extracted by the
+# shared parser. A future systemd-legal spelling the parser misses fails
+# this differential rather than silently escaping validation; the
+# spellings the parser deliberately refuses (continuations, quoting)
+# never reach an installed tree, because require_parseable_unit_sources
+# refuses them at install and at every transition.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  coverage_sources=()
+  while IFS= read -r encoded_coverage_source; do
+    [[ -n "${encoded_coverage_source}" ]] || continue
+    decode_path_item_into coverage_source "${encoded_coverage_source}"
+    coverage_sources+=("${coverage_source}")
+  done < <(deployment_unit_source_files \
+    "${dropin_root_home}/.config/systemd/user"/mcloving-*.service \
+    "${dropin_root_home}/.config/containers/systemd"/mcloving-*.container \
+    "${dropin_root_home}/.config/containers/systemd"/mcloving-*.volume)
+  [[ ${#coverage_sources[@]} -gt 0 ]] || {
+    echo "parse-coverage gate found no installed unit sources" >&2
+    exit 1
+  }
+  sloppy="$(cat "${coverage_sources[@]}" \
+    | grep -cE "^[[:space:]]*(${MCLOVING_UNIT_PATH_DIRECTIVES})[[:space:]]*=")" || true
+  parsed="$(deployment_unit_assignment_lines "${coverage_sources[@]}" \
+    | grep -cE "^(${MCLOVING_UNIT_PATH_DIRECTIVES})=")" || true
+  [[ "${sloppy}" -gt 0 ]] || {
+    echo "parse-coverage gate saw no path-bearing directives; the sweep went blind" >&2
+    exit 1
+  }
+  [[ "${sloppy}" -eq "${parsed}" ]] || {
+    echo "parse coverage: ${sloppy} path-bearing directive lines in the installed sources but ${parsed} extracted by the parser; a spelling systemd consumes escaped extraction" >&2
+    exit 1
+  }
+  # Exactness over the separator spellings systemd permits: spaces and
+  # tabs around '=', trailing whitespace, comment lines.
+  synthetic="${workdir}/parse-synthetic.conf"
+  printf '[Service]\nEnvironmentFile = /srv/spaced.env\n\tStateDirectory =\tspaced-name\nWorkingDirectory=/spaced/work  \n#EnvironmentFile=/commented.env\n; EnvironmentFile=/also-commented.env\n' \
+    > "${synthetic}"
+  expected_parse=$'EnvironmentFile=/srv/spaced.env\nStateDirectory=spaced-name\nWorkingDirectory=/spaced/work'
+  actual_parse="$(deployment_unit_assignment_lines "${synthetic}")"
+  [[ "${actual_parse}" == "${expected_parse}" ]] || {
+    echo "the assignment parser did not normalize systemd's separator spellings:" >&2
+    printf '%s\n' "${actual_parse}" >&2
+    exit 1
+  }
+  rm -f "${synthetic}"
+)
 # The drop-in SOURCES are execution vectors: a writable .d directory or
 # drop-in file must refuse the transition before the restart executes
 # whatever was injected -- and the top-level unit file is as much a vector
@@ -2770,8 +2956,54 @@ grep -q "is a symlink; the deployment only ever creates it as a regular file" \
   exit 1
 }
 rm -f "${lock_libexec}/.transition-lock" "${lock_victim}"
-# The upgrade below is the acceptance direction: with the symlink gone the
-# open recreates a regular lockfile and the same transition proceeds.
+# A FIFO at the lock path must be refused BY NAME, never opened: the
+# write-only open of a reader-less FIFO blocks forever, so an unguarded
+# open hangs every transition and every digest read before any identity
+# check or integrity refusal can run. The timeout is the gate's own
+# regression net -- an open-then-check implementation times out here
+# instead of refusing.
+mkfifo "${lock_libexec}/.transition-lock"
+lock_fifo_status=0
+timeout 30 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/lock-fifo.log" 2>&1 || lock_fifo_status=$?
+if [[ "${lock_fifo_status}" -eq 0 ]]; then
+  echo "an upgrade proceeded over a FIFO transition lock" >&2
+  exit 1
+fi
+if [[ "${lock_fifo_status}" -eq 124 ]]; then
+  echo "the transition hung opening a FIFO lock instead of refusing it" >&2
+  exit 1
+fi
+grep -q "is not a regular file (fifo)" "${workdir}/logs/lock-fifo.log" || {
+  echo "the FIFO-lock refusal was not named:" >&2
+  cat "${workdir}/logs/lock-fifo.log" >&2
+  exit 1
+}
+[[ "$(readlink "${lock_libexec}/current")" == "${lock_current}" ]] || {
+  echo "a FIFO-lock refusal still moved the current release" >&2
+  exit 1
+}
+lock_fifo_shared_status=0
+timeout 30 "${lock_libexec}/helpers/mcloving-deployed-digests" --home "${lock_home}" \
+  > "${workdir}/logs/lock-fifo-shared.log" 2>&1 || lock_fifo_shared_status=$?
+if [[ "${lock_fifo_shared_status}" -eq 0 ]]; then
+  echo "the digest reader opened a FIFO transition lock" >&2
+  exit 1
+fi
+if [[ "${lock_fifo_shared_status}" -eq 124 ]]; then
+  echo "the digest reader hung opening a FIFO lock instead of refusing it" >&2
+  exit 1
+fi
+grep -q "is not a regular file (fifo)" "${workdir}/logs/lock-fifo-shared.log" || {
+  echo "the reader's FIFO-lock refusal was not named:" >&2
+  cat "${workdir}/logs/lock-fifo-shared.log" >&2
+  exit 1
+}
+rm -f "${lock_libexec}/.transition-lock"
+# The upgrade below is the acceptance direction: with the symlink and the
+# FIFO gone the open recreates a regular lockfile and the same transition
+# proceeds.
 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null
