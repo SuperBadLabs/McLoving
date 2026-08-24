@@ -5503,6 +5503,86 @@ rm -f "${workdir}/parse-agent.env.orig"
   echo "rollback did not restore the original release after the PATH-boundary gates" >&2
   exit 1
 }
+# THE COMPLETE CONTRACT OR NONE OF IT. os.write() is one write(2): it
+# reports how many bytes it took, and taking fewer than it was given is a
+# SUCCESS rather than an error, so ignoring the result reported a truncated
+# contract as an installed one -- and the installer preserves whatever
+# contract it finds, so the truncation would be adopted as deliberate on
+# every later run.
+short_write="${workdir}/short-write"
+rm -rf "${short_write}"
+mkdir -p "${short_write}"
+chmod go-w "${short_write}"
+short_template="${repo_root}/deploy/env/controller.env.example"
+short_template_bytes="$(stat -c '%s' "${short_template}")"
+[[ "${short_template_bytes}" -gt 1024 ]] || {
+  echo "the controller template is only ${short_template_bytes} bytes; the file-size limit below no longer truncates it" >&2
+  exit 1
+}
+# THE HAZARD IS REAL, in one line of the same language: under a file-size
+# limit a single os.write takes SOME bytes and returns normally. Measured
+# rather than assumed, and without hard-coding what `ulimit -f 1` means in
+# bytes on this shell.
+raw_short="$(
+  ( ulimit -f 1
+    python3 -c '
+import os
+import sys
+
+body = b"x" * 8192
+descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    print(os.write(descriptor, body), len(body))
+finally:
+    os.close(descriptor)
+' "${short_write}/raw.probe" ) 2>/dev/null
+)"
+read -r raw_written raw_total <<<"${raw_short}"
+[[ -n "${raw_written}" && "${raw_written}" -gt 0 && "${raw_written}" -lt "${raw_total}" ]] || {
+  echo "a single os.write under a file-size limit did not return short (${raw_short:-nothing}); this gate's premise is gone" >&2
+  exit 1
+}
+rm -f "${short_write}/raw.probe"
+# Refusal direction: the render must fail under that limit, name the byte
+# counts rather than raising a traceback, and leave NO partial contract.
+short_status=0
+( ulimit -f 1
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  render_contract_template "${short_template}" "${short_write}/controller.env" \
+    /home/short-write-probe /home/short-write-probe/.local/state
+) > "${workdir}/logs/short-write.log" 2>&1 || short_status=$?
+[[ "${short_status}" -ne 0 ]] || {
+  echo "the render reported success under a file-size limit that cannot hold the contract" >&2
+  exit 1
+}
+grep -q "could not be written in full" "${workdir}/logs/short-write.log" || {
+  echo "the short write was not refused as an incomplete write:" >&2
+  cat "${workdir}/logs/short-write.log" >&2
+  exit 1
+}
+[[ ! -e "${short_write}/controller.env" ]] || {
+  echo "a truncated contract survived the refusal ($(stat -c '%s' "${short_write}/controller.env") of ${short_template_bytes} bytes); the next install would preserve it" >&2
+  exit 1
+}
+# Acceptance direction: with no limit in the way, the same call renders the
+# whole template.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  render_contract_template "${short_template}" "${short_write}/controller.env" \
+    /home/short-write-probe /home/short-write-probe/.local/state
+)
+short_rendered_bytes="$(stat -c '%s' "${short_write}/controller.env")"
+[[ "${short_rendered_bytes}" -gt 1024 ]] || {
+  echo "the unrestricted render produced only ${short_rendered_bytes} bytes" >&2
+  exit 1
+}
+grep -q '^MCLOVING_AGENT_IDENTITY_BINDINGS_PATH=' "${short_write}/controller.env" || {
+  echo "the rendered contract is missing its last assignment, so it is still truncated" >&2
+  exit 1
+}
+rm -rf "${short_write}"
 # CONTRACTS ARE OPENED THROUGH A CLASSIFIED DESCRIPTOR. Every caller reaches
 # the parser after a `-f` test, so the test and the open judge two different
 # moments: a contract atomically replaced in between is a different file by
@@ -5637,6 +5717,47 @@ rm -rf "${node_probe}"
         deployment_unit_load_paths "${HOME}" user quadlet | head -1)"
     [[ "${quadlet_first}" == "${perturbed_quadlet}" ]] || {
       echo "this shell's XDG_CONFIG_HOME moved the quadlet search base away from the manager's (${quadlet_first} vs ${perturbed_quadlet})" >&2
+      exit 1
+    }
+    # THE STATE ROOT, which decides where a rendered contract POINTS and so
+    # whether the guard can find the workspace systemd made. There is no
+    # UnitPath to ground this one against -- systemd publishes no list of
+    # where it would create a StateDirectory= leaf -- so the manager's own
+    # environment is the authority, and the property asserted is the one
+    # that matters: this shell cannot move it.
+    [[ "$(deployment_state_root_source "${HOME}")" == "manager" ]] || {
+      echo "the running manager serves this home but was not used for the state root" >&2
+      exit 1
+    }
+    manager_state="$(deployment_effective_state_root "${HOME}")"
+    perturbed_state="$(XDG_STATE_HOME=/tmp/mcloving-state-root-probe \
+      deployment_effective_state_root "${HOME}")"
+    [[ "${manager_state}" == "${perturbed_state}" ]] || {
+      echo "this shell's XDG_STATE_HOME moved the state root away from the manager's (${manager_state} vs ${perturbed_state})" >&2
+      exit 1
+    }
+    # And the pre-fix derivation, asserted inline so the check above cannot
+    # quietly become vacuous: the CALLER's derivation does follow this
+    # shell, which is what made rendering from it wrong.
+    caller_state="$(XDG_STATE_HOME=/tmp/mcloving-state-root-probe \
+      deployment_state_root "${HOME}")"
+    [[ "${caller_state}" == "/tmp/mcloving-state-root-probe" ]] || {
+      echo "the caller's state derivation no longer follows this shell (${caller_state}); this gate's premise is gone" >&2
+      exit 1
+    }
+    # The declared-root derivation and the rendered contract have to agree,
+    # so they are asserted against ONE answer rather than two spellings.
+    declared_under_manager=""
+    while IFS= read -r encoded_state_root; do
+      [[ -n "${encoded_state_root}" ]] || continue
+      decode_path_item_into decoded_state_root "${encoded_state_root}"
+      # shellcheck disable=SC2154  # set via the nameref above
+      [[ "${decoded_state_root}" != "${manager_state}/mcloving-agent/workspace" ]] \
+        || declared_under_manager=1
+    done < <(XDG_STATE_HOME=/tmp/mcloving-state-root-probe \
+      deployment_unit_declared_roots "${HOME}" "${repo_root}"/deploy/systemd/*.service)
+    [[ -n "${declared_under_manager}" ]] || {
+      echo "the units' declared state roots did not follow the manager's state root (${manager_state})" >&2
       exit 1
     }
   else

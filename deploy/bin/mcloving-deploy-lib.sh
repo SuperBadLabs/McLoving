@@ -1013,6 +1013,92 @@ deployment_config_root_source() {
   fi
 }
 
+# deployment_manager_xdg_root HOME VARIABLE DEFAULT_SUFFIX -> the XDG base
+# the RUNNING user manager resolves VARIABLE to, or nothing when no manager
+# serves HOME.
+#
+# THE CONFIGURATION BASE HAD AN ORACLE AND THESE DO NOT, and the difference
+# is worth stating rather than papering over. deployment_manager_config_root
+# can GROUND its answer -- the derived <base>/systemd/user has to appear in
+# the manager's own UnitPath -- so the variable proposes and the manager's
+# list confirms. There is no UnitPath for state, cache, or data: systemd
+# publishes no list of where it would create a StateDirectory= leaf. So the
+# authority here is the manager's ENVIRONMENT, which is not a model of what
+# systemd does but the very input systemd reads to decide. Round 34 declined
+# show-environment for the unit path because a better oracle existed; where
+# none exists, reading the same input is the closest thing to asking.
+#
+# ABSENCE IS AN ANSWER, and it is the answer that matters. A manager whose
+# environment carries no XDG_STATE_HOME will use ~/.local/state no matter
+# what the invoking shell exports -- measured on systemd 255, where a
+# transient unit with StateDirectory= run from a shell exporting a custom
+# XDG_STATE_HOME had its directory created under the manager's default. So
+# an unset or non-absolute value yields the DEFAULT rather than a refusal to
+# answer; only an unreachable manager, or one serving another home, declines.
+#
+# The ownership rule deployment_xdg_value_applies imposes on an INHERITED
+# value is deliberately not applied here. That rule exists because the
+# caller's environment may describe some other account's manager; this value
+# came from the manager that serves THIS home, so an absolute path outside
+# the home is a place systemd will genuinely use, and the ancestor walk --
+# not this derivation -- is what judges whether it is safe.
+deployment_manager_xdg_root() {
+  local home_dir="${1%/}" variable="$2" default_suffix="$3" value
+  deployment_manager_speaks_for "${home_dir}" || return 1
+  # 9>&- for the reason every systemctl call in this library carries it: we
+  # may be inside the transition lock, and a child inheriting fd 9 holds it.
+  value="$(systemctl --user show-environment 2>/dev/null 9>&- \
+    | sed -n "s/^${variable}=//p" | head -1)" || return 1
+  [[ "${value}" == /* ]] || value="${home_dir}/${default_suffix}"
+  printf '%s\n' "${value%/}"
+}
+
+# deployment_effective_state_root / _cache_root / _data_root HOME -> the base
+# this deployment should read from and write to: the manager's where it can
+# be established, the caller's derivation otherwise. The state one is what
+# decides where a rendered contract points, and therefore whether the guard
+# can find the workspace systemd created.
+deployment_effective_state_root() {
+  local home_dir="${1%/}" manager_root
+  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_STATE_HOME .local/state)" \
+    && [[ -n "${manager_root}" ]]; then
+    printf '%s\n' "${manager_root}"
+    return 0
+  fi
+  deployment_state_root "${home_dir}"
+}
+
+deployment_effective_cache_root() {
+  local home_dir="${1%/}" manager_root
+  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_CACHE_HOME .cache)" \
+    && [[ -n "${manager_root}" ]]; then
+    printf '%s\n' "${manager_root}"
+    return 0
+  fi
+  deployment_cache_root "${home_dir}"
+}
+
+deployment_effective_data_root() {
+  local home_dir="${1%/}" manager_root
+  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_DATA_HOME .local/share)" \
+    && [[ -n "${manager_root}" ]]; then
+    printf '%s\n' "${manager_root}"
+    return 0
+  fi
+  deployment_data_root "${home_dir}"
+}
+
+# deployment_state_root_source HOME -> "manager" or "derived", so a install
+# that resolved the state tree from the manager can SAY so -- the same
+# reason deployment_config_root_source exists.
+deployment_state_root_source() {
+  if deployment_manager_xdg_root "${1%/}" XDG_STATE_HOME .local/state >/dev/null 2>&1; then
+    printf 'manager\n'
+  else
+    printf 'derived\n'
+  fi
+}
+
 # deployment_unit_load_paths HOME CLASS FAMILY [SEMANTICS] -> encoded
 # items: the base directories the manager searches, IN SYSTEMD'S OWN
 # PRECEDENCE ORDER, whether or not they exist.
@@ -1062,7 +1148,7 @@ deployment_unit_load_paths() {
   # caller's derivation exactly when the manager cannot say, which is what
   # deployment_effective_config_root means.
   config_base="$(deployment_effective_config_root "${home_dir}")"
-  data_base="$(deployment_data_root "${home_dir}")"
+  data_base="$(deployment_effective_data_root "${home_dir}")"
   runtime_base="$(deployment_runtime_root "${home_dir}")"
   home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || home_uid=""
   # Two parallel arrays rather than one classified string: a path may carry
@@ -2024,8 +2110,13 @@ deployment_unit_declared_roots() {
   local home_dir="${1%/}" line key value entry path state_base cache_base
   local unit_file dropin source_files=()
   shift
-  state_base="$(deployment_state_root "${home_dir}")"
-  cache_base="$(deployment_cache_root "${home_dir}")"
+  # FROM THE MANAGER where it can say, for the same reason the config base
+  # is: systemd creates these leaves under the manager's XDG bases, so a
+  # validation that derived them from the caller's environment would judge a
+  # tree systemd never builds and miss the one it does. This is the site the
+  # rendered contract has to agree with, and both now come from one answer.
+  state_base="$(deployment_effective_state_root "${home_dir}")"
+  cache_base="$(deployment_effective_cache_root "${home_dir}")"
   # systemd and Quadlet merge <unit>.d/*.conf drop-ins into the unit, so a
   # drop-in adding a path directive declares a path the transition is about
   # to trust -- the round-12 lesson (drop-in descendants count) applied to
@@ -2713,7 +2804,46 @@ try:
 except OSError as error:
     raise SystemExit(f"cannot create contract {destination}: {error}")
 try:
-    os.write(out, body)
+    # os.write() IS ONE write(2) AND MAY RETURN SHORT. It reports how many
+    # bytes it took, and taking fewer than it was given is a success, not an
+    # error -- so ignoring the result reported a truncated contract as an
+    # installed one. Measured here rather than reasoned about: under
+    # RLIMIT_FSIZE at 1024 bytes, one os.write of a 2093-byte contract
+    # returned 1024 and the process exited 0. The buffered file objects this
+    # library uses elsewhere do not share the defect -- the same limit makes
+    # them raise OSError(EFBIG) -- which is why this is the only write site
+    # that needed changing.
+    written = 0
+    while written < len(body):
+        try:
+            taken = os.write(out, body[written:])
+        except OSError as error:
+            # The same limit that truncates SILENTLY when a write makes
+            # partial progress reports EFBIG when it can make none, so both
+            # halves of the one failure are named here rather than one being
+            # a refusal and the other a traceback.
+            raise SystemExit(
+                f"contract {destination} could not be written in full: "
+                f"{written} of {len(body)} bytes written, then {error}"
+            ) from None
+        if taken <= 0:
+            raise SystemExit(
+                f"contract {destination} could not be written in full: the "
+                f"descriptor stopped accepting bytes after {written} of "
+                f"{len(body)}"
+            )
+        written += taken
+except BaseException:
+    # A PARTIAL CONTRACT MUST NOT SURVIVE. The installer writes a contract
+    # only when none is there, and preserves whatever it finds otherwise --
+    # so a truncated file left behind here is adopted as the operator's own
+    # on every later run, and the refusal that should have been permanent
+    # becomes a one-time message about a file that now looks deliberate.
+    try:
+        os.unlink(destination)
+    except OSError:
+        pass
+    raise
 finally:
     os.close(out)
 RENDER
