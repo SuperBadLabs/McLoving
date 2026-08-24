@@ -156,7 +156,8 @@ for service in ["postgres", "db-init", "controller", "agent"]:
          str(repo_root / "deploy/bin/mcloving-deploy-lib.sh"), service],
         capture_output=True, text=True, check=True,
     ).stdout
-    # "CLASS LINK-POLICY VARIABLE" -- the variable is the third field.
+    # "CLASS LINK-POLICY VARIABLE EXPECTED-KIND" -- the variable is the
+    # third field; the kind column is enforced by the guard, not here.
     classified |= {line.split()[2] for line in listing.splitlines() if line}
 if not classified:
     raise SystemExit("the classification enumeration is empty; the authority went blind")
@@ -562,6 +563,78 @@ grep -q "MCLOVING_AGENT_SESSION_RECEIPT_PATH must be an absolute path" \
   exit 1
 }
 rm -f "${receipt_env}"
+# NODE KIND is part of the class, from the table's EXPECTED-KIND column.
+# The agent reaches std::fs::read_to_string() on an EXISTING session
+# receipt behind a bare path.exists(), so an owner-only FIFO there --
+# mode 0600, owned by the service user, passing every mode/ownership
+# check -- blocks the read forever and stalls the start probe until
+# TimeoutStartSec kills a unit whose contract the guard just called
+# satisfied. The timeout is the gate's own regression net: a guard that
+# OPENED the path instead of stat-ing it would hang here.
+receipt_fifo="${home}/receipt-node.fifo"
+receipt_kind_env="${home}/receipt-kind.env"
+rm -f "${receipt_fifo}"
+mkfifo "${receipt_fifo}"
+chmod 0600 "${receipt_fifo}"
+sed "s#^MCLOVING_AGENT_JOURNAL_PATH=#MCLOVING_AGENT_SESSION_RECEIPT_PATH=${receipt_fifo}\nMCLOVING_AGENT_JOURNAL_PATH=#" \
+  "${config}/agent.env" > "${receipt_kind_env}"
+chmod 0600 "${receipt_kind_env}"
+grep -q "^MCLOVING_AGENT_SESSION_RECEIPT_PATH=${receipt_fifo}\$" "${receipt_kind_env}" || {
+  echo "receipt-kind gate could not add MCLOVING_AGENT_SESSION_RECEIPT_PATH; contract shape changed" >&2
+  exit 1
+}
+receipt_kind_status=0
+timeout 60 "${libexec}/helpers/mcloving-env-guard" agent "${receipt_kind_env}" \
+  > "${workdir}/logs/guard-receipt-fifo.log" 2>&1 || receipt_kind_status=$?
+if [[ "${receipt_kind_status}" -eq 0 ]]; then
+  echo "env guard accepted a FIFO session receipt path" >&2
+  exit 1
+fi
+if [[ "${receipt_kind_status}" -eq 124 ]]; then
+  echo "the guard hung on a FIFO session receipt instead of refusing it" >&2
+  exit 1
+fi
+grep -q "MCLOVING_AGENT_SESSION_RECEIPT_PATH=${receipt_fifo} (not a regular file: fifo)" \
+  "${workdir}/logs/guard-receipt-fifo.log" || {
+  echo "the FIFO receipt refusal did not name the variable and node kind:" >&2
+  cat "${workdir}/logs/guard-receipt-fifo.log" >&2
+  exit 1
+}
+# Acceptance: the same variable pointing at a regular file is admitted --
+# the rule is node kind, not the variable being set at all.
+rm -f "${receipt_fifo}"
+printf 'session_epoch=0\n' > "${receipt_fifo}"
+chmod 0600 "${receipt_fifo}"
+"${libexec}/helpers/mcloving-env-guard" agent "${receipt_kind_env}" >/dev/null || {
+  echo "env guard refused a regular-file session receipt" >&2
+  exit 1
+}
+# The mirror direction: a state path classified as a DIRECTORY must be one.
+# The workspace root is expected-kind directory, and a regular file there
+# is refused by name rather than reaching the binary's own failure.
+workspace_kind_env="${home}/workspace-kind.env"
+workspace_file="${home}/workspace-as-file"
+printf 'not a directory\n' > "${workspace_file}"
+chmod 0600 "${workspace_file}"
+sed "s#^MCLOVING_AGENT_WORKSPACE_ROOT=.*#MCLOVING_AGENT_WORKSPACE_ROOT=${workspace_file}#" \
+  "${config}/agent.env" > "${workspace_kind_env}"
+chmod 0600 "${workspace_kind_env}"
+grep -q "^MCLOVING_AGENT_WORKSPACE_ROOT=${workspace_file}\$" "${workspace_kind_env}" || {
+  echo "workspace-kind gate could not rewrite MCLOVING_AGENT_WORKSPACE_ROOT; contract shape changed" >&2
+  exit 1
+}
+if "${libexec}/helpers/mcloving-env-guard" agent "${workspace_kind_env}" \
+  > "${workdir}/logs/guard-workspace-kind.log" 2>&1; then
+  echo "env guard accepted a regular file as the agent workspace root" >&2
+  exit 1
+fi
+grep -qE "must be an existing directory|not a directory: regular file" \
+  "${workdir}/logs/guard-workspace-kind.log" || {
+  echo "the non-directory workspace refusal was not named:" >&2
+  cat "${workdir}/logs/guard-workspace-kind.log" >&2
+  exit 1
+}
+rm -f "${receipt_fifo}" "${receipt_kind_env}" "${workspace_kind_env}" "${workspace_file}"
 effect_plan="${home}/effect-plan.json"
 printf '{}' > "${effect_plan}"
 chmod 0644 "${effect_plan}"
@@ -2526,6 +2599,104 @@ rm -f "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/qu
   echo "a refused unparseable-source upgrade still moved the current release" >&2
   exit 1
 }
+# systemd.exec documents EnvironmentFile= as "an absolute filename OR
+# WILDCARD EXPRESSION" and loads EVERY match. Validating the pattern
+# itself validates nothing -- the literal does not exist, so the contract
+# rule skips it -- while a writable match supplies attacker-controlled
+# environment to the next restart. Two rules must both hold, and this
+# gate proves both plus the acceptance direction.
+wild_dir="${dropin_root_home}/wildcard-env"
+mkdir -p "${wild_dir}"
+chmod 0755 "${wild_dir}"
+printf 'MCLOVING_WILD=1\n' > "${wild_dir}/extra.env"
+printf '[Service]\nEnvironmentFile=%%h/wildcard-env/*.env\n' \
+  > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/wildcard.conf"
+# (1) Every MATCH is judged under the contract rule. A match that is
+# already group/world-writable is invisible to the directory bound below
+# -- a 0666 file inside a 0755 root-owned directory is rewritable by
+# anyone -- so per-match validation is load-bearing, not decoration.
+chmod 0666 "${wild_dir}/extra.env"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/wildcard-match.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable wildcard-matched contract" >&2
+  exit 1
+fi
+grep -q "extra.env (mode 666, expected owner-only)" \
+  "${workdir}/logs/wildcard-match.log" || {
+  echo "the wildcard match escaped expansion or the refusal was unnamed:" >&2
+  cat "${workdir}/logs/wildcard-match.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused wildcard-match upgrade still moved the current release" >&2
+  exit 1
+}
+# (2) The DIRECTORY the pattern expands in must itself be closed to other
+# users. This is the half that bounds the interval systemd's own
+# expansion opens: the glob is evaluated shortly before exec, long after
+# this validation, so a match CREATED in between is never observable
+# here -- only who is able to create one is, and that is exactly what
+# this refusal enforces.
+chmod 0600 "${wild_dir}/extra.env"
+chmod 0777 "${wild_dir}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/wildcard-dir.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable wildcard expansion directory" >&2
+  exit 1
+fi
+grep -q "wildcard-env (mode 777)" "${workdir}/logs/wildcard-dir.log" || {
+  echo "the wildcard expansion directory was not judged:" >&2
+  cat "${workdir}/logs/wildcard-dir.log" >&2
+  exit 1
+}
+# Acceptance: owner-only match inside a closed directory admits the
+# transition, and the expansion really did happen -- a parser that
+# emitted nothing at all would also "pass" here, so the refusals above
+# are what prove the extraction, and this proves it is not over-broad.
+chmod 0755 "${wild_dir}"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured wildcard-matched contract did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the wildcard gate" >&2
+  exit 1
+}
+# The expansion is glob(3)'s, the same one systemd performs: a dotfile is
+# NOT matched by '*', so a match set that included it would mean this
+# deployment validates paths systemd never loads (and, worse, that the
+# two disagree about what the declaration means).
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  printf 'HIDDEN=1\n' > "${wild_dir}/.hidden.env"
+  chmod 0600 "${wild_dir}/.hidden.env"
+  wild_matches=""
+  while IFS= read -r encoded_wild; do
+    [[ -n "${encoded_wild}" ]] || continue
+    decode_path_item_into decoded_wild "${encoded_wild}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    wild_matches+="${decoded_wild}"$'\n'
+  done < <(deployment_glob_matches "${wild_dir}/*.env")
+  rm -f "${wild_dir}/.hidden.env"
+  grep -q "extra.env" <<<"${wild_matches}" || {
+    echo "glob expansion missed the plain match: ${wild_matches}" >&2
+    exit 1
+  }
+  if grep -q ".hidden.env" <<<"${wild_matches}"; then
+    echo "glob expansion matched a dotfile that systemd's glob(3) would not" >&2
+    exit 1
+  fi
+)
+rm -f "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/wildcard.conf"
+rm -rf "${wild_dir}"
 # Parse coverage, the class-closing check: any installed-source line that
 # even LOOKS like a path-bearing directive (sloppy match: optional
 # whitespace, key, optional whitespace, '=') must be extracted by the
@@ -2828,6 +2999,76 @@ grep -q "mcloving-cli (mode 775)" "${workdir}/logs/retained-binary-upgrade.log" 
   exit 1
 }
 chmod 0755 "${transguard_libexec}/${transguard_retained2}/mcloving-cli"
+# INSTALLED HELPERS are the other tree this transition executes from:
+# mcloving-health and mcloving-env-guard run from the units, and
+# mcloving-deploy-lib.sh is SOURCED by all of them. A helpers directory
+# that is merely traversable (0755 passes the ancestor rule) says nothing
+# about the mode of a file inside it, and one relaxed helper is arbitrary
+# code run as the service user during the restart and health gates this
+# very transition performs. Every file under helpers/ carries the
+# trust-input rule; the sourced library is the sharpest case.
+chmod 0664 "${transguard_libexec}/helpers/mcloving-deploy-lib.sh"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${transguard_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/helper-file-mode.log" 2>&1; then
+  echo "upgrade proceeded over a group-writable installed helper library" >&2
+  exit 1
+fi
+grep -q "mcloving-deploy-lib.sh (mode 664)" "${workdir}/logs/helper-file-mode.log" || {
+  echo "the writable helper file was not named:" >&2
+  cat "${workdir}/logs/helper-file-mode.log" >&2
+  exit 1
+}
+chmod 0755 "${transguard_libexec}/helpers/mcloving-deploy-lib.sh"
+# An executable helper, on the rollback entry point, with the helpers
+# directory left at a traversable 0755 -- proving the refusal comes from
+# the FILE rule and not from the directory's own mode.
+chmod 0755 "${transguard_libexec}/helpers"
+chmod 0775 "${transguard_libexec}/helpers/mcloving-health"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd > "${workdir}/logs/helper-exec-mode.log" 2>&1; then
+  echo "rollback proceeded over a group-writable installed helper executable" >&2
+  exit 1
+fi
+grep -q "mcloving-health (mode 775)" "${workdir}/logs/helper-exec-mode.log" || {
+  echo "the writable helper executable was not named:" >&2
+  cat "${workdir}/logs/helper-exec-mode.log" >&2
+  exit 1
+}
+if grep -q "rolling back" "${workdir}/logs/helper-exec-mode.log"; then
+  echo "the helper refusal came after the transition had begun" >&2
+  exit 1
+fi
+chmod 0755 "${transguard_libexec}/helpers/mcloving-health"
+chmod 0700 "${transguard_libexec}/helpers"
+# A special node planted among the helpers is refused by name rather than
+# skipped -- the walk leaves no node class outside validation.
+mkfifo "${transguard_libexec}/helpers/rogue.fifo"
+helper_fifo_status=0
+timeout 60 "${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd > "${workdir}/logs/helper-fifo.log" 2>&1 || helper_fifo_status=$?
+if [[ "${helper_fifo_status}" -eq 0 ]]; then
+  echo "rollback proceeded over a FIFO planted among the installed helpers" >&2
+  exit 1
+fi
+if [[ "${helper_fifo_status}" -eq 124 ]]; then
+  echo "the helpers walk hung on a FIFO instead of refusing it" >&2
+  exit 1
+fi
+grep -q "installed helper entry .*rogue.fifo is not a regular file or directory" \
+  "${workdir}/logs/helper-fifo.log" || {
+  echo "the helper special node was not refused by name:" >&2
+  cat "${workdir}/logs/helper-fifo.log" >&2
+  exit 1
+}
+rm -f "${transguard_libexec}/helpers/rogue.fifo"
+# Acceptance: with every helper restored the same rollback proceeds.
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${transguard_libexec}/current")" == "${transguard_retained2}" ]] || {
+  echo "the secured helpers did not admit the rollback" >&2
+  exit 1
+}
 rm -rf "${transguard_home}"
 mkdir -p "${lock_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${lock_home}" \

@@ -47,6 +47,17 @@ require_secret_files "${EUID}" "${env_file}"
 
 load_environment_file "${env_file}"
 
+# The EXPECTED-KIND column of the shared classification table, indexed by
+# variable, built once. Every class check below reads its node-kind rule
+# from here rather than from a list of its own, so a variable added to the
+# table arrives with its kind already enforced and cannot be enforced two
+# different ways in two places.
+declare -A contract_path_kind=()
+while IFS=' ' read -r _ _ kind_variable kind_value; do
+  [[ -n "${kind_variable:-}" ]] || continue
+  contract_path_kind["${kind_variable}"]="${kind_value:-}"
+done < <(deployment_contract_path_variables "${service}")
+
 # require_secret_paths VAR...
 #
 # The configured private keys and identity bindings are stealable and
@@ -83,13 +94,41 @@ require_secret_paths() {
 # journal the agent creates 0644 must not wedge the next start), and a
 # journal file that does not exist yet is legal too -- its parent chain is
 # still walked through the configured path.
+#
+# NODE KIND is enforced here too, from the EXPECTED-KIND column of the
+# shared classification table -- never a hard-coded list, so a variable
+# added there arrives with its kind already enforced. Mode and ownership
+# are silent about node type: an owner-only FIFO at
+# MCLOVING_AGENT_SESSION_RECEIPT_PATH passed every check in this function
+# while the agent blocked forever in read_to_string() behind a bare
+# path.exists(), stalling the unit's start probe until TimeoutStartSec
+# killed a service whose contract this guard had just reported satisfied.
+# Judged through the link (-f/-d), matching the follow policy these
+# variables carry, and only for a node that EXISTS: absence stays legal
+# wherever it already was, because every consumer creates its own.
 require_secured_paths() {
   local name value mode_owner mode owner offending state_paths=()
+  local expected_kind kind_offending=""
   for name in "$@"; do
     contract_into value "${name}"
     [[ -n "${value}" ]] || continue
     state_paths+=("${value}")
+    [[ -e "${value}" ]] || continue
+    expected_kind="${contract_path_kind[${name}]:-}"
+    case "${expected_kind}" in
+      file)
+        [[ -f "${value}" ]] \
+          || kind_offending+="${name}=${value} (not a regular file: $(stat -Lc '%F' "${value}" 2>/dev/null || echo "unknown node")) "
+        ;;
+      directory)
+        [[ -d "${value}" ]] \
+          || kind_offending+="${name}=${value} (not a directory: $(stat -Lc '%F' "${value}" 2>/dev/null || echo "unknown node")) "
+        ;;
+    esac
   done
+  if [[ -n "${kind_offending}" ]]; then
+    fail "configured path(s) of the wrong node kind: ${kind_offending% }-- the consuming binary opens each of these as the kind its classification names, and a special node blocks the open (a writer-less FIFO never returns) or fails it after this guard reported the contract satisfied; restore the expected node kind and retry"
+  fi
   [[ ${#state_paths[@]} -gt 0 ]] || return 0
   require_secure_ancestors "${guard_home}" "${state_paths[@]}"
   offending=""
@@ -124,26 +163,14 @@ require_secured_paths() {
 # require_readable_file, which stays first for its precise diagnostics.
 #
 # Trust inputs are always FILES (certificates, CA bundles, the mapping
-# catalog), so an existing non-regular node is refused by name on top of
-# the shared class: the secured-path rule serves the state class too,
-# where directories are legal, and cannot carry this requirement itself.
-# The two required CA/certificate variables already hit require_readable_file's
-# -f, but the optional trust inputs reached only the mode/owner checks --
-# where a 0644 FIFO passes and the consuming binary then blocks on the
-# read after ExecStartPre reported the contract satisfied.
+# catalog) and say so in the EXPECTED-KIND column of the shared table, so
+# the node-kind refusal now lives in require_secured_paths with every
+# other class rather than being hard-coded here: one authority, one
+# enforcement point. The two required CA/certificate variables also hit
+# require_readable_file's -f, but the OPTIONAL trust inputs reach only
+# this class, where a 0644 FIFO once passed and the consuming binary then
+# blocked on the read after ExecStartPre reported the contract satisfied.
 require_trust_input_paths() {
-  local name value offending=""
-  for name in "$@"; do
-    contract_into value "${name}"
-    [[ -n "${value}" ]] || continue
-    [[ -e "${value}" ]] || continue
-    if [[ ! -f "${value}" ]]; then
-      offending+="${value} (not a regular file: $(stat -Lc '%F' "${value}" 2>/dev/null || echo "unknown node")) "
-    fi
-  done
-  if [[ -n "${offending}" ]]; then
-    fail "configured trust-input path(s) not regular files: ${offending% }-- the consuming binary reads these as files, and a special node blocks or streams foreign bytes into that read; restore regular files and retry"
-  fi
   require_secured_paths "$@"
 }
 
@@ -210,7 +237,7 @@ require_min_bytes() {
 # this lane refuses. The shipped contracts are all %h-absolute, so nothing
 # legitimate carries a relative spelling; emptiness is judged by the
 # per-service require lists.
-while IFS=' ' read -r _ link_policy path_variable; do
+while IFS=' ' read -r _ link_policy path_variable _; do
   [[ -n "${path_variable:-}" ]] || continue
   contract_into class_path_value "${path_variable}"
   [[ -n "${class_path_value}" ]] || continue

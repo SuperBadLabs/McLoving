@@ -111,7 +111,7 @@ for contract_service in postgres db-init controller agent; do
   service_paths="$(
     load_environment_file "${contract_file}" 2>/dev/null || exit 0
     deployment_contract_path_variables "${contract_service}" \
-      | while IFS=' ' read -r path_class _ path_variable; do
+      | while IFS=' ' read -r path_class _ path_variable _; do
           case "${path_class}" in
             secret | trust) ;;
             *) continue ;;

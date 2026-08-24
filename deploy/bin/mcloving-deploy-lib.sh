@@ -158,7 +158,8 @@ require_secret_files() {
   fi
 }
 
-# deployment_contract_path_variables SERVICE -> "CLASS LINK-POLICY VARIABLE" lines
+# deployment_contract_path_variables SERVICE
+#   -> "CLASS LINK-POLICY VARIABLE EXPECTED-KIND" lines
 #
 # The single authority for which contract variables carry filesystem paths
 # and which protection class each belongs to, shared by mcloving-env-guard
@@ -186,6 +187,30 @@ require_secret_files() {
 # inspects with symlink_metadata() and refuses every symlink -- today the
 # two effect variables -- so the guard refuses the link itself, lstat-based,
 # before any generic class check follows it.
+#
+# EXPECTED-KIND is the same parity principle applied to NODE TYPE: "file"
+# when the consumer opens the path as a file, "directory" when it opens or
+# creates it as one. Mode and ownership say nothing about node type, so an
+# owner-only FIFO passed every class check while the consuming binary
+# blocked on it -- MCLOVING_AGENT_SESSION_RECEIPT_PATH reaches
+# std::fs::read_to_string() in publish_authenticated_session_receipt()
+# (bins/agent/src/lib.rs) behind a bare path.exists(), and a read-only open
+# of a writer-less FIFO never returns, so the start probe stalls until
+# TimeoutStartSec kills a unit whose contract the guard had just reported
+# satisfied. The kinds below were read off the Rust rather than assumed:
+#   MCLOVING_OBJECT_ROOT                 directory  FilesystemObjectStore::open
+#                                                   (create_dir + is_dir check)
+#   MCLOVING_WORKSPACE_ROOT              directory  create_dir_all, then a
+#                                                   guard refusing non-directories
+#   MCLOVING_AGENT_JOURNAL               file       rusqlite Connection::open
+#   MCLOVING_AGENT_WORKSPACE_ROOT        directory  create_dir_all + is_dir
+#   MCLOVING_AGENT_JOURNAL_PATH          file       rusqlite Connection::open
+#   MCLOVING_AGENT_SESSION_RECEIPT_PATH  file       read_to_string, then rename
+# Absence stays legal exactly where it already was: each of these is
+# created on demand by its consumer, and the kind rule judges only a node
+# that EXISTS. The secret and trust classes are all file-valued and carry
+# regular-file refusals of their own already; the column is stated for
+# them too, so the authority is complete rather than partial.
 deployment_contract_path_variables() {
   case "$1" in
     controller)
@@ -197,26 +222,26 @@ deployment_contract_path_variables() {
       # stays legal. Both are optional; empty means unset here, and the
       # binary refuses set-but-empty on its own.
       printf '%s\n' \
-        "secret follow MCLOVING_AGENT_SERVER_KEY_PATH" \
-        "secret follow MCLOVING_AGENT_IDENTITY_BINDINGS_PATH" \
-        "secret nofollow MCLOVING_EFFECT_RUNTIME_PLAN" \
-        "trust follow MCLOVING_AGENT_SERVER_CERT_PATH" \
-        "trust follow MCLOVING_AGENT_CLIENT_CA_PATH" \
-        "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG" \
-        "state follow MCLOVING_OBJECT_ROOT" \
-        "state follow MCLOVING_WORKSPACE_ROOT" \
-        "state follow MCLOVING_AGENT_JOURNAL"
+        "secret follow MCLOVING_AGENT_SERVER_KEY_PATH file" \
+        "secret follow MCLOVING_AGENT_IDENTITY_BINDINGS_PATH file" \
+        "secret nofollow MCLOVING_EFFECT_RUNTIME_PLAN file" \
+        "trust follow MCLOVING_AGENT_SERVER_CERT_PATH file" \
+        "trust follow MCLOVING_AGENT_CLIENT_CA_PATH file" \
+        "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG file" \
+        "state follow MCLOVING_OBJECT_ROOT directory" \
+        "state follow MCLOVING_WORKSPACE_ROOT directory" \
+        "state follow MCLOVING_AGENT_JOURNAL file"
       ;;
     agent)
       # The session receipt is an optional durable output the agent writes;
       # state-class like the journal, absence legal before first use.
       printf '%s\n' \
-        "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH" \
-        "trust follow MCLOVING_CONTROLLER_CA_PATH" \
-        "trust follow MCLOVING_AGENT_CERTIFICATE_PATH" \
-        "state follow MCLOVING_AGENT_WORKSPACE_ROOT" \
-        "state follow MCLOVING_AGENT_JOURNAL_PATH" \
-        "state follow MCLOVING_AGENT_SESSION_RECEIPT_PATH"
+        "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH file" \
+        "trust follow MCLOVING_CONTROLLER_CA_PATH file" \
+        "trust follow MCLOVING_AGENT_CERTIFICATE_PATH file" \
+        "state follow MCLOVING_AGENT_WORKSPACE_ROOT directory" \
+        "state follow MCLOVING_AGENT_JOURNAL_PATH file" \
+        "state follow MCLOVING_AGENT_SESSION_RECEIPT_PATH file"
       ;;
     postgres | db-init)
       :
@@ -504,6 +529,7 @@ require_parseable_unit_sources() {
 # accepts is the same declaration here.
 deployment_unit_declared_contracts() {
   local home_dir="${1%/}" line key value path encoded_source decoded_source
+  local encoded_match
   local source_files=()
   shift
   while IFS= read -r encoded_source; do
@@ -519,9 +545,59 @@ deployment_unit_declared_contracts() {
     path="${value#-}"
     path="${path//%h/${home_dir}}"
     case "${path}" in
-      /*) encode_path_item "${path}" ;;
+      /*) ;;
+      *) continue ;;
     esac
+    # The literal spelling is emitted whether or not it is a wildcard.
+    # For a plain path it IS the contract. For a wildcard it is what
+    # bounds the exposure: the chain derivation walks the pattern's own
+    # parent directories, so the directory a match could be ADDED to is
+    # judged non-group/world-writable and root-or-home-owned. That
+    # bound is the load-bearing half -- systemd expands the glob shortly
+    # before exec, long after this validation, so a match created in the
+    # interval is not observable here at all; only "who may create one"
+    # is. require_secure_files skips a literal that does not exist, so
+    # the wildcard spelling itself costs nothing there.
+    encode_path_item "${path}"
+    # The MATCHES are emitted too, and each is judged under the full
+    # contract rule with its own resolved chain. This is not merely
+    # defence in depth: a match that ALREADY exists group/world-writable,
+    # foreign-owned, or as a special node is invisible to the directory
+    # bound above -- a 0666 file inside a 0755 root-owned directory is
+    # rewritable by anyone -- and systemd loads every one of them.
+    if [[ "${path}" == *[\*\?\[]* ]]; then
+      while IFS= read -r encoded_match; do
+        [[ -n "${encoded_match}" ]] || continue
+        printf '%s\n' "${encoded_match}"
+      done < <(deployment_glob_matches "${path}")
+    fi
   done < <(deployment_unit_assignment_lines "${source_files[@]}")
+}
+
+# deployment_glob_matches PATTERN -> encoded items: every path the pattern
+# matches, with the glob(3) semantics systemd itself uses.
+#
+# systemd.exec documents the EnvironmentFile= argument as "an absolute
+# filename OR WILDCARD EXPRESSION", and expands it with
+# safe_glob(fn, 0, &pglob) -- plain glob(3), no GLOB_BRACE. python's glob
+# implements the same syntax: '*' and '?' (neither crossing '/' nor
+# matching a leading '.') and '[...]' classes, with brace expansion
+# absent. Verified against libc on this host rather than assumed:
+# glob("{a,b}.env", 0, ...) returns GLOB_NOMATCH where a shell would
+# expand it, and python's glob likewise returns no match -- so the
+# expansion here is neither narrower nor wider than the one systemd
+# performs. Being NARROWER would be the dangerous direction: a match
+# systemd loads that this never validates.
+deployment_glob_matches() {
+  python3 - "$1" <<'GLOB'
+import base64
+import glob
+import os
+import sys
+
+for match in sorted(glob.glob(sys.argv[1])):
+    print(base64.b64encode(os.fsencode(match)).decode("ascii"))
+GLOB
 }
 
 # deployment_unit_declared_roots HOME UNIT_FILE... -> the home-relative
@@ -1478,51 +1554,23 @@ require_deployment_integrity() {
       [[ -d "${unit_file}.d" ]] && dropin_dirs+=("${unit_file}.d")
     done
   fi
-  # The RETAINED release inventory joins the walk, derived by LISTING
-  # releases/ rather than enumerating from the current/previous links: the
-  # links name at most two entries, while every retained releases/<id> is
-  # executable state the next transition hashes and adopts. The inventory
-  # validates the releases PARENT already, but a retained directory (or a
-  # binary inside one) gone group/world-writable after publication would
-  # otherwise be hashed -- successfully -- and then swapped by another
-  # local user between the byte comparison and the service start. Each
-  # real directory found joins the validated-node set (its mode and
-  # ownership are judged like every managed root); each regular file gets
-  # the trust-input file rule below (no group/other write, root-or-home
-  # owner; world-readable stays legal -- these are public binaries, not
-  # secrets). A symlinked entry is refused by name, the round-11 rule:
-  # stage_release only ever publishes real directories and regular files.
-  local release_walk=() release_node release_binaries=() walk_index=0
-  local dotglob_was_set=0
-  shopt -q dotglob && dotglob_was_set=1
-  shopt -s dotglob
-  if [[ -d "${libexec_root}/releases" ]]; then
-    release_walk=("${libexec_root}/releases"/*)
-  fi
-  while (( walk_index < ${#release_walk[@]} )); do
-    release_node="${release_walk[walk_index]}"
-    walk_index=$((walk_index + 1))
-    # An unmatched glob stays a literal pattern; nothing exists there.
-    [[ -e "${release_node}" || -L "${release_node}" ]] || continue
-    if [[ -L "${release_node}" ]]; then
-      (( dotglob_was_set )) || shopt -u dotglob
-      deploy_fail "retained release entry ${release_node} is a symlink; an entry that is itself a symlink is never published by stage_release -- refusing to trust the retained inventory"
-    fi
-    if [[ -d "${release_node}" ]]; then
-      managed_roots+=("${release_node}")
-      release_walk+=("${release_node}"/*)
-    elif [[ -f "${release_node}" ]]; then
-      release_binaries+=("${release_node}")
-    else
-      # A FIFO, socket, or device node in the retained inventory has no
-      # legitimate state -- stage_release publishes only real directories
-      # and regular files -- and skipping it silently would leave exactly
-      # one node class outside the walk.
-      (( dotglob_was_set )) || shopt -u dotglob
-      deploy_fail "retained release entry ${release_node} is not a regular file or directory ($(stat -c '%F' "${release_node}" 2>/dev/null || echo "unknown node")); stage_release never publishes such a node -- refusing to trust the retained inventory"
-    fi
-  done
-  (( dotglob_was_set )) || shopt -u dotglob
+  # The two INSTALLED TREES the transition executes from -- retained
+  # releases and installed helpers -- are walked in full by the shared
+  # collector below. Each real directory found joins the validated-node
+  # set; each regular file joins the trust-input file list.
+  local release_binaries=() helper_files=()
+  deployment_collect_trust_tree "${libexec_root}/releases" \
+    "retained release" managed_roots release_binaries
+  # helpers/ holds every executable this transition RUNS -- mcloving-health
+  # and mcloving-env-guard run from the units, mcloving-deploy-lib.sh is
+  # SOURCED by all of them, and the installed rollback/digests helpers are
+  # what the recovery command invokes. The directory being non-writable
+  # (0700, or a merely traversable 0755) says nothing about the mode of an
+  # individual file inside it: one relaxed helper is arbitrary code
+  # executed as the service user during the restart and health gates this
+  # very transition is about to run.
+  deployment_collect_trust_tree "${libexec_root}/helpers" \
+    "installed helper" managed_roots helper_files
   # Unit SOURCE files enter the ancestor walk alongside the declared
   # targets: a top-level unit or drop-in .conf that is a symlink to a
   # securely-owned file passes the trust-input file rule on the target
@@ -1540,7 +1588,59 @@ require_deployment_integrity() {
   require_secure_files "${home_dir}" "${contract_destinations[@]}" \
     "${declared_contracts[@]}"
   require_integrity_files "${home_dir}" "${unit_source_files[@]}" \
-    "${release_binaries[@]}"
+    "${release_binaries[@]}" "${helper_files[@]}"
+}
+
+# deployment_collect_trust_tree ROOT LABEL DIRS_ARRAY FILES_ARRAY
+#
+# Walk one INSTALLED tree this deployment executes or sources from, and
+# split it into validated directory nodes (appended to DIRS_ARRAY, judged
+# by the managed-root mode and ownership rules) and trust-input files
+# (appended to FILES_ARRAY, judged by require_integrity_files). Derived by
+# LISTING the tree -- never from an enumerated name list or a symlink
+# target -- because enumeration is how this class of gap has repeatedly
+# reappeared: what is on disk is what the next transition executes.
+#
+# Entries that this deployment never legitimately publishes are refused by
+# name rather than skipped: a symlinked entry (the round-11 rule -- both
+# stage_release and the installer write real directories and regular files
+# only) and any other node kind (FIFO, socket, device). Dotfiles are
+# included: a hidden entry is executed exactly as readily as a visible one.
+# A missing tree is legal and contributes nothing -- the installer creates
+# these, and a fresh home has neither.
+deployment_collect_trust_tree() {
+  local tree_root="$1" tree_label="$2"
+  # shellcheck disable=SC2178  # nameref assignment
+  local -n collect_dirs_ref="$3"
+  # shellcheck disable=SC2178  # nameref assignment
+  local -n collect_files_ref="$4"
+  local collect_walk=() collect_node collect_index=0 collect_dotglob=0
+  shopt -q dotglob && collect_dotglob=1
+  shopt -s dotglob
+  if [[ -d "${tree_root}" ]]; then
+    collect_walk=("${tree_root}"/*)
+  fi
+  while (( collect_index < ${#collect_walk[@]} )); do
+    collect_node="${collect_walk[collect_index]}"
+    collect_index=$((collect_index + 1))
+    # An unmatched glob stays a literal pattern; nothing exists there.
+    [[ -e "${collect_node}" || -L "${collect_node}" ]] || continue
+    if [[ -L "${collect_node}" ]]; then
+      (( collect_dotglob )) || shopt -u dotglob
+      deploy_fail "${tree_label} entry ${collect_node} is a symlink; an entry that is itself a symlink is never published by this deployment, which writes only real directories and regular files there -- refusing to trust the installed tree"
+    fi
+    if [[ -d "${collect_node}" ]]; then
+      collect_dirs_ref+=("${collect_node}")
+      collect_walk+=("${collect_node}"/*)
+    elif [[ -f "${collect_node}" ]]; then
+      collect_files_ref+=("${collect_node}")
+    else
+      (( collect_dotglob )) || shopt -u dotglob
+      deploy_fail "${tree_label} entry ${collect_node} is not a regular file or directory ($(stat -c '%F' "${collect_node}" 2>/dev/null || echo "unknown node")); this deployment never publishes such a node -- refusing to trust the installed tree"
+    fi
+  done
+  (( collect_dotglob )) || shopt -u dotglob
+  return 0
 }
 
 # open_transition_lock_fd LIBEXEC_ROOT -- open fd 9 on the lockfile, safely.
