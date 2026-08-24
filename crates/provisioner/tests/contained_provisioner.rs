@@ -63,18 +63,31 @@ const POLICY_MAX_INSTANCE_LIFETIME_MS: u64 = REQUEST_LIFETIME_MS;
 const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS;
 
 /// Delay the fixture holds a delayed-create response open for before
-/// answering. The startup budgets below are derived from it.
+/// answering, on the `DelayedCreateReady` and `DelayedMalformedCreateOnce`
+/// modes. The startup budgets below are derived from it.
 const FIXTURE_DELAYED_CREATE_MS: u64 = 200;
+
+/// Delay the two `DelayedCreateAfter*Snapshot` modes hold their create open
+/// for when a test does not widen it.
+///
+/// Both current users widen it to [`FIXTURE_RENDEZVOUS_CREATE_MS`] and pair
+/// that with a held snapshot response, so this is only the fallback those
+/// modes keep for an un-widened use — no test's window is measured against
+/// it.
+const FIXTURE_SNAPSHOT_CREATE_MS: u64 = 100;
 
 /// Delay the rendezvous-on-create cases ask the fixture to hold its create
 /// response open for, via `Fixture::set_create_delay_ms`.
 ///
 /// These cases are genuinely two-sided windows: something else — a deadline
 /// expiry, a cancellation, a reconcile snapshot — has to land after the
-/// create call opens yet before the fixture answers it. Widening the delay
-/// well past the modes' own `FIXTURE_DELAYED_CREATE_MS` widens both margins
-/// at once instead of splitting a couple of hundred milliseconds between
-/// them.
+/// create call opens yet before the fixture answers it. The override supplies
+/// the delay in place of whichever default the mode would otherwise use —
+/// `FIXTURE_DELAYED_CREATE_MS` for `DelayedCreateReady` and
+/// `DelayedMalformedCreateOnce`, `FIXTURE_SNAPSHOT_CREATE_MS` for the two
+/// `DelayedCreateAfter*Snapshot` modes — and outruns both by an order of
+/// magnitude, so it widens the two margins at once instead of splitting a
+/// couple of hundred milliseconds between them.
 const FIXTURE_RENDEZVOUS_CREATE_MS: u64 = 3_000;
 
 /// Delay the fixture holds a raced response open for on the non-create paths
@@ -451,7 +464,7 @@ async fn create_instance(
         } else {
             match inner.mode {
                 FixtureMode::DelayedCreateAfterInitialSnapshot
-                | FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
+                | FixtureMode::DelayedCreateAfterFinalSnapshot => FIXTURE_SNAPSHOT_CREATE_MS,
                 FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce => {
                     FIXTURE_DELAYED_CREATE_MS
                 }
@@ -2377,17 +2390,21 @@ async fn reconciliation_uses_inventory_observation_for_the_create_peer_window() 
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation() {
-    // The reconcile arm below sleeps out the create peer window — the
-    // provider timeout plus one second — and must then observe the row while
-    // it is still pending, so the startup budget is derived from the peer
-    // window it has to outlive, with margin for the reconcile itself. The
+    // The reconcile arm below sleeps out the create peer window and must then
+    // observe the row while it is still pending, so the startup budget is the
+    // peer window it has to outlive plus margin for the reconcile itself. The
     // provision arm's `StartupTimeoutCleaned` outcome only needs the deadline
     // to fire eventually.
+    let provider_timeout_ms = PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS;
+    // The provisioner grants an in-flight create peer the provider timeout
+    // plus one second before an absence may be acted on.
+    let create_peer_window_ms = provider_timeout_ms + 1_000;
+    let reconcile_margin_ms = 4_000;
     let context = Context::with_limits(
         FixtureMode::DelayedPendingRefreshAfterInitialSnapshot,
         4,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS + 5_000,
+        provider_timeout_ms,
+        create_peer_window_ms + reconcile_margin_ms,
     )
     .await;
     let request = context.request();
