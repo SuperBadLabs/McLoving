@@ -64,7 +64,10 @@ acquire_transition_lock_shared "${home_dir}/.local/libexec/mcloving"
 # the same library derivation the installer writes with; the mcloving
 # contract root stays %h/.config/mcloving because that is the literal text
 # of the units' EnvironmentFile= lines.
-xdg_config_base="$(deployment_config_root "${home_dir}")"
+# The same base the installer writes to and the transitions validate, so
+# the canonical document describes the tree systemd actually reads rather
+# than the one this shell would have guessed.
+xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
 unit_root="${xdg_config_base}/systemd/user"
 quadlet_root="${xdg_config_base}/containers/systemd"
 ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \

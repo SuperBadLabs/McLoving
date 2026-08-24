@@ -4605,6 +4605,154 @@ EnvironmentFile=%t/extra.env|unit specifier other than %h in its value
 EXECSPELLINGS
 rm -f "${exec_dropin_dir}/exec.conf"
 rm -rf "${exec_tool_dir}"
+# A SCRIPT PASSED TO AN INTERPRETER is executed as surely as the interpreter.
+# Round 29 validated only the first token, so ExecStartPre=/bin/sh
+# %h/hook-dir/hook.sh left both the script and its directory unjudged. Which
+# arguments are files is undecidable in general, so the extractor
+# over-validates instead: every absolute argument that EXISTS as a regular
+# file takes the trust-input rule and the ancestor walk.
+exec_hook_dir="${dropin_root_home}/hook-dir"
+exec_hook_dropin="${dropin_unit_root}/mcloving-controller.service.d"
+mkdir -p "${exec_hook_dir}" "${exec_hook_dropin}"
+chmod 0755 "${exec_hook_dir}" "${exec_hook_dropin}"
+printf '#!/bin/sh\nexit 0\n' > "${exec_hook_dir}/hook.sh"
+chmod 0755 "${exec_hook_dir}/hook.sh"
+printf '[Service]\nExecStartPre=/bin/sh %%h/hook-dir/hook.sh\n' \
+  > "${exec_hook_dropin}/hook.conf"
+chmod 0644 "${exec_hook_dropin}/hook.conf"
+# (1) The script's own file rule.
+chmod 0666 "${exec_hook_dir}/hook.sh"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/exec-arg-file.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable script passed to an interpreter" >&2
+  exit 1
+fi
+grep -q "hook-dir/hook.sh (mode 666)" "${workdir}/logs/exec-arg-file.log" || {
+  echo "the interpreter's script argument was not judged:" >&2
+  cat "${workdir}/logs/exec-arg-file.log" >&2
+  exit 1
+}
+chmod 0755 "${exec_hook_dir}/hook.sh"
+# (2) The directory holding it, with the script itself secure -- proving the
+# argument reached the ancestor walk and not only the file rule.
+chmod 0777 "${exec_hook_dir}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/exec-arg-chain.log" 2>&1; then
+  echo "upgrade proceeded over an interpreter script in a world-writable directory" >&2
+  exit 1
+fi
+grep -q "hook-dir (mode 777)" "${workdir}/logs/exec-arg-chain.log" || {
+  echo "the interpreter script's directory was not walked:" >&2
+  cat "${workdir}/logs/exec-arg-chain.log" >&2
+  exit 1
+}
+chmod 0755 "${exec_hook_dir}"
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused exec-argument upgrade still moved the current release" >&2
+  exit 1
+}
+# (3) Acceptance, and the policy boundaries. A path-shaped argument that
+# does not exist, one that is a directory, and a relative one are all
+# ignored -- systemd passes them as strings and walking every path-shaped
+# argument would refuse transitions over trees nothing reads.
+printf '[Service]\nExecStartPre=/bin/sh %%h/hook-dir/hook.sh %%h/hook-dir/absent.sh %%h/hook-dir relative/thing\n' \
+  > "${exec_hook_dropin}/hook.conf"
+chmod 0644 "${exec_hook_dropin}/hook.conf"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the exec-argument gate" >&2
+  exit 1
+}
+# The tokenizer is systemd's, not a whitespace split: a QUOTED path argument
+# is exactly where a file hides, and a naive split would miss it.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  arg_seen=""
+  while IFS= read -r encoded_arg; do
+    [[ -n "${encoded_arg}" ]] || continue
+    decode_path_item_into decoded_arg "${encoded_arg}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    arg_seen+="${decoded_arg}"$'\n'
+  done < <(deployment_exec_argument_paths "${dropin_root_home}" \
+    "/bin/sh --msg=\"hello world\" \"${exec_hook_dir}/hook.sh\"")
+  grep -qx "${exec_hook_dir}/hook.sh" <<<"${arg_seen}" || {
+    echo "a quoted path argument escaped the command-line tokenizer: ${arg_seen}" >&2
+    exit 1
+  }
+  for ignored_arg in "${exec_hook_dir}/absent.sh" "${exec_hook_dir}" "relative/thing"; do
+    if grep -qx "${ignored_arg}" <<<"${arg_seen}"; then
+      echo "the argument extractor claimed ${ignored_arg}, which the stated policy ignores" >&2
+      exit 1
+    fi
+  done
+)
+rm -rf "${exec_hook_dir}" "${exec_hook_dropin}/hook.conf"
+# INSTALLATION ROOTS come from the running manager where it can say. Writing
+# to the wrong root is the one failure that is silent and total: units land
+# where the manager never searches and daemon-reload finds nothing.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  # A home no running manager serves must fall back to the caller's
+  # derivation, and must still honour an XDG base inside that home.
+  [[ "$(deployment_config_root_source "${dropin_root_home}")" == "derived" ]] || {
+    echo "a home the running manager does not serve was reported as manager-backed" >&2
+    exit 1
+  }
+  [[ "$(deployment_effective_config_root "${dropin_root_home}")" == "${dropin_root_home}/.config" ]] || {
+    echo "the fallback configuration base is not the caller's derivation" >&2
+    exit 1
+  }
+  if deployment_manager_is_reachable; then
+    [[ "$(deployment_config_root_source "${HOME}")" == "manager" ]] || {
+      echo "the running manager serves this home but was not used for the configuration base" >&2
+      exit 1
+    }
+    manager_base="$(deployment_effective_config_root "${HOME}")"
+    # The whole point: this shell's XDG_CONFIG_HOME must not move it.
+    perturbed_base="$(XDG_CONFIG_HOME=/tmp/mcloving-install-root-probe \
+      deployment_effective_config_root "${HOME}")"
+    [[ "${manager_base}" == "${perturbed_base}" ]] || {
+      echo "this shell's XDG_CONFIG_HOME moved the installation root away from the manager's (${manager_base} vs ${perturbed_base})" >&2
+      exit 1
+    }
+    # And it is grounded in the manager's own search list, not in the
+    # variable alone.
+    systemctl --user show -p UnitPath --value | tr ' ' '\n' \
+      | grep -qx "${manager_base}/systemd/user" || {
+      echo "the derived configuration base is not one the manager actually searches" >&2
+      exit 1
+    }
+  else
+    echo "installation-root manager gate skipped: no reachable systemctl --user on this host"
+  fi
+)
+# The installer says which base it used, because the two can only differ
+# when something is already surprising.
+install_root_home="${workdir}/install-root-home"
+rm -rf "${install_root_home}"
+mkdir -p "${install_root_home}"
+"${repo_root}/deploy/bin/mcloving-install" --home "${install_root_home}" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/install-root.log" 2>&1 || {
+  echo "the install-root gate could not install:" >&2
+  cat "${workdir}/logs/install-root.log" >&2
+  exit 1
+}
+grep -q "unit installation roots came from the derived configuration base (${install_root_home}/.config)" \
+  "${workdir}/logs/install-root.log" || {
+  echo "the installer did not report which configuration base it used:" >&2
+  cat "${workdir}/logs/install-root.log" >&2
+  exit 1
+}
+rm -rf "${install_root_home}"
 # Parse coverage, the class-closing check: any installed-source line that
 # even LOOKS like a path-bearing directive (sloppy match: optional
 # whitespace, key, optional whitespace, '=') must be extracted by the

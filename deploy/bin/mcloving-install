@@ -74,7 +74,19 @@ libexec_root="${home_dir}/.local/libexec/mcloving"
 # searches: XDG_CONFIG_HOME moves them, and units written under a
 # hard-coded ~/.config would be invisible to systemctl --user there.
 config_root="${home_dir}/.config/mcloving"
-xdg_config_base="$(deployment_config_root "${home_dir}")"
+# FROM THE RUNNING MANAGER where it can say, because writing to the wrong
+# root here is silent and total: units land where the manager never looks,
+# daemon-reload finds nothing, and the deployment does not exist as far as
+# systemd is concerned -- with no error anywhere. The caller's derivation is
+# the documented fallback, and which one was used is SAID, since the two can
+# only differ when something is already surprising.
+xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
+xdg_config_caller="$(deployment_config_root "${home_dir}")"
+if [[ "${xdg_config_base}" != "${xdg_config_caller}" ]]; then
+  deploy_notice "installing into the configuration root the running service manager searches (${xdg_config_base}), not the one this shell would derive (${xdg_config_caller}); the manager was started with a different XDG_CONFIG_HOME, and units written to the shell's root would be invisible to it"
+else
+  deploy_notice "unit installation roots came from the $(deployment_config_root_source "${home_dir}") configuration base (${xdg_config_base})"
+fi
 unit_root="${xdg_config_base}/systemd/user"
 quadlet_root="${xdg_config_base}/containers/systemd"
 

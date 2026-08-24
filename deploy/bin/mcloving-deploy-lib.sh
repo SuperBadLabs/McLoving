@@ -850,6 +850,67 @@ deployment_manager_unit_answer() {
   return 0
 }
 
+# deployment_manager_config_root HOME -> the XDG configuration base the
+# RUNNING user manager uses, or nothing when it cannot be established.
+#
+# Round 34 made the manager authoritative for what systemd READS. Install
+# needs the same authority for where the deployment WRITES, and the failure
+# there is worse: a manager started with a different XDG_CONFIG_HOME means
+# units land in a directory it never searches, daemon-reload finds nothing,
+# and the deployment silently does not exist as far as systemd is concerned.
+# No refusal, no error -- just an install that did nothing.
+#
+# The variable is read from the manager's own environment rather than the
+# caller's, and is then GROUNDED in the manager's own UnitPath: the derived
+# <base>/systemd/user must actually appear in the list the manager searches.
+# That is what keeps this from being round 34's rejected idea of feeding
+# show-environment back into a re-derivation -- the variable proposes, the
+# manager's list confirms, and a disagreement yields nothing rather than a
+# guess.
+deployment_manager_config_root() {
+  local home_dir="${1%/}" manager_config candidate encoded decoded path_list
+  deployment_manager_speaks_for "${home_dir}" || return 1
+  manager_config="$(systemctl --user show-environment 2>/dev/null 9>&- \
+    | sed -n 's/^XDG_CONFIG_HOME=//p' | head -1)" || return 1
+  [[ "${manager_config}" == /* ]] || manager_config="${home_dir}/.config"
+  manager_config="${manager_config%/}"
+  candidate="${manager_config}/systemd/user"
+  # Command substitution, not process substitution: this runs inside the
+  # transition lock and a producer left alive would hold fd 9 (round 34).
+  path_list="$(deployment_manager_unit_path "${home_dir}")" || return 1
+  while IFS= read -r encoded; do
+    [[ -n "${encoded}" ]] || continue
+    decode_path_item_into decoded "${encoded}"
+    if [[ "${decoded}" == "${candidate}" ]]; then
+      printf '%s\n' "${manager_config}"
+      return 0
+    fi
+  done <<<"${path_list}"
+  return 1
+}
+
+# deployment_effective_config_root HOME -> the configuration base this
+# deployment should read from and write to: the manager's where it can be
+# established, the caller's derivation otherwise.
+deployment_effective_config_root() {
+  local home_dir="${1%/}" manager_root
+  if manager_root="$(deployment_manager_config_root "${home_dir}")" \
+    && [[ -n "${manager_root}" ]]; then
+    printf '%s\n' "${manager_root}"
+    return 0
+  fi
+  deployment_config_root "${home_dir}"
+}
+
+# deployment_config_root_source HOME -> "manager" or "derived"
+deployment_config_root_source() {
+  if deployment_manager_config_root "${1%/}" >/dev/null 2>&1; then
+    printf 'manager\n'
+  else
+    printf 'derived\n'
+  fi
+}
+
 # deployment_unit_load_paths HOME CLASS FAMILY [SEMANTICS] -> encoded
 # items: the base directories the manager searches, IN SYSTEMD'S OWN
 # PRECEDENCE ORDER, whether or not they exist.
@@ -1592,6 +1653,108 @@ GLOB
 # declared contracts: the ancestor chain of the declared path is still
 # walked, so the directory an executable would appear in is judged even
 # before it exists.
+# deployment_exec_argument_paths HOME COMMAND_VALUE -> encoded items: every
+# ARGUMENT of an Exec* command line that is an absolute path and exists as a
+# regular file.
+#
+# Round 29 drew the boundary at "the executable is the first token;
+# arguments are not validated", and that boundary was wrong. A script handed
+# to an interpreter is executed exactly as surely as the interpreter is:
+# ExecStartPre=/bin/sh /srv/shared/hook.sh validated /bin/sh and left both
+# the script and /srv/shared unjudged, so another local user who could write
+# that directory owned what the transition ran.
+#
+# Deciding WHICH arguments are files is undecidable in general, so this does
+# not try. It OVER-VALIDATES instead, which round 31 established is the safe
+# direction: anything absolute that is actually there as a regular file is
+# judged. The cost of over-validating an argument that merely looks like a
+# path is a refusal only when that path is genuinely unsafe, which is the
+# direction to err in.
+#
+# The policy, stated because each case is a judgement:
+#
+#   ABSOLUTE AND EXISTS AS A REGULAR FILE -- validated. Trust-input file
+#     rule plus the shared ancestor walk, exactly like the executable.
+#   ABSOLUTE BUT ABSENT -- ignored. systemd passes it to the process as a
+#     string; nothing reads it. Walking the ancestors of every path-shaped
+#     argument would refuse transitions over directories the deployment
+#     never touches, which is a false refusal rather than a caught risk.
+#   ABSOLUTE BUT NOT A REGULAR FILE -- ignored. A directory argument is a
+#     data root, not executable input, and the classes that own such roots
+#     validate them through their own declarations.
+#   %h-ANCHORED -- expanded, the same leading-%h grammar the executable uses.
+#   RELATIVE -- ignored. systemd does not resolve it against anything this
+#     validator can observe, and round 33 settled that guessing a
+#     working-directory-relative path resolves somewhere systemd will not.
+#
+# Tokenization follows systemd's own command-line splitting rather than a
+# naive whitespace split, because a quoted argument is exactly where a path
+# hides: single and double quotes group, and a backslash escapes the next
+# character. Round 29's loud refusals still govern the EXECUTABLE token,
+# which is unchanged.
+deployment_exec_argument_paths() {
+  python3 - "$1" "$2" <<'ARGPATHS'
+import base64
+import os
+import sys
+
+home, value = sys.argv[1], sys.argv[2]
+
+
+def tokenize(text):
+    tokens = []
+    current = []
+    started = False
+    quote = None
+    escaped = False
+    for char in text:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            started = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            else:
+                current.append(char)
+            continue
+        if char in ("'", '"'):
+            quote = char
+            started = True
+            continue
+        if char.isspace():
+            if started:
+                tokens.append("".join(current))
+                current = []
+                started = False
+            continue
+        current.append(char)
+        started = True
+    if started:
+        tokens.append("".join(current))
+    return tokens
+
+
+seen = set()
+# tokens[0] is the executable, judged by the caller under round 29's rules.
+for token in tokenize(value)[1:]:
+    if token.startswith("%h/"):
+        token = home + token[2:]
+    if not token.startswith("/"):
+        continue
+    if not os.path.isfile(token):
+        continue
+    if token in seen:
+        continue
+    seen.add(token)
+    print(base64.b64encode(os.fsencode(token)).decode("ascii"))
+ARGPATHS
+}
+
 deployment_unit_declared_executables() {
   local home_dir="${1%/}" line key value exec_token path
   local encoded_source decoded_source
@@ -1620,6 +1783,12 @@ deployment_unit_declared_executables() {
     case "${path}" in
       /*) encode_path_item "${path}" ;;
     esac
+    # And every ARGUMENT that is actually a file on disk. A script passed to
+    # an interpreter is executed as surely as the interpreter, and which
+    # arguments are files is not decidable in general -- so this
+    # over-validates rather than models. Emitted through the same transport,
+    # so the caller judges them under the same rules as the executable.
+    deployment_exec_argument_paths "${home_dir}" "${value}"
   done < <(deployment_unit_assignment_lines "${source_files[@]}")
   return 0
 }
@@ -2696,7 +2865,7 @@ require_deployment_assets_present() {
   local asset missing=""
   libexec_root="${home_dir}/.local/libexec/mcloving"
   config_root="${home_dir}/.config/mcloving"
-  xdg_config_base="$(deployment_config_root "${home_dir}")"
+  xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
   unit_root="${xdg_config_base}/systemd/user"
   quadlet_root="${xdg_config_base}/containers/systemd"
   for asset in "${MCLOVING_DEPLOY_HELPERS[@]}" "${MCLOVING_DEPLOY_LIBRARY}"; do
@@ -2742,7 +2911,7 @@ require_deployment_integrity() {
   local unit_root quadlet_root unit_file
   libexec_root="${home_dir}/.local/libexec/mcloving"
   config_root="${home_dir}/.config/mcloving"
-  xdg_config_base="$(deployment_config_root "${home_dir}")"
+  xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
   unit_root="${xdg_config_base}/systemd/user"
   quadlet_root="${xdg_config_base}/containers/systemd"
   local managed_roots=(
