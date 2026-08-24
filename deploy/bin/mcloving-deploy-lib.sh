@@ -15,6 +15,45 @@ MCLOVING_DEPLOY_BINARIES=(
   mcloving-identity-admin
 )
 
+# THE ASSET MANIFEST. One list per class, here rather than in the installer,
+# because the installer used to carry three hand-maintained copies of the
+# same names (the changed-asset comparison, the helper install loop, the
+# unit install loop) and every validator carried a fourth implicitly by
+# globbing whatever happened to be on disk. A list that is written down
+# twice is a list that rots; a list that is only ever globbed cannot notice
+# a DELETION at all, which is exactly the gap this round closes.
+# shellcheck disable=SC2034  # read by mcloving-install and the smoke suite
+MCLOVING_DEPLOY_HELPERS=(
+  mcloving-env-guard
+  mcloving-health
+  mcloving-db-init
+  mcloving-deployed-digests
+  mcloving-unit-command
+  mcloving-rollback
+  mcloving-upgrade
+)
+# Sourced rather than executed, so it is installed 0644 and listed apart.
+# shellcheck disable=SC2034  # read by mcloving-install and the smoke suite
+MCLOVING_DEPLOY_LIBRARY="mcloving-deploy-lib.sh"
+# shellcheck disable=SC2034  # read by mcloving-install and the smoke suite
+MCLOVING_DEPLOY_UNITS=(
+  mcloving-db-init.service
+  mcloving-controller.service
+  mcloving-agent.service
+)
+# shellcheck disable=SC2034  # read by mcloving-install and the smoke suite
+MCLOVING_DEPLOY_QUADLETS=(
+  mcloving-postgres.container
+  mcloving-postgres-data.volume
+)
+# shellcheck disable=SC2034  # read by mcloving-install and the smoke suite
+MCLOVING_DEPLOY_CONTRACTS=(
+  postgres.env
+  db-init.env
+  controller.env
+  agent.env
+)
+
 deploy_fail() {
   echo "$(basename "$0"): $1" >&2
   exit 1
@@ -613,8 +652,10 @@ deployment_unit_names() {
   return 0
 }
 
-# require_absolute_xdg_search_lists HOME -- refuse a relative entry in
-# XDG_CONFIG_DIRS or XDG_DATA_DIRS, by name, in the MAIN shell.
+# require_usable_unit_search_path HOME -- refuse, by name and in the MAIN
+# shell, any unit search path this deployment cannot resolve: a UnitPath
+# the manager reports that will not split into absolute entries, or a
+# relative entry in XDG_CONFIG_DIRS or XDG_DATA_DIRS.
 #
 # systemd does not drop a relative XDG search entry: it makes it absolute
 # against the MANAGER'S WORKING DIRECTORY. Verified by running
@@ -630,8 +671,17 @@ deployment_unit_names() {
 # round is closing, reintroduced from the other end. So it is refused by
 # name, consistent with the guard's refusal of relative class paths, and
 # the repair is to spell the entry absolutely.
-require_absolute_xdg_search_lists() {
+require_usable_unit_search_path() {
   local home_dir="${1%/}" list_name list_value entry rest offending=""
+  # The MANAGER's list first, where it answers: if UnitPath carries a
+  # spelling this deployment cannot split into absolute entries, guessing
+  # which directories systemd searches is exactly the modelling this round
+  # removed. Refused loudly, in the main shell, before any derivation runs.
+  if deployment_manager_speaks_for "${home_dir}"; then
+    if ! deployment_manager_unit_path "${home_dir}" >/dev/null; then
+      deploy_fail "the service manager reported a unit search path this deployment cannot split into absolute entries; refusing to guess which directories systemd searches -- report the UnitPath value ($(systemctl --user show -p UnitPath --value 2>/dev/null 9>&- | head -c 400)) with this failure"
+    fi
+  fi
   for list_name in XDG_CONFIG_DIRS XDG_DATA_DIRS; do
     [[ -v "${list_name}" ]] || continue
     list_value="${!list_name}"
@@ -651,6 +701,138 @@ require_absolute_xdg_search_lists() {
   if [[ -n "${offending}" ]]; then
     deploy_fail "unit search list(s) carry a relative entry: ${offending% }-- systemd resolves a relative XDG search entry against the service manager's working directory, which this deployment cannot observe, so the unit file it would actually load cannot be determined; spell the entry as an absolute path and retry"
   fi
+}
+
+# ASKING THE MANAGER RATHER THAN MODELLING IT.
+#
+# Every derivation in this library reads the INVOKING SHELL's environment.
+# The user manager that will actually start the services was started with
+# its own, and the two need not agree: a manager whose XDG_CONFIG_DIRS
+# includes /srv/units while the operator's shell leaves it unset makes this
+# lane validate one tree while systemd loads another. That is the whole
+# meta-class of the last several rounds -- validating what the lane
+# computes instead of what systemd does -- so the answer is to stop
+# computing where systemd will answer.
+#
+# What is authoritative, established on systemd 255 rather than assumed:
+#
+#   systemctl --user show -p UnitPath
+#     The MANAGER'S OWN computed load path, in its own order. This is the
+#     authority. Note what it is NOT: `systemd-analyze --user unit-paths`
+#     RECOMPUTES the list from the CALLER's environment, so it agrees with
+#     the manager only when the two environments agree. Proven by running
+#     both with XDG_CONFIG_DIRS=/tmp/A in the shell -- analyze reported
+#     /tmp/A/systemd/user in slot 6, the manager reported
+#     /etc/xdg/systemd/user, because the manager never saw that variable.
+#     The round-33 parity gate had been asserting against analyze; it now
+#     asserts against UnitPath, which is the corrected oracle.
+#
+#   systemctl --user show UNIT -p LoadState -p UnitFileState -p FragmentPath
+#     The manager's ANSWER for one unit: which file it actually loaded, and
+#     whether the unit is masked. This sidesteps list derivation entirely
+#     for the selection question, including precedence, replacement
+#     semantics, and mask handling, none of which have to be modelled when
+#     the manager will simply say.
+#
+#   systemctl --user show-environment
+#     The manager's environment. Not needed once UnitPath is available --
+#     feeding those variables back into a re-derivation would be modelling
+#     again, one step removed -- so it is not used, and is recorded here
+#     only because it was the obvious candidate.
+#
+# WHEN THE MANAGER CANNOT ANSWER -- a --no-systemd install, a container
+# build, CI with no session, or simply a target home that is not the
+# invoking user's -- the derivation stands as a documented FALLBACK. The
+# two are never confused in diagnostics: deployment_unit_path_source
+# reports "manager" or "derived", the transition says which it used, and a
+# derived answer is never described as authoritative.
+deployment_manager_speaks_for() {
+  local home_dir="${1%/}" manager_home
+  [[ "${MCLOVING_ASSUME_NO_MANAGER:-}" != "1" ]] || return 1
+  command -v systemctl >/dev/null 2>&1 || return 1
+  # WHOSE home does the running manager serve? Not "$HOME" -- that is the
+  # CALLER's idea of it, and the caller is exactly whose environment this
+  # round stopped trusting. The manager reports its own, so ask: this is
+  # the one legitimate use of show-environment, for IDENTITY rather than
+  # for path derivation. Feeding its XDG variables into a re-derivation
+  # would be modelling again; reading which home it serves is how we learn
+  # whether its answers describe THIS deployment at all.
+  manager_home="$(systemctl --user show-environment 2>/dev/null 9>&- \
+    | sed -n 's/^HOME=//p' | head -1)" || return 1
+  [[ -n "${manager_home}" ]] || return 1
+  [[ "${home_dir}" == "${manager_home%/}" ]] || return 1
+  # 9>&- on every systemctl invocation: this library is called from INSIDE
+  # the transition lock, fd 9 is that lock, and a child that inherits it
+  # holds the lock for as long as it lives. The lane learned this once
+  # already (the flock-inheritance gate leak); the manager probes are new
+  # children in the locked region and must not reintroduce it.
+  systemctl --user show -p UnitPath --value >/dev/null 2>&1 9>&- || return 1
+  return 0
+}
+
+# deployment_unit_path_source HOME -> "manager" or "derived"
+deployment_unit_path_source() {
+  if deployment_manager_speaks_for "${1%/}"; then
+    printf 'manager\n'
+  else
+    printf 'derived\n'
+  fi
+}
+
+# deployment_manager_unit_path HOME -> encoded items: the manager's own
+# ordered load path, or nothing when it cannot answer.
+#
+# The property is a space-separated string. Every entry systemd reports is
+# absolute, so an entry that does not begin with "/" means the value
+# carried a spelling this split does not model -- refused loudly rather
+# than silently mis-split, the same rule the unit parser follows.
+deployment_manager_unit_path() {
+  local home_dir="${1%/}" raw entry
+  deployment_manager_speaks_for "${home_dir}" || return 0
+  raw="$(systemctl --user show -p UnitPath --value 2>/dev/null 9>&-)" || return 0
+  [[ -n "${raw}" ]] || return 0
+  for entry in ${raw}; do
+    [[ -n "${entry}" ]] || continue
+    # NOT a refusal here: this function runs inside command substitutions,
+    # where deploy_fail would die with the subshell and leave the caller
+    # continuing on partial output -- the round-27 lesson. The loud refusal
+    # lives in require_usable_unit_search_path, which runs in the main
+    # shell; this simply declines to answer so nothing half-parsed escapes.
+    if [[ "${entry}" != /* ]]; then
+      return 1
+    fi
+    encode_path_item "${entry}"
+  done
+  return 0
+}
+
+# deployment_manager_unit_answer HOME UNIT_NAME -> "LOADSTATE|UNITFILESTATE|FRAGMENT"
+# on one line, or nothing when the manager cannot answer.
+deployment_manager_unit_answer() {
+  local home_dir="${1%/}" unit_name="$2" line key value
+  local load_state="" file_state="" fragment=""
+  deployment_manager_speaks_for "${home_dir}" || return 0
+  [[ -n "${unit_name}" ]] || return 0
+  # COMMAND substitution, not process substitution. Bash waits for the
+  # former and does NOT wait for the latter, so a process-substitution child
+  # can outlive the read loop -- and inside the transition lock that child
+  # still holds fd 9, which makes the very next transition report the lock
+  # as held. That is not hypothetical: it failed a suite run.
+  local answer_raw
+  answer_raw="$(systemctl --user show "${unit_name}" \
+    -p LoadState -p UnitFileState -p FragmentPath 2>/dev/null 9>&-)" || answer_raw=""
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "${key}" in
+      LoadState) load_state="${value}" ;;
+      UnitFileState) file_state="${value}" ;;
+      FragmentPath) fragment="${value}" ;;
+    esac
+  done <<<"${answer_raw}"
+  printf '%s|%s|%s\n' "${load_state}" "${file_state}" "${fragment}"
+  return 0
 }
 
 # deployment_unit_load_paths HOME CLASS FAMILY [SEMANTICS] -> encoded
@@ -716,6 +898,42 @@ deployment_unit_load_paths() {
     fi
   }
 
+  # THE MANAGER'S OWN LIST, when it can answer, in place of every rule
+  # below. It already reflects that manager's environment, its precedence,
+  # and the replacement semantics -- none of which have to be modelled when
+  # the authority will simply say. Classification is still ours, because
+  # UnitPath carries no notion of who may write where: inside the home or
+  # inside the runtime tree is service-account-writable, everything else is
+  # root-owned in practice.
+  local manager_entry manager_used=0 manager_raw=""
+  if [[ "${family}" == "systemd" ]]; then
+    # Command substitution for the same reason: a process-substitution child
+    # spawned inside the transition lock outlives the loop and keeps fd 9.
+    manager_raw="$(deployment_manager_unit_path "${home_dir}")"
+    while IFS= read -r search_entry; do
+      [[ -n "${search_entry}" ]] || continue
+      decode_path_item_into manager_entry "${search_entry}"
+      manager_used=1
+      if [[ "${manager_entry}" == "${home_dir}" || "${manager_entry}" == "${home_dir}"/* ]] \
+        || { [[ -n "${runtime_base}" ]] \
+          && [[ "${manager_entry}" == "${runtime_base}" || "${manager_entry}" == "${runtime_base}"/* ]]; }; then
+        load_path_add "${manager_entry}" user
+      else
+        load_path_add "${manager_entry}" system
+      fi
+    done <<<"${manager_raw}"
+  fi
+  if (( manager_used )); then
+    unset -f load_path_add load_path_add_search
+    local manager_index=0
+    while (( manager_index < ${#ordered_paths[@]} )); do
+      if [[ "${want_class}" == "all" || "${want_class}" == "${ordered_class[manager_index]}" ]]; then
+        encode_path_item "${ordered_paths[manager_index]}"
+      fi
+      manager_index=$((manager_index + 1))
+    done
+    return 0
+  fi
   case "${family}" in
     systemd)
       load_path_add "${config_base}/systemd/user.control" user
@@ -808,18 +1026,63 @@ deployment_effective_unit_file() {
     *.service) family="systemd" ;;
     *) family="quadlet" ;;
   esac
+  # ASK, where the manager can answer: FragmentPath IS the selection, with
+  # precedence, replacement semantics and masking already applied by the
+  # thing that will start the service.
+  local manager_answer manager_fragment
+  if deployment_manager_speaks_for "${home_dir}" && [[ "${family}" == "systemd" ]]; then
+    manager_answer="$(deployment_manager_unit_answer "${home_dir}" "${unit_name}")"
+    manager_fragment="${manager_answer##*|}"
+    if [[ -n "${manager_fragment}" ]]; then
+      encode_path_item "${manager_fragment}"
+      return 0
+    fi
+    # An empty FragmentPath with the manager answering means the manager
+    # knows of no file for this name. Falling through to the derivation
+    # would contradict the authority, so nothing is emitted.
+    return 0
+  fi
   while IFS= read -r encoded_base; do
     [[ -n "${encoded_base}" ]] || continue
     decode_path_item_into decoded_base "${encoded_base}"
     candidate="${decoded_base}/${unit_name}"
-    # -f follows a symlink deliberately: systemd loads what the name
-    # resolves to, and the link's own target is judged by the trust-input
-    # file rule and the chain walk like any other source.
-    if [[ -f "${candidate}" ]]; then
+    # ANY existing candidate, not merely a regular file. A MASK is a
+    # symlink to /dev/null: -f follows it, sees a character device, says
+    # no, and the resolver used to fall through to a lower-priority file
+    # systemd would never load -- reporting a unit as live when it cannot
+    # start at all. The node kind is classified by the caller
+    # (deployment_unit_file_kind) rather than filtered here, so a mask and
+    # a tampered node are both visible instead of invisible.
+    if [[ -e "${candidate}" || -L "${candidate}" ]]; then
       encode_path_item "${candidate}"
       return 0
     fi
   done < <(deployment_unit_load_paths "${home_dir}" all "${family}" selection)
+  return 0
+}
+
+# deployment_unit_file_kind PATH -> "regular", "mask", "absent", or "other"
+#
+# systemd masks a unit by symlinking its name to /dev/null; the unit then
+# cannot start at all. That is not a variant of "shadowed by an override" --
+# an override still runs something -- so it is classified apart and its
+# consequence is decided by the caller.
+deployment_unit_file_kind() {
+  local candidate="$1" target
+  if [[ -L "${candidate}" ]]; then
+    target="$(readlink "${candidate}")"
+    if [[ "${target}" == "/dev/null" ]]; then
+      printf 'mask\n'
+      return 0
+    fi
+  fi
+  if [[ -f "${candidate}" ]]; then
+    printf 'regular\n'
+  elif [[ -e "${candidate}" || -L "${candidate}" ]]; then
+    printf 'other\n'
+  else
+    printf 'absent\n'
+  fi
   return 0
 }
 
@@ -2228,6 +2491,61 @@ verify_staged_release() {
     || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
 }
 
+# require_deployment_assets_present HOME -- assert that every file this
+# deployment MUST have is actually there, before a transition stops
+# anything.
+#
+# Every walk in this library validates WHAT EXISTS. None of them asserted
+# WHAT MUST EXIST, and a glob cannot: delete helpers/mcloving-health and the
+# inventory simply collects the remaining entries, integrity succeeds, the
+# upgrade stops both services and moves current, and only then does the
+# health invocation exit 127 with the release transition half done and the
+# agent stopped. The same blindness covered every asset class -- a deleted
+# unit file vanished from the mcloving-*.service glob, a deleted contract
+# was "skipped, the installer decides those", a release binary missing from
+# the CURRENT release was never re-checked after staging.
+#
+# Called by the TRANSITION entry points, deliberately NOT by the installer:
+# install is the tool that RESTORES a missing asset, so refusing it here
+# would trap the operator with no repair path. Transitions have no such
+# excuse -- they are about to stop running services.
+require_deployment_assets_present() {
+  local home_dir="${1%/}" libexec_root config_root xdg_config_base
+  local unit_root quadlet_root current_target
+  local asset missing=""
+  libexec_root="${home_dir}/.local/libexec/mcloving"
+  config_root="${home_dir}/.config/mcloving"
+  xdg_config_base="$(deployment_config_root "${home_dir}")"
+  unit_root="${xdg_config_base}/systemd/user"
+  quadlet_root="${xdg_config_base}/containers/systemd"
+  for asset in "${MCLOVING_DEPLOY_HELPERS[@]}" "${MCLOVING_DEPLOY_LIBRARY}"; do
+    [[ -f "${libexec_root}/helpers/${asset}" ]] \
+      || missing+="helpers/${asset} "
+  done
+  for asset in "${MCLOVING_DEPLOY_UNITS[@]}"; do
+    [[ -f "${unit_root}/${asset}" ]] || missing+="${unit_root}/${asset} "
+  done
+  for asset in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
+    [[ -f "${quadlet_root}/${asset}" ]] || missing+="${quadlet_root}/${asset} "
+  done
+  for asset in "${MCLOVING_DEPLOY_CONTRACTS[@]}"; do
+    [[ -f "${config_root}/${asset}" ]] || missing+="${config_root}/${asset} "
+  done
+  # The CURRENT release must carry every deployed binary. Staging verified
+  # the release it published; nothing re-checked the one in use, so a binary
+  # deleted from the live release was invisible until the restart failed.
+  if [[ -L "${libexec_root}/current" ]]; then
+    current_target="$(readlink "${libexec_root}/current")"
+    for asset in "${MCLOVING_DEPLOY_BINARIES[@]}"; do
+      [[ -f "${libexec_root}/${current_target}/${asset}" ]] \
+        || missing+="${current_target}/${asset} "
+    done
+  fi
+  if [[ -n "${missing}" ]]; then
+    deploy_fail "deployment asset(s) missing: ${missing% }-- a transition stops running services and then starts them again, so an asset that is absent NOW becomes a half-finished transition later; restore the deployment (mcloving-install repairs a tree in place) before upgrading or rolling back"
+  fi
+}
+
 # require_deployment_integrity HOME
 #
 # The full shared validation the installer performs, rerun by the
@@ -2276,12 +2594,43 @@ require_deployment_integrity() {
   # may be removed at any time, restoring it).
   local shadowing_units=() effective_unit_file encoded_shadow
   if [[ ${#unit_files[@]} -gt 0 ]]; then
+    # COLLECT FIRST, JUDGE AFTER. A deploy_fail raised from inside a loop
+    # fed by `< <(...)` exits the shell while the process-substitution
+    # PRODUCER is still alive -- and inside the transition lock that
+    # producer holds fd 9, so the next transition finds the lock held. The
+    # refusals below are the first in this function raised from within such
+    # a loop, and they made a suite run fail exactly that way. Command
+    # substitution is waited for, so the producer is reaped before anything
+    # can refuse.
+    local shadow_kind shadow_raw
+    shadow_raw="$(deployment_shadowing_unit_files "${home_dir}" "${unit_files[@]}")"
+    local -a shadow_candidates=()
     while IFS= read -r encoded_shadow; do
       [[ -n "${encoded_shadow}" ]] || continue
       decode_path_item_into effective_unit_file "${encoded_shadow}"
+      shadow_candidates+=("${effective_unit_file}")
+    done <<<"${shadow_raw}"
+    for effective_unit_file in ${shadow_candidates[@]+"${shadow_candidates[@]}"}; do
+      shadow_kind="$(deployment_unit_file_kind "${effective_unit_file}")"
+      case "${shadow_kind}" in
+        mask)
+          # REFUSED, not merely reported. An administrative OVERRIDE still
+          # runs something, so validating and reporting it is enough. A MASK
+          # runs nothing: the transition would stop both services, move
+          # current, and then fail to start a unit the manager refuses to
+          # load, leaving exactly the half-finished transition this lane
+          # exists to prevent. Refusing before anything is stopped costs an
+          # operator one command (systemctl --user unmask) and costs a
+          # running deployment nothing.
+          deploy_fail "unit ${effective_unit_file} is MASKED (a symlink to /dev/null in a load path that outranks this deployment's own unit of the same name); the service manager will refuse to start it, so a transition that stops the services could not bring them back -- run systemctl --user unmask on the unit, or remove the mask, and retry"
+          ;;
+        other)
+          deploy_fail "unit ${effective_unit_file} is the file the service manager would load for this deployment but is not a regular file ($(stat -Lc '%F' "${effective_unit_file}" 2>/dev/null || echo "unknown node")); this deployment publishes only regular unit files and the manager loads nothing else usefully -- remove the node and retry"
+          ;;
+      esac
       shadowing_units+=("${effective_unit_file}")
       unit_files+=("${effective_unit_file}")
-    done < <(deployment_shadowing_unit_files "${home_dir}" "${unit_files[@]}")
+    done
     # Reported, not refused. systemd's load path exists so an administrator
     # CAN override a unit, and a deployment that refused to upgrade because
     # the host exercised that mechanism would be un-upgradable with no
@@ -2292,6 +2641,7 @@ require_deployment_integrity() {
     # canonical digest document records these too, so an override appearing
     # or changing is drift the re-read can see.
     for effective_unit_file in "${shadowing_units[@]}"; do
+      deploy_notice "unit resolution used the $(deployment_unit_path_source "${home_dir}") unit search path"
       deploy_notice "unit file ${effective_unit_file} outranks this deployment's own installed unit of the same name and is what the service manager will load; it is validated under the same rules as the installed sources, and is recorded in the canonical digest document"
     done
   fi
@@ -2320,7 +2670,7 @@ require_deployment_integrity() {
     # BEFORE anything resolves: a relative XDG search entry makes the
     # effective unit file undeterminable, so it is refused here in the main
     # shell rather than silently resolving to the wrong directory.
-    require_absolute_xdg_search_lists "${home_dir}"
+    require_usable_unit_search_path "${home_dir}"
     # BEFORE anything parses: constructs systemd would consume that the
     # assignment parser does not model are a loud refusal here in the main
     # shell -- inside the derivation substitutions below a refusal would

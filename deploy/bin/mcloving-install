@@ -247,21 +247,17 @@ echo "current release: releases/${id}"
 # Under --no-systemd nothing here is managed, so replacement is safe.
 if [[ "${no_systemd}" != "1" ]]; then
   asset_changed=""
-  for asset in \
-    "${deploy_root}/bin/mcloving-env-guard:${libexec_root}/helpers/mcloving-env-guard" \
-    "${deploy_root}/bin/mcloving-health:${libexec_root}/helpers/mcloving-health" \
-    "${deploy_root}/bin/mcloving-db-init:${libexec_root}/helpers/mcloving-db-init" \
-    "${deploy_root}/bin/mcloving-deployed-digests:${libexec_root}/helpers/mcloving-deployed-digests" \
-    "${deploy_root}/bin/mcloving-unit-command:${libexec_root}/helpers/mcloving-unit-command" \
-    "${deploy_root}/bin/mcloving-rollback:${libexec_root}/helpers/mcloving-rollback" \
-    "${deploy_root}/bin/mcloving-upgrade:${libexec_root}/helpers/mcloving-upgrade" \
-    "${deploy_root}/bin/mcloving-deploy-lib.sh:${libexec_root}/helpers/mcloving-deploy-lib.sh" \
-    "${deploy_root}/systemd/mcloving-db-init.service:${unit_root}/mcloving-db-init.service" \
-    "${deploy_root}/systemd/mcloving-controller.service:${unit_root}/mcloving-controller.service" \
-    "${deploy_root}/systemd/mcloving-agent.service:${unit_root}/mcloving-agent.service" \
-    "${deploy_root}/podman/mcloving-postgres.container:${quadlet_root}/mcloving-postgres.container" \
-    "${deploy_root}/podman/mcloving-postgres-data.volume:${quadlet_root}/mcloving-postgres-data.volume" \
-  ; do
+  changed_assets=()
+  for asset in "${MCLOVING_DEPLOY_HELPERS[@]}" "${MCLOVING_DEPLOY_LIBRARY}"; do
+    changed_assets+=("${deploy_root}/bin/${asset}:${libexec_root}/helpers/${asset}")
+  done
+  for asset in "${MCLOVING_DEPLOY_UNITS[@]}"; do
+    changed_assets+=("${deploy_root}/systemd/${asset}:${unit_root}/${asset}")
+  done
+  for asset in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
+    changed_assets+=("${deploy_root}/podman/${asset}:${quadlet_root}/${asset}")
+  done
+  for asset in "${changed_assets[@]}"; do
     source_asset="${asset%%:*}"
     installed_asset="${asset#*:}"
     if [[ -e "${installed_asset}" ]] && ! cmp -s "${source_asset}" "${installed_asset}"; then
@@ -277,18 +273,16 @@ fi
 # mcloving-rollback is installed too: the upgrade path prints it as the
 # recovery command, and a recovery command that is not on the host is not a
 # recovery command.
-for helper in mcloving-env-guard mcloving-health mcloving-db-init \
-  mcloving-deployed-digests mcloving-unit-command mcloving-rollback \
-  mcloving-upgrade; do
+for helper in "${MCLOVING_DEPLOY_HELPERS[@]}"; do
   install -T -m 0755 "${deploy_root}/bin/${helper}" "${libexec_root}/helpers/${helper}"
 done
-install -T -m 0644 "${deploy_root}/bin/mcloving-deploy-lib.sh" \
-  "${libexec_root}/helpers/mcloving-deploy-lib.sh"
+install -T -m 0644 "${deploy_root}/bin/${MCLOVING_DEPLOY_LIBRARY}" \
+  "${libexec_root}/helpers/${MCLOVING_DEPLOY_LIBRARY}"
 
-for unit in mcloving-db-init.service mcloving-controller.service mcloving-agent.service; do
+for unit in "${MCLOVING_DEPLOY_UNITS[@]}"; do
   install -T -m 0644 "${deploy_root}/systemd/${unit}" "${unit_root}/${unit}"
 done
-for quadlet in mcloving-postgres.container mcloving-postgres-data.volume; do
+for quadlet in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
   install -T -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
 done
 

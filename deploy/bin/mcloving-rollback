@@ -60,6 +60,8 @@ acquire_transition_lock "${libexec_root}"
 # and only then discovers a writable ancestor has already caused the
 # outage it exists to prevent.
 require_deployment_integrity "${home_dir}"
+# Before anything is stopped: what MUST be here, not merely what is.
+require_deployment_assets_present "${home_dir}"
 current_target="$(require_release_link_target "${libexec_root}" current)"
 previous_target="$(require_release_link_target "${libexec_root}" previous)"
 [[ "${current_target}" != "${previous_target}" ]] \

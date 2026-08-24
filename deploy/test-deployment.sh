@@ -3551,6 +3551,167 @@ grep -q "XDG_CONFIG_DIRS entry relative-search-entry" \
   echo "a refused relative-XDG upgrade still moved the current release" >&2
   exit 1
 }
+# A MASK is not an override. systemd masks a unit by symlinking its name to
+# /dev/null in a load path; the unit then cannot start at all. The old
+# resolver's -f test followed the link, saw a character device, said no, and
+# fell through to the lower-priority installed file -- reporting as live a
+# unit the manager refuses to load. A transition would stop both services,
+# move current, and then fail to start anything.
+mkdir -p "${shadow_control}"
+chmod 0755 "${shadow_control}"
+ln -sfn /dev/null "${shadow_control}/mcloving-controller.service"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/mask-unit.log" 2>&1; then
+  echo "upgrade proceeded over a masked unit it could never have restarted" >&2
+  exit 1
+fi
+grep -q "is MASKED (a symlink to /dev/null" "${workdir}/logs/mask-unit.log" || {
+  echo "the masked unit was not refused by name:" >&2
+  cat "${workdir}/logs/mask-unit.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused masked-unit upgrade still moved the current release" >&2
+  exit 1
+}
+# A mask of the Quadlet-GENERATED name is the same fact about a unit this
+# deployment owns and never wrote.
+rm -f "${shadow_control}/mcloving-controller.service"
+ln -sfn /dev/null "${shadow_control}/mcloving-postgres.service"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd > "${workdir}/logs/mask-generated.log" 2>&1; then
+  echo "rollback proceeded over a masked generated unit" >&2
+  exit 1
+fi
+grep -q "mcloving-postgres.service is MASKED" "${workdir}/logs/mask-generated.log" || {
+  echo "the masked generated unit was not refused by name:" >&2
+  cat "${workdir}/logs/mask-generated.log" >&2
+  exit 1
+}
+rm -f "${shadow_control}/mcloving-postgres.service"
+# A REFUSED transition must not leave the lock held. deploy_fail exits the
+# main shell, but a process-substitution PRODUCER feeding the loop the
+# refusal was raised from is not waited for, and inside the transition lock
+# that producer still holds fd 9 -- so the very next transition reports the
+# lock as held and the real diagnosis is buried. This cost a suite run when
+# the mask refusals were first raised from inside such a loop; the loops
+# now collect before judging. Ten back-to-back pairs, because the leak was
+# intermittent before it was deterministic.
+for lock_leak_round in 1 2 3 4 5 6 7 8 9 10; do
+  ln -sfn /dev/null "${shadow_control}/mcloving-controller.service"
+  "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+    --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+    --no-systemd > "${workdir}/logs/lock-leak-upgrade.log" 2>&1 || true
+  rm -f "${shadow_control}/mcloving-controller.service"
+  ln -sfn /dev/null "${shadow_control}/mcloving-postgres.service"
+  "${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+    --no-systemd > "${workdir}/logs/lock-leak-rollback.log" 2>&1 || true
+  rm -f "${shadow_control}/mcloving-postgres.service"
+  if grep -q "another deployment transition holds the lock" \
+    "${workdir}/logs/lock-leak-rollback.log"; then
+    echo "round ${lock_leak_round}: a refused transition leaked the transition lock to a child; the next transition could not run:" >&2
+    cat "${workdir}/logs/lock-leak-rollback.log" >&2
+    exit 1
+  fi
+  grep -q "is MASKED" "${workdir}/logs/lock-leak-rollback.log" || {
+    echo "round ${lock_leak_round}: the follow-up transition did not reach its own refusal:" >&2
+    cat "${workdir}/logs/lock-leak-rollback.log" >&2
+    exit 1
+  }
+done
+# A node that is neither a regular file nor a mask is refused too: the
+# resolver selects any existing candidate and then classifies, so no node
+# kind is invisible.
+mkfifo "${shadow_control}/mcloving-controller.service"
+mask_fifo_status=0
+timeout 60 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/mask-fifo.log" 2>&1 || mask_fifo_status=$?
+if [[ "${mask_fifo_status}" -eq 0 ]]; then
+  echo "upgrade proceeded over a FIFO where the manager would load a unit" >&2
+  exit 1
+fi
+if [[ "${mask_fifo_status}" -eq 124 ]]; then
+  echo "unit resolution hung on a FIFO instead of refusing it" >&2
+  exit 1
+fi
+grep -q "is not a regular file (fifo)" "${workdir}/logs/mask-fifo.log" || {
+  echo "the non-regular unit node was not refused by name:" >&2
+  cat "${workdir}/logs/mask-fifo.log" >&2
+  exit 1
+}
+rm -f "${shadow_control}/mcloving-controller.service"
+# Acceptance: with the mask removed the same transition proceeds.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the mask gate" >&2
+  exit 1
+}
+# WHAT MUST EXIST, not merely what does. Every walk in this lane validates
+# the files it finds; none asserted the complete set, so a DELETED helper,
+# unit, contract, or live release binary passed integrity and only surfaced
+# after the transition had stopped the services.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  asset_index=0
+  for asset_path in \
+    "${dropin_root_libexec}/helpers/mcloving-health" \
+    "${dropin_root_libexec}/helpers/mcloving-deploy-lib.sh" \
+    "${dropin_unit_root}/mcloving-agent.service" \
+    "${dropin_root_home}/.config/containers/systemd/mcloving-postgres.container" \
+    "${dropin_root_home}/.config/mcloving/agent.env" \
+    "${dropin_root_libexec}/${dropin_root_current}/mcloving-cli"; do
+    asset_index=$((asset_index + 1))
+    [[ -f "${asset_path}" ]] || {
+      echo "the asset gate expected ${asset_path} to exist; the deployment shape changed" >&2
+      exit 1
+    }
+    mv "${asset_path}" "${asset_path}.aside"
+    if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+      --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+      --no-systemd > "${workdir}/logs/missing-asset-${asset_index}.log" 2>&1; then
+      mv "${asset_path}.aside" "${asset_path}"
+      echo "upgrade proceeded with ${asset_path} deleted" >&2
+      exit 1
+    fi
+    grep -q "deployment asset(s) missing:" "${workdir}/logs/missing-asset-${asset_index}.log" || {
+      echo "the missing asset ${asset_path} was not refused by name:" >&2
+      cat "${workdir}/logs/missing-asset-${asset_index}.log" >&2
+      mv "${asset_path}.aside" "${asset_path}"
+      exit 1
+    }
+    [[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+      echo "a refused missing-asset upgrade still moved the current release" >&2
+      mv "${asset_path}.aside" "${asset_path}"
+      exit 1
+    }
+    mv "${asset_path}.aside" "${asset_path}"
+  done
+  # And the manifest is the installer's own, not a second list: every helper
+  # the installer installs must be one this check requires.
+  for manifest_helper in "${MCLOVING_DEPLOY_HELPERS[@]}"; do
+    [[ -f "${dropin_root_libexec}/helpers/${manifest_helper}" ]] || {
+      echo "the installer's manifest names ${manifest_helper} but the install did not produce it" >&2
+      exit 1
+    }
+  done
+)
+# Acceptance: with every asset present the transition proceeds.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the asset gate" >&2
+  exit 1
+}
 rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
 # The derivation itself, against systemd's own answer where the host can
 # give one. `systemd-analyze --user unit-paths` is the authority; every
@@ -3698,12 +3859,47 @@ rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
     exit 1
   fi
   rm -rf "${xdg_probe}" "${xdg_default_standin}" "${xdg_configured_standin}"
-  if command -v systemd-analyze >/dev/null 2>&1 \
-    && systemd-analyze --user unit-paths >/dev/null 2>&1; then
+  if command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show -p UnitPath --value >/dev/null 2>&1; then
+    # THE MANAGER, not systemd-analyze. `systemd-analyze --user unit-paths`
+    # RECOMPUTES the list from the CALLER's environment and therefore agrees
+    # with the running manager only when the two environments agree -- which
+    # is precisely the assumption this round removed. `systemctl --user show
+    # -p UnitPath` is the manager's own computed list. Proven by running
+    # both with XDG_CONFIG_DIRS=/tmp/A in this shell: analyze reports
+    # /tmp/A/systemd/user in slot 6, the manager reports /etc/xdg/systemd/user.
+    #
     # ORDER as well as membership: a main unit file is resolved by first
-    # match, so a derivation that listed the same paths in a different
-    # order would resolve a shadow to the wrong file.
-    manager_paths="$(systemd-analyze --user unit-paths)"
+    # match, so a list with the same paths in a different order would
+    # resolve a shadow to the wrong file.
+    manager_paths="$(systemctl --user show -p UnitPath --value | tr ' ' '\n')"
+    # The shell's own XDG view must not move the answer any more.
+    shell_perturbed="$(XDG_CONFIG_DIRS=/tmp/mcloving-parity-probe \
+      systemctl --user show -p UnitPath --value | tr ' ' '\n')"
+    [[ "${manager_paths}" == "${shell_perturbed}" ]] || {
+      echo "the manager's UnitPath moved when this shell's XDG_CONFIG_DIRS changed; it is not the manager's own list after all" >&2
+      exit 1
+    }
+    loadpath_manager=""
+    while IFS= read -r encoded_loadpath; do
+      [[ -n "${encoded_loadpath}" ]] || continue
+      decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+      loadpath_manager+="${decoded_loadpath}"$'\n'
+    done < <(XDG_CONFIG_DIRS=/tmp/mcloving-parity-probe \
+      deployment_unit_load_paths "${HOME}" all systemd selection)
+    [[ "${manager_paths}" == "${loadpath_manager%$'\n'}" ]] || {
+      echo "with a perturbed shell XDG_CONFIG_DIRS the derivation did not return the MANAGER's list:" >&2
+      diff <(printf '%s\n' "${manager_paths}") <(printf '%s' "${loadpath_manager}") >&2 || true
+      exit 1
+    }
+    [[ "$(deployment_unit_path_source "${HOME}")" == "manager" ]] || {
+      echo "the unit path source is not reported as authoritative where the manager answers" >&2
+      exit 1
+    }
+    [[ "$(deployment_unit_path_source "${dropin_root_home}")" == "derived" ]] || {
+      echo "a home the running manager does not serve was reported as manager-backed" >&2
+      exit 1
+    }
     while IFS= read -r manager_path; do
       [[ -n "${manager_path}" ]] || continue
       grep -qx "${manager_path}" <<<"${loadpath_all}" || {
@@ -3712,12 +3908,12 @@ rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
       }
     done <<<"${manager_paths}"
     [[ "${manager_paths}" == "${loadpath_all%$'\n'}" ]] || {
-      echo "the derived load path order does not match systemd's:" >&2
+      echo "the load path order does not match the manager's:" >&2
       diff <(printf '%s\n' "${manager_paths}") <(printf '%s' "${loadpath_all}") >&2 || true
       exit 1
     }
   else
-    echo "load-path parity against systemd-analyze skipped: no usable systemd-analyze --user on this host"
+    echo "load-path parity against the running manager skipped: no reachable systemctl --user on this host; the derivation fallback is what runs here"
   fi
 )
 # System drop-in TREES must feed the shared chain collector like every
