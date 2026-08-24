@@ -66,18 +66,39 @@ const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS;
 /// answering. The startup budgets below are derived from it.
 const FIXTURE_DELAYED_CREATE_MS: u64 = 200;
 
-/// Delay the one rendezvous-on-create case asks the fixture to hold its
-/// create response open for, via `Fixture::set_create_delay_ms`.
+/// Delay the rendezvous-on-create cases ask the fixture to hold its create
+/// response open for, via `Fixture::set_create_delay_ms`.
 ///
-/// That case is the only genuinely two-sided window in the suite: its budget
-/// has to outlast the admission write yet expire before the fixture answers.
-/// Widening the delay well past the mode's own `FIXTURE_DELAYED_CREATE_MS`
-/// widens both margins at once instead of splitting a couple of hundred
-/// milliseconds between them.
+/// These cases are genuinely two-sided windows: something else — a deadline
+/// expiry, a cancellation, a reconcile snapshot — has to land after the
+/// create call opens yet before the fixture answers it. Widening the delay
+/// well past the modes' own `FIXTURE_DELAYED_CREATE_MS` widens both margins
+/// at once instead of splitting a couple of hundred milliseconds between
+/// them.
 const FIXTURE_RENDEZVOUS_CREATE_MS: u64 = 3_000;
 
-/// Startup budget for that case: a third of the delay the fixture holds the
-/// create open. The admission write would have to take a full second to miss
+/// Delay the fixture holds a raced response open for on the non-create paths
+/// a concurrent peer has to win against: the empty final inventory a newer
+/// reconcile must refresh the row inside, and the malformed delete a
+/// concurrent confirmed cleanup must land inside. Sized like the rendezvous
+/// create so the peer gets seconds, while staying under the default provider
+/// timeout with the same headroom as the held-open pending snapshot.
+const FIXTURE_RENDEZVOUS_HOLD_MS: u64 = 3_000;
+
+/// Delay the two retains-a-ready-transition cases ask the fixture to hold the
+/// raced inventory snapshot response open for.
+///
+/// The snapshot is captured when the inventory call arrives, before the hold,
+/// so holding the response past the full rendezvous create guarantees the
+/// create lands after the capture — and the extra margin gives the provision
+/// a cushion to mark the row ready before the reconcile resumes and takes its
+/// next ledger read. The provider timeout for those cases is derived to clear
+/// this hold.
+const FIXTURE_HELD_SNAPSHOT_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS + 2_000;
+
+/// Startup budget for the case whose deadline must expire *inside* the held
+/// create: a third of the delay the fixture holds the create open. The
+/// admission write would have to take a full second to miss
 /// the create call, and the create would have to answer three times early for
 /// the deadline not to have passed.
 const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
@@ -106,11 +127,12 @@ const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
 /// (`provider_timeout_ms` plus clock skew), which the stale-observation case
 /// must stay outside of with its 60 s backdate, and the configuration ceiling
 /// rejects anything over 60 s. 5 s clears the longest delay the fixture
-/// injects on a default-path call — the 3 s held-open pending snapshot — with
+/// injects on a default-path call — the 3 s rendezvous holds on the pending
+/// snapshot, the empty final inventory and the malformed delete — with
 /// seconds of headroom while staying an order of magnitude inside both
 /// ceilings. Cases that bound a specific fixture delay (the 5.1 s slow
-/// inventory, the held-open rendezvous create) keep their own derived
-/// timeouts.
+/// inventory, the held-open rendezvous create, the held snapshot responses)
+/// keep their own derived timeouts.
 const PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS: u64 = 5_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -602,26 +624,43 @@ async fn list_instances(
             || delayed_final
         {
             inner.inventory_reads += 1;
-            Some(ProviderInventory {
-                provisioner_id: "contained-provisioner".to_owned(),
-                complete: true,
-                observed_at_unix_ms: if delayed_initial_response {
-                    now_ms() + 4_000
-                } else {
-                    now_ms()
+            // The raced retains-a-ready-transition snapshots and the raced
+            // empty final inventory are windows a concurrent peer has to win
+            // against, so they get rendezvous-scale holds; the remaining
+            // delayed snapshots only need to outlast their test's own
+            // bookkeeping.
+            let hold_ms = if delayed_initial
+                || (delayed_final && inner.mode == FixtureMode::DelayedCreateAfterFinalSnapshot)
+            {
+                FIXTURE_HELD_SNAPSHOT_MS
+            } else if delayed_empty_final {
+                FIXTURE_RENDEZVOUS_HOLD_MS
+            } else {
+                200
+            };
+            Some((
+                hold_ms,
+                ProviderInventory {
+                    provisioner_id: "contained-provisioner".to_owned(),
+                    complete: true,
+                    observed_at_unix_ms: if delayed_initial_response {
+                        now_ms() + 4_000
+                    } else {
+                        now_ms()
+                    },
+                    instances: if delayed_empty_final || delayed_pending_initial {
+                        Vec::new()
+                    } else {
+                        inner.instances.values().cloned().collect()
+                    },
                 },
-                instances: if delayed_empty_final || delayed_pending_initial {
-                    Vec::new()
-                } else {
-                    inner.instances.values().cloned().collect()
-                },
-            })
+            ))
         } else {
             None
         }
     };
-    if let Some(snapshot) = delayed_inventory_snapshot {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if let Some((hold_ms, snapshot)) = delayed_inventory_snapshot {
+        tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
         return signed_response(&state, snapshot);
     }
     let slow_initial = {
@@ -716,7 +755,10 @@ async fn delete_instance(
     };
     if let Some(delayed) = malformed_delay {
         if delayed {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // A concurrent confirmed cleanup has to land while this delete is
+            // held open, so the hold gets rendezvous scale rather than a
+            // couple of hundred milliseconds host load can close.
+            tokio::time::sleep(std::time::Duration::from_millis(FIXTURE_RENDEZVOUS_HOLD_MS)).await;
         }
         return Response::builder()
             .status(StatusCode::OK)
@@ -2398,6 +2440,9 @@ async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observatio
         .fixture
         .set_mode(FixtureMode::DelayedEmptyFinalInventoryOnce);
 
+    // The newer reconcile has to refresh the row revision while the stale
+    // reconcile's empty final inventory is held open; the fixture holds that
+    // response for `FIXTURE_RENDEZVOUS_HOLD_MS` so it gets seconds to do so.
     let stale_request = reconcile_request(&context.config, IMPLEMENTATION_SHA256);
     let stale_reconciliation = context.provisioner.reconcile(&stale_request);
     let newer_reconciliation = async {
@@ -2518,13 +2563,24 @@ async fn reconciliation_cas_loss_rolls_back_tentative_absence_intent() {
 
 #[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_snapshot() {
+    // The reconcile has to capture its initial inventory snapshot while the
+    // create is still open, and the create has to land — and be marked ready —
+    // before the final inventory read. Rendezvous on a held-open create for
+    // the first side; the fixture holds the captured initial snapshot
+    // response past the whole create for the second, so both margins get
+    // seconds instead of splitting the mode's own 100 ms. The provider
+    // timeout is derived to clear the held snapshot, and the startup budget
+    // has to outlast the held create.
     let context = Context::with_limits(
         FixtureMode::DelayedCreateAfterInitialSnapshot,
         4,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
-        1_000,
+        FIXTURE_HELD_SNAPSHOT_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
     )
     .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
@@ -2559,13 +2615,23 @@ async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_s
 
 #[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_snapshot() {
+    // Both of the reconcile's inventory captures have to land while the
+    // create is still open, and the ready mark should then land inside the
+    // held final snapshot so the reconcile's last ledger read observes it.
+    // Rendezvous on a held-open create for the first side; the fixture holds
+    // the captured final snapshot response past the whole create for the
+    // second. The provider timeout is derived to clear the held snapshot,
+    // and the startup budget has to outlast the held create.
     let context = Context::with_limits(
         FixtureMode::DelayedCreateAfterFinalSnapshot,
         4,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
-        1_000,
+        FIXTURE_HELD_SNAPSHOT_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
     )
     .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
@@ -2613,13 +2679,21 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
 
 #[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
+    // The cancel has to land while the create is held open, so rendezvous on
+    // a held-open create rather than racing the mode's own 200 ms delay. The
+    // provider timeout has to clear the held create, and the startup budget
+    // has to outlast it so the outcome stays Cancelled, not a preempting
+    // startup timeout.
     let context = Context::with_limits(
         FixtureMode::DelayedCreateReady,
         4,
-        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
-        5_000,
+        FIXTURE_RENDEZVOUS_CREATE_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
     )
     .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2658,10 +2732,22 @@ async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
 
 #[tokio::test]
 async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
-    // The assertion below counts a *confirmed* cleanup, so the reconciling
-    // delete has to complete inside `provider_timeout_ms` — which the default
-    // budget now guarantees against host load.
-    let context = Context::new(FixtureMode::DelayedMalformedCreateOnce).await;
+    // The cancel's lookup has to complete while the malformed create is held
+    // open, so rendezvous on a held-open create rather than racing the mode's
+    // own 200 ms delay; the provider timeout is derived to clear the held
+    // create. The assertion below also counts a *confirmed* cleanup, so the
+    // reconciling delete has to complete inside `provider_timeout_ms` — which
+    // the derived budget guarantees against host load.
+    let context = Context::with_limits(
+        FixtureMode::DelayedMalformedCreateOnce,
+        4,
+        FIXTURE_RENDEZVOUS_CREATE_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
+    )
+    .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2713,6 +2799,9 @@ async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
 
 #[tokio::test]
 async fn confirmed_cleanup_dominates_a_concurrent_late_delete_failure() {
+    // The winning delete has to confirm while the losing delete's malformed
+    // response is held open; the fixture holds it for
+    // `FIXTURE_RENDEZVOUS_HOLD_MS` so the race gets seconds of room.
     let context = Context::new(FixtureMode::DelayedMalformedDeleteOnce).await;
     let request = context.request();
     context
