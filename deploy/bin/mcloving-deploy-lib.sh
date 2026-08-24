@@ -20,6 +20,18 @@ deploy_fail() {
   exit 1
 }
 
+# deploy_notice MESSAGE -- a named OBSERVATION, not a refusal. Reserved for
+# facts an operator should learn about a deployment that is nonetheless
+# admissible: today, a drop-in for one of this deployment's units found in
+# a root-owned system load path. Silence about those would be indefensible
+# (systemd merges them) and refusing them would be wrong (an administrator
+# placing one is doing their job), so they are validated like every other
+# drop-in and additionally SAID OUT LOUD. stderr, so a caller parsing this
+# tool's stdout as a protocol is unaffected.
+deploy_notice() {
+  echo "$(basename "$0"): notice: $1" >&2
+}
+
 # require_secure_ancestors HOME ROOT...
 #
 # Refuse every PRE-EXISTING directory on the way from HOME down to each
@@ -409,13 +421,201 @@ deployment_cache_root() {
   fi
 }
 
-# deployment_unit_dropin_dirs UNIT_FILE... -> encoded items: every drop-in
-# DIRECTORY systemd consults for these unit names that EXISTS on disk,
-# deduplicated across the whole argument list.
+deployment_data_root() {
+  local home_dir="${1%/}" value="${XDG_DATA_HOME:-}"
+  if [[ "${value}" == /* ]] && deployment_xdg_value_applies "${home_dir}" "${value}"; then
+    printf '%s\n' "${value%/}"
+  else
+    printf '%s\n' "${home_dir}/.local/share"
+  fi
+}
+
+# deployment_runtime_root HOME -> $XDG_RUNTIME_DIR as the user manager for
+# HOME resolves it. Unlike the other bases this one has no in-home default:
+# systemd's own fallback is /run/user/$UID, so an inherited value that does
+# not speak for HOME (the same rule the other bases use) is replaced by
+# /run/user/<the uid that owns HOME> rather than by a path under the home.
+# A home whose owner cannot be stat-ed yields nothing at all, and the
+# callers treat an empty base as "no such load path" -- the runtime tree is
+# a tmpfs that may legitimately not exist.
+deployment_runtime_root() {
+  local home_dir="${1%/}" value="${XDG_RUNTIME_DIR:-}" home_uid
+  if [[ "${value}" == /* ]] && deployment_xdg_value_applies "${home_dir}" "${value}"; then
+    printf '%s\n' "${value%/}"
+    return 0
+  fi
+  home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || return 0
+  [[ -n "${home_uid}" ]] || return 0
+  printf '/run/user/%s\n' "${home_uid}"
+}
+
+# The Quadlet source extensions this lane could ship, and the unit each
+# generates. Quadlet does not install its sources as units: it GENERATES a
+# .service and systemd applies drop-ins to the GENERATED name, so a
+# discovery seeded only from the source basenames never sees
+# mcloving-postgres.service.d at all.
 #
-# systemd.unit(5) does not consult only "<unit>.d". For a unit named
-# NAME.TYPE living in a configuration directory, systemd reads *.conf out
-# of ALL of these, and the deployment's own units match several of them:
+# The mapping was read off the generator, not the manual: podman 4.9.3's
+# /usr/libexec/podman/quadlet run over this deployment's own sources plus
+# probes writes mcloving-postgres.service, mcloving-postgres-data-volume.service,
+# mcloving-net-network.service and mcloving-img-image.service. The rule that
+# falls out, and that podman-systemd.unit(5) documents:
+#
+#   <base>.container -> <base>.service        (no suffix)
+#   <base>.kube      -> <base>.service        (no suffix)
+#   <base>.volume    -> <base>-volume.service
+#   <base>.network   -> <base>-network.service
+#   <base>.image     -> <base>-image.service
+#   <base>.build     -> <base>-build.service
+#   <base>.pod       -> <base>-pod.service
+#
+# .kube, .build and .pod are stated from the manual rather than observed --
+# podman 4.9.3 generates nothing for a .pod, which arrived in 5.0 -- and are
+# enumerated anyway so a lane that starts shipping one is not a fresh gap.
+# The suffixed names matter twice over: mcloving-postgres-data-volume.service
+# also brings mcloving-postgres-data-.service.d and mcloving-postgres-.service.d
+# into the dash-truncation forms below, which the source name never did.
+MCLOVING_QUADLET_SOURCE_TYPES="container|volume|network|image|build|pod|kube"
+
+# deployment_quadlet_generated_name SOURCE_BASENAME -> the .service name
+# Quadlet generates for it, or nothing when the extension is not a Quadlet
+# source type.
+deployment_quadlet_generated_name() {
+  local source_base="${1%.*}" source_type="${1##*.}"
+  [[ -n "${source_base}" && "${source_base}" != "$1" ]] || return 0
+  case "${source_type}" in
+    container | kube) printf '%s.service\n' "${source_base}" ;;
+    volume | network | image | build | pod)
+      printf '%s-%s.service\n' "${source_base}" "${source_type}" ;;
+    *) return 0 ;;
+  esac
+}
+
+# deployment_unit_names UNIT_FILE... -> encoded items: every unit NAME whose
+# drop-ins apply to this deployment. That is the basename of each source --
+# a native .service, and a Quadlet source, which takes .container.d style
+# drop-ins in the Quadlet search path -- PLUS the name Quadlet GENERATES for
+# each Quadlet source, whose drop-ins live in the systemd unit load paths
+# under the generated name and were previously enumerated nowhere.
+deployment_unit_names() {
+  local unit_file unit_base generated
+  local -A name_seen=()
+  for unit_file in "$@"; do
+    [[ -f "${unit_file}" ]] || continue
+    unit_base="${unit_file##*/}"
+    [[ -n "${unit_base}" && "${unit_base}" == *.* ]] || continue
+    if [[ -z "${name_seen["${unit_base}"]:-}" ]]; then
+      name_seen["${unit_base}"]=1
+      encode_path_item "${unit_base}"
+    fi
+    generated="$(deployment_quadlet_generated_name "${unit_base}")"
+    [[ -n "${generated}" ]] || continue
+    [[ -z "${name_seen["${generated}"]:-}" ]] || continue
+    name_seen["${generated}"]=1
+    encode_path_item "${generated}"
+  done
+  return 0
+}
+
+# deployment_unit_load_paths HOME CLASS FAMILY -> encoded items: the base
+# directories the manager searches, one per line, whether or not they exist.
+#
+# CLASS is "user" (writable by the service account), "system" (root-owned),
+# or "all". FAMILY is "systemd" (where .service drop-ins live) or "quadlet"
+# (where .container/.volume drop-ins live).
+#
+# systemd.unit(5) Table 2 is the authority for the systemd family, and a
+# drop-in for one of our units is merged from EVERY entry in it -- not only
+# from the directory the main unit happens to live in, which is all the
+# previous derivation looked at. The user-writable entries are the load-
+# bearing half of this fix: $XDG_RUNTIME_DIR/systemd/user and
+# $XDG_DATA_HOME/systemd/user are writable by the service account, are NOT
+# managed roots, and a drop-in placed in either is merged into our units
+# with nothing in the old derivation securing it or parsing the paths it
+# declares. Generator and transient outputs are included for the same
+# reason: they are ordinary directories under the runtime tree.
+#
+# $XDG_DATA_DIRS is deliberately NOT honoured for the vendor entries. It is
+# system scope, not account scope, and the documented default is what a
+# rootless user manager uses on every host this lane targets; adopting an
+# inherited value would let an environment variable steer the validator at
+# exactly the vendor paths it is meant to judge.
+deployment_unit_load_paths() {
+  local home_dir="${1%/}" want_class="$2" family="$3"
+  local config_base data_base runtime_base home_uid
+  config_base="$(deployment_config_root "${home_dir}")"
+  data_base="$(deployment_data_root "${home_dir}")"
+  runtime_base="$(deployment_runtime_root "${home_dir}")"
+  home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || home_uid=""
+  local -a user_paths=() system_paths=()
+  case "${family}" in
+    systemd)
+      user_paths+=("${config_base}/systemd/user.control")
+      user_paths+=("${config_base}/systemd/user")
+      if [[ -n "${runtime_base}" ]]; then
+        user_paths+=(
+          "${runtime_base}/systemd/user.control"
+          "${runtime_base}/systemd/transient"
+          "${runtime_base}/systemd/generator.early"
+          "${runtime_base}/systemd/user"
+          "${runtime_base}/systemd/generator"
+          "${runtime_base}/systemd/generator.late"
+        )
+      fi
+      user_paths+=("${data_base}/systemd/user")
+      system_paths+=(
+        "/etc/systemd/user"
+        "/run/systemd/user"
+        "/usr/local/share/systemd/user"
+        "/usr/share/systemd/user"
+        "/usr/local/lib/systemd/user"
+        "/usr/lib/systemd/user"
+      )
+      ;;
+    quadlet)
+      # podman-systemd.unit(5) rootless search path. The per-uid system
+      # directory is included only when the home's uid is known.
+      user_paths+=("${config_base}/containers/systemd")
+      [[ -n "${runtime_base}" ]] \
+        && user_paths+=("${runtime_base}/containers/systemd")
+      [[ -n "${home_uid}" ]] \
+        && system_paths+=("/etc/containers/systemd/users/${home_uid}")
+      system_paths+=(
+        "/etc/containers/systemd/users"
+        "/etc/containers/systemd"
+        "/usr/share/containers/systemd"
+      )
+      ;;
+    *) return 0 ;;
+  esac
+  local load_path
+  if [[ "${want_class}" == "user" || "${want_class}" == "all" ]]; then
+    for load_path in "${user_paths[@]}"; do
+      encode_path_item "${load_path}"
+    done
+  fi
+  if [[ "${want_class}" == "system" || "${want_class}" == "all" ]]; then
+    for load_path in "${system_paths[@]}"; do
+      encode_path_item "${load_path}"
+    done
+  fi
+  return 0
+}
+
+# deployment_unit_dropin_dirs HOME [--user|--system|--all] UNIT_FILE...
+#   -> encoded items: every drop-in DIRECTORY systemd consults for these
+#   units that EXISTS on disk, across every load path, deduplicated.
+#
+# Two independent enumerations meet here.
+#
+# WHICH DIRECTORIES are searched: the directory each source file itself
+# lives in, plus every user-unit load path (systemd.unit(5) Table 2) for
+# .service names and every Quadlet search path for Quadlet source names.
+# Restricting the search to the main unit's own directory was the gap: a
+# drop-in in /etc/systemd/user or in the service account's own
+# $XDG_RUNTIME_DIR/systemd/user is merged by systemd all the same.
+#
+# WHICH FORMS are built in each of them, for a name spelled NAME.TYPE:
 #
 #   TYPE.d                 type-wide -- applies to EVERY unit of that type,
 #                          so "service.d" applies to all three services
@@ -427,45 +627,84 @@ deployment_cache_root() {
 #   BASE@.TYPE.d           the template directory of an instantiated
 #                          BASE@INSTANCE unit (none are shipped today; the
 #                          form is enumerated so adding one is not a gap)
-#   NAME.TYPE.d            the exact unit directory -- the ONLY form this
-#                          enumeration used to cover
+#   NAME.TYPE.d            the exact unit directory
 #
-# Precedence among them is systemd's business and irrelevant here:
-# validation is ADDITIVE, so the union is what must be secured and parsed.
-# Enumerating only NAME.TYPE.d left a group/world-writable service.d or
-# mcloving-.service.d free to inject an ExecStart= or an external
-# EnvironmentFile= that the next transition's restart consumes, with
-# neither the drop-in source nor the paths it declares ever validated.
+# Precedence among paths and among forms is systemd's business and
+# irrelevant here: validation is ADDITIVE, so the union is what must be
+# secured and parsed. Where a given systemd or podman version consults
+# FEWER of these than are enumerated, the cost is validating a file nothing
+# reads -- the safe direction; the dangerous direction is one that is
+# honoured and never seen.
 #
-# Quadlet follows the same drop-in convention on the .container/.volume
-# side. Where a given systemd version consults FEWER of these forms than
-# are enumerated here the cost is validating a file nothing reads, which
-# is the safe direction; the dangerous direction is a form systemd honours
-# that this never sees.
-#
-# Only directories that EXIST are emitted, and that is not a gap: the
-# configuration directory holding them is itself a managed root under the
-# ancestor rule, so no other local user can create one -- the same
-# containing-directory bound that makes wildcard EnvironmentFile=
-# expansion safe.
+# Only directories that EXIST are emitted. For the deployment's own
+# configuration root that is not a gap, because the root is a managed root
+# under the ancestor rule and no other local user can create one. For the
+# other user-writable load paths the bound is weaker and is stated rather
+# than implied: the load path directories THEMSELVES join the ancestor walk
+# when they exist (see require_deployment_integrity), which keeps another
+# local user from creating a drop-in directory in them, but nothing here
+# prevents the SERVICE ACCOUNT from creating one -- that account is the
+# deployment's own trust level, and a compromise of it is outside what a
+# filesystem-integrity gate can bound.
 deployment_unit_dropin_dirs() {
-  local unit_file unit_dir unit_base unit_type unit_name prefix_part rest
-  local dropin_candidate
+  local home_dir="${1%/}" want_class="all"
+  shift
+  case "${1:-}" in
+    --user | --system | --all) want_class="${1#--}"; shift ;;
+  esac
+  local unit_file unit_base unit_type unit_name prefix_part rest
+  local dropin_candidate base_dir encoded_item decoded_item
   local -A dropin_seen=()
   local -a dropin_forms=()
+  local -a service_names=() quadlet_names=()
+  local -a systemd_bases=() quadlet_bases=() own_bases=()
+  local -A own_seen=()
+  while IFS= read -r encoded_item; do
+    [[ -n "${encoded_item}" ]] || continue
+    decode_path_item_into decoded_item "${encoded_item}"
+    case "${decoded_item}" in
+      *.service) service_names+=("${decoded_item}") ;;
+      *) quadlet_names+=("${decoded_item}") ;;
+    esac
+  done < <(deployment_unit_names "$@")
+  [[ ${#service_names[@]} -gt 0 || ${#quadlet_names[@]} -gt 0 ]] || return 0
+  # The directory a source actually lives in is searched as part of the
+  # USER class: it is the deployment's own tree, and in a real installation
+  # it IS one of the user-writable load paths below. It must NOT join the
+  # system class -- a --system query exists to name the drop-ins that come
+  # from OUTSIDE the deployment, and reporting the deployment's own config
+  # root among them would make that notice meaningless noise.
+  if [[ "${want_class}" == "user" || "${want_class}" == "all" ]]; then
   for unit_file in "$@"; do
-    [[ -f "${unit_file}" ]] || continue
-    [[ "${unit_file}" == */* ]] || continue
-    unit_dir="${unit_file%/*}"
-    unit_base="${unit_file##*/}"
-    [[ "${unit_base}" == *.* ]] || continue
-    unit_type="${unit_base##*.}"
-    unit_name="${unit_base%.*}"
-    [[ -n "${unit_type}" && -n "${unit_name}" ]] || continue
-    dropin_forms=("${unit_dir}/${unit_type}.d")
+    [[ -f "${unit_file}" && "${unit_file}" == */* ]] || continue
+    base_dir="${unit_file%/*}"
+    [[ -z "${own_seen["${base_dir}"]:-}" ]] || continue
+    own_seen["${base_dir}"]=1
+    own_bases+=("${base_dir}")
+  done
+  fi
+  while IFS= read -r encoded_item; do
+    [[ -n "${encoded_item}" ]] || continue
+    decode_path_item_into decoded_item "${encoded_item}"
+    systemd_bases+=("${decoded_item}")
+  done < <(deployment_unit_load_paths "${home_dir}" "${want_class}" systemd)
+  while IFS= read -r encoded_item; do
+    [[ -n "${encoded_item}" ]] || continue
+    decode_path_item_into decoded_item "${encoded_item}"
+    quadlet_bases+=("${decoded_item}")
+  done < <(deployment_unit_load_paths "${home_dir}" "${want_class}" quadlet)
+  systemd_bases+=("${own_bases[@]}")
+  quadlet_bases+=("${own_bases[@]}")
+
+  deployment_dropin_forms_for() { # BASE_DIR UNIT_NAME
+    local forms_base="${1%/}" forms_name="$2"
+    unit_type="${forms_name##*.}"
+    unit_name="${forms_name%.*}"
+    [[ -n "${unit_type}" && -n "${unit_name}" ]] || return 0
+    dropin_forms=("${forms_base}/${unit_type}.d")
     prefix_part="${unit_name%%@*}"
     if [[ "${unit_name}" == *@* ]]; then
-      dropin_forms+=("${unit_dir}/${prefix_part}@.${unit_type}.d")
+      dropin_forms+=("${forms_base}/${prefix_part}@.${unit_type}.d")
     fi
     # Truncate at every dash, right to left, exactly as systemd's
     # unit_name_build_prefixes does. An empty prefix ends the walk:
@@ -474,27 +713,43 @@ deployment_unit_dropin_dirs() {
     while [[ "${rest}" == *-* ]]; do
       rest="${rest%-*}"
       [[ -n "${rest}" ]] || break
-      dropin_forms+=("${unit_dir}/${rest}-.${unit_type}.d")
+      dropin_forms+=("${forms_base}/${rest}-.${unit_type}.d")
     done
-    dropin_forms+=("${unit_dir}/${unit_name}.${unit_type}.d")
+    dropin_forms+=("${forms_base}/${unit_name}.${unit_type}.d")
     for dropin_candidate in "${dropin_forms[@]}"; do
       [[ -d "${dropin_candidate}" ]] || continue
       [[ -z "${dropin_seen["${dropin_candidate}"]:-}" ]] || continue
       dropin_seen["${dropin_candidate}"]=1
       encode_path_item "${dropin_candidate}"
     done
+  }
+
+  for base_dir in "${systemd_bases[@]}"; do
+    [[ -d "${base_dir}" ]] || continue
+    for unit_base in "${service_names[@]}"; do
+      deployment_dropin_forms_for "${base_dir}" "${unit_base}"
+    done
   done
+  for base_dir in "${quadlet_bases[@]}"; do
+    [[ -d "${base_dir}" ]] || continue
+    for unit_base in "${quadlet_names[@]}"; do
+      deployment_dropin_forms_for "${base_dir}" "${unit_base}"
+    done
+  done
+  unset -f deployment_dropin_forms_for
   return 0
 }
 
-# deployment_unit_source_files UNIT_FILE... -> encoded items: every file
-# the unit parse READS -- the unit files themselves plus the *.conf of
-# every drop-in directory systemd consults for them
-# (deployment_unit_dropin_dirs, which is far more than "<unit>.d"). One
-# enumeration for the parser and for source validation, so what is parsed
-# and what is judged cannot diverge: everything the parser reads is an
-# execution vector (ExecStart lives in these files).
+# deployment_unit_source_files HOME UNIT_FILE... -> encoded items: every
+# file the unit parse READS -- the unit files themselves plus the *.conf of
+# every drop-in directory systemd consults for them, across every load path
+# (deployment_unit_dropin_dirs). One enumeration for the parser and for
+# source validation, so what is parsed and what is judged cannot diverge:
+# everything the parser reads is an execution vector (ExecStart lives in
+# these files).
 deployment_unit_source_files() {
+  local home_dir="$1"
+  shift
   local unit_file dropin dropin_dir encoded_dropin_dir
   for unit_file in "$@"; do
     [[ -f "${unit_file}" ]] || continue
@@ -506,7 +761,7 @@ deployment_unit_source_files() {
     for dropin in "${dropin_dir}"/*.conf; do
       [[ -f "${dropin}" ]] && encode_path_item "${dropin}"
     done
-  done < <(deployment_unit_dropin_dirs "$@")
+  done < <(deployment_unit_dropin_dirs "${home_dir}" "$@")
   return 0
 }
 
@@ -574,7 +829,7 @@ deployment_unit_assignment_lines() {
   return 0
 }
 
-# require_parseable_unit_sources UNIT_FILE... -- the loud half of the
+# require_parseable_unit_sources HOME UNIT_FILE... -- the loud half of the
 # parsing contract, run in the MAIN shell (never inside a command
 # substitution, where deploy_fail dies with the subshell and the caller
 # would continue on partial output): any construct systemd would consume
@@ -593,13 +848,15 @@ deployment_unit_assignment_lines() {
 # quietly declined to model a spelling is exactly how an execution vector
 # escapes the walk, so every spelling is either extracted or named.
 require_parseable_unit_sources() {
+  local home_dir="${1%/}"
+  shift
   local file line key value encoded_source exec_value exec_token specifier_probe
   local source_files=()
   while IFS= read -r encoded_source; do
     [[ -n "${encoded_source}" ]] || continue
     decode_path_item_into file "${encoded_source}"
     source_files+=("${file}")
-  done < <(deployment_unit_source_files "$@")
+  done < <(deployment_unit_source_files "${home_dir}" "$@")
   [[ ${#source_files[@]} -gt 0 ]] || return 0
   for file in "${source_files[@]}"; do
     while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -686,7 +943,7 @@ deployment_unit_declared_contracts() {
     [[ -n "${encoded_source}" ]] || continue
     decode_path_item_into decoded_source "${encoded_source}"
     source_files+=("${decoded_source}")
-  done < <(deployment_unit_source_files "$@")
+  done < <(deployment_unit_source_files "${home_dir}" "$@")
   [[ ${#source_files[@]} -gt 0 ]] || return 0
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -789,7 +1046,7 @@ deployment_unit_declared_executables() {
     [[ -n "${encoded_source}" ]] || continue
     decode_path_item_into decoded_source "${encoded_source}"
     source_files+=("${decoded_source}")
-  done < <(deployment_unit_source_files "$@")
+  done < <(deployment_unit_source_files "${home_dir}" "$@")
   [[ ${#source_files[@]} -gt 0 ]] || return 0
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -843,7 +1100,7 @@ deployment_unit_declared_roots() {
     [[ -n "${encoded_source}" ]] || continue
     decode_path_item_into decoded_source "${encoded_source}"
     source_files+=("${decoded_source}")
-  done < <(deployment_unit_source_files "$@")
+  done < <(deployment_unit_source_files "${home_dir}" "$@")
   [[ ${#source_files[@]} -gt 0 ]] || return 0
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -1733,14 +1990,32 @@ require_deployment_integrity() {
     [[ -f "${unit_file}" ]] && unit_files+=("${unit_file}")
   done
   local unit_declared_roots=() declared_contracts=() unit_source_files=()
-  local declared_executables=()
+  local declared_executables=() load_path_roots=() system_dropin_files=()
   local dropin_dirs=() encoded_root encoded_item decoded_item
+  # The load path DIRECTORIES themselves, where they exist, join the chain
+  # roots. This is the containing-directory bound for the paths outside the
+  # managed set: a group/world-writable $XDG_DATA_HOME/systemd/user is a
+  # drop-in directory another local user can create at will, and the
+  # drop-in that would be merged does not exist yet at validation time, so
+  # only "who may create one" is observable -- the same reasoning that
+  # makes wildcard EnvironmentFile= expansion safe. Non-existent paths
+  # contribute nothing; the ancestor walk skips what is not a directory.
+  local load_path_dir
+  while IFS= read -r encoded_item; do
+    [[ -n "${encoded_item}" ]] || continue
+    decode_path_item_into load_path_dir "${encoded_item}"
+    [[ -d "${load_path_dir}" ]] || continue
+    load_path_roots+=("${load_path_dir}")
+  done < <(
+    deployment_unit_load_paths "${home_dir}" all systemd
+    deployment_unit_load_paths "${home_dir}" all quadlet
+  )
   if [[ ${#unit_files[@]} -gt 0 ]]; then
     # BEFORE anything parses: constructs systemd would consume that the
     # assignment parser does not model are a loud refusal here in the main
     # shell -- inside the derivation substitutions below a refusal would
     # die with its subshell and validation would continue on partial output.
-    require_parseable_unit_sources "${unit_files[@]}"
+    require_parseable_unit_sources "${home_dir}" "${unit_files[@]}"
     local decoded_declared_root
     while IFS= read -r encoded_root; do
       [[ -n "${encoded_root}" ]] || continue
@@ -1759,7 +2034,7 @@ require_deployment_integrity() {
       [[ -n "${encoded_item}" ]] || continue
       decode_path_item_into decoded_item "${encoded_item}"
       unit_source_files+=("${decoded_item}")
-    done < <(deployment_unit_source_files "${unit_files[@]}")
+    done < <(deployment_unit_source_files "${home_dir}" "${unit_files[@]}")
     while IFS= read -r encoded_item; do
       [[ -n "${encoded_item}" ]] || continue
       decode_path_item_into decoded_item "${encoded_item}"
@@ -1774,7 +2049,27 @@ require_deployment_integrity() {
       [[ -n "${encoded_item}" ]] || continue
       decode_path_item_into decoded_item "${encoded_item}"
       dropin_dirs+=("${decoded_item}")
-    done < <(deployment_unit_dropin_dirs "${unit_files[@]}")
+    done < <(deployment_unit_dropin_dirs "${home_dir}" "${unit_files[@]}")
+    # System-path drop-ins are validated exactly like every other drop-in
+    # -- they are already in unit_source_files and dropin_dirs above -- and
+    # are additionally NAMED. An administrator may legitimately drop a
+    # /etc/systemd/user/service.d/*.conf on the host, so refusing the
+    # transition over one would be wrong; leaving the operator unaware that
+    # something outside the deployment tree is merged into its units would
+    # be worse. The same list is recorded in the canonical digest document,
+    # so appearance or drift of one changes the document too.
+    local system_dropin_dir system_dropin_file
+    while IFS= read -r encoded_item; do
+      [[ -n "${encoded_item}" ]] || continue
+      decode_path_item_into system_dropin_dir "${encoded_item}"
+      for system_dropin_file in "${system_dropin_dir}"/*.conf; do
+        [[ -f "${system_dropin_file}" ]] || continue
+        system_dropin_files+=("${system_dropin_file}")
+      done
+    done < <(deployment_unit_dropin_dirs "${home_dir}" --system "${unit_files[@]}")
+    for system_dropin_file in "${system_dropin_files[@]}"; do
+      deploy_notice "system-path drop-in ${system_dropin_file} is merged into this deployment's units by the service manager; it is validated under the same rules as the deployment's own sources, and is recorded in the canonical digest document"
+    done
   fi
   # The two INSTALLED TREES the transition executes from -- retained
   # releases and installed helpers -- are walked in full by the shared
@@ -1807,7 +2102,7 @@ require_deployment_integrity() {
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
     "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
     "${declared_contracts[@]}" "${declared_executables[@]}" \
-    "${dropin_dirs[@]}" "${unit_source_files[@]}"
+    "${load_path_roots[@]}" "${dropin_dirs[@]}" "${unit_source_files[@]}"
   require_secure_files "${home_dir}" "${contract_destinations[@]}" \
     "${declared_contracts[@]}"
   require_integrity_files "${home_dir}" "${unit_source_files[@]}" \

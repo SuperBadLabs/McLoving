@@ -125,7 +125,7 @@ contract_destinations=(
 # consume that the assignment parser does not model must refuse the
 # install loudly, not die inside the derivation subshells below while the
 # install continues on partial output.
-require_parseable_unit_sources \
+require_parseable_unit_sources "${home_dir}" \
   "${deploy_root}"/systemd/*.service \
   "${deploy_root}"/podman/*.container \
   "${deploy_root}"/podman/*.volume

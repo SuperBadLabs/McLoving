@@ -108,10 +108,21 @@ for digest_unit_file in "${unit_root}"/mcloving-*.service \
   [[ -f "${digest_unit_file}" ]] && digest_unit_files+=("${digest_unit_file}")
 done
 MCLOVING_UNIT_DROPIN_DIRS=""
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS=""
 if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
-  MCLOVING_UNIT_DROPIN_DIRS="$(deployment_unit_dropin_dirs "${digest_unit_files[@]}")"
+  MCLOVING_UNIT_DROPIN_DIRS="$(deployment_unit_dropin_dirs "${home_dir}" \
+    "${digest_unit_files[@]}")"
+  # The ROOT-OWNED load paths are split out, not dropped. systemd merges a
+  # /etc/systemd/user drop-in into this deployment's units exactly like one
+  # of its own, so the document must pin its bytes and mode -- otherwise an
+  # administrator's override, or a change to one, is drift the canonical
+  # re-read cannot see. They live outside the home and outside every walked
+  # tree, so they are their own array rather than more `units` entries.
+  MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="$(deployment_unit_dropin_dirs "${home_dir}" \
+    --system "${digest_unit_files[@]}")"
 fi
 export MCLOVING_UNIT_DROPIN_DIRS
+export MCLOVING_UNIT_SYSTEM_DROPIN_DIRS
 
 # The contracts may point their identity material OUTSIDE the walked trees
 # -- an external CA, an external bindings file -- and the runtime guard
@@ -223,6 +234,21 @@ if dropin_dirs_supplied is None:
 dropin_dirs = tuple(
     Path(posixpath.normpath(item))
     for item in decode_path_items(dropin_dirs_supplied)
+)
+
+# The subset of the above that lives in root-owned system load paths. Empty
+# is the normal case; UNSET means the document was built outside its
+# wrapper and would silently omit administrator overrides that systemd
+# merges into this deployment's units.
+system_dropin_dirs_supplied = os.environ.get("MCLOVING_UNIT_SYSTEM_DROPIN_DIRS")
+if system_dropin_dirs_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_SYSTEM_DROPIN_DIRS is not "
+        "set; run this through its shell wrapper"
+    )
+system_dropin_dirs = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(system_dropin_dirs_supplied)
 )
 
 
@@ -594,6 +620,11 @@ unit_entries = [
     if unit_owned(path, unit_dir)
 ]
 contract_entries = walk(config)
+# Recorded whole, like any other drop-in directory: systemd reads every
+# file inside one regardless of basename.
+system_dropin_entries = [
+    path for dropin_dir in system_dropin_dirs for path in walk(dropin_dir)
+]
 
 # Every symlink the walks follow contributes its resolved target's parent
 # chain, through the same shared collector the roots go through: a nested
@@ -648,7 +679,13 @@ for link in sorted(
 # their bytes and metadata too -- substituting an external CA while
 # preserving its mode must change this document. In-tree paths are already
 # recorded by the walks and are deduplicated here, not double-recorded.
-walked_roots = (libexec / "releases", libexec / "helpers", *unit_dirs, config)
+walked_roots = (
+    libexec / "releases",
+    libexec / "helpers",
+    *unit_dirs,
+    *system_dropin_dirs,
+    config,
+)
 
 
 def inside_walked_trees(path: Path) -> bool:
@@ -758,6 +795,15 @@ document = {
         # what they are called.
         file_record(path, home)
         for path in unit_entries
+    ],
+    # Drop-ins for this deployment's units found in ROOT-OWNED system load
+    # paths (/etc/systemd/user and kin). They are outside the home, so they
+    # carry absolute spellings rather than home-relative ones. Normally
+    # empty; non-empty is a fact about the host that the transition tools
+    # also say out loud.
+    "system_dropins": [
+        file_record(path, home)
+        for path in system_dropin_entries
     ],
     "environment_contracts": [
         file_record(path, home)

@@ -1651,10 +1651,18 @@ race_status=0
 # set comes through the same derivation for the same reason: the payload
 # refuses to build a document without it rather than silently omitting the
 # type-wide and prefix drop-ins.
+race_system_dropin_dirs="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_unit_dropin_dirs "${home}" --system \
+    "${smoke_unit_root}"/mcloving-*.service \
+    "${smoke_quadlet_root}"/mcloving-*.container \
+    "${smoke_quadlet_root}"/mcloving-*.volume
+)"
 race_dropin_dirs="$(
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
-  deployment_unit_dropin_dirs "${smoke_unit_root}"/mcloving-*.service \
+  deployment_unit_dropin_dirs "${home}" "${smoke_unit_root}"/mcloving-*.service \
     "${smoke_quadlet_root}"/mcloving-*.container \
     "${smoke_quadlet_root}"/mcloving-*.volume
 )"
@@ -1670,6 +1678,7 @@ MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1731,6 +1740,7 @@ MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
 import contextlib
@@ -1806,6 +1816,7 @@ MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/ctime-probe.txt" <<'CTIMERACE' || ctime_race_status=$?
 import contextlib
@@ -1880,6 +1891,7 @@ MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
 MCLOVING_CONFIGURED_PATHS="" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}" <<'LISTRACE' || listing_race_status=$?
@@ -2821,7 +2833,7 @@ chmod 0755 "${dropin_root_home}/prefix-shared"
     decode_path_item_into decoded_form "${encoded_form}"
     # shellcheck disable=SC2154 # assigned through the nameref above
     form_seen+="${decoded_form##*/}"$'\n'
-  done < <(deployment_unit_dropin_dirs "${form_probe}/foo-bar-baz.service")
+  done < <(deployment_unit_dropin_dirs "${form_probe}" "${form_probe}/foo-bar-baz.service")
   for expected_form in service.d foo-bar-.service.d foo-.service.d \
     foo-bar-baz.service.d; do
     grep -qx "${expected_form}" <<<"${form_seen}" || {
@@ -2856,6 +2868,249 @@ grep -q 'service.d/zz-typewide.conf' <<<"${typewide_digests_after}" || {
 }
 rm -rf "${typewide_dir}" "${prefix_dir}" "${dropin_root_home}/prefix-shared"
 rm -f "${dropin_root_home}/dropin-shared/typewide.env"
+# systemd merges a unit's drop-ins from EVERY user-unit load path, not only
+# from the directory the main unit came from. The user-writable ones --
+# $XDG_DATA_HOME/systemd/user and $XDG_RUNTIME_DIR/systemd/user -- are not
+# managed roots, so a drop-in placed in either was neither secured nor
+# parsed while systemd merged it into the units a transition restarts.
+loadpath_data_root="${dropin_root_home}/.local/share/systemd/user"
+loadpath_dropin="${loadpath_data_root}/mcloving-controller.service.d"
+mkdir -p "${loadpath_dropin}"
+chmod 0755 "${dropin_root_home}/.local/share" \
+  "${dropin_root_home}/.local/share/systemd" "${loadpath_data_root}" \
+  "${loadpath_dropin}"
+# (1) The SOURCE in another load path takes the trust-input file rule.
+printf '[Service]\nRestart=always\n' > "${loadpath_dropin}/zz-loadpath.conf"
+chmod 0666 "${loadpath_dropin}/zz-loadpath.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/loadpath-source.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable drop-in in another load path" >&2
+  exit 1
+fi
+grep -q "zz-loadpath.conf (mode 666)" "${workdir}/logs/loadpath-source.log" || {
+  echo "the other-load-path drop-in source was not judged:" >&2
+  cat "${workdir}/logs/loadpath-source.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused load-path-source upgrade still moved the current release" >&2
+  exit 1
+}
+# (2) And the paths it DECLARES are parsed, from that load path too.
+mkdir -p "${dropin_root_home}/loadpath-shared"
+printf 'MCLOVING_LOADPATH=1\n' > "${dropin_root_home}/loadpath-shared/loadpath.env"
+chmod 0600 "${dropin_root_home}/loadpath-shared/loadpath.env"
+chmod 0777 "${dropin_root_home}/loadpath-shared"
+printf '[Service]\nEnvironmentFile=%%h/loadpath-shared/loadpath.env\n' \
+  > "${loadpath_dropin}/zz-loadpath.conf"
+chmod 0644 "${loadpath_dropin}/zz-loadpath.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/loadpath-contract.log" 2>&1; then
+  echo "upgrade proceeded over a contract declared only in another load path" >&2
+  exit 1
+fi
+grep -q "loadpath-shared (mode 777)" "${workdir}/logs/loadpath-contract.log" || {
+  echo "the other-load-path drop-in's declared contract escaped the parser:" >&2
+  cat "${workdir}/logs/loadpath-contract.log" >&2
+  exit 1
+}
+chmod 0755 "${dropin_root_home}/loadpath-shared"
+# (3) The load path DIRECTORY itself is the containing bound for the paths
+# outside the managed set: the drop-in that would be merged does not exist
+# yet at validation time, so only who may CREATE one is observable. A
+# world-writable load path is refused with no drop-in present at all.
+rm -rf "${loadpath_dropin}"
+chmod 0777 "${loadpath_data_root}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/loadpath-dir.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable user-unit load path" >&2
+  exit 1
+fi
+grep -q ".local/share/systemd/user (mode 777)" "${workdir}/logs/loadpath-dir.log" || {
+  echo "the world-writable load path directory was not judged:" >&2
+  cat "${workdir}/logs/loadpath-dir.log" >&2
+  exit 1
+}
+chmod 0755 "${loadpath_data_root}"
+# (4) Acceptance: secured, the same transition proceeds.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured other-load-path drop-in did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the load-path gate" >&2
+  exit 1
+}
+rm -rf "${dropin_root_home}/.local/share/systemd" "${dropin_root_home}/loadpath-shared"
+# Quadlet GENERATES a service; systemd applies drop-ins to the GENERATED
+# name, which discovery seeded from the source basenames never saw. The
+# mapping is verified against podman's own generator in the probe below.
+generated_service_dropin="${dropin_unit_root}/mcloving-postgres.service.d"
+generated_volume_dropin="${dropin_unit_root}/mcloving-postgres-data-volume.service.d"
+mkdir -p "${generated_service_dropin}" "${generated_volume_dropin}"
+chmod 0755 "${generated_service_dropin}" "${generated_volume_dropin}"
+# (1) .container -> <base>.service
+printf '[Service]\nRestart=always\n' > "${generated_service_dropin}/override.conf"
+chmod 0666 "${generated_service_dropin}/override.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/generated-service.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable drop-in for the generated postgres service" >&2
+  exit 1
+fi
+grep -q "mcloving-postgres.service.d/override.conf (mode 666)" \
+  "${workdir}/logs/generated-service.log" || {
+  echo "the generated service's drop-in was not judged:" >&2
+  cat "${workdir}/logs/generated-service.log" >&2
+  exit 1
+}
+chmod 0644 "${generated_service_dropin}/override.conf"
+# (2) .volume -> <base>-volume.service, the suffixed mapping, proven
+# through a path only that name's drop-in declares.
+mkdir -p "${dropin_root_home}/generated-shared"
+printf 'MCLOVING_GENERATED=1\n' > "${dropin_root_home}/generated-shared/generated.env"
+chmod 0600 "${dropin_root_home}/generated-shared/generated.env"
+chmod 0777 "${dropin_root_home}/generated-shared"
+printf '[Service]\nEnvironmentFile=%%h/generated-shared/generated.env\n' \
+  > "${generated_volume_dropin}/override.conf"
+chmod 0644 "${generated_volume_dropin}/override.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/generated-volume.log" 2>&1; then
+  echo "upgrade proceeded over a contract declared only by the generated volume service's drop-in" >&2
+  exit 1
+fi
+grep -q "generated-shared (mode 777)" "${workdir}/logs/generated-volume.log" || {
+  echo "the generated volume service's drop-in escaped the parser:" >&2
+  cat "${workdir}/logs/generated-volume.log" >&2
+  exit 1
+}
+chmod 0755 "${dropin_root_home}/generated-shared"
+# (3) Acceptance.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured generated-service drop-ins did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the generated-name gate" >&2
+  exit 1
+}
+# The canonical document sees the generated service's drop-in too.
+generated_digests_before="$("${dropin_root_libexec}/helpers/mcloving-deployed-digests" --home "${dropin_root_home}")"
+printf '[Service]\nRestart=no\n' > "${generated_service_dropin}/override.conf"
+chmod 0644 "${generated_service_dropin}/override.conf"
+generated_digests_after="$("${dropin_root_libexec}/helpers/mcloving-deployed-digests" --home "${dropin_root_home}")"
+[[ "${generated_digests_before}" != "${generated_digests_after}" ]] || {
+  echo "editing the generated service's drop-in left the canonical document unchanged" >&2
+  exit 1
+}
+grep -q 'mcloving-postgres.service.d/override.conf' <<<"${generated_digests_after}" || {
+  echo "the canonical document does not record the generated service's drop-in" >&2
+  exit 1
+}
+# The document reflects the system-path reality too, even when empty: an
+# absent key would be indistinguishable from a host that has no overrides.
+printf '%s' "${generated_digests_after}" > "${workdir}/generated-digests.json"
+python3 - "${workdir}/generated-digests.json" <<'SYSDROP'
+import json
+import pathlib
+import sys
+
+document = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if "system_dropins" not in document:
+    raise SystemExit(
+        "the canonical document has no system_dropins key; a root-owned "
+        "load-path override would be invisible drift"
+    )
+if not isinstance(document["system_dropins"], list):
+    raise SystemExit("system_dropins is not a list")
+SYSDROP
+rm -rf "${generated_service_dropin}" "${generated_volume_dropin}" \
+  "${dropin_root_home}/generated-shared"
+# Exactness of the two new enumerations, against the generator and the
+# documented load path table rather than against assumption.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  # Quadlet's generated names. .container and .kube keep the base name;
+  # every other source type appends its own type. Verified against
+  # /usr/libexec/podman/quadlet's actual output for .container, .volume,
+  # .network and .image.
+  while IFS='|' read -r quadlet_source quadlet_expected; do
+    [[ -n "${quadlet_source}" ]] || continue
+    quadlet_actual="$(deployment_quadlet_generated_name "${quadlet_source}")"
+    [[ "${quadlet_actual}" == "${quadlet_expected}" ]] || {
+      echo "quadlet name mapping: ${quadlet_source} -> ${quadlet_actual}, expected ${quadlet_expected}" >&2
+      exit 1
+    }
+  done <<'QUADLETNAMES'
+mcloving-postgres.container|mcloving-postgres.service
+mcloving-postgres-data.volume|mcloving-postgres-data-volume.service
+mcloving-net.network|mcloving-net-network.service
+mcloving-img.image|mcloving-img-image.service
+mcloving-bld.build|mcloving-bld-build.service
+mcloving-grp.pod|mcloving-grp-pod.service
+mcloving-k8s.kube|mcloving-k8s.service
+mcloving-controller.service|
+QUADLETNAMES
+  # The load path table, classified. The user-writable entries are the ones
+  # this round closed; the system entries are validated and reported, never
+  # silently skipped, and the two classes must not overlap.
+  loadpath_user=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    loadpath_user+="${decoded_loadpath}"$'\n'
+  done < <(deployment_unit_load_paths "${dropin_root_home}" user systemd)
+  loadpath_system=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    loadpath_system+="${decoded_loadpath}"$'\n'
+  done < <(deployment_unit_load_paths "${dropin_root_home}" system systemd)
+  for expected_user in "${dropin_root_home}/.config/systemd/user" \
+    "${dropin_root_home}/.local/share/systemd/user"; do
+    grep -qx "${expected_user}" <<<"${loadpath_user}" || {
+      echo "the user-writable load path set is missing ${expected_user}: ${loadpath_user}" >&2
+      exit 1
+    }
+  done
+  for expected_system in /etc/systemd/user /run/systemd/user /usr/lib/systemd/user; do
+    grep -qx "${expected_system}" <<<"${loadpath_system}" || {
+      echo "the system load path set is missing ${expected_system}: ${loadpath_system}" >&2
+      exit 1
+    }
+    if grep -qx "${expected_system}" <<<"${loadpath_user}"; then
+      echo "${expected_system} is classified user-writable; the classes must not overlap" >&2
+      exit 1
+    fi
+  done
+  # A deployment whose only drop-ins are its own must report NO system-path
+  # drop-ins: a classifier that called everything "system" would make the
+  # notice above meaningless noise.
+  system_found="$(deployment_unit_dropin_dirs "${dropin_root_home}" --system \
+    "${dropin_unit_root}"/mcloving-*.service \
+    "${dropin_root_home}/.config/containers/systemd"/mcloving-*.container \
+    "${dropin_root_home}/.config/containers/systemd"/mcloving-*.volume)"
+  [[ -z "${system_found}" ]] || {
+    echo "a deployment-owned drop-in was classified as a system-path drop-in" >&2
+    exit 1
+  }
+)
 # Exec* directives name the executables the transition RUNS, and an
 # override resetting one to an external path was emitted by no
 # enumeration: the drop-in source was judged, found fine, and the unit was
@@ -3000,7 +3255,7 @@ rm -rf "${exec_tool_dir}"
     [[ -n "${encoded_coverage_source}" ]] || continue
     decode_path_item_into coverage_source "${encoded_coverage_source}"
     coverage_sources+=("${coverage_source}")
-  done < <(deployment_unit_source_files \
+  done < <(deployment_unit_source_files "${dropin_root_home}" \
     "${dropin_root_home}/.config/systemd/user"/mcloving-*.service \
     "${dropin_root_home}/.config/containers/systemd"/mcloving-*.container \
     "${dropin_root_home}/.config/containers/systemd"/mcloving-*.volume)
