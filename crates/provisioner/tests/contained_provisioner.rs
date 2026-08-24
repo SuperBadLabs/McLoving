@@ -63,21 +63,55 @@ const POLICY_MAX_INSTANCE_LIFETIME_MS: u64 = REQUEST_LIFETIME_MS;
 const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS;
 
 /// Delay the fixture holds a delayed-create response open for before
-/// answering. The startup budgets below are derived from it.
+/// answering, on the `DelayedCreateReady` and `DelayedMalformedCreateOnce`
+/// modes. The startup budgets below are derived from it.
 const FIXTURE_DELAYED_CREATE_MS: u64 = 200;
 
-/// Delay the one rendezvous-on-create case asks the fixture to hold its
-/// create response open for, via `Fixture::set_create_delay_ms`.
+/// Delay the two `DelayedCreateAfter*Snapshot` modes hold their create open
+/// for when a test does not widen it.
 ///
-/// That case is the only genuinely two-sided window in the suite: its budget
-/// has to outlast the admission write yet expire before the fixture answers.
-/// Widening the delay well past the mode's own `FIXTURE_DELAYED_CREATE_MS`
-/// widens both margins at once instead of splitting a couple of hundred
-/// milliseconds between them.
+/// Both current users widen it to [`FIXTURE_RENDEZVOUS_CREATE_MS`] and pair
+/// that with a held snapshot response, so this is only the fallback those
+/// modes keep for an un-widened use — no test's window is measured against
+/// it.
+const FIXTURE_SNAPSHOT_CREATE_MS: u64 = 100;
+
+/// Delay the rendezvous-on-create cases ask the fixture to hold its create
+/// response open for, via `Fixture::set_create_delay_ms`.
+///
+/// These cases are genuinely two-sided windows: something else — a deadline
+/// expiry, a cancellation, a reconcile snapshot — has to land after the
+/// create call opens yet before the fixture answers it. The override supplies
+/// the delay in place of whichever default the mode would otherwise use —
+/// `FIXTURE_DELAYED_CREATE_MS` for `DelayedCreateReady` and
+/// `DelayedMalformedCreateOnce`, `FIXTURE_SNAPSHOT_CREATE_MS` for the two
+/// `DelayedCreateAfter*Snapshot` modes — and outruns both by an order of
+/// magnitude, so it widens the two margins at once instead of splitting a
+/// couple of hundred milliseconds between them.
 const FIXTURE_RENDEZVOUS_CREATE_MS: u64 = 3_000;
 
-/// Startup budget for that case: a third of the delay the fixture holds the
-/// create open. The admission write would have to take a full second to miss
+/// Delay the fixture holds a raced response open for on the non-create paths
+/// a concurrent peer has to win against: the empty final inventory a newer
+/// reconcile must refresh the row inside, and the malformed delete a
+/// concurrent confirmed cleanup must land inside. Sized like the rendezvous
+/// create so the peer gets seconds, while staying under the default provider
+/// timeout with the same headroom as the held-open pending snapshot.
+const FIXTURE_RENDEZVOUS_HOLD_MS: u64 = 3_000;
+
+/// Delay the two retains-a-ready-transition cases ask the fixture to hold the
+/// raced inventory snapshot response open for.
+///
+/// The snapshot is captured when the inventory call arrives, before the hold,
+/// so holding the response past the full rendezvous create guarantees the
+/// create lands after the capture — and the extra margin gives the provision
+/// a cushion to mark the row ready before the reconcile resumes and takes its
+/// next ledger read. The provider timeout for those cases is derived to clear
+/// this hold.
+const FIXTURE_HELD_SNAPSHOT_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS + 2_000;
+
+/// Startup budget for the case whose deadline must expire *inside* the held
+/// create: a third of the delay the fixture holds the create open. The
+/// admission write would have to take a full second to miss
 /// the create call, and the create would have to answer three times early for
 /// the deadline not to have passed.
 const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
@@ -91,6 +125,63 @@ const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
 /// load only pushes those delays further out, so firing stays deterministic in
 /// the one direction these tests depend on.
 const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
+
+/// Request window, instance lifetime and startup budget that the standalone-
+/// binary case grants itself in place of the defaults above.
+///
+/// Every other case here admits its request microseconds after building it, in
+/// this process. That case stamps `requested_at_unix_ms`,
+/// `expires_at_unix_ms` and `instance_expires_at_unix_ms` in the parent and
+/// only then writes four fixture files, spawns the provisioner binary, and
+/// waits for that binary to read its configuration, hash its own
+/// multi-megabyte executable and open a fresh ledger — all before it admits
+/// anything. The whole spawn is charged against clocks that started in the
+/// parent, so the request lifetimes have to cover process startup rather than
+/// just the provision.
+///
+/// `validate_provision_request` folds `instance_expires_at_unix_ms > now` into
+/// the binding conjunction, so overrunning the default 90 s
+/// `REQUEST_INSTANCE_LIFETIME_MS` surfaces as `binding_mismatch` — a
+/// misconfigured-fixture code — rather than as anything naming host load. A
+/// core pinned under a hundred busy loops has taken 112 s to get from the
+/// parent's stamp to the child's answer.
+///
+/// Unlike the fixture-delay budgets above there is nothing here to derive
+/// from: the span is however long the host takes to start a process. So the
+/// window takes the largest value the protocol admits — `MAX_COMMAND_WINDOW_MS`
+/// is 5 minutes — and the instance lifetime sits below it.
+///
+/// The instance figure also feeds `startup_timeout_ms`, and that is what keeps
+/// the instance expiry the binding clamp on `startup_deadline`. That deadline
+/// is the minimum of the startup budget measured from admission and the
+/// request's own two expiries, so leaving the budget at the 90 s default would
+/// let it — not the instance expiry — bind for any admission inside 150 s,
+/// reinstating exactly the second, shorter clock that
+/// `STARTUP_BUDGET_BEYOND_TEST_WORK_MS` exists to remove.
+const STANDALONE_REQUEST_LIFETIME_MS: u64 = 300_000;
+const STANDALONE_INSTANCE_LIFETIME_MS: u64 = 240_000;
+
+/// Provider round-trip budget for cases whose asserted outcome does not put
+/// the provider timeout under test.
+///
+/// `provider_timeout_ms` bounds every loopback HTTP call to the fixture —
+/// connect and full round trip — so the old 300 ms default made each provider
+/// call a race against host load: a slow but *successful* create, lookup,
+/// inventory or delete exhausts the budget, and the outcome under test
+/// degrades into `ReconciliationRequired` or an unconfirmed cleanup.
+///
+/// Unlike the startup budget above, this figure cannot borrow the request
+/// lifetime. It also feeds the observation-freshness window
+/// (`provider_timeout_ms` plus clock skew), which the stale-observation case
+/// must stay outside of with its 60 s backdate, and the configuration ceiling
+/// rejects anything over 60 s. 5 s clears the longest delay the fixture
+/// injects on a default-path call — the 3 s rendezvous holds on the pending
+/// snapshot, the empty final inventory and the malformed delete — with
+/// seconds of headroom while staying an order of magnitude inside both
+/// ceilings. Cases that bound a specific fixture delay (the 5.1 s slow
+/// inventory, the held-open rendezvous create, the held snapshot responses)
+/// keep their own derived timeouts.
+const PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS: u64 = 5_000;
 
 /// Lookups *after the switch into* `FlappingPendingLookup` that the fixture
 /// answers with its pending-then-malformed alternation before it stabilizes
@@ -399,7 +490,7 @@ async fn create_instance(
         } else {
             match inner.mode {
                 FixtureMode::DelayedCreateAfterInitialSnapshot
-                | FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
+                | FixtureMode::DelayedCreateAfterFinalSnapshot => FIXTURE_SNAPSHOT_CREATE_MS,
                 FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce => {
                     FIXTURE_DELAYED_CREATE_MS
                 }
@@ -619,26 +710,43 @@ async fn list_instances(
             || delayed_final
         {
             inner.inventory_reads += 1;
-            Some(ProviderInventory {
-                provisioner_id: "contained-provisioner".to_owned(),
-                complete: true,
-                observed_at_unix_ms: if delayed_initial_response {
-                    now_ms() + 4_000
-                } else {
-                    now_ms()
+            // The raced retains-a-ready-transition snapshots and the raced
+            // empty final inventory are windows a concurrent peer has to win
+            // against, so they get rendezvous-scale holds; the remaining
+            // delayed snapshots only need to outlast their test's own
+            // bookkeeping.
+            let hold_ms = if delayed_initial
+                || (delayed_final && inner.mode == FixtureMode::DelayedCreateAfterFinalSnapshot)
+            {
+                FIXTURE_HELD_SNAPSHOT_MS
+            } else if delayed_empty_final {
+                FIXTURE_RENDEZVOUS_HOLD_MS
+            } else {
+                200
+            };
+            Some((
+                hold_ms,
+                ProviderInventory {
+                    provisioner_id: "contained-provisioner".to_owned(),
+                    complete: true,
+                    observed_at_unix_ms: if delayed_initial_response {
+                        now_ms() + 4_000
+                    } else {
+                        now_ms()
+                    },
+                    instances: if delayed_empty_final || delayed_pending_initial {
+                        Vec::new()
+                    } else {
+                        inner.instances.values().cloned().collect()
+                    },
                 },
-                instances: if delayed_empty_final || delayed_pending_initial {
-                    Vec::new()
-                } else {
-                    inner.instances.values().cloned().collect()
-                },
-            })
+            ))
         } else {
             None
         }
     };
-    if let Some(snapshot) = delayed_inventory_snapshot {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if let Some((hold_ms, snapshot)) = delayed_inventory_snapshot {
+        tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
         return signed_response(&state, snapshot);
     }
     let slow_initial = {
@@ -733,7 +841,10 @@ async fn delete_instance(
     };
     if let Some(delayed) = malformed_delay {
         if delayed {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // A concurrent confirmed cleanup has to land while this delete is
+            // held open, so the hold gets rendezvous scale rather than a
+            // couple of hundred milliseconds host load can close.
+            tokio::time::sleep(std::time::Duration::from_millis(FIXTURE_RENDEZVOUS_HOLD_MS)).await;
         }
         return Response::builder()
             .status(StatusCode::OK)
@@ -836,9 +947,18 @@ impl Context {
     /// The default startup budget deliberately exceeds anything the contained
     /// harness can spend, so a test only observes `StartupTimeoutCleaned` when
     /// it asked for it. Tests that put the timeout itself under test opt in
-    /// with [`Context::with_startup_timeout`].
+    /// with [`Context::with_startup_timeout`]. The default provider timeout
+    /// likewise clears every round trip the fixture serves on the default
+    /// path; tests that bound a specific fixture delay opt in with
+    /// [`Context::with_provider_timeout`] or [`Context::with_limits`].
     async fn with_quota(mode: FixtureMode, maximum: u32) -> Self {
-        Self::with_limits(mode, maximum, 300, STARTUP_BUDGET_BEYOND_TEST_WORK_MS).await
+        Self::with_limits(
+            mode,
+            maximum,
+            PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+            STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
+        )
+        .await
     }
 
     async fn with_provider_timeout(mode: FixtureMode, provider_timeout_ms: u64) -> Self {
@@ -852,7 +972,13 @@ impl Context {
     }
 
     async fn with_startup_timeout(mode: FixtureMode, startup_timeout_ms: u64) -> Self {
-        Self::with_limits(mode, 4, 300, startup_timeout_ms).await
+        Self::with_limits(
+            mode,
+            4,
+            PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+            startup_timeout_ms,
+        )
+        .await
     }
 
     async fn with_limits(
@@ -935,7 +1061,7 @@ fn configuration(
             max_active_per_tenant: maximum,
             max_active_per_project: maximum,
         },
-        provider_timeout_ms: 300,
+        provider_timeout_ms: PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         startup_timeout_ms: STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
         startup_poll_interval_ms: 10,
         max_instance_lifetime_ms: POLICY_MAX_INSTANCE_LIFETIME_MS,
@@ -1504,7 +1630,7 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
 
 #[tokio::test]
 async fn final_inventory_substitution_is_reported_as_escaped_compute() {
-    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
+    let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
     context
         .provisioner
@@ -1635,7 +1761,13 @@ async fn duplicate_initial_inventory_instance_id_is_rejected_before_cleanup() {
 
 #[tokio::test]
 async fn quota_and_all_certified_bindings_fail_before_provider_access() {
-    let context = Context::with_limits(FixtureMode::Ready, 1, 300, 5_000).await;
+    let context = Context::with_limits(
+        FixtureMode::Ready,
+        1,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
+        5_000,
+    )
+    .await;
     let first = context.request();
     context
         .provisioner
@@ -2000,7 +2132,7 @@ async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
     let context = Context::with_limits(
         FixtureMode::DelayedSnapshotPendingThenMalformed,
         4,
-        5_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         10_000,
     )
     .await;
@@ -2032,7 +2164,7 @@ async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
     let context = Context::with_limits(
         FixtureMode::DelayedSnapshotPendingThenMalformed,
         4,
-        5_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         10_000,
     )
     .await;
@@ -2076,7 +2208,7 @@ async fn post_lookup_timeout_cannot_reactivate_confirmed_cleanup() {
     let context = Context::with_limits(
         FixtureMode::DelayedSnapshotPendingThenMalformed,
         4,
-        5_000,
+        PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS,
         2_000,
     )
     .await;
@@ -2347,9 +2479,21 @@ async fn reconciliation_uses_inventory_observation_for_the_create_peer_window() 
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation() {
-    let context = Context::with_startup_timeout(
+    // The reconcile arm below sleeps out the create peer window and must then
+    // observe the row while it is still pending, so the startup budget is the
+    // peer window it has to outlive plus margin for the reconcile itself. The
+    // provision arm's `StartupTimeoutCleaned` outcome only needs the deadline
+    // to fire eventually.
+    let provider_timeout_ms = PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS;
+    // The provisioner grants an in-flight create peer the provider timeout
+    // plus one second before an absence may be acted on.
+    let create_peer_window_ms = provider_timeout_ms + 1_000;
+    let reconcile_margin_ms = 4_000;
+    let context = Context::with_limits(
         FixtureMode::DelayedPendingRefreshAfterInitialSnapshot,
-        3_000,
+        4,
+        provider_timeout_ms,
+        create_peer_window_ms + reconcile_margin_ms,
     )
     .await;
     let request = context.request();
@@ -2419,7 +2563,7 @@ async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation()
 
 #[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observation() {
-    let context = Context::with_provider_timeout(FixtureMode::Ready, 5_000).await;
+    let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
     let provisioned = context
         .provisioner
@@ -2431,6 +2575,9 @@ async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observatio
         .fixture
         .set_mode(FixtureMode::DelayedEmptyFinalInventoryOnce);
 
+    // The newer reconcile has to refresh the row revision while the stale
+    // reconcile's empty final inventory is held open; the fixture holds that
+    // response for `FIXTURE_RENDEZVOUS_HOLD_MS` so it gets seconds to do so.
     let stale_request = reconcile_request(&context.config, IMPLEMENTATION_SHA256);
     let stale_reconciliation = context.provisioner.reconcile(&stale_request);
     let newer_reconciliation = async {
@@ -2551,13 +2698,24 @@ async fn reconciliation_cas_loss_rolls_back_tentative_absence_intent() {
 
 #[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_snapshot() {
+    // The reconcile has to capture its initial inventory snapshot while the
+    // create is still open, and the create has to land — and be marked ready —
+    // before the final inventory read. Rendezvous on a held-open create for
+    // the first side; the fixture holds the captured initial snapshot
+    // response past the whole create for the second, so both margins get
+    // seconds instead of splitting the mode's own 100 ms. The provider
+    // timeout is derived to clear the held snapshot, and the startup budget
+    // has to outlast the held create.
     let context = Context::with_limits(
         FixtureMode::DelayedCreateAfterInitialSnapshot,
         4,
-        1_000,
-        1_000,
+        FIXTURE_HELD_SNAPSHOT_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
     )
     .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
@@ -2592,13 +2750,23 @@ async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_s
 
 #[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_snapshot() {
+    // Both of the reconcile's inventory captures have to land while the
+    // create is still open, and the ready mark should then land inside the
+    // held final snapshot so the reconcile's last ledger read observes it.
+    // Rendezvous on a held-open create for the first side; the fixture holds
+    // the captured final snapshot response past the whole create for the
+    // second. The provider timeout is derived to clear the held snapshot,
+    // and the startup budget has to outlast the held create.
     let context = Context::with_limits(
         FixtureMode::DelayedCreateAfterFinalSnapshot,
         4,
-        1_000,
-        1_000,
+        FIXTURE_HELD_SNAPSHOT_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
     )
     .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
@@ -2646,7 +2814,21 @@ async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_sna
 
 #[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
-    let context = Context::with_limits(FixtureMode::DelayedCreateReady, 4, 5_000, 5_000).await;
+    // The cancel has to land while the create is held open, so rendezvous on
+    // a held-open create rather than racing the mode's own 200 ms delay. The
+    // provider timeout has to clear the held create, and the startup budget
+    // has to outlast it so the outcome stays Cancelled, not a preempting
+    // startup timeout.
+    let context = Context::with_limits(
+        FixtureMode::DelayedCreateReady,
+        4,
+        FIXTURE_RENDEZVOUS_CREATE_MS + 2_000,
+        STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
+    )
+    .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2685,17 +2867,22 @@ async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
 
 #[tokio::test]
 async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
-    // The assertion below counts a *confirmed* cleanup, so the reconciling
-    // delete has to complete inside `provider_timeout_ms`. The default 300 ms
-    // is a provider-RPC bound, not the subject here, and a loaded host can
-    // exhaust it and downgrade the cleanup to ambiguous.
+    // The cancel's lookup has to complete while the malformed create is held
+    // open, so rendezvous on a held-open create rather than racing the mode's
+    // own 200 ms delay; the provider timeout is derived to clear the held
+    // create. The assertion below also counts a *confirmed* cleanup, so the
+    // reconciling delete has to complete inside `provider_timeout_ms` — which
+    // the derived budget guarantees against host load.
     let context = Context::with_limits(
         FixtureMode::DelayedMalformedCreateOnce,
         4,
-        5_000,
+        FIXTURE_RENDEZVOUS_CREATE_MS + 2_000,
         STARTUP_BUDGET_BEYOND_TEST_WORK_MS,
     )
     .await;
+    context
+        .fixture
+        .set_create_delay_ms(FIXTURE_RENDEZVOUS_CREATE_MS);
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2747,6 +2934,9 @@ async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
 
 #[tokio::test]
 async fn confirmed_cleanup_dominates_a_concurrent_late_delete_failure() {
+    // The winning delete has to confirm while the losing delete's malformed
+    // response is held open; the fixture holds it for
+    // `FIXTURE_RENDEZVOUS_HOLD_MS` so the race gets seconds of room.
     let context = Context::new(FixtureMode::DelayedMalformedDeleteOnce).await;
     let request = context.request();
     context
@@ -3508,13 +3698,29 @@ async fn standalone_binary_accepts_final_frame_and_does_not_disclose_authority_m
     let temporary = tempfile::tempdir().expect("temporary directory");
     let executable = std::path::PathBuf::from(env!("CARGO_BIN_EXE_mcloving-provisioner"));
     let implementation_sha256 = sha256_file(&executable).await.expect("binary digest");
-    let config = configuration(
+    let mut config = configuration(
         &fixture,
         temporary.path().join("binary-state"),
         &implementation_sha256,
         1,
     );
-    let request = provision_request(&config, &implementation_sha256);
+    // One instance-side figure feeds all three ceilings the widened lifetime
+    // has to clear: the policy maximum the binding conjunction checks the
+    // request against, the identity TTL `validate_instance` charges the minted
+    // identity for — the fixture issues that identity at create time and
+    // expires it with the instance, so its TTL is the whole remaining lifetime
+    // when the create lands early — and the startup budget, so that the
+    // instance expiry rather than a shorter admission-anchored clock binds
+    // `startup_deadline`.
+    config.max_instance_lifetime_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    config.instance_identity.max_ttl_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    config.startup_timeout_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    let mut request = provision_request(&config, &implementation_sha256);
+    request.expires_at_unix_ms =
+        request.requested_at_unix_ms + millis(STANDALONE_REQUEST_LIFETIME_MS);
+    request.instance_expires_at_unix_ms =
+        request.requested_at_unix_ms + millis(STANDALONE_INSTANCE_LIFETIME_MS);
+    let request_built_at = now_ms();
     let config_path = temporary.path().join("config.json");
     let token_path = temporary.path().join("provider-token");
     let public_key_path = temporary.path().join("provider-public-key");
@@ -3576,7 +3782,11 @@ async fn standalone_binary_accepts_final_frame_and_does_not_disclose_authority_m
         parse_json_no_duplicates(&output.stdout).expect("bounded binary output");
     assert_eq!(
         response.get("ok").and_then(serde_json::Value::as_bool),
-        Some(true)
+        Some(true),
+        "code={:?} message={:?} elapsed_ms={}",
+        response.get("code").and_then(serde_json::Value::as_str),
+        response.get("message").and_then(serde_json::Value::as_str),
+        now_ms() - request_built_at,
     );
     assert!(
         !output
