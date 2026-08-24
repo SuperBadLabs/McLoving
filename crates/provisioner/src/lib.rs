@@ -130,6 +130,57 @@ const MAX_COMMAND_WINDOW_MS: i64 = 5 * 60 * 1_000;
 const MAX_CLOCK_SKEW_MS: i64 = 5_000;
 const MAX_INSTANCE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 const MAX_STARTUP_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
+/// Reloads `recover_one` may take after losing a state race before the
+/// request is declared unavailable for this attempt.
+///
+/// Every retry needs a concurrent writer to have moved the request between
+/// observation and write, so any race that actually converges does so within
+/// a few of them. The bound turns a pathological ping-pong into the same
+/// retry-the-command `StateUnavailable` verdict `recover_cancel_race` hands
+/// out instead of a livelock, with the retained state exactly where the last
+/// completed pass left it; deadlines still anchor to wall clock, and the
+/// bound never extends or shortens them.
+const RECOVERY_RELOAD_BUDGET: u32 = 32;
+
+/// One hop through the recovery web. Produced by the `*_step` helpers and
+/// consumed by [`Provisioner::run_recovery`]; see its doc for why the
+/// helpers hand hops back instead of calling each other.
+enum RecoveryStep {
+    RecoverOne {
+        stored: Box<StoredRequest>,
+        audit_lineage: String,
+    },
+    AwaitStartup {
+        request: Box<ProvisionRequest>,
+        request_sha256: String,
+        instance: Box<ProviderInstance>,
+        deadline: i64,
+    },
+    StartupRace {
+        request: Box<ProvisionRequest>,
+        request_sha256: String,
+        instance: Box<ProviderInstance>,
+    },
+    AdmissionRace {
+        request: Box<ProvisionRequest>,
+        request_sha256: String,
+        instance: Box<ProviderInstance>,
+    },
+    Cleanup {
+        request: Box<ProvisionRequest>,
+        request_sha256: String,
+        instance: Box<ProviderInstance>,
+        reason: CleanupReason,
+        success_outcome: LifecycleOutcome,
+        audit_lineage: String,
+    },
+}
+
+/// What a recovery step resolved to: a finished receipt, or the next hop.
+enum RecoveryFlow {
+    Done(Box<LifecycleReceipt>),
+    Next(RecoveryStep),
+}
 const MAX_PROVIDER_TIMEOUT_MS: u64 = 60 * 1_000;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -938,7 +989,7 @@ impl Provisioner {
                 if lifecycle_receipt_converges(&stored, receipt) {
                     return Ok(receipt.clone());
                 }
-                return Box::pin(self.recover_one(stored, &request.audit_lineage)).await;
+                return self.recover_one(stored, &request.audit_lineage).await;
             }
             return self
                 .wait_for_peer_or_recover(stored, &request.audit_lineage)
@@ -1566,7 +1617,7 @@ impl Provisioner {
                 let current = self
                     .load_stored_request(*request_id)?
                     .ok_or(ProvisionerError::StateUnavailable)?;
-                Box::pin(self.recover_one(current, &request.audit_lineage)).await?
+                self.recover_one(current, &request.audit_lineage).await?
             };
             if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
                 cleaned = cleaned
@@ -1643,26 +1694,170 @@ impl Provisioner {
         self.verify_signature(&receipt.body, &receipt.signature)
     }
 
+    /// Drives the recovery web — `recover_one`, `await_startup`,
+    /// `recover_startup_race`, `recover_create_admission_race` and
+    /// `cleanup_instance` — one hop at a time.
+    ///
+    /// These helpers used to tail-call each other through `Box::pin`, so
+    /// every hop nested another poll frame on the stack. The recovery walk
+    /// is bounded by wall-clock deadlines, not by hop count: a provider
+    /// whose answers kept flapping inside the startup window could nest
+    /// frames until the stack overflowed, and on loaded runners it did so
+    /// long before any deadline fired. Each helper therefore returns the
+    /// next hop and this loop takes it, holding exactly one step frame at a
+    /// time; each step future is boxed so no caller embeds the web's state
+    /// on its own stack. Convergence still rests solely on the receipts and
+    /// deadlines the steps consult.
+    async fn run_recovery(
+        &self,
+        mut step: RecoveryStep,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        loop {
+            let flow = match step {
+                RecoveryStep::RecoverOne {
+                    stored,
+                    audit_lineage,
+                } => Box::pin(self.recover_one_step(*stored, &audit_lineage)).await?,
+                RecoveryStep::AwaitStartup {
+                    request,
+                    request_sha256,
+                    instance,
+                    deadline,
+                } => {
+                    Box::pin(self.await_startup_step(
+                        &request,
+                        &request_sha256,
+                        *instance,
+                        deadline,
+                    ))
+                    .await?
+                }
+                RecoveryStep::StartupRace {
+                    request,
+                    request_sha256,
+                    instance,
+                } => {
+                    Box::pin(self.recover_startup_race_step(&request, &request_sha256, &instance))
+                        .await?
+                }
+                RecoveryStep::AdmissionRace {
+                    request,
+                    request_sha256,
+                    instance,
+                } => {
+                    Box::pin(self.recover_create_admission_race_step(
+                        &request,
+                        &request_sha256,
+                        &instance,
+                    ))
+                    .await?
+                }
+                RecoveryStep::Cleanup {
+                    request,
+                    request_sha256,
+                    instance,
+                    reason,
+                    success_outcome,
+                    audit_lineage,
+                } => {
+                    Box::pin(self.cleanup_instance_step(
+                        &request,
+                        &request_sha256,
+                        &instance,
+                        reason,
+                        success_outcome,
+                        &audit_lineage,
+                    ))
+                    .await?
+                }
+            };
+            step = match flow {
+                RecoveryFlow::Done(receipt) => return Ok(*receipt),
+                RecoveryFlow::Next(next) => next,
+            };
+        }
+    }
+
+    async fn recover_one(
+        &self,
+        stored: StoredRequest,
+        audit_lineage: &str,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        self.run_recovery(RecoveryStep::RecoverOne {
+            stored: Box::new(stored),
+            audit_lineage: audit_lineage.to_owned(),
+        })
+        .await
+    }
+
     async fn await_startup(
+        &self,
+        request: &ProvisionRequest,
+        request_sha256: &str,
+        instance: ProviderInstance,
+        deadline: i64,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        self.run_recovery(RecoveryStep::AwaitStartup {
+            request: Box::new(request.clone()),
+            request_sha256: request_sha256.to_owned(),
+            instance: Box::new(instance),
+            deadline,
+        })
+        .await
+    }
+
+    async fn recover_create_admission_race(
+        &self,
+        request: &ProvisionRequest,
+        request_sha256: &str,
+        instance: &ProviderInstance,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        self.run_recovery(RecoveryStep::AdmissionRace {
+            request: Box::new(request.clone()),
+            request_sha256: request_sha256.to_owned(),
+            instance: Box::new(instance.clone()),
+        })
+        .await
+    }
+
+    async fn cleanup_instance(
+        &self,
+        request: &ProvisionRequest,
+        request_sha256: &str,
+        instance: &ProviderInstance,
+        reason: CleanupReason,
+        success_outcome: LifecycleOutcome,
+        audit_lineage: &str,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        self.run_recovery(RecoveryStep::Cleanup {
+            request: Box::new(request.clone()),
+            request_sha256: request_sha256.to_owned(),
+            instance: Box::new(instance.clone()),
+            reason,
+            success_outcome,
+            audit_lineage: audit_lineage.to_owned(),
+        })
+        .await
+    }
+
+    async fn await_startup_step(
         &self,
         request: &ProvisionRequest,
         request_sha256: &str,
         mut instance: ProviderInstance,
         deadline: i64,
-    ) -> Result<LifecycleReceipt, ProvisionerError> {
+    ) -> Result<RecoveryFlow, ProvisionerError> {
         loop {
             let now = now_unix_ms()?;
             if now >= deadline {
-                return self
-                    .cleanup_instance(
-                        request,
-                        request_sha256,
-                        &instance,
-                        CleanupReason::StartupTimeout,
-                        LifecycleOutcome::StartupTimeoutCleaned,
-                        &request.audit_lineage,
-                    )
-                    .await;
+                return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                    request: Box::new(request.clone()),
+                    request_sha256: request_sha256.to_owned(),
+                    instance: Box::new(instance),
+                    reason: CleanupReason::StartupTimeout,
+                    success_outcome: LifecycleOutcome::StartupTimeoutCleaned,
+                    audit_lineage: request.audit_lineage.clone(),
+                }));
             }
             let remaining_ms = u64::try_from(deadline.saturating_sub(now))
                 .map_err(|_| ProvisionerError::InvalidConfig)?;
@@ -1685,9 +1880,11 @@ impl Provisioner {
                             .map(|stored_instance| stored_instance.instance_id)
                             != Some(instance.instance_id)
                     {
-                        return self
-                            .recover_startup_race(request, request_sha256, &instance)
-                            .await;
+                        return Ok(RecoveryFlow::Next(RecoveryStep::StartupRace {
+                            request: Box::new(request.clone()),
+                            request_sha256: request_sha256.to_owned(),
+                            instance: Box::new(instance),
+                        }));
                     }
                     let (reason, outcome) = if observed_at >= deadline {
                         (
@@ -1708,22 +1905,26 @@ impl Provisioner {
                         observed_at,
                     )?
                     else {
-                        return self
-                            .recover_startup_race(request, request_sha256, &instance)
-                            .await;
+                        return Ok(RecoveryFlow::Next(RecoveryStep::StartupRace {
+                            request: Box::new(request.clone()),
+                            request_sha256: request_sha256.to_owned(),
+                            instance: Box::new(instance),
+                        }));
                     };
-                    return self.append_lifecycle_receipt(
-                        request,
-                        LifecycleEvidence {
-                            request_sha256,
-                            instance: None,
-                            outcome,
-                            cleanup_confirmed: true,
-                            ambiguity: false,
-                            audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: observed_at,
-                        },
-                    );
+                    return Ok(RecoveryFlow::Done(Box::new(
+                        self.append_lifecycle_receipt(
+                            request,
+                            LifecycleEvidence {
+                                request_sha256,
+                                instance: None,
+                                outcome,
+                                cleanup_confirmed: true,
+                                ambiguity: false,
+                                audit_lineage: &request.audit_lineage,
+                                observed_at_unix_ms: observed_at,
+                            },
+                        )?,
+                    )));
                 }
                 Err(_) => {
                     let observed_at = now_unix_ms()?;
@@ -1734,36 +1935,38 @@ impl Provisioner {
                         Some(&instance),
                         observed_at,
                     )? {
-                        return self
-                            .recover_startup_race(request, request_sha256, &instance)
-                            .await;
+                        return Ok(RecoveryFlow::Next(RecoveryStep::StartupRace {
+                            request: Box::new(request.clone()),
+                            request_sha256: request_sha256.to_owned(),
+                            instance: Box::new(instance),
+                        }));
                     }
-                    return self.append_lifecycle_receipt(
-                        request,
-                        LifecycleEvidence {
-                            request_sha256,
-                            instance: Some(&instance),
-                            outcome: LifecycleOutcome::ReconciliationRequired,
-                            cleanup_confirmed: false,
-                            ambiguity: true,
-                            audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: observed_at,
-                        },
-                    );
+                    return Ok(RecoveryFlow::Done(Box::new(
+                        self.append_lifecycle_receipt(
+                            request,
+                            LifecycleEvidence {
+                                request_sha256,
+                                instance: Some(&instance),
+                                outcome: LifecycleOutcome::ReconciliationRequired,
+                                cleanup_confirmed: false,
+                                ambiguity: true,
+                                audit_lineage: &request.audit_lineage,
+                                observed_at_unix_ms: observed_at,
+                            },
+                        )?,
+                    )));
                 }
             };
             let now = now_unix_ms()?;
             if now >= deadline {
-                return self
-                    .cleanup_instance(
-                        request,
-                        request_sha256,
-                        &instance,
-                        CleanupReason::StartupTimeout,
-                        LifecycleOutcome::StartupTimeoutCleaned,
-                        &request.audit_lineage,
-                    )
-                    .await;
+                return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                    request: Box::new(request.clone()),
+                    request_sha256: request_sha256.to_owned(),
+                    instance: Box::new(instance),
+                    reason: CleanupReason::StartupTimeout,
+                    success_outcome: LifecycleOutcome::StartupTimeoutCleaned,
+                    audit_lineage: request.audit_lineage.clone(),
+                }));
             }
             let create = ProviderCreateRequest {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -1773,16 +1976,14 @@ impl Provisioner {
                 request: request.clone(),
             };
             if self.validate_instance(&instance, &create, now).is_err() {
-                return self
-                    .cleanup_instance(
-                        request,
-                        request_sha256,
-                        &instance,
-                        CleanupReason::Substitution,
-                        LifecycleOutcome::SubstitutionDeniedCleaned,
-                        &request.audit_lineage,
-                    )
-                    .await;
+                return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                    request: Box::new(request.clone()),
+                    request_sha256: request_sha256.to_owned(),
+                    instance: Box::new(instance),
+                    reason: CleanupReason::Substitution,
+                    success_outcome: LifecycleOutcome::SubstitutionDeniedCleaned,
+                    audit_lineage: request.audit_lineage.clone(),
+                }));
             }
             match instance.state {
                 ProviderInstanceState::Ready => {
@@ -1793,22 +1994,26 @@ impl Provisioner {
                         Some(&instance),
                         now,
                     )? {
-                        return self
-                            .recover_create_admission_race(request, request_sha256, &instance)
-                            .await;
+                        return Ok(RecoveryFlow::Next(RecoveryStep::AdmissionRace {
+                            request: Box::new(request.clone()),
+                            request_sha256: request_sha256.to_owned(),
+                            instance: Box::new(instance),
+                        }));
                     }
-                    return self.append_lifecycle_receipt(
-                        request,
-                        LifecycleEvidence {
-                            request_sha256,
-                            instance: Some(&instance),
-                            outcome: LifecycleOutcome::Ready,
-                            cleanup_confirmed: false,
-                            ambiguity: false,
-                            audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: now,
-                        },
-                    );
+                    return Ok(RecoveryFlow::Done(Box::new(
+                        self.append_lifecycle_receipt(
+                            request,
+                            LifecycleEvidence {
+                                request_sha256,
+                                instance: Some(&instance),
+                                outcome: LifecycleOutcome::Ready,
+                                cleanup_confirmed: false,
+                                ambiguity: false,
+                                audit_lineage: &request.audit_lineage,
+                                observed_at_unix_ms: now,
+                            },
+                        )?,
+                    )));
                 }
                 ProviderInstanceState::StartupFailed | ProviderInstanceState::AgentLost => {
                     let (reason, outcome) =
@@ -1820,16 +2025,14 @@ impl Provisioner {
                         } else {
                             (CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned)
                         };
-                    return self
-                        .cleanup_instance(
-                            request,
-                            request_sha256,
-                            &instance,
-                            reason,
-                            outcome,
-                            &request.audit_lineage,
-                        )
-                        .await;
+                    return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                        request: Box::new(request.clone()),
+                        request_sha256: request_sha256.to_owned(),
+                        instance: Box::new(instance),
+                        reason,
+                        success_outcome: outcome,
+                        audit_lineage: request.audit_lineage.clone(),
+                    }));
                 }
                 ProviderInstanceState::Pending | ProviderInstanceState::Deleting => {
                     if !self.set_state_from(
@@ -1839,202 +2042,206 @@ impl Provisioner {
                         Some(&instance),
                         now,
                     )? {
-                        return self
-                            .recover_startup_race(request, request_sha256, &instance)
-                            .await;
+                        return Ok(RecoveryFlow::Next(RecoveryStep::StartupRace {
+                            request: Box::new(request.clone()),
+                            request_sha256: request_sha256.to_owned(),
+                            instance: Box::new(instance),
+                        }));
                     }
                 }
             }
         }
     }
 
-    async fn recover_one(
+    async fn recover_one_step(
         &self,
-        stored: StoredRequest,
+        mut stored: StoredRequest,
         audit_lineage: &str,
-    ) -> Result<LifecycleReceipt, ProvisionerError> {
-        if let Some(receipt) = stored.latest_receipt.as_ref() {
-            self.verify_lifecycle_receipt(receipt)?;
-            if receipt.body.cleanup_confirmed
-                && !receipt.body.ambiguity
-                && lifecycle_receipt_converges(&stored, receipt)
-            {
-                return Ok(receipt.clone());
-            }
-        }
-        match self.provider_lookup(stored.request.request_id).await {
-            Ok(Some(instance)) => {
-                let now = now_unix_ms()?;
-                let create = ProviderCreateRequest {
-                    protocol_version: PROTOCOL_VERSION.to_owned(),
-                    provisioner_id: self.config.provisioner_id.clone(),
-                    provisioner_config_sha256: stored.request.expected_config_sha256.clone(),
-                    request_sha256: stored.request_sha256.clone(),
-                    request: stored.request.clone(),
-                };
-                if self.validate_instance(&instance, &create, now).is_err() {
-                    return self
-                        .cleanup_instance(
-                            &stored.request,
-                            &stored.request_sha256,
-                            &instance,
-                            CleanupReason::Substitution,
-                            LifecycleOutcome::SubstitutionDeniedCleaned,
-                            audit_lineage,
-                        )
-                        .await;
-                }
-                if stored.state == StoredState::Deleting {
-                    let (reason, outcome) = self
-                        .load_cleanup_intent(stored.request.request_id)?
-                        .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
-                    return self
-                        .cleanup_instance(
-                            &stored.request,
-                            &stored.request_sha256,
-                            &instance,
-                            reason,
-                            outcome,
-                            audit_lineage,
-                        )
-                        .await;
-                }
-                let startup_deadline =
-                    self.startup_deadline(&stored.request, stored.created_at_unix_ms)?;
-                if matches!(
-                    stored.state,
-                    StoredState::Intent | StoredState::Ambiguous | StoredState::Pending
-                ) && now >= startup_deadline
+    ) -> Result<RecoveryFlow, ProvisionerError> {
+        // A lost state race reloads the request and retries here, in place —
+        // relooping instead of recursing keeps the poll stack flat however
+        // long the race lasts.
+        for _ in 0..RECOVERY_RELOAD_BUDGET {
+            if let Some(receipt) = stored.latest_receipt.as_ref() {
+                self.verify_lifecycle_receipt(receipt)?;
+                if receipt.body.cleanup_confirmed
+                    && !receipt.body.ambiguity
+                    && lifecycle_receipt_converges(&stored, receipt)
                 {
-                    return self
-                        .cleanup_instance(
-                            &stored.request,
-                            &stored.request_sha256,
-                            &instance,
-                            CleanupReason::StartupTimeout,
-                            LifecycleOutcome::StartupTimeoutCleaned,
-                            audit_lineage,
-                        )
-                        .await;
+                    return Ok(RecoveryFlow::Done(Box::new(receipt.clone())));
                 }
-                match instance.state {
-                    ProviderInstanceState::Ready => {
-                        if !self.set_state_from(
-                            stored.request.request_id,
-                            stored.state,
-                            StoredState::Ready,
-                            Some(&instance),
-                            now,
-                        )? {
-                            return self
-                                .recover_create_admission_race(
+            }
+            match self.provider_lookup(stored.request.request_id).await {
+                Ok(Some(instance)) => {
+                    let now = now_unix_ms()?;
+                    let create = ProviderCreateRequest {
+                        protocol_version: PROTOCOL_VERSION.to_owned(),
+                        provisioner_id: self.config.provisioner_id.clone(),
+                        provisioner_config_sha256: stored.request.expected_config_sha256.clone(),
+                        request_sha256: stored.request_sha256.clone(),
+                        request: stored.request.clone(),
+                    };
+                    if self.validate_instance(&instance, &create, now).is_err() {
+                        return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                            request: Box::new(stored.request.clone()),
+                            request_sha256: stored.request_sha256.clone(),
+                            instance: Box::new(instance),
+                            reason: CleanupReason::Substitution,
+                            success_outcome: LifecycleOutcome::SubstitutionDeniedCleaned,
+                            audit_lineage: audit_lineage.to_owned(),
+                        }));
+                    }
+                    if stored.state == StoredState::Deleting {
+                        let (reason, outcome) = self
+                            .load_cleanup_intent(stored.request.request_id)?
+                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
+                        return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                            request: Box::new(stored.request.clone()),
+                            request_sha256: stored.request_sha256.clone(),
+                            instance: Box::new(instance),
+                            reason,
+                            success_outcome: outcome,
+                            audit_lineage: audit_lineage.to_owned(),
+                        }));
+                    }
+                    let startup_deadline =
+                        self.startup_deadline(&stored.request, stored.created_at_unix_ms)?;
+                    if matches!(
+                        stored.state,
+                        StoredState::Intent | StoredState::Ambiguous | StoredState::Pending
+                    ) && now >= startup_deadline
+                    {
+                        return Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                            request: Box::new(stored.request.clone()),
+                            request_sha256: stored.request_sha256.clone(),
+                            instance: Box::new(instance),
+                            reason: CleanupReason::StartupTimeout,
+                            success_outcome: LifecycleOutcome::StartupTimeoutCleaned,
+                            audit_lineage: audit_lineage.to_owned(),
+                        }));
+                    }
+                    return match instance.state {
+                        ProviderInstanceState::Ready => {
+                            if !self.set_state_from(
+                                stored.request.request_id,
+                                stored.state,
+                                StoredState::Ready,
+                                Some(&instance),
+                                now,
+                            )? {
+                                return Ok(RecoveryFlow::Next(RecoveryStep::AdmissionRace {
+                                    request: Box::new(stored.request.clone()),
+                                    request_sha256: stored.request_sha256.clone(),
+                                    instance: Box::new(instance),
+                                }));
+                            }
+                            Ok(RecoveryFlow::Done(Box::new(
+                                self.append_lifecycle_receipt(
                                     &stored.request,
-                                    &stored.request_sha256,
-                                    &instance,
-                                )
-                                .await;
+                                    LifecycleEvidence {
+                                        request_sha256: &stored.request_sha256,
+                                        instance: Some(&instance),
+                                        outcome: LifecycleOutcome::Ready,
+                                        cleanup_confirmed: false,
+                                        ambiguity: false,
+                                        audit_lineage,
+                                        observed_at_unix_ms: now,
+                                    },
+                                )?,
+                            )))
                         }
+                        ProviderInstanceState::Pending => {
+                            Ok(RecoveryFlow::Next(RecoveryStep::AwaitStartup {
+                                request: Box::new(stored.request.clone()),
+                                request_sha256: stored.request_sha256.clone(),
+                                instance: Box::new(instance),
+                                deadline: startup_deadline,
+                            }))
+                        }
+                        ProviderInstanceState::StartupFailed
+                        | ProviderInstanceState::AgentLost
+                        | ProviderInstanceState::Deleting => {
+                            let (reason, outcome) = match instance.state {
+                                ProviderInstanceState::StartupFailed => (
+                                    CleanupReason::StartupFailed,
+                                    LifecycleOutcome::StartupFailedCleaned,
+                                ),
+                                ProviderInstanceState::AgentLost => {
+                                    (CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned)
+                                }
+                                _ => (CleanupReason::Superseded, LifecycleOutcome::Cancelled),
+                            };
+                            Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+                                request: Box::new(stored.request.clone()),
+                                request_sha256: stored.request_sha256.clone(),
+                                instance: Box::new(instance),
+                                reason,
+                                success_outcome: outcome,
+                                audit_lineage: audit_lineage.to_owned(),
+                            }))
+                        }
+                    };
+                }
+                Ok(None) => {
+                    let now = now_unix_ms()?;
+                    let Some(outcome) = self.transition_absence_from_revision(&stored, now)? else {
+                        stored = self
+                            .load_stored_request(stored.request.request_id)?
+                            .ok_or(ProvisionerError::StateUnavailable)?;
+                        continue;
+                    };
+                    return Ok(RecoveryFlow::Done(Box::new(
                         self.append_lifecycle_receipt(
                             &stored.request,
                             LifecycleEvidence {
                                 request_sha256: &stored.request_sha256,
-                                instance: Some(&instance),
-                                outcome: LifecycleOutcome::Ready,
-                                cleanup_confirmed: false,
+                                instance: None,
+                                outcome,
+                                cleanup_confirmed: true,
                                 ambiguity: false,
                                 audit_lineage,
                                 observed_at_unix_ms: now,
                             },
-                        )
-                    }
-                    ProviderInstanceState::Pending => {
-                        self.await_startup(
-                            &stored.request,
-                            &stored.request_sha256,
-                            instance,
-                            startup_deadline,
-                        )
-                        .await
-                    }
-                    ProviderInstanceState::StartupFailed
-                    | ProviderInstanceState::AgentLost
-                    | ProviderInstanceState::Deleting => {
-                        let (reason, outcome) = match instance.state {
-                            ProviderInstanceState::StartupFailed => (
-                                CleanupReason::StartupFailed,
-                                LifecycleOutcome::StartupFailedCleaned,
-                            ),
-                            ProviderInstanceState::AgentLost => {
-                                (CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned)
-                            }
-                            _ => (CleanupReason::Superseded, LifecycleOutcome::Cancelled),
-                        };
-                        self.cleanup_instance(
-                            &stored.request,
-                            &stored.request_sha256,
-                            &instance,
-                            reason,
-                            outcome,
-                            audit_lineage,
-                        )
-                        .await
-                    }
+                        )?,
+                    )));
                 }
-            }
-            Ok(None) => {
-                let now = now_unix_ms()?;
-                let Some(outcome) = self.transition_absence_from_revision(&stored, now)? else {
-                    let current = self
-                        .load_stored_request(stored.request.request_id)?
-                        .ok_or(ProvisionerError::StateUnavailable)?;
-                    return Box::pin(self.recover_one(current, audit_lineage)).await;
-                };
-                self.append_lifecycle_receipt(
-                    &stored.request,
-                    LifecycleEvidence {
-                        request_sha256: &stored.request_sha256,
-                        instance: None,
-                        outcome,
-                        cleanup_confirmed: true,
-                        ambiguity: false,
-                        audit_lineage,
-                        observed_at_unix_ms: now,
-                    },
-                )
-            }
-            Err(_) => {
-                let now = now_unix_ms()?;
-                let retained_state = if stored.state == StoredState::Deleting {
-                    StoredState::Deleting
-                } else {
-                    StoredState::Ambiguous
-                };
-                if !self.set_state_from(
-                    stored.request.request_id,
-                    stored.state,
-                    retained_state,
-                    stored.instance.as_ref(),
-                    now,
-                )? {
-                    let current = self
-                        .load_stored_request(stored.request.request_id)?
-                        .ok_or(ProvisionerError::StateUnavailable)?;
-                    return Box::pin(self.recover_one(current, audit_lineage)).await;
+                Err(_) => {
+                    let now = now_unix_ms()?;
+                    let retained_state = if stored.state == StoredState::Deleting {
+                        StoredState::Deleting
+                    } else {
+                        StoredState::Ambiguous
+                    };
+                    if !self.set_state_from(
+                        stored.request.request_id,
+                        stored.state,
+                        retained_state,
+                        stored.instance.as_ref(),
+                        now,
+                    )? {
+                        stored = self
+                            .load_stored_request(stored.request.request_id)?
+                            .ok_or(ProvisionerError::StateUnavailable)?;
+                        continue;
+                    }
+                    return Ok(RecoveryFlow::Done(Box::new(
+                        self.append_lifecycle_receipt(
+                            &stored.request,
+                            LifecycleEvidence {
+                                request_sha256: &stored.request_sha256,
+                                instance: stored.instance.as_ref(),
+                                outcome: LifecycleOutcome::ReconciliationRequired,
+                                cleanup_confirmed: false,
+                                ambiguity: true,
+                                audit_lineage,
+                                observed_at_unix_ms: now,
+                            },
+                        )?,
+                    )));
                 }
-                self.append_lifecycle_receipt(
-                    &stored.request,
-                    LifecycleEvidence {
-                        request_sha256: &stored.request_sha256,
-                        instance: stored.instance.as_ref(),
-                        outcome: LifecycleOutcome::ReconciliationRequired,
-                        cleanup_confirmed: false,
-                        ambiguity: true,
-                        audit_lineage,
-                        observed_at_unix_ms: now,
-                    },
-                )
             }
         }
+        Err(ProvisionerError::StateUnavailable)
     }
 
     fn startup_deadline(
@@ -2172,12 +2379,12 @@ impl Provisioner {
         Ok(Some(outcome))
     }
 
-    async fn recover_create_admission_race(
+    async fn recover_create_admission_race_step(
         &self,
         request: &ProvisionRequest,
         request_sha256: &str,
         instance: &ProviderInstance,
-    ) -> Result<LifecycleReceipt, ProvisionerError> {
+    ) -> Result<RecoveryFlow, ProvisionerError> {
         let stored = self
             .load_stored_request(request.request_id)?
             .ok_or(ProvisionerError::StateUnavailable)?;
@@ -2192,14 +2399,17 @@ impl Provisioner {
                 .latest_receipt
                 .ok_or(ProvisionerError::StateUnavailable)?;
             self.verify_lifecycle_receipt(&receipt)?;
-            return Ok(receipt);
+            return Ok(RecoveryFlow::Done(Box::new(receipt)));
         }
         if matches!(
             stored.state,
             StoredState::Intent | StoredState::Pending | StoredState::Ready
         ) && stored.latest_receipt.is_none()
         {
-            return Box::pin(self.recover_one(stored, &request.audit_lineage)).await;
+            return Ok(RecoveryFlow::Next(RecoveryStep::RecoverOne {
+                stored: Box::new(stored),
+                audit_lineage: request.audit_lineage.clone(),
+            }));
         }
         let (reason, outcome) = self
             .load_cleanup_intent(request.request_id)?
@@ -2210,37 +2420,42 @@ impl Provisioner {
                     .and_then(|receipt| cleanup_directive(receipt.body.outcome))
             })
             .unwrap_or((CleanupReason::Superseded, LifecycleOutcome::Cancelled));
-        self.cleanup_instance(
-            request,
-            request_sha256,
-            instance,
+        Ok(RecoveryFlow::Next(RecoveryStep::Cleanup {
+            request: Box::new(request.clone()),
+            request_sha256: request_sha256.to_owned(),
+            instance: Box::new(instance.clone()),
             reason,
-            outcome,
-            &request.audit_lineage,
-        )
-        .await
+            success_outcome: outcome,
+            audit_lineage: request.audit_lineage.clone(),
+        }))
     }
 
-    async fn recover_startup_race(
+    async fn recover_startup_race_step(
         &self,
         request: &ProvisionRequest,
         request_sha256: &str,
         instance: &ProviderInstance,
-    ) -> Result<LifecycleReceipt, ProvisionerError> {
+    ) -> Result<RecoveryFlow, ProvisionerError> {
         let stored = self
             .load_stored_request(request.request_id)?
             .ok_or(ProvisionerError::StateUnavailable)?;
         if let Some(receipt) = stored.latest_receipt.as_ref() {
             self.verify_lifecycle_receipt(receipt)?;
             if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
-                return Ok(receipt.clone());
+                return Ok(RecoveryFlow::Done(Box::new(receipt.clone())));
             }
         }
         if stored.state == StoredState::Ambiguous {
-            return Box::pin(self.recover_one(stored, &request.audit_lineage)).await;
+            return Ok(RecoveryFlow::Next(RecoveryStep::RecoverOne {
+                stored: Box::new(stored),
+                audit_lineage: request.audit_lineage.clone(),
+            }));
         }
-        self.recover_create_admission_race(request, request_sha256, instance)
-            .await
+        Ok(RecoveryFlow::Next(RecoveryStep::AdmissionRace {
+            request: Box::new(request.clone()),
+            request_sha256: request_sha256.to_owned(),
+            instance: Box::new(instance.clone()),
+        }))
     }
 
     async fn recover_cancel_race(
@@ -2259,7 +2474,7 @@ impl Provisioner {
                 }
             }
             if stored.state == StoredState::Deleting {
-                return Box::pin(self.recover_one(stored, audit_lineage)).await;
+                return self.recover_one(stored, audit_lineage).await;
             }
             if self.set_state_from(
                 request_id,
@@ -2271,7 +2486,7 @@ impl Provisioner {
                 let current = self
                     .load_stored_request(request_id)?
                     .ok_or(ProvisionerError::StateUnavailable)?;
-                return Box::pin(self.recover_one(current, audit_lineage)).await;
+                return self.recover_one(current, audit_lineage).await;
             }
         }
         Err(ProvisionerError::StateUnavailable)
@@ -2297,7 +2512,7 @@ impl Provisioner {
                 if lifecycle_receipt_converges(&stored, receipt) {
                     return Ok(receipt.clone());
                 }
-                return Box::pin(self.recover_one(stored, audit_lineage)).await;
+                return self.recover_one(stored, audit_lineage).await;
             }
             if stored.instance.is_some() || stored.state != StoredState::Intent {
                 return self.recover_one(stored, audit_lineage).await;
@@ -2312,7 +2527,7 @@ impl Provisioner {
         }
     }
 
-    async fn cleanup_instance(
+    async fn cleanup_instance_step(
         &self,
         request: &ProvisionRequest,
         request_sha256: &str,
@@ -2320,12 +2535,12 @@ impl Provisioner {
         reason: CleanupReason,
         success_outcome: LifecycleOutcome,
         audit_lineage: &str,
-    ) -> Result<LifecycleReceipt, ProvisionerError> {
+    ) -> Result<RecoveryFlow, ProvisionerError> {
         let now = now_unix_ms()?;
         let (reason, success_outcome) =
             self.record_cleanup_intent(request.request_id, reason, success_outcome)?;
         if let Some(receipt) = self.enter_cleanup(request.request_id, instance, now)? {
-            return Ok(receipt);
+            return Ok(RecoveryFlow::Done(Box::new(receipt)));
         }
         let deletion = match self.provider_delete(request, instance, reason).await {
             Ok(deletion) => deletion,
@@ -2337,18 +2552,20 @@ impl Provisioner {
                     Some(instance),
                     now,
                 )?;
-                return self.append_lifecycle_receipt(
-                    request,
-                    LifecycleEvidence {
-                        request_sha256,
-                        instance: Some(instance),
-                        outcome: LifecycleOutcome::ReconciliationRequired,
-                        cleanup_confirmed: false,
-                        ambiguity: true,
-                        audit_lineage,
-                        observed_at_unix_ms: now,
-                    },
-                );
+                return Ok(RecoveryFlow::Done(Box::new(
+                    self.append_lifecycle_receipt(
+                        request,
+                        LifecycleEvidence {
+                            request_sha256,
+                            instance: Some(instance),
+                            outcome: LifecycleOutcome::ReconciliationRequired,
+                            cleanup_confirmed: false,
+                            ambiguity: true,
+                            audit_lineage,
+                            observed_at_unix_ms: now,
+                        },
+                    )?,
+                )));
             }
         };
         if deletion.request_id != request.request_id
@@ -2362,18 +2579,20 @@ impl Provisioner {
                 Some(instance),
                 now,
             )?;
-            return self.append_lifecycle_receipt(
-                request,
-                LifecycleEvidence {
-                    request_sha256,
-                    instance: Some(instance),
-                    outcome: LifecycleOutcome::ReconciliationRequired,
-                    cleanup_confirmed: false,
-                    ambiguity: true,
-                    audit_lineage,
-                    observed_at_unix_ms: now,
-                },
-            );
+            return Ok(RecoveryFlow::Done(Box::new(
+                self.append_lifecycle_receipt(
+                    request,
+                    LifecycleEvidence {
+                        request_sha256,
+                        instance: Some(instance),
+                        outcome: LifecycleOutcome::ReconciliationRequired,
+                        cleanup_confirmed: false,
+                        ambiguity: true,
+                        audit_lineage,
+                        observed_at_unix_ms: now,
+                    },
+                )?,
+            )));
         }
         let confirmation_stored = Box::new(
             self.load_stored_request(request.request_id)?
@@ -2386,8 +2605,11 @@ impl Provisioner {
                 .map(|stored_instance| stored_instance.instance_id)
                 != Some(instance.instance_id)
         {
-            return Box::pin(self.recover_create_admission_race(request, request_sha256, instance))
-                .await;
+            return Ok(RecoveryFlow::Next(RecoveryStep::AdmissionRace {
+                request: Box::new(request.clone()),
+                request_sha256: request_sha256.to_owned(),
+                instance: Box::new(instance.clone()),
+            }));
         }
         match self.provider_lookup(request.request_id).await {
             Ok(None) => {
@@ -2414,33 +2636,34 @@ impl Provisioner {
                             && !receipt.body.ambiguity
                             && receipt.body.instance_id == Some(instance.instance_id)
                         {
-                            return Ok(receipt);
+                            return Ok(RecoveryFlow::Done(Box::new(receipt)));
                         }
                     }
                     if current.state != terminal
                         || current.instance.as_ref().map(|value| value.instance_id)
                             != Some(instance.instance_id)
                     {
-                        return Box::pin(self.recover_create_admission_race(
-                            request,
-                            request_sha256,
-                            instance,
-                        ))
-                        .await;
+                        return Ok(RecoveryFlow::Next(RecoveryStep::AdmissionRace {
+                            request: Box::new(request.clone()),
+                            request_sha256: request_sha256.to_owned(),
+                            instance: Box::new(instance.clone()),
+                        }));
                     }
                 }
-                self.append_lifecycle_receipt(
-                    request,
-                    LifecycleEvidence {
-                        request_sha256,
-                        instance: Some(instance),
-                        outcome: success_outcome,
-                        cleanup_confirmed: true,
-                        ambiguity: false,
-                        audit_lineage,
-                        observed_at_unix_ms: observed_at,
-                    },
-                )
+                Ok(RecoveryFlow::Done(Box::new(
+                    self.append_lifecycle_receipt(
+                        request,
+                        LifecycleEvidence {
+                            request_sha256,
+                            instance: Some(instance),
+                            outcome: success_outcome,
+                            cleanup_confirmed: true,
+                            ambiguity: false,
+                            audit_lineage,
+                            observed_at_unix_ms: observed_at,
+                        },
+                    )?,
+                )))
             }
             Ok(Some(_)) | Err(_) => {
                 self.set_state_from(
@@ -2450,18 +2673,20 @@ impl Provisioner {
                     Some(instance),
                     now,
                 )?;
-                self.append_lifecycle_receipt(
-                    request,
-                    LifecycleEvidence {
-                        request_sha256,
-                        instance: Some(instance),
-                        outcome: LifecycleOutcome::ReconciliationRequired,
-                        cleanup_confirmed: false,
-                        ambiguity: true,
-                        audit_lineage,
-                        observed_at_unix_ms: now,
-                    },
-                )
+                Ok(RecoveryFlow::Done(Box::new(
+                    self.append_lifecycle_receipt(
+                        request,
+                        LifecycleEvidence {
+                            request_sha256,
+                            instance: Some(instance),
+                            outcome: LifecycleOutcome::ReconciliationRequired,
+                            cleanup_confirmed: false,
+                            ambiguity: true,
+                            audit_lineage,
+                            observed_at_unix_ms: now,
+                        },
+                    )?,
+                )))
             }
         }
     }
