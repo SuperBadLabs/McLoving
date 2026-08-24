@@ -126,8 +126,8 @@ const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
 /// the one direction these tests depend on.
 const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
 
-/// Request window and instance lifetime the one standalone-binary case grants
-/// itself in place of the defaults above.
+/// Request window, instance lifetime and startup budget that the standalone-
+/// binary case grants itself in place of the defaults above.
 ///
 /// Every other case here admits its request microseconds after building it, in
 /// this process. That case stamps `requested_at_unix_ms`,
@@ -149,9 +149,15 @@ const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
 /// Unlike the fixture-delay budgets above there is nothing here to derive
 /// from: the span is however long the host takes to start a process. So the
 /// window takes the largest value the protocol admits — `MAX_COMMAND_WINDOW_MS`
-/// is 5 minutes — and the instance lifetime sits below it, which keeps the
-/// instance expiry the binding clamp on `startup_deadline` exactly as it is
-/// for the in-process cases.
+/// is 5 minutes — and the instance lifetime sits below it.
+///
+/// The instance figure also feeds `startup_timeout_ms`, and that is what keeps
+/// the instance expiry the binding clamp on `startup_deadline`. That deadline
+/// is the minimum of the startup budget measured from admission and the
+/// request's own two expiries, so leaving the budget at the 90 s default would
+/// let it — not the instance expiry — bind for any admission inside 150 s,
+/// reinstating exactly the second, shorter clock that
+/// `STARTUP_BUDGET_BEYOND_TEST_WORK_MS` exists to remove.
 const STANDALONE_REQUEST_LIFETIME_MS: u64 = 300_000;
 const STANDALONE_INSTANCE_LIFETIME_MS: u64 = 240_000;
 
@@ -3615,14 +3621,17 @@ async fn standalone_binary_accepts_final_frame_and_does_not_disclose_authority_m
         &implementation_sha256,
         1,
     );
-    // The widened instance lifetime has to clear both ceilings the config puts
-    // on it: the policy maximum the binding conjunction checks it against, and
-    // the identity TTL `validate_instance` charges the minted identity for —
-    // the fixture issues that identity at create time and expires it with the
-    // instance, so its TTL is the whole remaining lifetime when the create
-    // lands early.
-    config.max_instance_lifetime_ms = STANDALONE_REQUEST_LIFETIME_MS;
+    // One instance-side figure feeds all three ceilings the widened lifetime
+    // has to clear: the policy maximum the binding conjunction checks the
+    // request against, the identity TTL `validate_instance` charges the minted
+    // identity for — the fixture issues that identity at create time and
+    // expires it with the instance, so its TTL is the whole remaining lifetime
+    // when the create lands early — and the startup budget, so that the
+    // instance expiry rather than a shorter admission-anchored clock binds
+    // `startup_deadline`.
+    config.max_instance_lifetime_ms = STANDALONE_INSTANCE_LIFETIME_MS;
     config.instance_identity.max_ttl_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    config.startup_timeout_ms = STANDALONE_INSTANCE_LIFETIME_MS;
     let mut request = provision_request(&config, &implementation_sha256);
     request.expires_at_unix_ms =
         request.requested_at_unix_ms + millis(STANDALONE_REQUEST_LIFETIME_MS);
