@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Upgrade the deployed McLoving binaries to a new verified release.
+#
+# usage: mcloving-upgrade --release-dir DIR (--manifest FILE | --checksums FILE)
+#                         [--home DIR] [--no-systemd]
+#
+# Order of operations (fail-closed at every step):
+#   1. verify every new binary digest before anything stops
+#   2. stop mcloving-agent, then mcloving-controller (postgres keeps running)
+#   3. stage the new release and flip previous/current symlinks
+#   4. start mcloving-controller and require its health gate
+#   5. start mcloving-agent (its unit runs env-guard + probe as ExecStartPre)
+#      and require journal health
+#
+# On a failed health check this script exits non-zero and prints the exact
+# rollback command; it does not roll back automatically, so the operator
+# keeps an explicit decision point.
+set -euo pipefail
+
+# Locate the shared library beside this script when installed as a helper, and
+# under bin/ when run from the repository. The installer places helpers and the
+# library together, so a repository-only assumption makes the installed
+# recovery command exit before it touches anything.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${script_dir}/mcloving-deploy-lib.sh" ]]; then
+  deploy_lib="${script_dir}/mcloving-deploy-lib.sh"
+else
+  deploy_lib="$(cd "${script_dir}/.." && pwd)/bin/mcloving-deploy-lib.sh"
+fi
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "${deploy_lib}"
+
+
+release_dir=""
+manifest=""
+checksums=""
+home_dir="${HOME}"
+no_systemd="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --release-dir) release_dir="${2:?}"; shift 2 ;;
+    --manifest) manifest="${2:?}"; shift 2 ;;
+    --checksums) checksums="${2:?}"; shift 2 ;;
+    --home) home_dir="${2:?}"; shift 2 ;;
+    --no-systemd) no_systemd="1"; shift ;;
+    *) deploy_fail "unknown argument: $1" ;;
+  esac
+done
+
+# Anchored to the invoking directory once, up front. A relative --home
+# would otherwise reach path comparisons and the ancestor walk, where
+# component resolution anchored at "/" would inspect a tree that does not
+# exist and validate none of the real deployment's links. Absolutization
+# only -- symlink resolution stays the walk's job.
+case "${home_dir}" in /*) ;; *) home_dir="${PWD%/}/${home_dir}" ;; esac
+
+[[ -n "${release_dir}" ]] || deploy_fail "--release-dir is required"
+# systemd units resolve %h to the service account's real home and the manager
+# acted on below is this user's, so operating on a different tree while
+# expecting systemd to follow would stop and start units that point elsewhere.
+require_systemd_home "${home_dir}" "${no_systemd}"
+
+libexec_root="${home_dir}/.local/libexec/mcloving"
+config_root="${home_dir}/.config/mcloving"
+[[ -L "${libexec_root}/current" ]] || deploy_fail "no installed release; run mcloving-install first"
+
+acquire_transition_lock "${libexec_root}"
+# An ancestor relaxed after installation must refuse the transition before
+# anything is staged or any link moves -- same walk, same messages as
+# install, inside the lock.
+require_deployment_integrity "${home_dir}"
+# Before anything is stopped: what MUST be here, not merely what is.
+require_deployment_assets_present "${home_dir}"
+old_target="$(require_release_link_target "${libexec_root}" current)"
+
+# Stage and verify before stopping anything: the release identity is the
+# identity of the verified copy, so it is not known until the copy exists, and
+# a release that fails verification must not have cost an outage first.
+# Captured in its own assignment: nesting this inside basename would let
+# basename's success mask a verification failure, since the outer command
+# substitution reports basename's status, not staging's.
+staged="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
+staged_target="${staged#* }"
+id="$(basename "${staged_target}")"
+if [[ "${old_target}" == "releases/${id}" ]]; then
+  deploy_fail "release ${id} is already current; nothing to upgrade"
+fi
+
+echo "upgrading ${old_target} -> releases/${id}"
+service_control "${no_systemd}" stop mcloving-agent.service
+service_control "${no_systemd}" stop mcloving-controller.service
+
+point_symlink "${libexec_root}/previous" "${old_target}"
+point_symlink "${libexec_root}/current" "releases/${id}"
+echo "current release: releases/${id} (previous: ${old_target})"
+
+if [[ "${no_systemd}" == "1" ]]; then
+  echo "binaries swapped; service restart and health checks skipped (--no-systemd)"
+  exit 0
+fi
+
+rollback_hint="rollback with: $(recovery_command "${libexec_root}" "${home_dir}")"
+if ! service_control "${no_systemd}" start mcloving-controller.service; then
+  echo "controller failed to start after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+# A transition is not the unit, so its own environment says nothing about
+# what the services received. Under systemd the manager is asked instead
+# (mcloving-health --unit, which refuses rather than guessing when the
+# manager cannot answer); under --no-systemd there is no unit and no manager
+# by construction, so the contract stands and the probe is best-effort.
+health_controller_args=(controller "${config_root}/controller.env")
+health_agent_args=(agent "${config_root}/agent.env")
+if [[ "${no_systemd}" != "1" ]]; then
+  health_controller_args+=(--unit mcloving-controller.service)
+  health_agent_args+=(--unit mcloving-agent.service)
+fi
+if ! "${libexec_root}/helpers/mcloving-health" "${health_controller_args[@]}"; then
+  echo "controller health gate failed after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+if ! require_service_stable "${no_systemd}" mcloving-controller.service; then
+  echo "controller did not stay running after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+if ! service_control "${no_systemd}" start mcloving-agent.service; then
+  echo "agent failed to start after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+if ! "${libexec_root}/helpers/mcloving-health" "${health_agent_args[@]}"; then
+  echo "agent health gate failed after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+# The journal check above proves the journal, not the process. Without this an
+# agent that execs and exits leaves the upgrade reporting success while nothing
+# accepts work.
+if ! require_service_stable "${no_systemd}" mcloving-agent.service; then
+  echo "agent did not stay running after upgrade; ${rollback_hint}" >&2
+  exit 1
+fi
+echo "upgrade to release ${id} complete and healthy"

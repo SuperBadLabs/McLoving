@@ -1,0 +1,903 @@
+#!/usr/bin/env bash
+# Re-read every deployed McLoving implementation identity as one canonical,
+# deterministic JSON document. A future authoritative-cutover freeze
+# (CUTOVER-001) consumes this output to detect drift: two invocations over
+# an unchanged deployment produce byte-identical documents (no timestamps,
+# sorted keys, sorted paths, home-relative paths).
+#
+# usage: mcloving-deployed-digests [--home DIR]
+#
+# Covered identities:
+#   ancestors         mode and owner of every directory on the lexical AND
+#                     physical chain down to each walked tree; a relaxed or
+#                     re-owned ancestor lets another local user rename a
+#                     protected subtree aside wholesale
+#   releases/*        sha256 + size of every staged binary set (all records
+#                     carry mode, uid, and gid)
+#   current/previous  active and rollback release symlink targets
+#   units             sha256 of every installed mcloving-* unit/quadlet file
+#   config            sha256 of every file under ~/.config/mcloving
+#                     (environment contracts, identity bindings, PKI); the
+#                     hash commits to secret-bearing files without revealing
+#                     them
+set -euo pipefail
+
+home_dir="${HOME}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --home) home_dir="${2:?}"; shift 2 ;;
+    *) echo "usage: mcloving-deployed-digests [--home DIR]" >&2; exit 64 ;;
+  esac
+done
+
+# Anchored to the invoking directory once, up front. A relative --home
+# would otherwise reach path comparisons and the ancestor walk, where
+# component resolution anchored at "/" would inspect a tree that does not
+# exist and validate none of the real deployment's links. Absolutization
+# only -- symlink resolution stays the walk's job.
+case "${home_dir}" in /*) ;; *) home_dir="${PWD%/}/${home_dir}" ;; esac
+
+if [[ ! -d "${home_dir}/.local/libexec/mcloving" ]]; then
+  echo "mcloving-deployed-digests: no deployment under ${home_dir}" >&2
+  exit 1
+fi
+
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+
+# The whole inventory read -- link reads, walks, and the document build --
+# happens under a SHARED acquisition of the deployment transition lock, so
+# it can never capture the half-written previous/current pair a concurrent
+# upgrade or rollback produces between its two symlink writes. Chosen over
+# read-then-confirm because a single acquisition makes the whole document
+# one consistent observation, not two reads with an argument about the
+# interval between them; concurrent digest readers coexist (shared), and a
+# transition in progress is a named refusal rather than a silent queue.
+acquire_transition_lock_shared "${home_dir}/.local/libexec/mcloving"
+
+# The ancestor set comes from the library's single derivation -- the same
+# lexical-plus-physical chain the installer refuses on -- so the inventory
+# and the refusal walk cannot drift apart. The roots listed here mirror the
+# trees the document walks below. A looping or dangling ancestor link is a
+# named failure: nothing behind it is readable to record.
+# The unit roots follow the user manager's XDG configuration base, through
+# the same library derivation the installer writes with; the mcloving
+# contract root stays %h/.config/mcloving because that is the literal text
+# of the units' EnvironmentFile= lines.
+# The same base the installer writes to and the transitions validate, so
+# the canonical document describes the tree systemd actually reads rather
+# than the one this shell would have guessed.
+xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
+unit_root="${xdg_config_base}/systemd/user"
+quadlet_root="${xdg_config_base}/containers/systemd"
+ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
+  "${home_dir}/.local/libexec/mcloving/releases" \
+  "${home_dir}/.local/libexec/mcloving/helpers" \
+  "${unit_root}" \
+  "${quadlet_root}" \
+  "${home_dir}/.config/mcloving" \
+  "${home_dir}/.config/mcloving/pki")" || {
+  echo "mcloving-deployed-digests: cannot derive the deployment ancestor chain" >&2
+  exit 1
+}
+export MCLOVING_ANCESTOR_DIRS="${ancestor_dirs}"
+# Nested symlinks are discovered only while walking, so their target chains
+# are derived at that point -- through the same shared library function,
+# which the document builder invokes by path.
+MCLOVING_DEPLOY_LIB="$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+export MCLOVING_DEPLOY_LIB
+# The walker's unit roots are the derived ones above -- one derivation for
+# writer, validator, and inventory alike.
+# One substitution per item strips its own trailing newline, so the items
+# are joined with an explicit one -- two adjacent substitutions would fuse
+# into a single undecodable token.
+MCLOVING_UNIT_DIRS="$(encode_path_item "${unit_root}")
+$(encode_path_item "${quadlet_root}")"
+export MCLOVING_UNIT_DIRS
+
+# The drop-in directories systemd actually consults for these units, from
+# the library's one enumeration -- far more than "<unit>.d": the type-wide
+# service.d / container.d / volume.d and the dash-truncated
+# mcloving-.service.d apply to every unit this deployment ships. The
+# document's unit walk filters a SHARED configuration directory by the
+# mcloving- name prefix, which is right for top-level entries and wrong for
+# these -- "service.d" carries no such prefix, so a type-wide drop-in
+# changing the real configuration left the canonical document
+# byte-identical. Passing the DERIVED directories rather than a second name
+# pattern keeps writer, validator, and inventory on one authority.
+digest_unit_files=()
+for digest_unit_file in "${unit_root}"/mcloving-*.service \
+  "${quadlet_root}"/mcloving-*.container "${quadlet_root}"/mcloving-*.volume; do
+  [[ -f "${digest_unit_file}" ]] && digest_unit_files+=("${digest_unit_file}")
+done
+MCLOVING_UNIT_DROPIN_DIRS=""
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS=""
+if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
+  MCLOVING_UNIT_DROPIN_DIRS="$(deployment_unit_dropin_dirs "${home_dir}" \
+    "${digest_unit_files[@]}")"
+  # The ROOT-OWNED load paths are split out, not dropped. systemd merges a
+  # /etc/systemd/user drop-in into this deployment's units exactly like one
+  # of its own, so the document must pin its bytes and mode -- otherwise an
+  # administrator's override, or a change to one, is drift the canonical
+  # re-read cannot see. They live outside the home and outside every walked
+  # tree, so they are their own array rather than more `units` entries.
+  MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="$(deployment_unit_dropin_dirs "${home_dir}" \
+    --system "${digest_unit_files[@]}")"
+fi
+export MCLOVING_UNIT_DROPIN_DIRS
+export MCLOVING_UNIT_SYSTEM_DROPIN_DIRS
+
+# A main unit file in a higher-priority load path SHADOWS the installed one
+# -- systemd loads it instead, and the installed file is never read. The
+# transition validates it and says so out loud; the canonical document must
+# pin its bytes too, or an override appearing, changing, or being removed
+# is drift the re-read cannot see. Through the same library derivation the
+# validator uses, so the two cannot disagree about what is shadowing what.
+MCLOVING_SHADOWING_UNITS=""
+if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
+  MCLOVING_SHADOWING_UNITS="$(deployment_shadowing_unit_files "${home_dir}" \
+    "${digest_unit_files[@]}")"
+fi
+export MCLOVING_SHADOWING_UNITS
+
+# The contracts may point their identity material OUTSIDE the walked trees
+# -- an external CA, an external bindings file -- and the runtime guard
+# validates those files while a config-tree-only inventory would record
+# nothing but the unchanged path string. The path-bearing variables come
+# from the library's single classification enumeration (the same table the
+# guard enforces); the secret and trust classes are inventoried, because
+# they are stable identity material. The state class (workspace and object
+# roots, journals) is deliberately NOT digested: journals are live flux the
+# services rewrite in normal operation, and a canonical document that
+# changed on every poll would be useless as a drift baseline. Each contract
+# is parsed in a subshell so a malformed one costs its own paths, never the
+# whole document -- its bytes are still recorded by the walk.
+configured_paths=""
+for contract_service in postgres db-init controller agent; do
+  contract_file="${home_dir}/.config/mcloving/${contract_service}.env"
+  [[ -f "${contract_file}" ]] || continue
+  service_paths="$(
+    load_environment_file "${contract_file}" 2>/dev/null || exit 0
+    deployment_contract_path_variables "${contract_service}" \
+      | while IFS=' ' read -r path_class _ path_variable _; do
+          case "${path_class}" in
+            secret | trust) ;;
+            *) continue ;;
+          esac
+          contract_into path_value "${path_variable}"
+          case "${path_value}" in
+            /*) encode_path_item "${path_value}" ;;
+            "") ;;
+            *)
+              # The guard refuses relative class paths outright; a contract
+              # carrying one anyway is drift the document must SHOW, never
+              # silently skip. The whole marker is one encoded item, so a
+              # value carrying a newline stays one record.
+              encode_path_item "!relative ${path_variable} ${path_value}"
+              ;;
+          esac
+        done
+  )" || service_paths=""
+  if [[ -n "${service_paths}" ]]; then
+    configured_paths+="${service_paths}"$'\n'
+  fi
+done
+MCLOVING_CONFIGURED_PATHS="${configured_paths%$'\n'}"
+export MCLOVING_CONFIGURED_PATHS
+
+# SANITIZED CHILD, with exactly what this payload needs named explicitly.
+# The seven MCLOVING_ variables below are the walker's inputs and are passed
+# on this one invocation rather than inherited; nothing else crosses, so an
+# inherited PYTHONHOME, PYTHONUSERBASE or PYTHONPATH cannot redirect the
+# interpreter that builds the canonical document. They carry no secrets --
+# they are encoded path lists -- so an environment variable is the right
+# channel; the contract values this document records are read from the
+# files by the payload itself, never handed across on a command line.
+deployment_python \
+  MCLOVING_ANCESTOR_DIRS="${MCLOVING_ANCESTOR_DIRS}" \
+  MCLOVING_DEPLOY_LIB="${MCLOVING_DEPLOY_LIB}" \
+  MCLOVING_UNIT_DIRS="${MCLOVING_UNIT_DIRS}" \
+  MCLOVING_UNIT_DROPIN_DIRS="${MCLOVING_UNIT_DROPIN_DIRS}" \
+  MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${MCLOVING_UNIT_SYSTEM_DROPIN_DIRS}" \
+  MCLOVING_SHADOWING_UNITS="${MCLOVING_SHADOWING_UNITS}" \
+  MCLOVING_CONFIGURED_PATHS="${MCLOVING_CONFIGURED_PATHS}" \
+  -- - "${home_dir}" <<'PY'
+import base64
+import hashlib
+import json
+import posixpath
+import stat
+import subprocess
+import sys
+import os
+from pathlib import Path
+
+NODE_KINDS = {
+    stat.S_IFIFO: "fifo",
+    stat.S_IFSOCK: "socket",
+    stat.S_IFCHR: "character_device",
+    stat.S_IFBLK: "block_device",
+    stat.S_IFDIR: "directory",
+}
+
+# Lexically normalized (posixpath.normpath, and ONLY that -- realpath would
+# resolve symlinks, and each class's symlink policy is applied per-record):
+# every containment and dedup comparison below is a lexical string
+# comparison, and an unnormalized spelling on either side makes two names
+# for one file compare as different files -- or, worse, a name for a file
+# the walks never visit compare as inside a walked tree.
+home = Path(posixpath.normpath(sys.argv[1]))
+libexec = home / ".local/libexec/mcloving"
+config = home / ".config/mcloving"
+unit_dirs_supplied = os.environ.get("MCLOVING_UNIT_DIRS")
+if unit_dirs_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_DIRS is not set; "
+        "run this through its shell wrapper"
+    )
+def decode_path_items(text: str) -> list:
+    """One base64 line per item -- the shared transport convention; an item
+    carrying a newline or any other byte stays one item."""
+    return [
+        os.fsdecode(base64.b64decode(line))
+        for line in text.splitlines()
+        if line
+    ]
+
+
+# Normalized like every other path that enters a comparison: the unit roots
+# participate in walked-tree containment and in home-relative record
+# spellings, and an XDG base inherited from the environment may legally
+# carry "..". Lexical only -- symlinked roots keep their per-record policy.
+unit_dirs = tuple(
+    Path(posixpath.normpath(item)) for item in decode_path_items(unit_dirs_supplied)
+)
+
+# The drop-in directories systemd consults for this deployment's units,
+# derived by the shell wrapper from the library's one enumeration. Empty is
+# legal -- a deployment with no drop-ins at all -- but UNSET means the
+# document was built outside its wrapper and would silently omit them.
+dropin_dirs_supplied = os.environ.get("MCLOVING_UNIT_DROPIN_DIRS")
+if dropin_dirs_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_DROPIN_DIRS is not set; "
+        "run this through its shell wrapper"
+    )
+dropin_dirs = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(dropin_dirs_supplied)
+)
+
+# The subset of the above that lives in root-owned system load paths. Empty
+# is the normal case; UNSET means the document was built outside its
+# wrapper and would silently omit administrator overrides that systemd
+# merges into this deployment's units.
+system_dropin_dirs_supplied = os.environ.get("MCLOVING_UNIT_SYSTEM_DROPIN_DIRS")
+if system_dropin_dirs_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_SYSTEM_DROPIN_DIRS is not "
+        "set; run this through its shell wrapper"
+    )
+system_dropin_dirs = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(system_dropin_dirs_supplied)
+)
+
+# Main unit files that outrank this deployment's installed units. Empty is
+# the normal case; UNSET means the document was built outside its wrapper
+# and would silently omit an override that decides what actually runs.
+shadowing_units_supplied = os.environ.get("MCLOVING_SHADOWING_UNITS")
+if shadowing_units_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_SHADOWING_UNITS is not set; "
+        "run this through its shell wrapper"
+    )
+shadowing_units = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(shadowing_units_supplied)
+)
+
+
+MAX_RECORD_ATTEMPTS = 3
+
+# Directories whose listings never settled within the attempt budget; each
+# becomes a named record rather than a silent gap or a failed run.
+LISTING_UNSTABLE: set = set()
+
+
+def file_record(path: Path, root: Path) -> dict:
+    # Every fact in a record comes from one non-blocking descriptor, and the
+    # link target is checked on both sides of the read.
+    #
+    # Classifying with a stat() and then opening leaves a window: a contract
+    # replaced with a FIFO in between makes the ordinary open block forever, so
+    # the document is lost exactly when the drift it reports is present.
+    # O_NONBLOCK returns immediately for a FIFO with no writer, and fstat on
+    # the descriptor describes the thing actually opened rather than whatever
+    # the path named a moment earlier.
+    #
+    # Reading the link separately leaves the same kind of window: a rotated
+    # symlink yields the old target's bytes beside the new target's name, an
+    # identity that never existed. The target is snapshotted before and
+    # rechecked after; a link that moved under the read is retried.
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        # A physical ancestor outside the home tree -- the parent chain of a
+        # symlinked root's resolved target -- has no home-relative spelling.
+        # It is recorded under its absolute path: the document must pin its
+        # mode all the same, or relaxing it leaves the re-read blind to the
+        # one rename that swaps the whole deployment aside.
+        relative = path.as_posix()
+
+    def identity(status: os.stat_result) -> tuple:
+        # Everything a record asserts about a file, plus the inode,
+        # modification time, and CHANGE time. mtime alone is forgeable: an
+        # in-place rewrite of the same size with the original mtime restored
+        # via utime() slides through the read window and the digest of the
+        # old (or mixed) bytes gets recorded as settled. ctime cannot be set
+        # back without clock-level privilege, so it anchors the tuple.
+        return (
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mode,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+
+    def link_target():
+        try:
+            return os.readlink(path)
+        except OSError:
+            return None
+
+    def unreadable(reason: str, target: str | None) -> dict:
+        # An entry that cannot be read is itself the drift worth reporting, and
+        # losing the whole document to it would deny CUTOVER-001 its re-read
+        # precisely while the tree is changing. The reason distinguishes a
+        # withdrawn permission from a disappearance.
+        record = {"path": relative, "kind": "unreadable", "reason": reason}
+        if target is not None:
+            record["symlink_target"] = target
+        return record
+
+    for _ in range(MAX_RECORD_ATTEMPTS):
+        before = link_target()
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except PermissionError:
+            return unreadable("permission_denied", before)
+        except OSError:
+            if before is not None:
+                # A target that has gone missing is exactly the drift this
+                # document exists to report, so the link is recorded rather
+                # than dereferenced.
+                return {
+                    "path": relative,
+                    "symlink_target": before,
+                    "kind": "dangling_symlink",
+                }
+            return unreadable("open_failed", before)
+        try:
+            status = os.fstat(descriptor)
+            opened = (status.st_dev, status.st_ino)
+            # The metadata snapshot the returned record was built from; the
+            # regular-file branch refreshes it with its post-read fstat.
+            recorded = status
+            if not stat.S_ISREG(status.st_mode):
+                # A FIFO, socket, device node, or directory has no content to
+                # digest. A directory's mode is deployment state in its own
+                # right: a config root relaxed to 0777 leaves every file record
+                # byte-identical while another local user can replace the
+                # contracts and keys inside it.
+                kind = NODE_KINDS.get(stat.S_IFMT(status.st_mode), "unknown_node")
+                if before is not None and stat.S_ISDIR(status.st_mode):
+                    kind = "directory_symlink"
+                record = {
+                    "path": relative,
+                    "kind": kind,
+                    "mode": stat.S_IMODE(status.st_mode),
+                    # Ownership is identity too: a directory that changes
+                    # hands can be re-moded by its new owner at will, so a
+                    # record omitting the owner stays byte-identical across
+                    # the one change that makes every other field revocable.
+                    "uid": status.st_uid,
+                    "gid": status.st_gid,
+                }
+                if stat.S_ISDIR(status.st_mode):
+                    # The entry-set digest gives a directory record listing
+                    # identity of its own: an entry added or renamed changes
+                    # this hash even when every surviving child record is
+                    # unchanged, so the document itself betrays a listing
+                    # that moved. Read through the already-classified
+                    # descriptor; the final pathname re-check (mtime/ctime)
+                    # retries the record if the listing changes under it.
+                    try:
+                        listing = sorted(os.listdir(descriptor))
+                    except OSError:
+                        listing = None
+                    if listing is not None:
+                        record["entries_sha256"] = hashlib.sha256(
+                            "\x00".join(listing).encode("utf-8", "surrogateescape")
+                        ).hexdigest()
+            else:
+                digest = hashlib.sha256()
+                try:
+                    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(chunk)
+                    # One descriptor is not enough on its own: a file truncated
+                    # or appended in place while the read is in flight leaves
+                    # the digest describing the bytes actually seen and the
+                    # size describing the state before the change. Recheck the
+                    # metadata that defines the identity, and retry rather than
+                    # emit a pairing that never existed.
+                    settled = os.fstat(descriptor)
+                except PermissionError:
+                    return unreadable("permission_denied", before)
+                except OSError:
+                    return unreadable("read_failed", before)
+                if identity(settled) != identity(status):
+                    continue
+                recorded = settled
+                record = {
+                    "path": relative,
+                    "sha256": digest.hexdigest(),
+                    "size_bytes": settled.st_size,
+                    "mode": stat.S_IMODE(settled.st_mode),
+                    "executable": bool(settled.st_mode & 0o111),
+                    "uid": settled.st_uid,
+                    "gid": settled.st_gid,
+                }
+        finally:
+            os.close(descriptor)
+        # An atomic rename can replace the file after the open while the
+        # descriptor stays perfectly stable, and neither path is a symlink, so
+        # the link check above sees nothing. Without this the record reports
+        # the old inode's content for a pathname that already refers to new
+        # content -- a CUTOVER re-read describing stale deployment state during
+        # exactly the update it is meant to observe. Compare what the pathname
+        # resolves to now against what was actually opened.
+        try:
+            current = os.stat(path)
+        except OSError:
+            continue
+        if (current.st_dev, current.st_ino) != opened:
+            continue
+        # Same inode is not same identity: a chmod or chown landing between
+        # the record's fstat and this re-check leaves device and inode
+        # untouched while the mode the record carries is already stale -- a
+        # canonical document reporting 0700 for a directory that is 0777 by
+        # the time it returns. Non-regular nodes never had a second look at
+        # all; regular files only compared their own two fstats. Revalidate
+        # the identity-relevant metadata against what the pathname resolves
+        # to NOW, and retry on change like every other instability here.
+        if (
+            stat.S_IMODE(current.st_mode),
+            current.st_uid,
+            current.st_gid,
+            # Content metadata too: a write landing after the post-read
+            # fstat leaves device, inode, mode, and owner untouched while
+            # the pathname already holds different bytes -- returning the
+            # old digest beside them would hand a cutover re-read a record
+            # that describes nothing on disk. Size and both timestamps
+            # against the recorded snapshot; retry re-reads the new bytes.
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
+        ) != (
+            stat.S_IMODE(recorded.st_mode),
+            recorded.st_uid,
+            recorded.st_gid,
+            recorded.st_size,
+            recorded.st_mtime_ns,
+            recorded.st_ctime_ns,
+        ):
+            continue
+        after = link_target()
+        if after == before:
+            if before is not None:
+                record["symlink_target"] = before
+            return record
+    # The file or its link moved under every attempt. Reporting that is honest;
+    # reporting a digest paired with a size, mode, or target it did not come
+    # from is not.
+    return unreadable("unstable_entry", link_target())
+
+
+def walk(root: Path) -> list[Path]:
+    """Every file the services can actually read beneath ``root``.
+
+    ``rglob`` does not descend a symlinked directory, so an operator who points
+    a configuration subtree such as ``pki`` at managed storage would get a
+    re-read that silently omits every certificate and key inside it, while the
+    services read them happily. This walks the tree the way the services see
+    it, following directory links, and guards against a link cycle by
+    remembering resolved directories.
+    """
+    found: list[Path] = []
+    if root.is_dir() and not root.is_symlink():
+        # The walked root is a directory whose permissions are themselves
+        # deployment state, so it is recorded alongside what it contains.
+        found.append(root)
+    if root.is_symlink():
+        # The root of a walked tree is live configuration in its own right.
+        # Every nested alias is recorded below, but repointing ~/.config/mcloving
+        # itself at another managed directory holding identical bytes would
+        # otherwise leave this document unchanged -- a drift re-read blind to
+        # the one substitution that redirects the whole tree. A root link whose
+        # target is gone is likewise a fact the `is_dir()` check would drop.
+        found.append(root)
+    if not root.is_dir():
+        return found
+    seen: set = set()
+
+    def descend(directory: Path) -> None:
+        try:
+            key = directory.resolve().as_posix()
+        except OSError:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        # A listing is a snapshot, and a file created right after it is
+        # taken would be present when this command returns yet absent from
+        # the document. The established identity-snapshot pattern applies:
+        # process the entries, re-list, and retry the whole directory --
+        # rolling back what this attempt appended -- when the entry set
+        # moved; a listing that never settles is named, not guessed at.
+        for _ in range(MAX_RECORD_ATTEMPTS):
+            found_mark = len(found)
+            seen_mark = set(seen)
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                return
+            names_before = [entry.name for entry in entries]
+            _process_entries(entries)
+            try:
+                names_after = sorted(
+                    child.name for child in directory.iterdir()
+                )
+            except OSError:
+                names_after = None
+            if names_after == names_before:
+                return
+            del found[found_mark:]
+            seen.clear()
+            seen.update(seen_mark)
+        LISTING_UNSTABLE.add(directory)
+
+    def _process_entries(entries: list) -> None:
+        for entry in entries:
+            try:
+                is_directory = entry.is_dir()
+                is_file = entry.is_file()
+            except OSError:
+                # A dangling link is configuration the services would fail on,
+                # so it is reported rather than dropped.
+                found.append(entry)
+                continue
+            if is_directory:
+                if not entry.is_symlink():
+                    # Recorded as well as descended: the mode of every
+                    # directory in the tree is drift worth reporting.
+                    found.append(entry)
+                if entry.is_symlink():
+                    # Record the alias itself before deduplication can suppress
+                    # it. Two links to one target are two pieces of live
+                    # configuration: repointing or deleting either changes what
+                    # the services read, and a re-read that reported only the
+                    # first would be byte-identical across that change.
+                    found.append(entry)
+                descend(entry)
+            elif is_file:
+                found.append(entry)
+            else:
+                found.append(entry)
+
+    descend(root)
+    return sorted(found)
+
+
+# Every directory on the way to each walked root is deployment state too:
+# relaxing ~/.local/libexec/mcloving itself (or ~/.config) to 0777 leaves
+# every child record byte-identical while another local user renames
+# current, releases, or helpers aside and substitutes deployed code -- and
+# the PHYSICAL parents of a symlinked root's resolved target permit the very
+# same rename from outside the home tree. The set is derived once, by the
+# shared deployment_ancestor_chain in mcloving-deploy-lib.sh (the same
+# lexical-plus-physical walk the installer refuses on), and handed in by the
+# wrapper above; deriving it here a second time is how the two views would
+# drift apart. Enumeration is how this class of gap has happened four times.
+ancestors_supplied = os.environ.get("MCLOVING_ANCESTOR_DIRS")
+if ancestors_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_ANCESTOR_DIRS is not set; "
+        "run this through its shell wrapper"
+    )
+deploy_lib = os.environ.get("MCLOVING_DEPLOY_LIB")
+if deploy_lib is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_DEPLOY_LIB is not set; "
+        "run this through its shell wrapper"
+    )
+
+release_entries = walk(libexec / "releases")
+helper_entries = walk(libexec / "helpers")
+def unit_owned(path: Path, unit_dir: Path) -> bool:
+    """Whether an entry under a shared unit directory belongs to this
+    deployment.
+
+    The mcloving- name filter applies to the TOP-LEVEL entry only: systemd
+    (and Quadlet, which follows the same convention on the containers side)
+    reads every file inside a matching drop-in directory such as
+    mcloving-controller.service.d/ regardless of its basename, so a
+    basename filter applied at every depth silently discarded
+    override.conf -- an active Restart= or ExecStart= override changing the
+    real configuration while the canonical document stayed byte-identical.
+    The unit root itself is kept, as before.
+
+    The name prefix is not the whole ownership test, because systemd
+    consults drop-in directories whose names carry no unit name at all: the
+    type-wide service.d / container.d / volume.d apply to every unit of
+    that type, this deployment's included. Those directories -- and
+    everything beneath them -- are owned by this deployment in the only
+    sense that matters to a drift baseline: their contents change what the
+    services actually run. They arrive here as the DERIVED list the library
+    enumerates, never as a second name pattern to keep in sync.
+    """
+    if path == unit_dir:
+        return True
+    if any(path == d or d in path.parents for d in dropin_dirs):
+        return True
+    try:
+        first_component = path.relative_to(unit_dir).parts[0]
+    except ValueError:
+        return False
+    return first_component.startswith("mcloving-")
+
+
+unit_entries = [
+    path
+    for unit_dir in unit_dirs
+    for path in walk(unit_dir)
+    if unit_owned(path, unit_dir)
+]
+contract_entries = walk(config)
+# A shadowing unit is one FILE, not a tree: systemd selects it, it is not
+# merged. Its own chain is collected below with the other roots.
+shadowing_unit_entries = [path for path in shadowing_units if path.exists()]
+# Recorded whole, like any other drop-in directory: systemd reads every
+# file inside one regardless of basename.
+system_dropin_entries = [
+    path for dropin_dir in system_dropin_dirs for path in walk(dropin_dir)
+]
+
+# Every symlink the walks follow contributes its resolved target's parent
+# chain, through the same shared collector the roots go through: a nested
+# pki/certs -> /srv/shared/certs is followed and its bytes inventoried, but
+# without this the mode or owner of /srv/shared could change while the
+# document stayed byte-identical -- the ancestor class, one level down.
+# Totality differs from the root chains deliberately: a nested link whose
+# chain does not resolve (dangling, looping) yields an unresolvable_link_chain
+# RECORD rather than failing the run, because losing the whole canonical
+# document to one bad in-tree link would deny CUTOVER-001 its re-read
+# precisely while drift is present. Root ancestors keep their named,
+# fail-closed refusal: nothing behind a broken root chain is recordable.
+chain_directories = set(decode_path_items(ancestors_supplied))
+unresolvable_links = []
+
+
+def collect_chain(path: Path) -> bool:
+    """Feed ``path``'s ancestor chain through the shared collector.
+
+    Tolerant like the nested-link handling: a chain that does not resolve
+    is reported by the caller as a record, never as a failed run.
+    """
+    derived = subprocess.run(
+        ["bash", "-ec", 'source "$0" && deployment_ancestor_chain "$1" "$2"',
+         deploy_lib, str(home), str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if derived.returncode != 0:
+        return False
+    chain_directories.update(decode_path_items(derived.stdout))
+    return True
+
+
+# The system drop-in tree ROOTS get the same treatment as every other root
+# this document walks. Their trees were being recorded while their chains
+# were not: MCLOVING_ANCESTOR_DIRS covers only the six deployment roots, so
+# nothing here pinned the mode or owner of /etc/systemd/user itself, and
+# relaxing or re-owning it left every emitted system_dropins record
+# byte-identical while the drop-in it holds became replaceable. Transition
+# validation already treats those ancestors as security-relevant; the
+# canonical re-read has to see the same thing or it cannot report the drift.
+#
+# Tolerant, like the nested-link chains and unlike the deployment's own
+# roots: these trees are outside the deployment, and losing the whole
+# document to an unresolvable chain in somebody else's tree would deny
+# CUTOVER-001 its re-read for a reason the deployment cannot fix.
+for system_dropin_dir in sorted(system_dropin_dirs):
+    if not collect_chain(system_dropin_dir):
+        unresolvable_links.append(system_dropin_dir)
+
+# Same reasoning for a shadowing unit file: relaxing the directory that
+# holds it makes the file another local user can replace, while its own
+# record stays byte-identical.
+for shadowing_unit in sorted(shadowing_unit_entries):
+    if not collect_chain(shadowing_unit):
+        unresolvable_links.append(shadowing_unit)
+
+for link in sorted(
+    {
+        entry
+        for entry in (
+            *release_entries,
+            *helper_entries,
+            *unit_entries,
+            *contract_entries,
+            # A symlinked .conf inside a system drop-in directory points
+            # somewhere, and that somewhere has parents another local user
+            # may be able to rename. Same sweep, same reason.
+            *system_dropin_entries,
+            *shadowing_unit_entries,
+        )
+        if entry.is_symlink()
+    }
+):
+    if not collect_chain(link):
+        unresolvable_links.append(link)
+
+# Identity material the contracts configure OUTSIDE the walked trees: the
+# guard validates these files at service start, so the inventory must pin
+# their bytes and metadata too -- substituting an external CA while
+# preserving its mode must change this document. In-tree paths are already
+# recorded by the walks and are deduplicated here, not double-recorded.
+walked_roots = (
+    libexec / "releases",
+    libexec / "helpers",
+    *unit_dirs,
+    *system_dropin_dirs,
+    config,
+)
+
+
+def inside_walked_trees(path: Path) -> bool:
+    # BOTH sides normalized before the lexical prefix test. A configured
+    # spelling containing ".." -- /home/x/.config/mcloving/../ca.pem -- has
+    # the walked config root as a lexical prefix while naming a file the
+    # walk never visits: without normalization it is classified as covered
+    # and its real target's substitution never changes the document. The
+    # roots are normalized too, because an XDG base inherited from the
+    # environment may itself carry ".." legally. normpath, never realpath:
+    # containment here is about what the LEXICAL walks above recorded, and
+    # symlink policy stays per-class in the records themselves.
+    candidate = posixpath.normpath(str(path))
+    for walked_root in walked_roots:
+        root_text = posixpath.normpath(str(walked_root))
+        if candidate == root_text or candidate.startswith(root_text + "/"):
+            return True
+    return False
+
+
+configured_supplied = os.environ.get("MCLOVING_CONFIGURED_PATHS", "")
+relative_configured = []
+absolute_configured = set()
+for line in decode_path_items(configured_supplied):
+    if not line:
+        continue
+    if line.startswith("!relative "):
+        # "!relative VARIABLE VALUE" -- a class path the guard refuses as
+        # relative; recorded by name so a malformed contract is visible in
+        # the document rather than invisibly skipped.
+        parts = line.split(" ", 2)
+        relative_configured.append((parts[1], parts[2] if len(parts) > 2 else ""))
+        continue
+    # Normalized at intake, so the dedup set, the containment test, the
+    # record path, and the chain derivation all see one canonical spelling
+    # -- two contract spellings of one file collapse to one record instead
+    # of two, and a "..'d" spelling can no longer hide behind a walked
+    # root's prefix.
+    candidate = Path(posixpath.normpath(line))
+    if not inside_walked_trees(candidate):
+        absolute_configured.add(candidate)
+configured_paths = sorted(absolute_configured)
+relative_configured.sort()
+for configured in configured_paths:
+    if not collect_chain(configured):
+        unresolvable_links.append(configured)
+
+
+def home_relative(path: Path) -> str:
+    try:
+        return path.relative_to(home).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+document = {
+    "schema": "mcloving.deployed-digests/v1",
+    "configured_paths": [
+        file_record(path, home)
+        for path in configured_paths
+    ]
+    + [
+        {
+            "path": relative_value,
+            "variable": variable_name,
+            "kind": "relative_configured_path",
+        }
+        for variable_name, relative_value in relative_configured
+    ],
+    "ancestors": [
+        file_record(Path(path), home)
+        for path in sorted(chain_directories)
+    ]
+    + [
+        {"path": home_relative(link), "kind": "unresolvable_link_chain"}
+        for link in unresolvable_links
+    ]
+    + [
+        {"path": home_relative(directory), "kind": "unstable_listing"}
+        for directory in sorted(LISTING_UNSTABLE)
+    ],
+    "releases": [
+        file_record(path, home)
+        for path in release_entries
+    ],
+    "helpers": [
+        file_record(path, home)
+        for path in helper_entries
+    ],
+    "current_release": (
+        (libexec / "current").readlink().as_posix()
+        if (libexec / "current").is_symlink()
+        else None
+    ),
+    "previous_release": (
+        (libexec / "previous").readlink().as_posix()
+        if (libexec / "previous").is_symlink()
+        else None
+    ),
+    "units": [
+        # unit_owned (applied when unit_entries was built) selects the
+        # top-level entries this deployment owns out of a directory it
+        # shares with everything else the user runs, keeps the unit root
+        # itself (`~/.config/systemd/user` is named `user`, not
+        # `mcloving-*`), and keeps EVERYTHING beneath a matched drop-in
+        # directory, because systemd and Quadlet read those files no matter
+        # what they are called.
+        file_record(path, home)
+        for path in unit_entries
+    ],
+    # Drop-ins for this deployment's units found in ROOT-OWNED system load
+    # paths (/etc/systemd/user and kin). They are outside the home, so they
+    # carry absolute spellings rather than home-relative ones. Normally
+    # empty; non-empty is a fact about the host that the transition tools
+    # also say out loud.
+    # Main unit files that outrank this deployment's own. Outside the home
+    # in the administrative cases, so absolute spellings there. Normally
+    # empty; non-empty means the service manager is running something other
+    # than what this deployment installed.
+    "shadowing_units": [
+        file_record(path, home)
+        for path in shadowing_unit_entries
+    ],
+    "system_dropins": [
+        file_record(path, home)
+        for path in system_dropin_entries
+    ],
+    "environment_contracts": [
+        file_record(path, home)
+        for path in contract_entries
+    ],
+}
+
+sys.stdout.write(
+    json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+)
+PY

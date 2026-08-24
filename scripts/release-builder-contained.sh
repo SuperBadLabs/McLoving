@@ -107,7 +107,7 @@ docker run --rm --pull never --platform linux/amd64 \
   /bin/bash -c 'tar -xf /input/source.tar -C /build-src && exec /bin/bash /build-src/scripts/release-build-inner.sh'
 
 expected_files="$(find "${output_root}" -mindepth 1 -type f -printf '%P\n' | LC_ALL=C sort)"
-[[ "${expected_files}" == $'Cargo.lock\nbuild-receipt.json\ncomponents.json\ncomponents/bin/mcloving-agent\ncomponents/bin/mcloving-cli\ncomponents/bin/mcloving-controller\nrelease.bundle\nsbom.json\nsource.tar\ntoolchain.txt' ]] ||
+[[ "${expected_files}" == $'Cargo.lock\nbuild-receipt.json\ncomponents.json\ncomponents/bin/mcloving-agent\ncomponents/bin/mcloving-cli\ncomponents/bin/mcloving-controller\ncomponents/bin/mcloving-identity-admin\nrelease.bundle\nsbom.json\nsource.tar\ntoolchain.txt' ]] ||
   deny "builder emitted an unexpected release file set"
 expected_directories="$(find "${output_root}" -mindepth 1 -type d -printf '%P\n' | LC_ALL=C sort)"
 [[ "${expected_directories}" == $'components\ncomponents/bin' ]] ||

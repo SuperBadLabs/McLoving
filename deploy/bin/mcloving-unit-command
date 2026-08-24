@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Derive executable invocations from McLoving unit definitions.
+
+The smoke test must run the exact commands the units declare, so this tool
+parses a systemd service unit or a podman quadlet .container file and emits
+the derived invocation as JSON. Nothing is hand-copied: if a unit changes,
+the derived invocation changes with it.
+
+Usage:
+  mcloving-unit-command UNIT_FILE --home HOME [overrides...] [--print KEY]
+
+For .service units the output object carries:
+  environment_files, exec_start_pre, exec_start, exec_start_post
+
+For .container quadlet units the output object carries:
+  environment_files, exec_start (a `podman run` argv synthesized from the
+  [Container] section), health_cmd
+
+Overrides (test-only, each recorded in the output under "overrides"):
+  --publish-override HOST:PORT   replace the host side of PublishPort
+  --name-override NAME           replace ContainerName
+  --volume-override NAME         replace the named volume
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import sys
+from pathlib import Path
+
+
+def parse_unit(text: str) -> dict[str, list[tuple[str, str]]]:
+    sections: dict[str, list[tuple[str, str]]] = {}
+    current = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            sections.setdefault(current, [])
+            continue
+        if "=" not in line:
+            raise SystemExit(f"unparseable unit line: {raw!r}")
+        key, _, value = line.partition("=")
+        sections.setdefault(current, []).append((key.strip(), value.strip()))
+    return sections
+
+
+def values(section: list[tuple[str, str]], key: str) -> list[str]:
+    return [value for name, value in section if name == key]
+
+
+def expand(value: str, home: str) -> str:
+    return value.replace("%h", home)
+
+
+def split_command(value: str, home: str) -> list[str]:
+    return [expand(part, home) for part in shlex.split(value)]
+
+
+def derive_service(sections: dict, home: str) -> dict:
+    service = sections.get("Service", [])
+    exec_start = values(service, "ExecStart")
+    if len(exec_start) != 1:
+        raise SystemExit("service unit must declare exactly one ExecStart")
+    return {
+        "kind": "service",
+        "environment_files": [
+            expand(value, home) for value in values(service, "EnvironmentFile")
+        ],
+        "exec_start_pre": [
+            split_command(value, home) for value in values(service, "ExecStartPre")
+        ],
+        "exec_start": split_command(exec_start[0], home),
+        "exec_start_post": [
+            split_command(value, home) for value in values(service, "ExecStartPost")
+        ],
+    }
+
+
+def derive_container(
+    sections: dict,
+    home: str,
+    publish_override: str | None,
+    name_override: str | None,
+    volume_override: str | None,
+) -> dict:
+    container = sections.get("Container", [])
+    service = sections.get("Service", [])
+    overrides: dict[str, str] = {}
+
+    images = values(container, "Image")
+    if len(images) != 1:
+        raise SystemExit("container unit must declare exactly one Image")
+
+    name = next(iter(values(container, "ContainerName")), None)
+    if name_override:
+        overrides["container_name"] = name_override
+        name = name_override
+
+    argv = ["podman", "run", "--rm", "--detach"]
+    if name:
+        argv += ["--name", name]
+
+    environment_files = [
+        expand(value, home) for value in values(container, "EnvironmentFile")
+    ]
+    for env_file in environment_files:
+        argv += ["--env-file", env_file]
+
+    for volume in values(container, "Volume"):
+        source, _, destination = volume.partition(":")
+        if source.endswith(".volume"):
+            source = source[: -len(".volume")]
+        if volume_override:
+            overrides["volume"] = volume_override
+            source = volume_override
+        argv += ["--volume", f"{source}:{destination}"]
+
+    for publish in values(container, "PublishPort"):
+        if publish_override:
+            overrides["publish"] = publish_override
+            container_port = publish.rsplit(":", 1)[-1]
+            publish = f"{publish_override}:{container_port}"
+        argv += ["--publish", publish]
+
+    health_cmd = next(iter(values(container, "HealthCmd")), None)
+    if health_cmd:
+        argv += ["--health-cmd", health_cmd]
+    for unit_key, flag in (
+        ("HealthInterval", "--health-interval"),
+        ("HealthTimeout", "--health-timeout"),
+        ("HealthRetries", "--health-retries"),
+        ("HealthStartPeriod", "--health-start-period"),
+    ):
+        for value in values(container, unit_key):
+            argv += [flag, value]
+
+    argv.append(images[0])
+
+    return {
+        "kind": "container",
+        "image": images[0],
+        "environment_files": environment_files,
+        "exec_start_pre": [
+            split_command(value, home) for value in values(service, "ExecStartPre")
+        ],
+        "exec_start": argv,
+        "health_cmd": shlex.split(health_cmd) if health_cmd else None,
+        "overrides": overrides,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("unit", type=Path)
+    parser.add_argument("--home", required=True)
+    parser.add_argument("--publish-override")
+    parser.add_argument("--name-override")
+    parser.add_argument("--volume-override")
+    parser.add_argument("--print", dest="print_key")
+    arguments = parser.parse_args()
+    # %h substitutions and EnvironmentFile paths must be absolute: derived
+    # invocations run from arbitrary directories. Lexical absolutization
+    # only, consistent with the deploy library's convention.
+    arguments.home = os.path.abspath(arguments.home)
+
+    sections = parse_unit(arguments.unit.read_text(encoding="utf-8"))
+    if arguments.unit.suffix == ".container":
+        derived = derive_container(
+            sections,
+            arguments.home,
+            arguments.publish_override,
+            arguments.name_override,
+            arguments.volume_override,
+        )
+    elif arguments.unit.suffix == ".service":
+        derived = derive_service(sections, arguments.home)
+    else:
+        raise SystemExit(f"unsupported unit type: {arguments.unit}")
+
+    if arguments.print_key:
+        value = derived[arguments.print_key]
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            sys.stdout.write("\0".join(value))
+        else:
+            json.dump(value, sys.stdout, sort_keys=True)
+        return
+    json.dump(derived, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

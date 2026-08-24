@@ -1,7 +1,38 @@
 # systemd deployment
 
-Controller and Linux-agent service definitions will be added with packaging and
-restart evidence.
+Systemd half of the single-host deployment lane (DEPLOY-001): user-manager
+service units for a dedicated, lingering service user
+(`loginctl enable-linger`). PostgreSQL runs rootless in podman via the
+quadlet units in `deploy/podman/`.
+
+Units (installed into `~/.config/systemd/user/` by
+`deploy/bin/mcloving-install`):
+
+- `mcloving-db-init.service` — oneshot bootstrap: waits for PostgreSQL,
+  applies migrations with the migration role
+  (`mcloving-identity-admin migrate`), enables constrained LOGIN on the
+  `mcloving_tenant` runtime role, and provisions the configured
+  organization/project pair. Idempotent.
+- `mcloving-controller.service` — public API, agent-control mTLS plane, and
+  the (deliberately disabled) embedded worker. Startup succeeds only when
+  the public API answers.
+- `mcloving-agent.service` — outbound-only mTLS agent. `mcloving-agent
+  probe` runs as `ExecStartPre` to prove identity, controller reachability,
+  and journal health before the long-running service starts.
+
+Startup order: `mcloving-postgres.service` (healthy, via quadlet
+`Notify=healthy`) → `mcloving-db-init.service` → `mcloving-controller.service`
+→ `mcloving-agent.service`.
+
+Every unit sources its environment contract from `~/.config/mcloving/*.env`
+(templates in `deploy/env/`) and refuses to start while any variable is
+missing, empty, or still a `__SET_ME…__` placeholder
+(`deploy/bin/mcloving-env-guard`).
+
+Operations — install, upgrade, rollback, health verification, and the
+deployed-digest re-read consumed by a future cutover freeze — are documented
+in `docs/operations/DEPLOYMENT_V1.md` and proven by
+`deploy/test-deployment.sh`.
 
 ## Source-acquirer kernel deadline profile
 

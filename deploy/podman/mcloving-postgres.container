@@ -1,0 +1,62 @@
+# McLoving PostgreSQL quadlet unit (rootless podman).
+#
+# Install to ~/.config/containers/systemd/ for the mcloving service user.
+# The quadlet generator turns this file into mcloving-postgres.service.
+#
+# The image digest below is pinned to MCLOVING_POSTGRES_IMAGE in
+# tools/versions.env. deploy/test-deployment.sh fails if the two drift.
+
+[Unit]
+Description=McLoving PostgreSQL (digest-pinned foundation image)
+
+[Container]
+Image=docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+ContainerName=mcloving-postgres
+EnvironmentFile=%h/.config/mcloving/postgres.env
+Volume=mcloving-postgres-data.volume:/var/lib/postgresql/data
+PublishPort=127.0.0.1:5432:5432
+HealthCmd=pg_isready --username mcloving --dbname mcloving
+HealthInterval=5s
+HealthTimeout=3s
+HealthRetries=12
+HealthStartPeriod=10s
+# The unit reports "started" only once the health check passes, so
+# After=mcloving-postgres.service means "after PostgreSQL is healthy".
+Notify=healthy
+
+[Service]
+# EXECUTION HOOKS ARE STRIPPED BEFORE ANY OF THIS UNIT'S PROCESSES START.
+# bash sources BASH_ENV before the first line of a script, and the dynamic
+# loader runs an LD_PRELOAD constructor before main(), so the pre-start
+# guard cannot defend itself from inside itself -- by the time its code
+# runs, the hook has already executed. systemd applies UnsetEnvironment= to
+# the composed environment before exec, which beats a manager-level value
+# and one this unit's own EnvironmentFile= declares alike. Validation
+# refuses such a declaration as well; this is the layer that protects the
+# guard itself.
+UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS PYTHONUSERBASE PYTHONHOME
+# TWO EnvironmentFile= declarations, for two different consumers, and both
+# are required.
+#
+# The one in [Container] above becomes `--env-file` on the podman command
+# line: it sets the variables INSIDE the container, which is what PostgreSQL
+# itself reads. It does NOT put them in the generated unit's own
+# environment -- quadlet copies that section into an inert [X-Container]
+# record for provenance, and systemd ignores [X-...] sections entirely.
+#
+# This one is passed through to the generated [Service] verbatim, so the
+# variables reach the unit's own processes -- which is what ExecStartPre
+# below is. Without it the guard runs with systemd's invocation markers and
+# none of the POSTGRES_* variables, so the effective-environment rule
+# (rounds 35/36) correctly concludes that every declared variable will not
+# reach the service and refuses -- on every real start, taking PostgreSQL
+# and everything that depends on it with it.
+EnvironmentFile=%h/.config/mcloving/postgres.env
+# A missing environment file must stop the unit, not start it half-configured.
+ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard postgres %h/.config/mcloving/postgres.env
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

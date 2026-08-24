@@ -52,10 +52,14 @@ cargo +1.97.1 build --locked --offline --release \
   --bin mcloving-agent \
   --bin mcloving-cli \
   --bin mcloving-controller \
+  --bin mcloving-identity-admin \
   --bin mcloving-release-provenance
 
 install -d -m 0700 "${OUTPUT_ROOT}/components" "${OUTPUT_ROOT}/components/bin"
-for binary in mcloving-agent mcloving-cli mcloving-controller; do
+# The deployment lane requires the identity administrator for database
+# bootstrap, so an official release must carry it or the lane cannot be
+# installed from one.
+for binary in mcloving-agent mcloving-cli mcloving-controller mcloving-identity-admin; do
   install -m 0700 "${TARGET_ROOT}/${binary}" "${OUTPUT_ROOT}/components/bin/${binary}"
 done
 install -m 0600 /input/source.tar "${OUTPUT_ROOT}/source.tar"
@@ -67,7 +71,9 @@ controller_digest="$(sha256sum "${OUTPUT_ROOT}/components/bin/mcloving-controlle
 agent_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-agent")"
 cli_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-cli")"
 controller_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-controller")"
-printf '%s' "[{\"path\":\"bin/mcloving-agent\",\"role\":\"agent\",\"sha256\":\"${agent_digest}\",\"size_bytes\":${agent_size},\"executable\":true},{\"path\":\"bin/mcloving-cli\",\"role\":\"cli\",\"sha256\":\"${cli_digest}\",\"size_bytes\":${cli_size},\"executable\":true},{\"path\":\"bin/mcloving-controller\",\"role\":\"controller\",\"sha256\":\"${controller_digest}\",\"size_bytes\":${controller_size},\"executable\":true}]" >"${OUTPUT_ROOT}/components.json"
+identity_admin_digest="$(sha256sum "${OUTPUT_ROOT}/components/bin/mcloving-identity-admin" | cut -d' ' -f1)"
+identity_admin_size="$(stat -c '%s' "${OUTPUT_ROOT}/components/bin/mcloving-identity-admin")"
+printf '%s' "[{\"path\":\"bin/mcloving-agent\",\"role\":\"agent\",\"sha256\":\"${agent_digest}\",\"size_bytes\":${agent_size},\"executable\":true},{\"path\":\"bin/mcloving-cli\",\"role\":\"cli\",\"sha256\":\"${cli_digest}\",\"size_bytes\":${cli_size},\"executable\":true},{\"path\":\"bin/mcloving-controller\",\"role\":\"controller\",\"sha256\":\"${controller_digest}\",\"size_bytes\":${controller_size},\"executable\":true},{\"path\":\"bin/mcloving-identity-admin\",\"role\":\"migration_tool\",\"sha256\":\"${identity_admin_digest}\",\"size_bytes\":${identity_admin_size},\"executable\":true}]" >"${OUTPUT_ROOT}/components.json"
 chmod 0600 "${OUTPUT_ROOT}/components.json"
 
 release_tool="${TARGET_ROOT}/mcloving-release-provenance"

@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+# Fail-closed environment-contract guard, run as ExecStartPre of every
+# McLoving unit. A unit must refuse to start half-configured: any missing,
+# empty, or placeholder (__SET_ME…__) variable aborts startup, as do
+# contract violations the binaries would only reject after side effects.
+set -euo pipefail
+
+usage() {
+  echo "usage: mcloving-env-guard {postgres|db-init|controller|agent} ENV_FILE" >&2
+  exit 64
+}
+
+[[ $# -eq 2 ]] || usage
+service="$1"
+env_file="$2"
+
+if [[ ! -f "${env_file}" ]]; then
+  echo "mcloving-env-guard: environment file ${env_file} does not exist" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
+
+# The deployment home anchors the ancestor walk's stop points for the
+# contract itself and the configured paths below. This guard is installed
+# under <home>/.local/libexec/mcloving/helpers and runs as the service
+# user, so the home is derived from where the guard itself lives; a copy
+# running from anywhere else falls back to the invoking user's HOME.
+guard_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${guard_script_dir}" in
+  */.local/libexec/mcloving/helpers)
+    guard_home="${guard_script_dir%/.local/libexec/mcloving/helpers}" ;;
+  *)
+    guard_home="${HOME}" ;;
+esac
+
+# The contract file is judged BEFORE it is parsed. Install-time validation
+# proves the state at install; a preserved contract -- an external symlink
+# included -- whose file or resolved ancestor is relaxed afterwards would
+# still parse cleanly at service start, so the runtime path applies the
+# same treatment: the shared lexical-plus-physical ancestor walk over the
+# contract's resolved chain, and the secret-file rules (contracts carry
+# database passwords and tokens) on the file itself.
+require_secure_ancestors "${guard_home}" "${env_file}"
+require_secret_files "${EUID}" "${env_file}"
+
+load_effective_contract "${env_file}"
+
+# The EXPECTED-KIND column of the shared classification table, indexed by
+# variable, built once. Every class check below reads its node-kind rule
+# from here rather than from a list of its own, so a variable added to the
+# table arrives with its kind already enforced and cannot be enforced two
+# different ways in two places.
+declare -A contract_path_kind=()
+while IFS=' ' read -r _ _ kind_variable kind_value; do
+  [[ -n "${kind_variable:-}" ]] || continue
+  contract_path_kind["${kind_variable}"]="${kind_value:-}"
+done < <(deployment_contract_path_variables "${service}")
+
+# require_secret_paths VAR...
+#
+# The configured private keys and identity bindings are stealable and
+# replaceable identity material: readable-regular-file is not enough. Each
+# gets the full treatment the installer gives preserved contracts --
+# owner-only mode, root-or-service-uid ownership, effective readability,
+# and the shared lexical-plus-physical ancestor walk over its resolved
+# chain -- refusing by name with the path, mode, and uid. Certificates and
+# CA bundles are public material and keep the readable-regular-file rule.
+require_secret_paths() {
+  local name value secret_paths=()
+  for name in "$@"; do
+    contract_into value "${name}"
+    # Empty means an unset OPTIONAL variable; requiredness is judged by the
+    # per-service require lists, and the binaries refuse set-but-empty on
+    # their own where they must.
+    [[ -n "${value}" ]] || continue
+    secret_paths+=("${value}")
+  done
+  [[ ${#secret_paths[@]} -gt 0 ]] || return 0
+  require_secure_ancestors "${guard_home}" "${secret_paths[@]}"
+  require_secret_files "${EUID}" "${secret_paths[@]}"
+}
+
+# require_secured_paths VAR...
+#
+# The integrity class for configured agent/controller state: workspace
+# roots, object roots, and journals are dereferenced directly by the
+# binaries, so another local user who can write them -- or any link of
+# their resolved chains -- can modify workload inputs or replace durable
+# journal state. Not secret-classified: the node itself must carry no
+# group/other WRITE bit and be owned by root or the service user, and its
+# resolved ancestor chain is walked; group/other READ stays legal (a
+# journal the agent creates 0644 must not wedge the next start), and a
+# journal file that does not exist yet is legal too -- its parent chain is
+# still walked through the configured path.
+#
+# NODE KIND is enforced here too, from the EXPECTED-KIND column of the
+# shared classification table -- never a hard-coded list, so a variable
+# added there arrives with its kind already enforced. Mode and ownership
+# are silent about node type: an owner-only FIFO at
+# MCLOVING_AGENT_SESSION_RECEIPT_PATH passed every check in this function
+# while the agent blocked forever in read_to_string() behind a bare
+# path.exists(), stalling the unit's start probe until TimeoutStartSec
+# killed a service whose contract this guard had just reported satisfied.
+# Judged through the link (-f/-d), matching the follow policy these
+# variables carry, and only for a node that EXISTS: absence stays legal
+# wherever it already was, because every consumer creates its own.
+require_secured_paths() {
+  local name value mode_owner mode owner offending state_paths=()
+  local expected_kind kind_offending=""
+  for name in "$@"; do
+    contract_into value "${name}"
+    [[ -n "${value}" ]] || continue
+    state_paths+=("${value}")
+    [[ -e "${value}" ]] || continue
+    expected_kind="${contract_path_kind[${name}]:-}"
+    case "${expected_kind}" in
+      file)
+        [[ -f "${value}" ]] \
+          || kind_offending+="${name}=${value} (not a regular file: $(stat -Lc '%F' "${value}" 2>/dev/null || echo "unknown node")) "
+        ;;
+      directory)
+        [[ -d "${value}" ]] \
+          || kind_offending+="${name}=${value} (not a directory: $(stat -Lc '%F' "${value}" 2>/dev/null || echo "unknown node")) "
+        ;;
+    esac
+  done
+  if [[ -n "${kind_offending}" ]]; then
+    fail "configured path(s) of the wrong node kind: ${kind_offending% }-- the consuming binary opens each of these as the kind its classification names, and a special node blocks the open (a writer-less FIFO never returns) or fails it after this guard reported the contract satisfied; restore the expected node kind and retry"
+  fi
+  [[ ${#state_paths[@]} -gt 0 ]] || return 0
+  require_secure_ancestors "${guard_home}" "${state_paths[@]}"
+  offending=""
+  for value in "${state_paths[@]}"; do
+    [[ -e "${value}" ]] || continue
+    mode_owner="$(stat -Lc '%a %u' "${value}")" \
+      || fail "cannot stat configured state path ${value}"
+    mode="${mode_owner%% *}"
+    owner="${mode_owner##* }"
+    if (( (8#${mode} & 8#022) != 0 )); then
+      offending+="${value} (mode ${mode}) "
+    fi
+    if [[ "${owner}" != "0" && "${owner}" != "${EUID}" ]]; then
+      offending+="${value} (owned by uid ${owner}, expected uid ${EUID} or root) "
+    fi
+  done
+  if [[ -n "${offending}" ]]; then
+    fail "configured state or trust-input path(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rewrite workload inputs, durable state, or the material TLS trust is built from; run chmod go-w (or restore ownership) and retry"
+  fi
+}
+
+# require_trust_input_paths VAR...
+#
+# Trust inputs are public to READ and critical to WRITE. A CA bundle's
+# content is not a secret -- world-readable is legal, unlike the
+# secret-file class -- but whoever can REPLACE it chooses what the TLS
+# handshake trusts: a substituted controller CA lets another local user
+# stand up a fake controller endpoint bearing a certificate for the
+# configured DNS name, and the agent then accepts its work assignments.
+# The node rule and chain walk are the secured-path integrity class;
+# existence and readability were already required by
+# require_readable_file, which stays first for its precise diagnostics.
+#
+# Trust inputs are always FILES (certificates, CA bundles, the mapping
+# catalog) and say so in the EXPECTED-KIND column of the shared table, so
+# the node-kind refusal now lives in require_secured_paths with every
+# other class rather than being hard-coded here: one authority, one
+# enforcement point. The two required CA/certificate variables also hit
+# require_readable_file's -f, but the OPTIONAL trust inputs reach only
+# this class, where a 0644 FIFO once passed and the consuming binary then
+# blocked on the read after ExecStartPre reported the contract satisfied.
+require_trust_input_paths() {
+  require_secured_paths "$@"
+}
+
+fail() {
+  echo "mcloving-env-guard[${service}]: $1" >&2
+  exit 1
+}
+
+require() {
+  local name value
+  for name in "$@"; do
+    contract_into value "${name}"
+    if [[ -n "${MCLOVING_CONTRACT_DROPPED[${name}]:-}" ]]; then
+      # Declared in the file and absent from what the service will get: a
+      # different failure from "you forgot to set it", and it needs its own
+      # sentence or the operator edits the contract and nothing changes.
+      fail "required variable ${name} is declared in ${env_file} but will NOT reach this service: the effective environment systemd composed for this unit does not carry it, which is what a drop-in that resets EnvironmentFile= -- or replaces it with a file omitting the variable -- produces; reconcile the unit EnvironmentFile= declarations with ${env_file} and retry"
+    fi
+    if [[ -z "${value}" ]]; then
+      fail "required variable ${name} is unset or empty in ${env_file}"
+    fi
+    if [[ "${value}" == *__SET_ME* ]]; then
+      fail "variable ${name} still carries a __SET_ME…__ placeholder in ${env_file}"
+    fi
+  done
+}
+
+require_uuid() {
+  local name value
+  for name in "$@"; do
+    contract_into value "${name}"
+    if [[ ! "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+      fail "variable ${name} must be a UUID, got ${value:-<empty>}"
+    fi
+  done
+}
+
+require_readable_file() {
+  local name value
+  for name in "$@"; do
+    contract_into value "${name}"
+    # -r alone accepts a directory, and a FIFO or device node too. The
+    # controller and agent need a regular file they can read; reporting the
+    # contract satisfied here defers the failure to the binary, or worse, to a
+    # read that blocks on a special node.
+    if [[ ! -f "${value}" || ! -r "${value}" ]]; then
+      fail "variable ${name} must name a readable regular file; ${value:-<empty>} is not"
+    fi
+  done
+}
+
+require_min_bytes() {
+  local name="$1" minimum="$2" value bytes
+  contract_into value "${name}"
+  # Bytes, not characters. ${#value} counts characters under a UTF-8 locale,
+  # while the controller measures String::len(), which is the UTF-8 byte
+  # length — so a valid multi-byte token would be refused here and accepted
+  # there, stopping a service over a contract it could have run.
+  bytes="$(printf '%s' "${value}" | wc -c)"
+  if [[ "${bytes}" -lt "${minimum}" ]]; then
+    fail "variable ${name} must contain at least ${minimum} bytes, got ${bytes}"
+  fi
+}
+
+# EFFECTIVE ENVIRONMENT, not merely the parsed contract file.
+#
+# The binaries read their configuration from the PROCESS ENVIRONMENT, which
+# systemd composes from the manager's own environment, Environment= in the
+# unit and its drop-ins, and every EnvironmentFile= in order. A guard that
+# judged only the parsed contract validated one input while the service
+# received another: an ambient MCLOVING_AGENT_SESSION_RECEIPT_PATH, or an
+# injected MCLOVING_EFFECT_RUNTIME_PLAN naming a file under a
+# world-writable ancestor, reached the binary having passed no class rule
+# at all.
+#
+# The composition is READ, never re-derived. This guard runs as
+# ExecStartPre of the very unit whose environment is in question, so
+# systemd has ALREADY performed that composition and the answer is sitting
+# in this process's own environment. Re-deriving it would mean
+# reimplementing systemd's precedence between Environment= and
+# EnvironmentFile= and the manager environment -- a second implementation
+# that must agree with systemd's forever, which is exactly the failure
+# shape this lane refuses elsewhere (the C-escape decision in round 31).
+# Reading it is both simpler and strictly more faithful: whatever systemd
+# decided wins, this sees, including precedence rules that change between
+# versions. Run by hand with no such environment -- as the smoke suite runs
+# it -- nothing is set and the parsed contract stands unchanged.
+#
+# ASYMMETRY IS REFUSED for the classified path variables. A classified path
+# that reaches the service from outside the contract file is validated here
+# and then invisible forever after: mcloving-deployed-digests builds the
+# canonical drift baseline by reading the CONTRACT, so an ambient value is
+# pinned by nothing and its substitution changes no document. The contract
+# is this lane's interface, and the repair is to declare the variable in
+# it. Non-path variables absent from the contract are deliberately not
+# imported: they carry no filesystem path, so no class rule applies to
+# them, and importing every ambient MCLOVING_* would let unrelated
+# environment noise satisfy the required-variable checks.
+guard_classified=()
+while IFS=' ' read -r _ _ guard_path_variable _; do
+  [[ -n "${guard_path_variable:-}" ]] || continue
+  guard_classified+=("${guard_path_variable}")
+done < <(deployment_contract_path_variables "${service}")
+
+# COMPARED AGAINST THE DECLARED MAP, never against MCLOVING_CONTRACT. The
+# latter now holds the EFFECTIVE value, so comparing to it would compare the
+# environment against itself and this refusal could never fire -- which is
+# exactly what the first draft of the overlay did. Semantics are unchanged
+# from round 32, which is what operators have been told: a classified path
+# that reaches the service from outside the contract, or disagrees with it,
+# is REFUSED by name with both values shown, because the digest inventory
+# pins what the CONTRACT declares and an ambient value is watched by nothing.
+# EXECUTION HOOKS in the environment this service will receive.
+#
+# Stated honestly about what this can and cannot do: it CANNOT protect this
+# guard's own process. bash sources BASH_ENV before the first line of this
+# script and the loader runs an LD_PRELOAD constructor before main(), so by
+# the time this check executes, a hook aimed at the GUARD has already run.
+# What it does protect is the SERVICE BINARY, which systemd starts after
+# this guard exits: a hook still present in the composed environment would
+# reach it. The layers that protect the guard are UnsetEnvironment= in the
+# unit, which strips before exec, and the validation-time refusal of any
+# declaration -- both of which run outside this process.
+guard_hook_offending=""
+for guard_hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+  [[ -v "MCLOVING_EFFECTIVE_ENV[${guard_hook_name}]" ]] || continue
+  guard_hook_offending+="${guard_hook_name}=${MCLOVING_EFFECTIVE_ENV[${guard_hook_name}]} "
+done
+if [[ -n "${guard_hook_offending}" ]]; then
+  fail "execution-hook variable(s) reach this service: ${guard_hook_offending% }-- a shell, language runtime, or the dynamic loader acts on these automatically at process start, loading or executing code the value names before the service binary's own first instruction; the units strip them with UnsetEnvironment= and validation refuses any declaration, so one arriving here means both were bypassed"
+fi
+
+guard_env_offending=""
+for guard_name in "${guard_classified[@]}"; do
+  [[ -v "MCLOVING_EFFECTIVE_ENV[${guard_name}]" ]] || continue
+  guard_env_value="${MCLOVING_EFFECTIVE_ENV[${guard_name}]}"
+  if [[ ! -v "MCLOVING_CONTRACT_DECLARED[${guard_name}]" ]]; then
+    guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} does not declare it) "
+  elif [[ "${guard_env_value}" != "${MCLOVING_CONTRACT_DECLARED[${guard_name}]}" ]]; then
+    guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} says ${MCLOVING_CONTRACT_DECLARED[${guard_name}]}) "
+  fi
+done
+if [[ -n "${guard_env_offending}" ]]; then
+  fail "classified path variable(s) reach this service from outside its contract file: ${guard_env_offending% }-- the binary opens what the ENVIRONMENT carries, while the deployment's digest inventory pins what the CONTRACT declares, so a value supplied ambiently or by a unit Environment= override is validated once here and then unwatched; declare it in ${env_file} (or remove the override) and retry"
+fi
+
+# The overlay itself is load_effective_contract's job now -- one derivation
+# shared with mcloving-health rather than a second copy here -- and it is
+# two-directional: a contract key the effective environment does NOT carry
+# is REMOVED, because the service will not receive it. That is the half this
+# guard was missing: the old `continue` left the value parsed from the
+# original contract in place, so a drop-in that reset EnvironmentFile= or
+# replaced it with a file omitting a required variable still reported
+# satisfied, and the binary then failed after an upgrade had already stopped
+# the services.
+
+# Every enumerated class path must be ABSOLUTE before anything dereferences
+# it -- checked ahead of the per-service branches, so the refusal names the
+# actual defect instead of whichever downstream check trips first. A
+# relative trust or secret path means whatever the runtime working
+# directory says it means: ambient-context substitution, the exact class
+# this lane refuses. The shipped contracts are all %h-absolute, so nothing
+# legitimate carries a relative spelling; emptiness is judged by the
+# per-service require lists.
+while IFS=' ' read -r _ link_policy path_variable _; do
+  [[ -n "${path_variable:-}" ]] || continue
+  contract_into class_path_value "${path_variable}"
+  [[ -n "${class_path_value}" ]] || continue
+  if [[ "${class_path_value}" != /* ]]; then
+    fail "${path_variable} must be an absolute path; ${class_path_value} depends on the runtime working directory"
+  fi
+  # Parity with the consuming binary: the effect plan and mapping catalog
+  # are inspected with symlink_metadata() and refused as symlinks by the
+  # controller itself, so a guard that followed the link would report a
+  # contract satisfied and watch the unit fail after ExecStartPre.
+  if [[ "${link_policy}" == "nofollow" && -L "${class_path_value}" ]]; then
+    fail "${path_variable} must not be a symlink; the consuming binary refuses symlinked configuration (${class_path_value})"
+  fi
+done < <(deployment_contract_path_variables "${service}")
+
+case "${service}" in
+  postgres)
+    require POSTGRES_USER POSTGRES_DB POSTGRES_PASSWORD
+    ;;
+  db-init)
+    require MCLOVING_MIGRATION_DATABASE_URL MCLOVING_TENANT_PASSWORD \
+      MCLOVING_ORGANIZATION_ID MCLOVING_ORGANIZATION_SLUG \
+      MCLOVING_PROJECT_ID MCLOVING_PROJECT_SLUG \
+      MCLOVING_POSTGRES_CONTAINER MCLOVING_POSTGRES_SUPERUSER \
+      MCLOVING_POSTGRES_DB
+    require_uuid MCLOVING_ORGANIZATION_ID MCLOVING_PROJECT_ID
+    # The bootstrap uses two different connection targets for one database:
+    # migrations go through MCLOVING_MIGRATION_DATABASE_URL, while the tenant
+    # role and the provisioning queries go through `podman exec` against
+    # MCLOVING_POSTGRES_CONTAINER / _SUPERUSER / _DB. A mistyped but reachable
+    # URL therefore migrates one database and then modifies -- or fails
+    # against -- another, which the contract template requires to be the same.
+    contract_into migration_url MCLOVING_MIGRATION_DATABASE_URL
+    contract_into postgres_db MCLOVING_POSTGRES_DB
+    migration_db="$(database_url_database "${migration_url}")"
+    [[ -n "${migration_db}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL must name a database"
+    [[ "${migration_db}" == "${postgres_db}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL names database ${migration_db}, but MCLOVING_POSTGRES_DB is ${postgres_db}; the bootstrap migrates through the URL and provisions through the container, so both must name one database"
+    # The database name alone does not identify an instance. The provisioning
+    # half runs `podman exec` into a local container, so a URL pointing at a
+    # remote host with a same-named database would have the bootstrap migrate
+    # one server and then alter roles in another. The container publishes to
+    # loopback, so the URL must address loopback too, and its role must be the
+    # superuser the container was created with.
+    database_url_is_loopback "${migration_url}" \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL must address the local PostgreSQL container on loopback, got host $(database_url_host "${migration_url}")"
+    contract_into postgres_superuser MCLOVING_POSTGRES_SUPERUSER
+    [[ "$(database_url_role "${migration_url}")" == "${postgres_superuser}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL uses role $(database_url_role "${migration_url}"), but MCLOVING_POSTGRES_SUPERUSER is ${postgres_superuser}"
+    ;;
+  controller)
+    require MCLOVING_MIGRATION_DATABASE_URL MCLOVING_DATABASE_URL \
+      MCLOVING_API_TOKEN MCLOVING_ARTIFACT_AGENT_TOKEN \
+      MCLOVING_LISTEN MCLOVING_OBJECT_ROOT \
+      MCLOVING_ORGANIZATION_ID MCLOVING_AGENT_ID \
+      MCLOVING_AGENT_CAPABILITIES MCLOVING_AGENT_TRUST_POOL \
+      MCLOVING_LEASE_SECONDS MCLOVING_POLL_MILLISECONDS \
+      MCLOVING_CANCELLATION_POLL_MILLISECONDS \
+      MCLOVING_TERMINATION_GRACE_MILLISECONDS MCLOVING_SESSION_EPOCH \
+      MCLOVING_WORKSPACE_ROOT MCLOVING_AGENT_JOURNAL \
+      MCLOVING_AGENT_LISTEN MCLOVING_AGENT_SERVER_CERT_PATH \
+      MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
+      MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    require_uuid MCLOVING_ORGANIZATION_ID
+    require_min_bytes MCLOVING_API_TOKEN 32
+    require_min_bytes MCLOVING_ARTIFACT_AGENT_TOKEN 32
+    contract_into api_token MCLOVING_API_TOKEN
+    contract_into artifact_token MCLOVING_ARTIFACT_AGENT_TOKEN
+    if [[ "${api_token}" == "${artifact_token}" ]]; then
+      fail "MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct"
+    fi
+    # Compare the roles the URLs authenticate as, not the URL text. Two
+    # spellings of one role — a default port written out in one and omitted in
+    # the other — would otherwise pass as distinct, and the controller would
+    # run its runtime pool as the migration role, which is exactly what this
+    # check exists to prevent.
+    contract_into migration_url MCLOVING_MIGRATION_DATABASE_URL
+    contract_into runtime_url MCLOVING_DATABASE_URL
+    migration_role="$(database_url_role "${migration_url}")"
+    runtime_role="$(database_url_role "${runtime_url}")"
+    if [[ -z "${migration_role}" || -z "${runtime_role}" ]]; then
+      fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must each name a role"
+    fi
+    if [[ "${migration_role}" == "${runtime_role}" ]]; then
+      fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must use distinct roles, both are ${runtime_role}"
+    fi
+    # Distinct is not sufficient. Store::preflight_tenant_runtime requires the
+    # runtime session role to be exactly MCLOVING_RUNTIME_ROLE, so a typo or a
+    # second privileged role passes an inequality check here and fails after
+    # the controller has already bound its listeners and run migrations. The
+    # guard exists to stop that before anything starts.
+    if [[ "${runtime_role}" != "${MCLOVING_RUNTIME_ROLE}" ]]; then
+      fail "MCLOVING_DATABASE_URL must use the constrained ${MCLOVING_RUNTIME_ROLE} role, got ${runtime_role}"
+    fi
+    # Distinct roles on the same database, not two different databases. The
+    # controller migrates through the first URL and then opens its runtime pool
+    # through the second, so a typo in either host, port, or database name
+    # modifies one instance and then fails against another -- after startup has
+    # already reported the contract satisfied.
+    migration_endpoint="$(database_url_endpoint "${migration_url}")"
+    runtime_endpoint="$(database_url_endpoint "${runtime_url}")"
+    [[ -n "${migration_endpoint}" && -n "${runtime_endpoint}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL and MCLOVING_DATABASE_URL must each name a host and database"
+    [[ "${migration_endpoint}" == "${runtime_endpoint}" ]] \
+      || fail "MCLOVING_MIGRATION_DATABASE_URL addresses ${migration_endpoint} but MCLOVING_DATABASE_URL addresses ${runtime_endpoint}; the controller migrates through the first and runs through the second, so both must be one database"
+    require_readable_file MCLOVING_AGENT_SERVER_CERT_PATH \
+      MCLOVING_AGENT_SERVER_KEY_PATH MCLOVING_AGENT_CLIENT_CA_PATH \
+      MCLOVING_AGENT_IDENTITY_BINDINGS_PATH
+    ;;
+  agent)
+    require MCLOVING_AGENT_ID MCLOVING_AGENT_TRUST_POOL \
+      MCLOVING_AGENT_ORGANIZATION_ID MCLOVING_CONTROLLER_URI \
+      MCLOVING_CONTROLLER_DNS_NAME MCLOVING_CONTROLLER_CA_PATH \
+      MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH \
+      MCLOVING_AGENT_JOURNAL_PATH MCLOVING_AGENT_WORKSPACE_ROOT
+    require_uuid MCLOVING_AGENT_ORGANIZATION_ID
+    require_readable_file MCLOVING_CONTROLLER_CA_PATH \
+      MCLOVING_AGENT_CERTIFICATE_PATH MCLOVING_AGENT_PRIVATE_KEY_PATH
+    # The agent refuses to spawn work into a missing workspace root; require
+    # it up front so the unit fails at start, not at first assignment.
+    contract_into workspace_root MCLOVING_AGENT_WORKSPACE_ROOT
+    if [[ ! -d "${workspace_root}" ]]; then
+      fail "MCLOVING_AGENT_WORKSPACE_ROOT must be an existing directory: ${workspace_root}"
+    fi
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+# The path-bearing variables and their protection classes come from the
+# library's single enumeration -- the same table the digest inventory
+# consumes -- so a variable added there inherits enforcement here without
+# anyone remembering a second list.
+mapfile -t class_secret < <(deployment_contract_path_variables "${service}" \
+  | awk '$1 == "secret" { print $3 }')
+mapfile -t class_trust < <(deployment_contract_path_variables "${service}" \
+  | awk '$1 == "trust" { print $3 }')
+mapfile -t class_state < <(deployment_contract_path_variables "${service}" \
+  | awk '$1 == "state" { print $3 }')
+if [[ ${#class_secret[@]} -gt 0 ]]; then
+  require_secret_paths "${class_secret[@]}"
+fi
+if [[ ${#class_trust[@]} -gt 0 ]]; then
+  require_trust_input_paths "${class_trust[@]}"
+fi
+if [[ ${#class_state[@]} -gt 0 ]]; then
+  require_secured_paths "${class_state[@]}"
+fi
+
+echo "mcloving-env-guard[${service}]: contract satisfied (${env_file})"

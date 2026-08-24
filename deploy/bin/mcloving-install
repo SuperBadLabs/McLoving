@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# Install the McLoving single-host deployment lane for a rootless service
+# user. Digest verification is mandatory and fail-closed: nothing is copied
+# before every binary's sha256 matches the release manifest or an
+# operator-supplied checksums file.
+#
+# usage: mcloving-install --release-dir DIR (--manifest FILE | --checksums FILE)
+#                         [--home DIR] [--no-systemd]
+#
+# Layout under HOME (default: $HOME):
+#   .local/libexec/mcloving/releases/<id>/   verified binaries
+#   .local/libexec/mcloving/current          symlink to the active release
+#   .local/libexec/mcloving/previous         symlink to the rollback release
+#   .local/libexec/mcloving/helpers/         operational scripts
+#   .config/systemd/user/                    service units
+#   .config/containers/systemd/              podman quadlet units
+#   .config/mcloving/                        environment contracts (from
+#                                            examples; never overwritten)
+set -euo pipefail
+
+deploy_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Locate the shared library beside this script when installed as a helper, and
+# under bin/ when run from the repository. The installer places helpers and the
+# library together, so a repository-only assumption makes the installed
+# recovery command exit before it touches anything.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${script_dir}/mcloving-deploy-lib.sh" ]]; then
+  deploy_lib="${script_dir}/mcloving-deploy-lib.sh"
+else
+  deploy_lib="$(cd "${script_dir}/.." && pwd)/bin/mcloving-deploy-lib.sh"
+fi
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "${deploy_lib}"
+
+
+release_dir=""
+manifest=""
+checksums=""
+home_dir="${HOME}"
+no_systemd="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --release-dir) release_dir="${2:?}"; shift 2 ;;
+    --manifest) manifest="${2:?}"; shift 2 ;;
+    --checksums) checksums="${2:?}"; shift 2 ;;
+    --home) home_dir="${2:?}"; shift 2 ;;
+    --no-systemd) no_systemd="1"; shift ;;
+    *) deploy_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "${release_dir}" ]] || deploy_fail "--release-dir is required"
+
+# Anchored to the invoking directory once, up front. A relative --home
+# would otherwise reach path comparisons and the ancestor walk, where
+# component resolution anchored at "/" would inspect a tree that does not
+# exist and validate none of the real deployment's links. Absolutization
+# only -- symlink resolution stays the walk's job.
+case "${home_dir}" in /*) ;; *) home_dir="${PWD%/}/${home_dir}" ;; esac
+[[ -d "${home_dir}" ]] || deploy_fail "--home ${home_dir} does not exist"
+
+
+# systemd units resolve %h to the service account's real home and the manager
+# reloaded below is this user's, so installing into a different tree while
+# expecting systemd to use it would advertise services that cannot see any of
+# the installed files. That combination is refused rather than half-performed.
+require_systemd_home "${home_dir}" "${no_systemd}"
+
+libexec_root="${home_dir}/.local/libexec/mcloving"
+# The contract root is %h/.config/mcloving because that is the literal text
+# of the shipped units' EnvironmentFile= lines -- %h ignores XDG. The unit
+# and quadlet roots, by contrast, are wherever the user manager actually
+# searches: XDG_CONFIG_HOME moves them, and units written under a
+# hard-coded ~/.config would be invisible to systemctl --user there.
+config_root="${home_dir}/.config/mcloving"
+# FROM THE RUNNING MANAGER where it can say, because writing to the wrong
+# root here is silent and total: units land where the manager never looks,
+# daemon-reload finds nothing, and the deployment does not exist as far as
+# systemd is concerned -- with no error anywhere. The caller's derivation is
+# the documented fallback, and which one was used is SAID, since the two can
+# only differ when something is already surprising.
+xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
+xdg_config_caller="$(deployment_config_root "${home_dir}")"
+if [[ "${xdg_config_base}" != "${xdg_config_caller}" ]]; then
+  deploy_notice "installing into the configuration root the running service manager searches (${xdg_config_base}), not the one this shell would derive (${xdg_config_caller}); the manager was started with a different XDG_CONFIG_HOME, and units written to the shell's root would be invisible to it"
+else
+  deploy_notice "unit installation roots came from the $(deployment_config_root_source "${home_dir}") configuration base (${xdg_config_base})"
+fi
+unit_root="${xdg_config_base}/systemd/user"
+quadlet_root="${xdg_config_base}/containers/systemd"
+
+# The umask below secures only the ancestors mkdir CREATES. An ancestor that
+# already exists writable -- a pre-existing 0777 ~/.local -- is untouched by
+# the umask and by the chmods on the managed roots, and permits the same
+# subtree-rename substitution, so it is refused by name before anything is
+# created. Refused rather than re-moded: these are shared locations holding
+# unrelated content, and checking before mkdir keeps a refused install free
+# of side effects.
+#
+# The list names EVERY directory this installer (and stage_release on its
+# behalf) creates or re-modes under the home -- pki and the release trees
+# included, not only the four top roots. A pre-existing symlink at any of
+# these names redirects the subtree it heads, and the validator resolves
+# each root component by component, so the link's target chain is examined
+# too. The trace-coverage gate in deploy/test-deployment.sh mechanically
+# asserts this list covers every path an install actually touches, so a
+# directory added later cannot bypass the walk.
+managed_roots=(
+  "${libexec_root}"
+  "${libexec_root}/helpers"
+  "${libexec_root}/releases"
+  "${config_root}"
+  "${config_root}/pki"
+  "${unit_root}"
+  "${quadlet_root}"
+)
+# The four preserved contract destinations are validated as roots too: the
+# preserve branch below keeps a pre-existing contract exactly as it is, and
+# `-f` follows a symlink, so a contract that is a link into an external
+# directory would otherwise be kept with its whole target chain unexamined
+# -- and whoever can write that chain controls the environment systemd
+# loads. The chain derivation resolves a file's final component like any
+# other, and require_secure_files judges the resolved file itself by the
+# same mode and ownership rules.
+contract_destinations=(
+  "${config_root}/postgres.env"
+  "${config_root}/db-init.env"
+  "${config_root}/controller.env"
+  "${config_root}/agent.env"
+)
+# The units themselves declare directories this installer never touches --
+# systemd creates StateDirectory= leaves under ~/.local/state at service
+# start -- so their roots are derived from the staged unit files and walked
+# alongside everything else. A future directive lands here automatically.
+# Parse-refusals first, in the main shell: a construct systemd would
+# consume that the assignment parser does not model must refuse the
+# install loudly, not die inside the derivation subshells below while the
+# install continues on partial output.
+require_parseable_unit_sources "${home_dir}" \
+  "${deploy_root}"/systemd/*.service \
+  "${deploy_root}"/podman/*.container \
+  "${deploy_root}"/podman/*.volume
+unit_declared_roots=()
+while IFS= read -r encoded_declared_root; do
+  [[ -n "${encoded_declared_root}" ]] || continue
+  decode_path_item_into decoded_declared_root "${encoded_declared_root}"
+  unit_declared_roots+=("${decoded_declared_root}")
+done < <(deployment_unit_declared_roots "${home_dir}" \
+  "${deploy_root}"/systemd/*.service \
+  "${deploy_root}"/podman/*.container \
+  "${deploy_root}"/podman/*.volume | sort -u)
+# The staged units' declared EnvironmentFiles are contracts wherever they
+# point, and enter the same walks the four standard destinations do.
+declared_contracts=()
+while IFS= read -r encoded_declared_contract; do
+  [[ -n "${encoded_declared_contract}" ]] || continue
+  decode_path_item_into decoded_declared_contract "${encoded_declared_contract}"
+  declared_contracts+=("${decoded_declared_contract}")
+done < <(deployment_unit_declared_contracts "${home_dir}" \
+  "${deploy_root}"/systemd/*.service \
+  "${deploy_root}"/podman/*.container \
+  "${deploy_root}"/podman/*.volume | sort -u)
+require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
+  "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
+  "${declared_contracts[@]}"
+require_secure_files "${home_dir}" "${contract_destinations[@]}" \
+  "${declared_contracts[@]}"
+# A reinstall over an existing deployment inherits whatever unit drop-ins
+# the operator has placed there since: the full transition-grade
+# revalidation covers the INSTALLED tree -- sources, drop-in directories,
+# and everything they declare -- before this install mutates anything. On
+# a fresh home every check inside skips what does not exist.
+require_deployment_integrity "${home_dir}"
+
+# Set before the hierarchy is created, not after. `mkdir -p` builds every
+# missing ancestor -- .local, .local/libexec, .config, .config/systemd,
+# .config/containers -- with the caller's umask, and chmod-ing only the leaves
+# leaves those parents world-writable under `umask 000`. A writable parent is
+# as good as a writable child: the protected subtree can simply be renamed
+# aside and replaced.
+umask 077
+mkdir -p "${libexec_root}/helpers" "${config_root}/pki" "${unit_root}" "${quadlet_root}"
+# Explicit modes rather than whatever umask the operator invoked us with. A
+# world-writable libexec or helpers directory lets another local user rename a
+# verified binary out and a chosen one in -- code execution as the service
+# account, with every file still mode 0755. The unit directories are shared
+# XDG locations that may hold unrelated content, so those only have the group
+# and other write bits removed rather than being forced to a fixed mode.
+chmod 0700 "${config_root}" "${config_root}/pki" \
+  "${libexec_root}" "${libexec_root}/helpers"
+chmod go-w "${unit_root}" "${quadlet_root}"
+
+# Every release state transition in this process -- the current-release
+# snapshot below, staging, the symlink writes -- happens under the
+# deployment-wide transition lock, alongside upgrade and rollback.
+acquire_transition_lock "${libexec_root}"
+
+# An established deployment that has lost its current link is NOT a fresh
+# install: releases on disk mean services may be running on them, and
+# staging a release plus planting a new current here would skip every stop,
+# restart, and health gate the transition paths exist for -- running
+# processes on old binaries while the canonical document reports the new
+# release active. No sanctioned automated repair exists for this state:
+# upgrade and rollback both require the link. It is refused by name.
+if [[ ! -L "${libexec_root}/current" ]] \
+  && compgen -G "${libexec_root}/releases/*" >/dev/null; then
+  deploy_fail "deployment at ${libexec_root} is established (releases are present) but the current link is missing; refusing to reinstall over it as if fresh. No sanctioned automated repair exists: restore current to a verified releases/<id> by hand (mcloving-deployed-digests identifies the candidates), then use mcloving-upgrade or mcloving-rollback"
+fi
+
+# Decided before staging, not after. Repointing current here would leave
+# running services executing the old binaries while the digest re-read reports
+# the new release as current -- a deployment that disagrees with its own
+# canonical identity. Changing the active release is mcloving-upgrade's job,
+# because it stops the services, flips the symlinks, restarts, and gates on
+# health; this installer does none of that.
+#
+# The prospective id is computed from the source directory purely to reach that
+# refusal before anything is published. It is not the release identity: that is
+# still taken from the verified copy below, because a source can change after
+# it is read. Refusing after staging would leave a rejected command having
+# added a release to disk and to the canonical inventory.
+if [[ -L "${libexec_root}/current" ]] && release_dir_is_complete "${release_dir}"; then
+  old_target="$(require_release_link_target "${libexec_root}" current)"
+  prospective="$(release_id "${release_dir}")"
+  if [[ "${old_target}" != "releases/${prospective}" ]]; then
+    deploy_fail "release ${old_target} is already installed; use mcloving-upgrade --release-dir ... to change the active release"
+  fi
+fi
+
+staged="$(stage_release "${libexec_root}" "${release_dir}" "${manifest}" "${checksums}")"
+staged_state="${staged%% *}"
+target="${staged#* }"
+id="$(basename "${target}")"
+echo "staged release ${id} at ${target}"
+
+if [[ -L "${libexec_root}/current" ]]; then
+  old_target="$(require_release_link_target "${libexec_root}" current)"
+  if [[ "${old_target}" != "releases/${id}" ]]; then
+    # Reachable only if the source changed between the pre-check and the copy.
+    # The copy is the identity, so it decides. Remove the release only when
+    # this invocation published it: the same id may already exist as a
+    # retained release -- the `previous` rollback target, for instance -- and
+    # deleting that would destroy the rollback while reporting a refusal.
+    if [[ "${staged_state}" == "published" ]]; then
+      rm -rf -- "${libexec_root}/releases/${id}"
+    fi
+    deploy_fail "release ${old_target} is already installed; use mcloving-upgrade --release-dir ... to change the active release"
+  fi
+fi
+point_symlink "${libexec_root}/current" "releases/${id}"
+echo "current release: releases/${id}"
+
+# Replacing units and helpers under running services would leave those
+# processes on the old unit-applied environment and sandbox settings while the
+# digest document records the new files. `daemon-reload` does not fix that: it
+# reloads the manager's configuration, and applying a changed unit to an
+# already-active service needs a restart, which this installer does not do.
+# Under --no-systemd nothing here is managed, so replacement is safe.
+if [[ "${no_systemd}" != "1" ]]; then
+  asset_changed=""
+  changed_assets=()
+  for asset in "${MCLOVING_DEPLOY_HELPERS[@]}" "${MCLOVING_DEPLOY_LIBRARY}"; do
+    changed_assets+=("${deploy_root}/bin/${asset}:${libexec_root}/helpers/${asset}")
+  done
+  for asset in "${MCLOVING_DEPLOY_UNITS[@]}"; do
+    changed_assets+=("${deploy_root}/systemd/${asset}:${unit_root}/${asset}")
+  done
+  for asset in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
+    changed_assets+=("${deploy_root}/podman/${asset}:${quadlet_root}/${asset}")
+  done
+  for asset in "${changed_assets[@]}"; do
+    source_asset="${asset%%:*}"
+    installed_asset="${asset#*:}"
+    if [[ -e "${installed_asset}" ]] && ! cmp -s "${source_asset}" "${installed_asset}"; then
+      asset_changed="${installed_asset}"
+      break
+    fi
+  done
+  if [[ -n "${asset_changed}" ]]; then
+    deploy_fail "${asset_changed} differs from this deployment tree and services may be active; stop the mcloving units, rerun with --no-systemd to replace the assets, run systemctl --user daemon-reload so the manager and the Quadlet generator drop the cached configuration, then start the units again"
+  fi
+fi
+
+# mcloving-rollback is installed too: the upgrade path prints it as the
+# recovery command, and a recovery command that is not on the host is not a
+# recovery command.
+for helper in "${MCLOVING_DEPLOY_HELPERS[@]}"; do
+  install -T -m 0755 "${deploy_root}/bin/${helper}" "${libexec_root}/helpers/${helper}"
+done
+install -T -m 0644 "${deploy_root}/bin/${MCLOVING_DEPLOY_LIBRARY}" \
+  "${libexec_root}/helpers/${MCLOVING_DEPLOY_LIBRARY}"
+
+for unit in "${MCLOVING_DEPLOY_UNITS[@]}"; do
+  install -T -m 0644 "${deploy_root}/systemd/${unit}" "${unit_root}/${unit}"
+done
+for quadlet in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
+  install -T -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
+done
+
+for contract in postgres db-init controller agent; do
+  if [[ ! -f "${config_root}/${contract}.env" ]]; then
+    # -T: without it, GNU install copies the source *into* an existing
+    # directory at that path, so a directory named agent.env would be reported
+    # as an installed placeholder while the unit's EnvironmentFile= still
+    # names a directory and startup must fail.
+    install -T -m 0600 "${deploy_root}/env/${contract}.env.example" \
+      "${config_root}/${contract}.env"
+    echo "installed placeholder contract ${config_root}/${contract}.env (edit before starting)"
+  fi
+done
+
+if [[ "${no_systemd}" == "0" ]]; then
+  systemctl --user daemon-reload
+  echo "systemd user units reloaded"
+else
+  echo "skipping systemctl --user daemon-reload (--no-systemd)"
+fi
+
+cat <<NEXT
+install complete (release ${id})
+next steps:
+  1. edit the four contracts under ${config_root}/ (mcloving-env-guard
+     blocks startup while placeholders remain)
+  2. place mTLS material under ${config_root}/pki/ and enroll the agent in
+     ${config_root}/agent-identity-bindings.txt
+NEXT
+# The units resolve %h to the home of whoever runs them, so under --no-systemd
+# with an alternate --home they name a different deployment than the one just
+# installed. Printing the start command regardless would have the operator
+# start an unrelated deployment, or fail on units that are not there.
+if [[ "${no_systemd}" == "1" ]]; then
+  cat <<NEXT
+  3. this install did not touch systemd (--no-systemd), so any user manager
+     for this home still holds its previously generated configuration: run
+     systemctl --user daemon-reload before starting units. The units under
+     ${config_root%/mcloving}/systemd/user resolve %h to the home of whichever
+     user runs them, so they describe this deployment only when that user's
+     home is ${home_dir}. Start it with a manager whose %h resolves there, or
+     run the binaries under ${libexec_root}/current directly against the
+     contracts above.
+NEXT
+else
+  cat <<NEXT
+  3. systemctl --user enable --now mcloving-postgres mcloving-db-init \\
+       mcloving-controller mcloving-agent
+NEXT
+fi
