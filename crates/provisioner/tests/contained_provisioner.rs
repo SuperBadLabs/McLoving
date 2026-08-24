@@ -183,6 +183,16 @@ const STANDALONE_INSTANCE_LIFETIME_MS: u64 = 240_000;
 /// keep their own derived timeouts.
 const PROVIDER_TIMEOUT_BEYOND_TEST_WORK_MS: u64 = 5_000;
 
+/// Lookups *after the switch into* `FlappingPendingLookup` that the fixture
+/// answers with its pending-then-malformed alternation before it stabilizes
+/// and reports the instance `Ready`. The count is rebased at the mode switch
+/// so the flap is the same length however many lookups the preceding phase
+/// spent. Each malformed answer used to nest three more recovery poll frames,
+/// and the pre-fix stack fell over within a handful, so twenty error rounds
+/// leave a wide margin while keeping the flap far shorter than the startup
+/// budget the walk is charged against.
+const FLAPPING_LOOKUPS_BEFORE_READY: usize = 40;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FixtureMode {
     Ready,
@@ -197,6 +207,7 @@ enum FixtureMode {
     MalformedCreateOnce,
     DelayedMalformedCreateOnce,
     DelayedMalformedLookupOnce,
+    FlappingPendingLookup,
     DelayedSnapshotPendingThenMalformed,
     MalformedDeleteOnce,
     DelayedMalformedDeleteOnce,
@@ -223,6 +234,7 @@ struct Inner {
     creates: usize,
     deletes: usize,
     lookups: usize,
+    lookups_at_mode_change: usize,
     malformed_create_sent: bool,
     malformed_lookup_sent: bool,
     snapshot_pending_sent: bool,
@@ -264,6 +276,7 @@ impl Fixture {
                 creates: 0,
                 deletes: 0,
                 lookups: 0,
+                lookups_at_mode_change: 0,
                 malformed_create_sent: false,
                 malformed_lookup_sent: false,
                 snapshot_pending_sent: false,
@@ -383,8 +396,15 @@ impl Fixture {
             .clone()
     }
 
+    /// Install a mode and rebase the lookup counter it reads. A mode's phases
+    /// are about the lookups made *after* the switch, so a mode installed
+    /// part-way through a test must not inherit the lookups an earlier phase
+    /// already spent — otherwise its phases end early by exactly however many
+    /// lookups happened to precede it.
     fn set_mode(&self, mode: FixtureMode) {
-        self.state.inner.lock().expect("fixture state").mode = mode;
+        let mut inner = self.state.inner.lock().expect("fixture state");
+        inner.lookups_at_mode_change = inner.lookups;
+        inner.mode = mode;
     }
 
     /// Hold the create response open for longer than the mode's own delay, so
@@ -546,6 +566,7 @@ async fn lookup_instance(
         snapshot_pending,
         snapshot_absent,
         malformed_after_snapshot,
+        flapping_malformed,
     ) = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.lookup_started += 1;
@@ -555,6 +576,10 @@ async fn lookup_instance(
         if malformed_lookup {
             inner.malformed_lookup_sent = true;
         }
+        let flapped = inner.lookups - inner.lookups_at_mode_change;
+        let flapping_malformed = inner.mode == FixtureMode::FlappingPendingLookup
+            && flapped <= FLAPPING_LOOKUPS_BEFORE_READY
+            && flapped % 2 == 0;
         let snapshot_pending = if inner.mode == FixtureMode::DelayedSnapshotPendingThenMalformed
             && !inner.snapshot_pending_sent
         {
@@ -588,6 +613,7 @@ async fn lookup_instance(
             snapshot_pending,
             snapshot_absent,
             malformed_after_snapshot,
+            flapping_malformed,
         )
     };
     if let Some(snapshot_pending) = snapshot_pending {
@@ -612,13 +638,25 @@ async fn lookup_instance(
     {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    if malformed_lookup || malformed_after_snapshot {
+    if malformed_lookup || malformed_after_snapshot || flapping_malformed {
         return Response::builder()
             .status(StatusCode::OK)
             .body(Body::from("{"))
             .expect("malformed lookup fixture response");
     }
     let mut inner = state.inner.lock().expect("fixture state");
+    if inner.mode == FixtureMode::FlappingPendingLookup {
+        let flap_state =
+            if inner.lookups - inner.lookups_at_mode_change > FLAPPING_LOOKUPS_BEFORE_READY {
+                ProviderInstanceState::Ready
+            } else {
+                ProviderInstanceState::Pending
+            };
+        if let Some(instance) = inner.instances.get_mut(&request_id) {
+            instance.state = flap_state;
+            instance.observed_at_unix_ms = now_ms();
+        }
+    }
     if inner.mode == FixtureMode::DelayedAbsence {
         inner.instances.remove(&request_id);
     }
@@ -1963,6 +2001,51 @@ async fn terminal_cancel_state_survives_late_recovery_lookup_failure() {
         )
         .expect("read terminal state");
     assert_eq!(state, "deleted");
+}
+
+/// A provider whose lookups flap between a pending instance and a transport
+/// error drives recovery around the `recover_one` → `await_startup` →
+/// `recover_startup_race` cycle: the successful lookup re-enters the startup
+/// wait, and the failed lookup loses the `Pending` → `Ambiguous` CAS (the
+/// state already is ambiguous) and re-enters recovery. Each lap used to nest
+/// three more `Box::pin` poll frames, so a provider that flapped inside the
+/// startup window crashed the process with a stack overflow long before the
+/// deadline could classify the request. The recovery trampoline holds one
+/// step frame at a time, so the same flap now just walks the cycle in place
+/// until the provider stabilizes and recovery converges on Ready.
+#[tokio::test]
+async fn flapping_lookups_walk_recovery_in_place_instead_of_overflowing_the_stack() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before simulated recovery");
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "UPDATE requests SET state = 'ambiguous', latest_receipt_json = NULL
+             WHERE request_id = ?1",
+            [request.request_id.to_string()],
+        )
+        .expect("simulate ambiguous recovery boundary");
+    drop(database);
+    let lookups_before_flap = context.fixture.counts().2;
+    context.fixture.set_mode(FixtureMode::FlappingPendingLookup);
+
+    let recovered = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("recovery outlives the flap and converges once lookups stabilize");
+    assert_eq!(recovered.body.outcome, LifecycleOutcome::Ready);
+    assert!(!recovered.body.ambiguity);
+    assert!(
+        context.fixture.counts().2 - lookups_before_flap > FLAPPING_LOOKUPS_BEFORE_READY,
+        "recovery must have ridden out the whole flapping phase",
+    );
 }
 
 #[tokio::test]
