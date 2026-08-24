@@ -315,8 +315,17 @@ fi
 # address (that is SO_REUSEPORT, which the controller does not set), so the
 # socket must be closed before the service binds -- which restores exactly
 # the window it was meant to close.
+# The reservations MUST accumulate in this shell. An earlier draft called
+# this through $( ), which runs the function in a SUBSHELL: the append below
+# was discarded every time and every call handed python an EMPTY exclusion
+# set, so two reservations could return the same free port -- a fresh
+# collision mode introduced while closing the kernel's. The port is
+# returned through a NAMEREF instead, so the only command substitution left
+# is python's own and the array grows where it is read.
 reserved_ports=()
 reserve_port() {
+  # shellcheck disable=SC2178,SC2034  # nameref assignment, written below
+  local -n reserve_target_ref="$1"
   local chosen
   chosen="$(python3 - "${reserved_ports[@]}" <<'PY'
 import errno
@@ -384,7 +393,8 @@ raise SystemExit(
 PY
   )" || exit 1
   reserved_ports+=("${chosen}")
-  printf '%s\n' "${chosen}"
+  # shellcheck disable=SC2034  # the nameref target is the caller's variable
+  reserve_target_ref="${chosen}"
 }
 
 # require_reserved_ports_free LABEL=PORT... -- re-verify immediately before
@@ -428,9 +438,64 @@ PY
     exit 1
   fi
 }
-pg_port="$(reserve_port)"
-api_port="$(reserve_port)"
-agent_port="$(reserve_port)"
+reserve_port pg_port
+reserve_port api_port
+reserve_port agent_port
+# The MECHANISM, not the outcome. A natural collision in a 4536-port band is
+# so unlikely that a passing suite proves nothing about whether exclusions
+# work at all, so each link of the chain is asserted directly: that the
+# reservations accumulate in THIS shell, that the accumulated set actually
+# reaches the selector and is honoured, and only then that the three ports
+# came out distinct.
+[[ ${#reserved_ports[@]} -eq 3 ]] || {
+  echo "reserve_port did not accumulate its reservations in the calling shell (${#reserved_ports[@]} of 3); the exclusion set is being discarded, so two ports can collide" >&2
+  exit 1
+}
+# shellcheck disable=SC2154 # assigned through reserve_port's nameref
+[[ "${pg_port}" != "${api_port}" && "${api_port}" != "${agent_port}"   && "${pg_port}" != "${agent_port}" ]] || {
+  echo "the three reserved ports are not pairwise distinct: ${pg_port} ${api_port} ${agent_port}" >&2
+  exit 1
+}
+# Exclusions are honoured, proven by making them decisive: with the whole
+# preferred band excluded, a selector that ignored the set would still
+# return a port from it. Skipped only where the host's ephemeral range
+# leaves no second band to fall back into, which is stated rather than
+# silently passing.
+(
+  port_range_low="$(cut -f1 /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo 32768)"
+  port_range_high="$(cut -f2 /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo 60999)"
+  if [[ "${port_range_low}" -le 10240 || "${port_range_high}" -ge 65535 ]]; then
+    echo "exclusion gate skipped: ip_local_port_range ${port_range_low}-${port_range_high} leaves only one band"
+    exit 0
+  fi
+  reserved_ports=()
+  for excluded in $(seq "$((port_range_high + 1))" 65535); do
+    reserved_ports+=("${excluded}")
+  done
+  reserve_port forced_fallback
+  # shellcheck disable=SC2154 # assigned through reserve_port's nameref
+  [[ "${forced_fallback}" -lt "${port_range_low}" ]] || {
+    echo "reserve_port returned ${forced_fallback} from a band every one of whose ports was excluded; the exclusion set is not reaching the selector" >&2
+    exit 1
+  }
+)
+# Outcome backstop over repeated triples. With the mechanism above proven
+# this cannot fail without one of those assertions failing first, which is
+# the point: it would localize a regression to the accumulation rather than
+# to chance.
+(
+  for _ in $(seq 1 50); do
+    reserved_ports=()
+    reserve_port triple_a
+    reserve_port triple_b
+    reserve_port triple_c
+    # shellcheck disable=SC2154 # assigned through reserve_port's nameref
+    [[ "${triple_a}" != "${triple_b}" && "${triple_b}" != "${triple_c}"       && "${triple_a}" != "${triple_c}" ]] || {
+      echo "reserve_port returned a duplicate within one triple: ${triple_a} ${triple_b} ${triple_c}" >&2
+      exit 1
+    }
+  done
+)
 
 organization_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 project_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
@@ -3098,6 +3163,211 @@ chmod 0755 "${loadpath_data_root}"
   exit 1
 }
 rm -rf "${dropin_root_home}/.local/share/systemd" "${dropin_root_home}/loadpath-shared"
+# XDG_CONFIG_DIRS and XDG_DATA_DIRS are part of the user-unit load path --
+# systemd's user_dirs() consults both, and `systemd-analyze --user
+# unit-paths` reports /etc/xdg/systemd/user between the config home and
+# /etc/systemd/user. Round 30 enumerated neither. An entry that resolves
+# inside the deployment home is writable by the service account, so it is
+# the sharp case and the one this gate can actually create.
+xdgconf_root="${dropin_root_home}/xdgconf"
+xdgconf_dropin="${xdgconf_root}/systemd/user/mcloving-controller.service.d"
+mkdir -p "${xdgconf_dropin}"
+chmod 0755 "${xdgconf_root}" "${xdgconf_root}/systemd" \
+  "${xdgconf_root}/systemd/user" "${xdgconf_dropin}"
+printf '[Service]\nRestart=always\n' > "${xdgconf_dropin}/zz-xdgconf.conf"
+chmod 0666 "${xdgconf_dropin}/zz-xdgconf.conf"
+if XDG_CONFIG_DIRS="${xdgconf_root}" "${repo_root}/deploy/bin/mcloving-upgrade" \
+  --home "${dropin_root_home}" --release-dir "${release2_dir}" \
+  --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdgconf-source.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable drop-in in an XDG_CONFIG_DIRS load path" >&2
+  exit 1
+fi
+grep -q "zz-xdgconf.conf (mode 666)" "${workdir}/logs/xdgconf-source.log" || {
+  echo "the XDG_CONFIG_DIRS drop-in source was not judged:" >&2
+  cat "${workdir}/logs/xdgconf-source.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused XDG_CONFIG_DIRS upgrade still moved the current release" >&2
+  exit 1
+}
+# And the paths it DECLARES are parsed from there too.
+mkdir -p "${dropin_root_home}/xdg-shared"
+printf 'MCLOVING_XDG=1\n' > "${dropin_root_home}/xdg-shared/xdg.env"
+chmod 0600 "${dropin_root_home}/xdg-shared/xdg.env"
+chmod 0777 "${dropin_root_home}/xdg-shared"
+printf '[Service]\nEnvironmentFile=%%h/xdg-shared/xdg.env\n' \
+  > "${xdgconf_dropin}/zz-xdgconf.conf"
+chmod 0644 "${xdgconf_dropin}/zz-xdgconf.conf"
+if XDG_CONFIG_DIRS="${xdgconf_root}" "${repo_root}/deploy/bin/mcloving-upgrade" \
+  --home "${dropin_root_home}" --release-dir "${release2_dir}" \
+  --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdgconf-contract.log" 2>&1; then
+  echo "upgrade proceeded over a contract declared only from an XDG_CONFIG_DIRS load path" >&2
+  exit 1
+fi
+grep -q "xdg-shared (mode 777)" "${workdir}/logs/xdgconf-contract.log" || {
+  echo "the XDG_CONFIG_DIRS drop-in's declared contract escaped the parser:" >&2
+  cat "${workdir}/logs/xdgconf-contract.log" >&2
+  exit 1
+}
+chmod 0755 "${dropin_root_home}/xdg-shared"
+# The same directory in XDG_DATA_DIRS rather than XDG_CONFIG_DIRS: both
+# lists are consulted, so both must be enumerated.
+if XDG_DATA_DIRS="${xdgconf_root}" "${repo_root}/deploy/bin/mcloving-upgrade" \
+  --home "${dropin_root_home}" --release-dir "${release2_dir}" \
+  --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdgdata-source.log" 2>&1; then
+  : # secured now; the acceptance direction is asserted below
+else
+  echo "upgrade refused a secured XDG_DATA_DIRS load path:" >&2
+  cat "${workdir}/logs/xdgdata-source.log" >&2
+  exit 1
+fi
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+chmod 0666 "${xdgconf_dropin}/zz-xdgconf.conf"
+if XDG_DATA_DIRS="${xdgconf_root}" "${repo_root}/deploy/bin/mcloving-upgrade" \
+  --home "${dropin_root_home}" --release-dir "${release2_dir}" \
+  --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdgdata-relaxed.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable drop-in in an XDG_DATA_DIRS load path" >&2
+  exit 1
+fi
+grep -q "zz-xdgconf.conf (mode 666)" "${workdir}/logs/xdgdata-relaxed.log" || {
+  echo "the XDG_DATA_DIRS drop-in source was not judged:" >&2
+  cat "${workdir}/logs/xdgdata-relaxed.log" >&2
+  exit 1
+}
+# Acceptance: secured, and with neither variable set the same tree is
+# simply not a load path at all, so the transition proceeds either way.
+chmod 0644 "${xdgconf_dropin}/zz-xdgconf.conf"
+XDG_CONFIG_DIRS="${xdgconf_root}" "${repo_root}/deploy/bin/mcloving-upgrade" \
+  --home "${dropin_root_home}" --release-dir "${release2_dir}" \
+  --checksums "${workdir}/checksums2.sha256" --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured XDG_CONFIG_DIRS drop-in did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+rm -rf "${xdgconf_root}" "${dropin_root_home}/xdg-shared"
+# The derivation itself, against systemd's own answer where the host can
+# give one. `systemd-analyze --user unit-paths` is the authority; every
+# path it names must be in this derivation. It is not a hard dependency of
+# the suite, so its absence is stated rather than silently passing.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  loadpath_all=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    loadpath_all+="${decoded_loadpath}"$'\n'
+  done < <(deployment_unit_load_paths "${HOME}" all systemd)
+  # The XDG search lists contribute their spec defaults unconditionally,
+  # and those are root-owned, so they belong to the system class.
+  loadpath_system=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    loadpath_system+="${decoded_loadpath}"$'\n'
+  done < <(deployment_unit_load_paths "${HOME}" system systemd)
+  for expected_xdg in /etc/xdg/systemd/user /usr/local/share/systemd/user \
+    /usr/share/systemd/user; do
+    grep -qx "${expected_xdg}" <<<"${loadpath_system}" || {
+      echo "the XDG search-list default ${expected_xdg} is missing from the system load path set" >&2
+      exit 1
+    }
+  done
+  if command -v systemd-analyze >/dev/null 2>&1 \
+    && systemd-analyze --user unit-paths >/dev/null 2>&1; then
+    while IFS= read -r manager_path; do
+      [[ -n "${manager_path}" ]] || continue
+      grep -qx "${manager_path}" <<<"${loadpath_all}" || {
+        echo "systemd searches ${manager_path} for user units and this derivation does not enumerate it" >&2
+        exit 1
+      }
+    done < <(systemd-analyze --user unit-paths)
+  else
+    echo "load-path parity against systemd-analyze skipped: no usable systemd-analyze --user on this host"
+  fi
+)
+# System drop-in TREES must feed the shared chain collector like every
+# other root the document walks. Their trees were recorded while their
+# ancestors were not, so relaxing /etc/systemd/user left every emitted
+# system_dropins record byte-identical. Driven through the payload
+# directly -- the only way to present a system-path tree without root --
+# exactly as the digest race drivers do.
+sysdrop_tree="${workdir}/fake-system-dropin/service.d"
+sysdrop_link_target="${workdir}/fake-system-link-target"
+rm -rf "${workdir}/fake-system-dropin" "${sysdrop_link_target}"
+mkdir -p "${sysdrop_tree}" "${sysdrop_link_target}/nested"
+printf '[Service]\nRestart=always\n' > "${sysdrop_tree}/zz.conf"
+printf '[Service]\nRestart=no\n' > "${sysdrop_link_target}/nested/linked.conf"
+ln -s "${sysdrop_link_target}/nested/linked.conf" "${sysdrop_tree}/linked.conf"
+sysdrop_dirs_env="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  encode_path_item "${sysdrop_tree}"
+)"
+sysdrop_ancestors="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_ancestor_chain "${home}" \
+    "${libexec}/releases" "${libexec}/helpers" \
+    "${smoke_unit_root}" "${smoke_quadlet_root}" \
+    "${home}/.config/mcloving" "${home}/.config/mcloving/pki"
+)"
+MCLOVING_ANCESTOR_DIRS="${sysdrop_ancestors}" \
+MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
+MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
+MCLOVING_UNIT_DROPIN_DIRS="${sysdrop_dirs_env}" \
+MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${sysdrop_dirs_env}" \
+python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
+  > "${workdir}/system-dropin-digests.json" <<'SYSCHAIN'
+import sys
+
+helper, home = sys.argv[1], sys.argv[2]
+source = open(helper, encoding="utf-8").read()
+payload = source.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+sys.argv = [helper, home]
+exec(compile(payload, helper, "exec"), {"__name__": "__main__"})
+SYSCHAIN
+python3 - "${workdir}/system-dropin-digests.json" "${sysdrop_tree}" \
+  "${sysdrop_link_target}" <<'SYSCHECK'
+import json
+import pathlib
+import sys
+
+document = json.loads(pathlib.Path(sys.argv[1]).read_text())
+tree, link_target = sys.argv[2], sys.argv[3]
+# The ancestor list is RECORDS, not bare strings, and a path outside the
+# home carries its absolute spelling (file_record's own rule).
+ancestors = {record["path"] for record in document.get("ancestors", [])}
+recorded = {record["path"] for record in document.get("system_dropins", [])}
+if not any(entry.endswith("zz.conf") for entry in recorded):
+    raise SystemExit(f"the system drop-in tree was not recorded at all: {sorted(recorded)}")
+# The tree's OWN chain: without it, relaxing the directory that holds the
+# active drop-in leaves the document byte-identical.
+if tree not in ancestors:
+    raise SystemExit(
+        f"the system drop-in tree {tree} never reached the ancestor collector; "
+        "relaxing it would not change the canonical document"
+    )
+if str(pathlib.PurePosixPath(tree).parent) not in ancestors:
+    raise SystemExit(f"the system drop-in tree's parent is missing from the chain")
+# And the chain of what a symlinked .conf inside it points at.
+if f"{link_target}/nested" not in ancestors:
+    raise SystemExit(
+        f"a symlinked .conf inside the system drop-in tree did not contribute "
+        f"its target's chain; {link_target}/nested is absent"
+    )
+SYSCHECK
+rm -rf "${workdir}/fake-system-dropin" "${sysdrop_link_target}" \
+  "${workdir}/system-dropin-digests.json"
 # Quadlet GENERATES a service; systemd applies drop-ins to the GENERATED
 # name, which discovery seeded from the source basenames never saw. The
 # mapping is verified against podman's own generator in the probe below.
@@ -3383,6 +3653,7 @@ ExecStart=%t/tool|unit specifier other than a leading %h in its executable
 ExecStart=tool --serve|with a non-absolute executable
 ExecStart=-|with command prefixes but no executable
 ExecStart=/opt/my\ tool|with a backslash escape in its executable
+EnvironmentFile=/srv/secure/evil\x2eenv|with a backslash escape in its value
 EnvironmentFile=%t/extra.env|unit specifier other than %h in its value
 EXECSPELLINGS
 rm -f "${exec_dropin_dir}/exec.conf"

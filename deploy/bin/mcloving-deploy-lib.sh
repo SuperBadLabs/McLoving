@@ -449,6 +449,55 @@ deployment_runtime_root() {
   printf '/run/user/%s\n' "${home_uid}"
 }
 
+# deployment_xdg_search_entries HOME VALUE DEFAULT_LIST -> the absolute
+# directories a colon-separated XDG SEARCH LIST contributes, one per line.
+#
+# XDG_CONFIG_DIRS and XDG_DATA_DIRS are lists rather than single bases, but
+# they get the SAME applicability rule the single bases get, applied per
+# entry: an inherited value speaks for this deployment when the target home
+# is the invoking user's own (the environment describes that account's
+# manager) or when the entry lies inside the target home. Round 30 ignored
+# these two variables outright on the grounds that "an env var should not
+# steer the validator", and that argument was never sound -- XDG_CONFIG_HOME
+# steers it too, under exactly this rule. The applicability gate is the
+# principle; a blanket ignore was not.
+#
+# The spec DEFAULTS are always included, in union with whatever the
+# variable contributes, rather than being replaced by it. Where the two
+# disagree the union validates a directory systemd would not read, which is
+# over-validation -- the safe direction -- while replacement risks the one
+# outcome that matters: a directory systemd DOES read and this never sees.
+# Relative entries are dropped, exactly as the XDG spec and systemd's own
+# lookup do.
+deployment_xdg_search_entries() {
+  local home_dir="${1%/}" value="$2" default_list="$3"
+  local entry rest emitted
+  local -A search_seen=()
+  for rest in "${default_list}" "${value}"; do
+    while [[ -n "${rest}" ]]; do
+      entry="${rest%%:*}"
+      if [[ "${entry}" == "${rest}" ]]; then
+        rest=""
+      else
+        rest="${rest#*:}"
+      fi
+      [[ "${entry}" == /* ]] || continue
+      entry="${entry%/}"
+      [[ -n "${entry}" ]] || continue
+      # The default list is unconditional; an entry that came from the
+      # environment must pass the applicability gate.
+      if [[ ":${default_list}:" != *":${entry}:"* ]]; then
+        deployment_xdg_value_applies "${home_dir}" "${entry}" || continue
+      fi
+      [[ -z "${search_seen["${entry}"]:-}" ]] || continue
+      search_seen["${entry}"]=1
+      emitted="${entry}"
+      printf '%s\n' "${emitted}"
+    done
+  done
+  return 0
+}
+
 # The Quadlet source extensions this lane could ship, and the unit each
 # generates. Quadlet does not install its sources as units: it GENERATES a
 # .service and systemd applies drop-ins to the GENERATED name, so a
@@ -563,11 +612,35 @@ deployment_unit_load_paths() {
         )
       fi
       user_paths+=("${data_base}/systemd/user")
+      # The two XDG SEARCH LISTS systemd's user_dirs() consults, which this
+      # list omitted entirely: XDG_CONFIG_DIRS (default /etc/xdg) and
+      # XDG_DATA_DIRS (default /usr/local/share:/usr/share). Verified
+      # against `systemd-analyze --user unit-paths` on systemd 255 rather
+      # than against the manual: it reports /etc/xdg/systemd/user between
+      # the config home and /etc/systemd/user, and the two data dirs between
+      # the data home and /usr/local/lib/systemd/user.
+      #
+      # Each entry is classified by WHERE IT IS, not by which variable
+      # produced it: an entry inside the target home is writable by the
+      # service account and joins the user class, everything else is
+      # root-owned in practice and joins the system class, which is
+      # validated and additionally reported.
+      local search_entry
+      while IFS= read -r search_entry; do
+        [[ -n "${search_entry}" ]] || continue
+        if [[ "${search_entry}" == "${home_dir}" || "${search_entry}" == "${home_dir}"/* ]]; then
+          user_paths+=("${search_entry}/systemd/user")
+        else
+          system_paths+=("${search_entry}/systemd/user")
+        fi
+      done < <(
+        deployment_xdg_search_entries "${home_dir}" "${XDG_CONFIG_DIRS:-}" "/etc/xdg"
+        deployment_xdg_search_entries "${home_dir}" "${XDG_DATA_DIRS:-}" \
+          "/usr/local/share:/usr/share"
+      )
       system_paths+=(
         "/etc/systemd/user"
         "/run/systemd/user"
-        "/usr/local/share/systemd/user"
-        "/usr/share/systemd/user"
         "/usr/local/lib/systemd/user"
         "/usr/lib/systemd/user"
       )
@@ -834,8 +907,10 @@ deployment_unit_assignment_lines() {
 # substitution, where deploy_fail dies with the subshell and the caller
 # would continue on partial output): any construct systemd would consume
 # but the assignment parser does not model is a NAMED refusal, never a
-# silent partial validation. Four constructs qualify: line continuations;
-# quote characters in the values of path-bearing directives; a unit
+# silent partial validation. Five constructs qualify: line continuations;
+# quote characters in the values of path-bearing directives; C-style
+# backslash escapes in EITHER family, which systemd unescapes and this
+# parser deliberately does not; a unit
 # specifier other than %h in either family (this deployment expands %h and
 # nothing else, and an unexpanded %t or %S would either be dropped as
 # non-absolute or validated at a literal path nothing ever uses); and any
@@ -876,6 +951,27 @@ require_parseable_unit_sources() {
       if [[ "${key}" =~ ^(${MCLOVING_UNIT_PATH_DIRECTIVES})$ ]]; then
         if [[ "${value}" == *[\"\']* ]]; then
           deploy_fail "unit source ${file} declares ${key} with a quote character in its value; systemd unquotes path values but this deployment's parser does not model quoting, and word-splitting a quoted path would validate paths that do not exist -- spell the path unquoted and retry"
+        fi
+        # C-style escapes, refused rather than unescaped -- the same rule
+        # the Exec family has carried since round 29, now uniform across
+        # both families. systemd runs config values through cunescape,
+        # which understands the whole C escape set (\n, \t, \\, \s, the
+        # hex \xNN, octal \NNN, and \uNNNN / \UNNNNNNNN), so validating the
+        # LITERAL backslash spelling means this deployment and systemd
+        # disagree about which file is loaded.
+        # EnvironmentFile=/srv/secure/evil\x2eenv is the sharp case: the
+        # literal does not exist, so the contract rule skipped it, while
+        # systemd loaded /srv/secure/evil.env -- attacker-writable and
+        # never judged.
+        #
+        # Refusal beats reimplementation. A PARTIAL unescape that disagrees
+        # with cunescape anywhere is WORSE than no unescape at all: it
+        # would validate a third path, neither the literal nor the one
+        # systemd loads, and the disagreement would be silent. No shipped
+        # unit needs an escape, and a path carrying an awkward byte can be
+        # spelled literally.
+        if [[ "${value}" == *"${MCLOVING_BACKSLASH}"* ]]; then
+          deploy_fail "unit source ${file} declares ${key} with a backslash escape in its value (${value}); systemd unescapes C-style escapes before loading the path but this parser deliberately does not model that, so validation and systemd would disagree about which file is loaded -- spell the path without escapes and retry"
         fi
         # %h is the ONE specifier this deployment expands. Any other --
         # %t, %S, %i, or the literal-percent %% -- survives expansion and

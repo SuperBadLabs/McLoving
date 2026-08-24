@@ -659,6 +659,23 @@ def collect_chain(path: Path) -> bool:
     return True
 
 
+# The system drop-in tree ROOTS get the same treatment as every other root
+# this document walks. Their trees were being recorded while their chains
+# were not: MCLOVING_ANCESTOR_DIRS covers only the six deployment roots, so
+# nothing here pinned the mode or owner of /etc/systemd/user itself, and
+# relaxing or re-owning it left every emitted system_dropins record
+# byte-identical while the drop-in it holds became replaceable. Transition
+# validation already treats those ancestors as security-relevant; the
+# canonical re-read has to see the same thing or it cannot report the drift.
+#
+# Tolerant, like the nested-link chains and unlike the deployment's own
+# roots: these trees are outside the deployment, and losing the whole
+# document to an unresolvable chain in somebody else's tree would deny
+# CUTOVER-001 its re-read for a reason the deployment cannot fix.
+for system_dropin_dir in sorted(system_dropin_dirs):
+    if not collect_chain(system_dropin_dir):
+        unresolvable_links.append(system_dropin_dir)
+
 for link in sorted(
     {
         entry
@@ -667,6 +684,10 @@ for link in sorted(
             *helper_entries,
             *unit_entries,
             *contract_entries,
+            # A symlinked .conf inside a system drop-in directory points
+            # somewhere, and that somewhere has parents another local user
+            # may be able to rename. Same sweep, same reason.
+            *system_dropin_entries,
         )
         if entry.is_symlink()
     }
