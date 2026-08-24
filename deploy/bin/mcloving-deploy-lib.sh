@@ -1402,6 +1402,51 @@ MCLOVING_EXECUTION_HOOK_VARIABLES=(
   PERL5LIB          # perl resolves modules from it
   RUBYOPT           # carries -r, which requires a library at start
   NODE_OPTIONS      # carries --require, which loads a module at start
+  PYTHONUSERBASE    # python imports usercustomize.py from its site-packages
+)
+
+# THE VARIABLES A CONTRACT OR UNIT MAY LEGITIMATELY DECLARE, as a
+# DEFAULT-DENY ALLOWLIST rather than another denylist.
+#
+# PYTHONUSERBASE proved the denylist above cannot be relied on for
+# completeness: it satisfies the round-39 criterion exactly and was simply
+# not enumerated, and the next runtime will ship another one. Where the
+# shape can be inverted, it is inverted, because an allowlist is
+# enumeration-INDEPENDENT: a hook variable nobody has heard of is refused
+# because it is not on the list, not because it is on another one.
+#
+# Inversion is possible for DECLARATIONS because this deployment knows
+# exactly what its own contracts and units legitimately set:
+#
+#   * the MCLOVING_ namespace, which is this project's own and which no
+#     shell, loader, or language runtime consults, so it cannot carry a
+#     hook by construction; the classified-path machinery governs the
+#     members of it that name paths, and the smoke suite's coverage gate
+#     already requires every MCLOVING_ variable the binaries read to be
+#     classified or explicitly excluded.
+#   * the handful of foreign names the shipped contracts genuinely need --
+#     today only the three the PostgreSQL image itself reads. The smoke
+#     suite asserts this list equals the non-MCLOVING keys of the shipped
+#     example contracts, so it cannot drift from what the deployment
+#     actually ships.
+#
+# Inversion is NOT possible for variables merely INHERITED from the service
+# manager, and the denylist above remains the only tool there. That is a
+# property of systemd, established rather than assumed: there is no
+# clean-environment directive, and systemd.exec states of PassEnvironment=
+# that "in case of the user service manager all environment variables are
+# passed to the executed processes anyway, hence this option is without
+# effect for the user service manager". The obvious workaround --
+# ExecStart=/usr/bin/env -i ... re-supplying what is needed -- is refused
+# on concrete grounds rather than taste: /proc/PID/cmdline is world-readable
+# (mode 0444), so re-supplying a contract on the command line would publish
+# the database password and API tokens to every local user, trading this
+# vulnerability for a worse one.
+# shellcheck disable=SC2034  # read by the smoke suite's allowlist gate
+MCLOVING_CONTRACT_FOREIGN_VARIABLES=(
+  POSTGRES_USER
+  POSTGRES_DB
+  POSTGRES_PASSWORD
 )
 
 # The command directives that name an EXECUTABLE the transition runs.
@@ -2896,56 +2941,62 @@ verify_staged_release() {
     || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
 }
 
-# require_no_execution_hooks HOME CONTRACT_FILE... -- refuse, by name, any
-# declaration of an execution-hook variable, in a contract or in a unit's
-# own Environment= directives.
+# require_declared_variables_allowed HOME CONTRACT_FILE... -- refuse, by
+# name, any variable a contract declares that this deployment does not
+# recognise. DEFAULT-DENY.
 #
 # WHERE THE DEFENCE HAS TO LIVE, and why it cannot live in the guard.
-# BASH_ENV is sourced by bash BEFORE the first line of the guard's body, and
-# the dynamic loader runs an LD_PRELOAD constructor before main(). Both were
-# confirmed here rather than assumed, including that unsetting BASH_ENV on
-# the guard's own first line still runs the hook. So a check inside the
-# guard is theatre for the guard's own process: by the time any guard code
-# executes, the attacker's code already has.
+# BASH_ENV is sourced by bash BEFORE the first line of the guard's body, the
+# dynamic loader runs an LD_PRELOAD constructor before main(), and
+# PYTHONUSERBASE causes usercustomize.py to be imported by the python the
+# guard itself invokes from require_secure_ancestors -- before the guard
+# reaches any check of its own. All three were confirmed here rather than
+# assumed. So a check inside the guard is theatre for the guard's own
+# process: by the time any guard code executes, the attacker's code already
+# has.
 #
-# This check runs at VALIDATION time -- inside the transition, before the
-# unit is ever started -- which is early enough to matter, and it judges the
+# This runs at VALIDATION time -- inside the transition, before the unit is
+# ever started -- which is early enough to matter, and it judges the
 # DECLARATION rather than the file the declaration names. That distinction
-# is deliberate: securing the hook target would only bound who may rewrite
-# it, while the objection is that arbitrary code is being injected into a
-# process that never asked to run it. A hook script under a perfectly
-# validated %h tree is still a hook, so round 37's argument validation does
-# not make one acceptable.
-require_no_execution_hooks() {
-  local home_dir="${1%/}" contract_file hook_name line key value entry
+# is deliberate: securing a hook target would only bound who may rewrite
+# it, while the objection is that arbitrary code is injected into a process
+# that never asked to run it. A hook script under a perfectly validated %h
+# tree is still a hook, so round 37's argument validation does not make one
+# acceptable.
+#
+# The rule is an ALLOWLIST because PYTHONUSERBASE proved a denylist cannot
+# be relied on for completeness. See MCLOVING_CONTRACT_FOREIGN_VARIABLES for
+# the reasoning and for why the inversion stops at declarations.
+require_declared_variables_allowed() {
+  local home_dir="${1%/}" contract_file key value allowed_name
   shift
   local offending=""
-  local -A hook_lookup=()
-  for hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
-    hook_lookup["${hook_name}"]=1
+  local -A allowed=()
+  for allowed_name in "${MCLOVING_CONTRACT_FOREIGN_VARIABLES[@]}"; do
+    allowed["${allowed_name}"]=1
   done
-  # Contracts: every assignment the file makes.
   for contract_file in "$@"; do
     [[ -f "${contract_file}" ]] || continue
     while IFS= read -r -d '' key && IFS= read -r -d '' value; do
-      [[ -n "${hook_lookup["${key}"]:-}" ]] || continue
-      offending+="${key} declared in ${contract_file} "
+      [[ "${key}" != MCLOVING_* ]] || continue
+      [[ -z "${allowed["${key}"]:-}" ]] || continue
+      offending+="${key} in ${contract_file} "
     done < <(parse_environment_file "${contract_file}" 2>/dev/null || true)
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "execution-hook variable(s) declared: ${offending% }-- a shell, language runtime, or the dynamic loader acts on these automatically at process start, loading or executing code the value names before the program's own first instruction, so declaring one hands arbitrary code execution to whoever can write the file it points at; remove the declaration (securing its target is not sufficient, because the objection is that the code runs at all)"
+    deploy_fail "contract(s) declare variable(s) this deployment does not recognise: ${offending% }-- a contract may declare the MCLOVING_ namespace, which no shell, loader, or language runtime consults, plus the few foreign names the shipped contracts genuinely need; anything else is refused BY DEFAULT rather than matched against a list of known-dangerous names, because an interpreter or loader hook nobody has enumerated yet (BASH_ENV, LD_PRELOAD, PYTHONUSERBASE and their successors) executes code as the service account before its first instruction. Remove the declaration, or add it to the shipped example contract if the deployment genuinely needs it"
   fi
   return 0
 }
 
-# require_unit_environment_hooks_absent UNIT_SOURCE... -- the same refusal
-# for Environment= directives in units and their drop-ins, which reach the
-# service without passing through any contract file.
-require_unit_environment_hooks_absent() {
-  local line key value entry hook_name offending=""
-  local -A hook_lookup=()
-  for hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
-    hook_lookup["${hook_name}"]=1
+# require_unit_environment_allowed UNIT_SOURCE... -- the same default-deny
+# rule for Environment= directives in units and their drop-ins, which reach
+# the service without passing through any contract file.
+require_unit_environment_allowed() {
+  local line key value entry allowed_name offending=""
+  local -A allowed=()
+  for allowed_name in "${MCLOVING_CONTRACT_FOREIGN_VARIABLES[@]}"; do
+    allowed["${allowed_name}"]=1
   done
   [[ $# -gt 0 ]] || return 0
   while IFS= read -r line; do
@@ -2955,45 +3006,91 @@ require_unit_environment_hooks_absent() {
     # systemd allows several assignments on one Environment= line.
     for entry in ${value}; do
       [[ "${entry}" == *=* ]] || continue
-      [[ -n "${hook_lookup["${entry%%=*}"]:-}" ]] || continue
+      [[ "${entry%%=*}" != MCLOVING_* ]] || continue
+      [[ -z "${allowed["${entry%%=*}"]:-}" ]] || continue
       offending+="${entry%%=*} "
     done
   done < <(deployment_unit_assignment_lines "$@")
   if [[ -n "${offending}" ]]; then
-    deploy_fail "execution-hook variable(s) set by a unit Environment= directive: ${offending% }-- these are acted on by a shell, language runtime, or the dynamic loader before the program's own first instruction, so the deployment would execute code of somebody else's choosing on the next start; remove the directive"
+    deploy_fail "unit Environment= directive(s) set variable(s) this deployment does not recognise: ${offending% }-- the same default-deny rule the contracts get, and for the same reason: a directive reaching the service environment can carry an interpreter or loader hook that executes code before the program's first instruction, and enumerating those is what PYTHONUSERBASE showed cannot be relied on; remove the directive"
   fi
   return 0
 }
 
-# require_unit_hook_stripping HOME UNIT_FILE... -- assert every shipped unit
-# still strips the hook variables with UnsetEnvironment=.
+# require_unit_hook_stripping HOME UNIT_FILE... -- assert that the EFFECTIVE
+# UnsetEnvironment= of every unit this deployment ships still strips every
+# execution-hook variable.
 #
-# This is the layer that protects the GUARD ITSELF, which nothing inside the
-# guard can do. systemd applies UnsetEnvironment= to the composed
-# environment before exec, so it beats a manager-level variable AND one the
-# unit's own EnvironmentFile= declares -- both confirmed here -- while
-# ordinary variables survive. Asserting the directive is still present is
-# the round-34 pattern: the walks validate what exists, so something must
-# assert what must exist, or the protection can be quietly deleted.
+# THE EFFECTIVE LIST, not the declared base. An applicable drop-in
+# containing an empty UnsetEnvironment= RESETS the list inherited from the
+# shipped unit -- confirmed here: the manager then reports
+# UnsetEnvironment= as empty, and "reset then re-add" reports only the
+# re-added name. Checking the installed base file alone still saw every
+# required name while the stripping was gone, which is rounds 30 and 32's
+# lesson landing on the safety net itself.
+#
+# ASKED, where the manager can answer: systemctl --user show UNIT
+# -p UnsetEnvironment reports the composed value, reset semantics already
+# applied, for the GENERATED name in the Quadlet case. That is round 34's
+# principle and it is exact.
+#
+# The FALLBACK, where no manager serves this home, is deliberately blunter
+# than systemd's semantics rather than an approximation of them. Composing
+# reset-then-re-add correctly needs the precedence order of every applicable
+# drop-in, and a derivation that got that subtly wrong would report the
+# safety net intact while it was not. So the fallback refuses ANY empty
+# UnsetEnvironment= assignment in any applicable source outright: this
+# deployment never ships one, its only effect is to discard the stripping,
+# and refusing it is order-independent and fail-closed. Absent a reset, the
+# union of what the sources declare must cover the whole denylist.
 require_unit_hook_stripping() {
-  local home_dir="${1%/}" unit_file hook_name declared missing=""
+  local home_dir="${1%/}" unit_file hook_name missing="" reset_sources=""
   shift
   [[ $# -gt 0 ]] || return 0
-  local line key value entry
+  local unit_name effective source_file line key value encoded decoded
+  local source_list
   for unit_file in "$@"; do
     [[ -f "${unit_file}" ]] || continue
-    declared=""
-    while IFS= read -r line; do
-      key="${line%%=*}"
-      value="${line#*=}"
-      [[ "${key}" == "UnsetEnvironment" ]] || continue
-      declared+="${value} "
-    done < <(deployment_unit_assignment_lines "${unit_file}")
+    unit_name="${unit_file##*/}"
+    case "${unit_name}" in
+      *.service) ;;
+      *)
+        # A Quadlet source: the manager knows the GENERATED name.
+        unit_name="$(deployment_quadlet_generated_name "${unit_name}")"
+        ;;
+    esac
+    effective=""
+    if [[ -n "${unit_name}" ]] && deployment_manager_is_reachable \
+      && effective="$(systemctl --user show "${unit_name}" \
+        -p UnsetEnvironment --value 2>/dev/null 9>&-)" \
+      && [[ -n "${effective}" ]]; then
+      : # the manager's composed answer, reset semantics already applied
+    else
+      effective=""
+      source_list="$(deployment_unit_source_files "${home_dir}" "${unit_file}")"
+      while IFS= read -r encoded; do
+        [[ -n "${encoded}" ]] || continue
+        decode_path_item_into decoded "${encoded}"
+        while IFS= read -r line; do
+          key="${line%%=*}"
+          value="${line#*=}"
+          [[ "${key}" == "UnsetEnvironment" ]] || continue
+          if [[ -z "${value}" ]]; then
+            reset_sources+="${decoded} "
+            continue
+          fi
+          effective+="${value} "
+        done < <(deployment_unit_assignment_lines "${decoded}")
+      done <<<"${source_list}"
+    fi
     for hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
-      [[ " ${declared} " != *" ${hook_name} "* ]] || continue
+      [[ " ${effective} " != *" ${hook_name} "* ]] || continue
       missing+="${unit_file}:${hook_name} "
     done
   done
+  if [[ -n "${reset_sources}" ]]; then
+    deploy_fail "unit source(s) reset the execution-hook stripping with an empty UnsetEnvironment=: ${reset_sources% }-- an empty assignment discards the list the shipped unit declares, and that list is the only layer that can protect the pre-start guard, because a shell or the dynamic loader acts on a hook before the guard's first line runs; remove the empty assignment"
+  fi
   if [[ -n "${missing}" ]]; then
     deploy_fail "unit(s) no longer strip execution-hook variables: ${missing% }-- UnsetEnvironment= is the only layer that can protect the pre-start guard itself, because a shell or the dynamic loader acts on these before the guard's first line runs; restore the directive"
   fi
@@ -3274,14 +3371,14 @@ require_deployment_integrity() {
     "${load_path_roots[@]}" "${dropin_dirs[@]}" "${unit_source_files[@]}"
   require_secure_files "${home_dir}" "${contract_destinations[@]}" \
     "${declared_contracts[@]}"
-  # EXECUTION HOOKS, refused at validation time -- the only moment early
-  # enough, since a shell or the loader acts on them before the guard's own
-  # first line. Contracts and declared contracts alike, because a drop-in
-  # can point EnvironmentFile= anywhere.
-  require_no_execution_hooks "${home_dir}" "${contract_destinations[@]}" \
+  # DECLARED VARIABLES, default-deny, refused at validation time -- the only
+  # moment early enough, since a shell or the loader acts on a hook before
+  # the guard's own first line. Contracts and declared contracts alike,
+  # because a drop-in can point EnvironmentFile= anywhere.
+  require_declared_variables_allowed "${home_dir}" "${contract_destinations[@]}" \
     ${declared_contracts[@]+"${declared_contracts[@]}"}
   if [[ ${#unit_source_files[@]} -gt 0 ]]; then
-    require_unit_environment_hooks_absent "${unit_source_files[@]}"
+    require_unit_environment_allowed "${unit_source_files[@]}"
   fi
   # And the deployment's OWN units must still strip them. Only the
   # deployment's own -- an administrative override is somebody else's file

@@ -4912,7 +4912,7 @@ if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
   echo "upgrade proceeded over a contract declaring BASH_ENV" >&2
   exit 1
 fi
-grep -q "execution-hook variable(s) declared: BASH_ENV declared in" \
+grep -q "contract(s) declare variable(s) this deployment does not recognise: BASH_ENV in" \
   "${workdir}/logs/hook-contract.log" || {
   echo "the declared execution hook was not refused by name:" >&2
   cat "${workdir}/logs/hook-contract.log" >&2
@@ -4938,7 +4938,7 @@ if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
   echo "upgrade proceeded over a drop-in setting LD_PRELOAD" >&2
   exit 1
 fi
-grep -q "execution-hook variable(s) set by a unit Environment= directive: LD_PRELOAD" \
+grep -q "unit Environment= directive(s) set variable(s) this deployment does not recognise: LD_PRELOAD" \
   "${workdir}/logs/hook-dropin.log" || {
   echo "the drop-in execution hook was not refused by name:" >&2
   cat "${workdir}/logs/hook-dropin.log" >&2
@@ -5023,6 +5023,108 @@ grep -q "execution-hook variable(s) reach this service: LD_PRELOAD=" \
   exit 1
 }
 rm -f "${workdir}/hook-agent.env.orig" "${workdir}/hook-agent.unit.orig"
+# DEFAULT-DENY FOR DECLARATIONS. PYTHONUSERBASE proved a denylist cannot be
+# relied on for completeness -- it satisfies the round-39 criterion exactly
+# and was simply not enumerated -- so declarations are now judged by an
+# allowlist, which is enumeration-INDEPENDENT: a hook nobody has heard of is
+# refused for not being on the list rather than for being on another one.
+allow_env_file="${dropin_root_home}/.config/mcloving/agent.env"
+cp "${allow_env_file}" "${workdir}/allow-agent.env.orig"
+# (1) The named successor from this round.
+printf 'PYTHONUSERBASE=%%h/attacker-tree\n' >> "${allow_env_file}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/allow-pythonuserbase.log" 2>&1; then
+  echo "upgrade proceeded over a contract declaring PYTHONUSERBASE" >&2
+  exit 1
+fi
+grep -q "PYTHONUSERBASE in ${allow_env_file}" \
+  "${workdir}/logs/allow-pythonuserbase.log" || {
+  echo "PYTHONUSERBASE was not refused by name:" >&2
+  cat "${workdir}/logs/allow-pythonuserbase.log" >&2
+  exit 1
+}
+cp "${workdir}/allow-agent.env.orig" "${allow_env_file}"
+chmod 0600 "${allow_env_file}"
+# (2) The point of the inversion: a variable NOBODY has enumerated is
+# refused too. If this ever starts passing, the rule has silently reverted
+# to a denylist.
+printf 'SOME_FUTURE_RUNTIME_HOOK=%%h/attacker-tree\n' >> "${allow_env_file}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/allow-unknown.log" 2>&1; then
+  echo "upgrade proceeded over a contract declaring an unrecognised variable; the rule is no longer default-deny" >&2
+  exit 1
+fi
+grep -q "SOME_FUTURE_RUNTIME_HOOK in ${allow_env_file}" \
+  "${workdir}/logs/allow-unknown.log" || {
+  echo "the unrecognised variable was not refused by name:" >&2
+  cat "${workdir}/logs/allow-unknown.log" >&2
+  exit 1
+}
+cp "${workdir}/allow-agent.env.orig" "${allow_env_file}"
+chmod 0600 "${allow_env_file}"
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused default-deny upgrade still moved the current release" >&2
+  exit 1
+}
+# (3) The allowlist is DERIVED, not hand-maintained: the foreign names it
+# permits must be exactly the non-MCLOVING keys of the shipped example
+# contracts, or it has drifted from what the deployment actually ships.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  shipped_foreign="$(grep -hoE '^[A-Za-z_][A-Za-z0-9_]*=' "${repo_root}"/deploy/env/*.env.example \
+    | tr -d '=' | grep -v '^MCLOVING_' | sort -u)"
+  declared_foreign="$(printf '%s\n' "${MCLOVING_CONTRACT_FOREIGN_VARIABLES[@]}" | sort -u)"
+  [[ "${shipped_foreign}" == "${declared_foreign}" ]] || {
+    echo "the contract allowlist has drifted from the shipped example contracts:" >&2
+    diff <(printf '%s\n' "${shipped_foreign}") <(printf '%s\n' "${declared_foreign}") >&2 || true
+    exit 1
+  }
+  [[ -n "${shipped_foreign}" ]] || {
+    echo "the allowlist gate found no foreign keys at all; the sweep went blind" >&2
+    exit 1
+  }
+)
+# THE EFFECTIVE UnsetEnvironment=, not the declared base. An applicable
+# drop-in with an EMPTY assignment RESETS the list the shipped unit
+# declares, and the base file still reads correctly while the stripping is
+# gone -- rounds 30 and 32's lesson landing on the safety net itself.
+reset_dropin_dir="${dropin_unit_root}/mcloving-agent.service.d"
+mkdir -p "${reset_dropin_dir}"
+chmod 0755 "${reset_dropin_dir}"
+printf '[Service]\nUnsetEnvironment=\n' > "${reset_dropin_dir}/reset.conf"
+chmod 0644 "${reset_dropin_dir}/reset.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/unset-reset.log" 2>&1; then
+  echo "upgrade proceeded over a drop-in that reset the execution-hook stripping" >&2
+  exit 1
+fi
+grep -q "reset the execution-hook stripping with an empty UnsetEnvironment=" \
+  "${workdir}/logs/unset-reset.log" || {
+  echo "the UnsetEnvironment= reset was not refused by name:" >&2
+  cat "${workdir}/logs/unset-reset.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused UnsetEnvironment-reset upgrade still moved the current release" >&2
+  exit 1
+}
+rm -f "${reset_dropin_dir}/reset.conf"
+# Acceptance: with no reset and nothing unrecognised declared, the
+# transition proceeds.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the default-deny gate" >&2
+  exit 1
+}
+rm -f "${workdir}/allow-agent.env.orig"
 # INSTALLATION ROOTS come from the running manager where it can say. Writing
 # to the wrong root is the one failure that is silent and total: units land
 # where the manager never searches and daemon-reload finds nothing.
@@ -6292,7 +6394,11 @@ rm -rf "${ctlink_home}"
 mkdir -p "${ctlink_home}/ext" "${ctlink_home}/.config/mcloving"
 chmod 0755 "${ctlink_home}" "${ctlink_home}/ext" \
   "${ctlink_home}/.config" "${ctlink_home}/.config/mcloving"
-printf 'PRESERVED_MARKER=%s\n' "${suffix}" > "${ctlink_home}/ext/agent.env"
+# The marker lives in this project's own namespace, like every variable a
+# real contract declares: the contract allowlist is default-deny, so a
+# fixture using a foreign name would be refused for the right reason and
+# fail this gate for the wrong one.
+printf 'MCLOVING_PRESERVED_MARKER=%s\n' "${suffix}" > "${ctlink_home}/ext/agent.env"
 chmod 0600 "${ctlink_home}/ext/agent.env"
 ln -s "${ctlink_home}/ext/agent.env" "${ctlink_home}/.config/mcloving/agent.env"
 chmod 0777 "${ctlink_home}/ext"
@@ -6369,7 +6475,7 @@ podman unshare chown 0:0 "${ctlink_home}/ext/agent.env"
   echo "install replaced a secured preserved contract symlink" >&2
   exit 1
 }
-grep -q "PRESERVED_MARKER=${suffix}" "${ctlink_home}/.config/mcloving/agent.env" || {
+grep -q "MCLOVING_PRESERVED_MARKER=${suffix}" "${ctlink_home}/.config/mcloving/agent.env" || {
   echo "install did not preserve the secured contract's content" >&2
   exit 1
 }
