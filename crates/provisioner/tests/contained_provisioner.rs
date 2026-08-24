@@ -126,6 +126,41 @@ const STARTUP_BUDGET_DURING_CREATE_MS: u64 = FIXTURE_RENDEZVOUS_CREATE_MS / 3;
 /// the one direction these tests depend on.
 const STARTUP_BUDGET_UNDER_TEST_MS: u64 = 50;
 
+/// Request window, instance lifetime and startup budget that the standalone-
+/// binary case grants itself in place of the defaults above.
+///
+/// Every other case here admits its request microseconds after building it, in
+/// this process. That case stamps `requested_at_unix_ms`,
+/// `expires_at_unix_ms` and `instance_expires_at_unix_ms` in the parent and
+/// only then writes four fixture files, spawns the provisioner binary, and
+/// waits for that binary to read its configuration, hash its own
+/// multi-megabyte executable and open a fresh ledger — all before it admits
+/// anything. The whole spawn is charged against clocks that started in the
+/// parent, so the request lifetimes have to cover process startup rather than
+/// just the provision.
+///
+/// `validate_provision_request` folds `instance_expires_at_unix_ms > now` into
+/// the binding conjunction, so overrunning the default 90 s
+/// `REQUEST_INSTANCE_LIFETIME_MS` surfaces as `binding_mismatch` — a
+/// misconfigured-fixture code — rather than as anything naming host load. A
+/// core pinned under a hundred busy loops has taken 112 s to get from the
+/// parent's stamp to the child's answer.
+///
+/// Unlike the fixture-delay budgets above there is nothing here to derive
+/// from: the span is however long the host takes to start a process. So the
+/// window takes the largest value the protocol admits — `MAX_COMMAND_WINDOW_MS`
+/// is 5 minutes — and the instance lifetime sits below it.
+///
+/// The instance figure also feeds `startup_timeout_ms`, and that is what keeps
+/// the instance expiry the binding clamp on `startup_deadline`. That deadline
+/// is the minimum of the startup budget measured from admission and the
+/// request's own two expiries, so leaving the budget at the 90 s default would
+/// let it — not the instance expiry — bind for any admission inside 150 s,
+/// reinstating exactly the second, shorter clock that
+/// `STARTUP_BUDGET_BEYOND_TEST_WORK_MS` exists to remove.
+const STANDALONE_REQUEST_LIFETIME_MS: u64 = 300_000;
+const STANDALONE_INSTANCE_LIFETIME_MS: u64 = 240_000;
+
 /// Provider round-trip budget for cases whose asserted outcome does not put
 /// the provider timeout under test.
 ///
@@ -3580,13 +3615,29 @@ async fn standalone_binary_accepts_final_frame_and_does_not_disclose_authority_m
     let temporary = tempfile::tempdir().expect("temporary directory");
     let executable = std::path::PathBuf::from(env!("CARGO_BIN_EXE_mcloving-provisioner"));
     let implementation_sha256 = sha256_file(&executable).await.expect("binary digest");
-    let config = configuration(
+    let mut config = configuration(
         &fixture,
         temporary.path().join("binary-state"),
         &implementation_sha256,
         1,
     );
-    let request = provision_request(&config, &implementation_sha256);
+    // One instance-side figure feeds all three ceilings the widened lifetime
+    // has to clear: the policy maximum the binding conjunction checks the
+    // request against, the identity TTL `validate_instance` charges the minted
+    // identity for — the fixture issues that identity at create time and
+    // expires it with the instance, so its TTL is the whole remaining lifetime
+    // when the create lands early — and the startup budget, so that the
+    // instance expiry rather than a shorter admission-anchored clock binds
+    // `startup_deadline`.
+    config.max_instance_lifetime_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    config.instance_identity.max_ttl_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    config.startup_timeout_ms = STANDALONE_INSTANCE_LIFETIME_MS;
+    let mut request = provision_request(&config, &implementation_sha256);
+    request.expires_at_unix_ms =
+        request.requested_at_unix_ms + millis(STANDALONE_REQUEST_LIFETIME_MS);
+    request.instance_expires_at_unix_ms =
+        request.requested_at_unix_ms + millis(STANDALONE_INSTANCE_LIFETIME_MS);
+    let request_built_at = now_ms();
     let config_path = temporary.path().join("config.json");
     let token_path = temporary.path().join("provider-token");
     let public_key_path = temporary.path().join("provider-public-key");
@@ -3648,7 +3699,11 @@ async fn standalone_binary_accepts_final_frame_and_does_not_disclose_authority_m
         parse_json_no_duplicates(&output.stdout).expect("bounded binary output");
     assert_eq!(
         response.get("ok").and_then(serde_json::Value::as_bool),
-        Some(true)
+        Some(true),
+        "code={:?} message={:?} elapsed_ms={}",
+        response.get("code").and_then(serde_json::Value::as_str),
+        response.get("message").and_then(serde_json::Value::as_str),
+        now_ms() - request_built_at,
     );
     assert!(
         !output
