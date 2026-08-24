@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # One-shot database bootstrap for the McLoving deployment lane.
 #
 # Order of operations (each step fail-closed and idempotent):

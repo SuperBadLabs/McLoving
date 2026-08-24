@@ -35,6 +35,29 @@ Notify=healthy
 # refuses such a declaration as well; this is the layer that protects the
 # guard itself.
 UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS PYTHONUSERBASE PYTHONHOME
+# PATH IS PINNED AT THIS BOUNDARY, never inherited from the service manager.
+# Every pre-start helper below is a script, and the KERNEL resolves its
+# interpreter before a single line of guard code runs -- so a manager PATH
+# carrying a group- or world-writable directory ahead of /usr/bin lets
+# another local user supply that interpreter and execute code as the service
+# account on the next start, with the guard's own process already
+# compromised by the time it could object. Round 41 established exactly this
+# reasoning for the children this lane spawns ("resolving by name through an
+# inherited PATH is the same defect one level down") and gave them a fixed
+# trusted PATH; this is that defect at the unit boundary, which that round
+# did not reach.
+#
+# This directive is NOT the last word, and must not be mistaken for it:
+# EnvironmentFile= overrides Environment= REGARDLESS OF DECLARATION ORDER --
+# verified on systemd 255, where a file assignment won both above and below
+# this line. So the shipped helpers additionally name an ABSOLUTE
+# interpreter in their shebangs, and the contract allowlist refuses a
+# declared PATH outright. Three layers, because any one of them alone leaves
+# a door.
+#
+# The value is MCLOVING_TRUSTED_PATH from deploy/bin/mcloving-deploy-lib.sh.
+# deploy/test-deployment.sh fails if the two drift.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # TWO EnvironmentFile= declarations, for two different consumers, and both
 # are required.
 #

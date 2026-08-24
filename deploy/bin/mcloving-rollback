@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Roll the deployed McLoving binaries back to the previous release set.
 #
 # usage: mcloving-rollback [--home DIR] [--no-systemd]

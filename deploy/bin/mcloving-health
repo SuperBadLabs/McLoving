@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Health verification for deployed McLoving services.
 #
 #   mcloving-health controller ENV_FILE   # public API answers /openapi.json

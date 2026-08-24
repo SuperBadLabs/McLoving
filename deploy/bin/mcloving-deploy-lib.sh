@@ -54,6 +54,16 @@ MCLOVING_DEPLOY_CONTRACTS=(
   agent.env
 )
 
+# The home the shipped example contracts spell their absolute paths against.
+# They are TEMPLATES: mcloving-install renders them against the real home
+# and the real XDG state root rather than copying them verbatim, so a
+# deployment whose manager uses a non-default XDG_STATE_HOME does not get a
+# contract pointing at a workspace systemd never created. Named here because
+# the renderer, the smoke suite's template gate, and the examples themselves
+# must agree on one spelling.
+# shellcheck disable=SC2034  # read by mcloving-install and the smoke suite
+MCLOVING_CONTRACT_TEMPLATE_HOME="/home/mcloving"
+
 # A TRUSTED PATH for resolving the interpreters this lane spawns, and the
 # sanitized invocation that runs them.
 #
@@ -91,6 +101,33 @@ MCLOVING_DEPLOY_CONTRACTS=(
 #                utf-8 even when LC_ALL names a locale that does not exist,
 #                which is what keeps os.fsencode/fsdecode byte-exact for the
 #                arbitrary-byte paths this lane deliberately supports.
+# THE SAME VALUE IS PINNED AT THE UNIT BOUNDARY. Round 41 gave this list to
+# the children the lane SPAWNS and left the units themselves inheriting the
+# manager's PATH -- so every shipped helper's `#!/usr/bin/env bash` still
+# resolved its interpreter through that inherited value, before any guard
+# code could run, and a group- or world-writable directory ahead of /usr/bin
+# in the manager's PATH was arbitrary code as the service account on the
+# next start. Every shipped unit now declares
+# `Environment=PATH=<this value>`, and deploy/test-deployment.sh fails if a
+# unit's spelling drifts from this constant.
+#
+# Three layers, because none of them is sufficient alone:
+#
+#   the unit directive   replaces the manager's PATH for everything the unit
+#                        starts, including the commands a helper resolves by
+#                        name before it has sourced a line of this library.
+#   absolute shebangs    the deployed helpers name /bin/bash and
+#                        /usr/bin/python3 literally, because
+#                        EnvironmentFile= OVERRIDES Environment= REGARDLESS
+#                        OF DECLARATION ORDER -- verified on systemd 255,
+#                        where a file assignment won both above and below
+#                        the directive -- so a contract that reached the
+#                        service environment could still move PATH.
+#   the contract rule    require_declared_variables_allowed refuses a
+#                        declared PATH by default-deny, which is the layer
+#                        that stops such a contract from existing, and which
+#                        only works because the parser's exit status is now
+#                        propagated rather than swallowed.
 MCLOVING_TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 MCLOVING_PYTHON_BIN=""
 
@@ -1013,7 +1050,18 @@ deployment_config_root_source() {
 deployment_unit_load_paths() {
   local home_dir="${1%/}" want_class="$2" family="$3" semantics="${4:-merge}"
   local config_base data_base runtime_base home_uid
-  config_base="$(deployment_config_root "${home_dir}")"
+  # THE MANAGER'S BASE where it can be established, for the same reason the
+  # installer uses it: rounds 34/37 made the running manager authoritative
+  # for where units are READ and WRITTEN, and the installer now writes
+  # quadlets under deployment_effective_config_root. The systemd family
+  # below never reaches this value when the manager answers -- its own
+  # UnitPath replaces the whole derivation -- but the QUADLET family has no
+  # such list to ask for, so deriving its base from the caller's
+  # XDG_CONFIG_HOME left the reader looking somewhere the writer had not
+  # written whenever the two environments disagreed. Falls back to the
+  # caller's derivation exactly when the manager cannot say, which is what
+  # deployment_effective_config_root means.
+  config_base="$(deployment_effective_config_root "${home_dir}")"
   data_base="$(deployment_data_root "${home_dir}")"
   runtime_base="$(deployment_runtime_root "${home_dir}")"
   home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || home_uid=""
@@ -2419,6 +2467,8 @@ release_dir_is_complete() {
 # delimiter.
 parse_environment_file() {
   deployment_python - "$1" <<'PARSE'
+import os
+import stat
 import sys
 
 # systemd's EnvironmentFile= grammar, not Bash's. A value is a concatenation of
@@ -2550,25 +2600,123 @@ def parse_value(text, handle):
             return text_out[start:end]
 
 
-with open(path, "r", encoding="utf-8") as handle:
-    while True:
-        raw = handle.readline()
-        if not raw:
-            break
-        # Only the newline is removed. Stripping the line would delete an
-        # escaped trailing space before the parser could see it was escaped,
-        # leaving a dangling backslash that reads as a line continuation.
-        probe = raw.strip(WHITESPACE)
-        if not probe or probe.startswith("#") or probe.startswith(";"):
-            continue
-        line = raw.rstrip("\n")
-        name, separator, value = line.partition("=")
-        if not separator:
-            sys.stderr.write("environment file line is not NAME=VALUE\n")
-            raise SystemExit(1)
-        name = name.strip(WHITESPACE)
-        out.write(name.encode() + b"\0" + parse_value(value, handle).encode() + b"\0")
+# CLASSIFY THE DESCRIPTOR; the pathname is not evidence. Every caller
+# arrives here after a `-f` test, and a contract atomically replaced in
+# between is a different file by the time this opens it: a FIFO left in its
+# place blocks mcloving-env-guard or mcloving-health until something writes
+# to it -- at ExecStartPre, which is the unit's startup -- and a symlink to a
+# newline-free device such as /dev/zero grows one pending line without
+# bound. That is the same pathname-classification race release_id and
+# copy_regular_file already handle for release binaries and digest sources,
+# so it is handled the same way and not a second way: open NONBLOCKING so the
+# open itself cannot hang, require the OPENED descriptor to be regular, and
+# parse THAT descriptor rather than the name. Blocking is restored only after
+# the descriptor has been classified, so the readline loop below is the
+# ordinary one.
+try:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as error:
+    raise SystemExit(f"cannot open environment file {path}: {error}")
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(f"environment file {path} is not a regular file")
+    os.set_blocking(descriptor, True)
+    with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
+        while True:
+            raw = handle.readline()
+            if not raw:
+                break
+            # Only the newline is removed. Stripping the line would delete an
+            # escaped trailing space before the parser could see it was
+            # escaped, leaving a dangling backslash that reads as a line
+            # continuation.
+            probe = raw.strip(WHITESPACE)
+            if not probe or probe.startswith("#") or probe.startswith(";"):
+                continue
+            line = raw.rstrip("\n")
+            name, separator, value = line.partition("=")
+            if not separator:
+                sys.stderr.write("environment file line is not NAME=VALUE\n")
+                raise SystemExit(1)
+            name = name.strip(WHITESPACE)
+            out.write(
+                name.encode() + b"\0" + parse_value(value, handle).encode() + b"\0"
+            )
+finally:
+    os.close(descriptor)
 PARSE
+}
+
+# render_contract_template SOURCE DESTINATION HOME STATE_ROOT -- install one
+# shipped example contract as a placeholder, with its absolute paths rendered
+# against the deployment this install is actually creating.
+#
+# THE EXAMPLES ARE TEMPLATES, and copying them verbatim shipped a contract
+# that was wrong in a way the operator could not see. The units declare
+# StateDirectory=, and systemd creates those leaves under the SERVICE
+# MANAGER'S XDG_STATE_HOME -- so with a non-default absolute value systemd
+# makes <custom>/mcloving-agent/workspace while the copied contract still
+# named ~/.local/state/mcloving-agent/workspace, and the guard refused
+# startup for a workspace nothing had ever been asked to create. Round 32
+# gave the lane deployment_state_root and used it to VALIDATE declared
+# roots; the runtime paths in the contracts stayed hard-coded, which is the
+# half that was missing.
+#
+# Refusing a custom XDG_STATE_HOME instead would have been the other
+# sanctioned remedy, and is the wrong one here: this lane deliberately
+# SUPPORTS custom XDG bases (the smoke suite installs under one and asserts
+# the derived trees), so refusing would retract a feature to fix a template.
+#
+# BYTES, not text, and never sed: a home directory may contain any byte
+# including the delimiters and metacharacters a substitution command would
+# read as syntax, and this lane carries arbitrary-byte paths on purpose. The
+# source is read through a CLASSIFIED DESCRIPTOR for the same reason every
+# other contract read is, and the destination is created O_EXCL at 0600 so a
+# file appearing between the caller's check and this write is refused rather
+# than clobbered.
+render_contract_template() {
+  deployment_python - "$1" "$2" "$3" "$4" "${MCLOVING_CONTRACT_TEMPLATE_HOME}" <<'RENDER'
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1], sys.argv[2]
+home, state_root, template_home = (os.fsencode(value) for value in sys.argv[3:6])
+template_state = template_home + b"/.local/state"
+
+try:
+    descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as error:
+    raise SystemExit(f"cannot open contract template {source}: {error}")
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(f"contract template {source} is not a regular file")
+    os.set_blocking(descriptor, True)
+    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+        body = handle.read()
+finally:
+    os.close(descriptor)
+
+# The state prefix FIRST, because it begins with the home prefix and
+# rewriting the home first would leave the state paths under the real home
+# rather than under the manager's state root -- which is the whole defect.
+body = body.replace(template_state, state_root.rstrip(b"/"))
+body = body.replace(template_home, home.rstrip(b"/"))
+if template_home in body:
+    raise SystemExit(
+        f"contract template {source} still names {os.fsdecode(template_home)} "
+        "after rendering"
+    )
+
+try:
+    out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except OSError as error:
+    raise SystemExit(f"cannot create contract {destination}: {error}")
+try:
+    os.write(out, body)
+finally:
+    os.close(out)
+RENDER
 }
 
 # database_url_role URL -> the role a PostgreSQL URL authenticates as.
@@ -3041,13 +3189,41 @@ require_declared_variables_allowed() {
   for allowed_name in "${MCLOVING_CONTRACT_FOREIGN_VARIABLES[@]}"; do
     allowed["${allowed_name}"]=1
   done
+  local parsed parse_status
   for contract_file in "$@"; do
     [[ -f "${contract_file}" ]] || continue
+    # THE PARSER'S EXIT STATUS IS PART OF THE VERDICT, and discarding it
+    # defeated the whole rule. systemd does NOT stop at a line without "=";
+    # it complains and keeps loading the assignments that follow. This
+    # parser does stop there. Reading through a process substitution throws
+    # the status away, and the `|| true` that used to stand here then turned
+    # "this contract could not be read" into "this contract declares nothing
+    # objectionable" -- so a file of valid assignments, then a malformed
+    # line, then PATH=/srv/writable was reported CLEAN by the default-deny
+    # rule that exists to refuse exactly that PATH, because the rule never
+    # reached it. Combined with an interpreter resolved by name, that is a
+    # local escalation and not a cosmetic gap.
+    #
+    # A temporary file rather than a pipe because values may contain NUL
+    # separators, which command substitution strips. load_environment_file
+    # already applies this discipline in the guard, with the same reasoning
+    # written above it; this is that lesson reaching the validator, which is
+    # the side that runs BEFORE any service is stopped.
+    parsed="$(mktemp)" \
+      || deploy_fail "cannot create a temporary file to read ${contract_file}"
+    parse_status=0
+    parse_environment_file "${contract_file}" > "${parsed}" 2>/dev/null \
+      || parse_status=$?
+    if [[ "${parse_status}" -ne 0 ]]; then
+      rm -f "${parsed}"
+      deploy_fail "contract ${contract_file} could not be parsed, so this deployment cannot say which variables it declares -- refusing the transition rather than reading an unreadable contract as an empty one. systemd is deliberately more forgiving than this parser: it skips a line it cannot read and loads every assignment after it, so a contract that stops this parser can still put variables into the service environment that nothing has judged. A line without '=' is the usual cause; repair the file and retry"
+    fi
     while IFS= read -r -d '' key && IFS= read -r -d '' value; do
       [[ "${key}" != MCLOVING_* ]] || continue
       [[ -z "${allowed["${key}"]:-}" ]] || continue
       offending+="${key} in ${contract_file} "
-    done < <(parse_environment_file "${contract_file}" 2>/dev/null || true)
+    done < "${parsed}"
+    rm -f "${parsed}"
   done
   if [[ -n "${offending}" ]]; then
     deploy_fail "contract(s) declare variable(s) this deployment does not recognise: ${offending% }-- a contract may declare the MCLOVING_ namespace, which no shell, loader, or language runtime consults, plus the few foreign names the shipped contracts genuinely need; anything else is refused BY DEFAULT rather than matched against a list of known-dangerous names, because an interpreter or loader hook nobody has enumerated yet (BASH_ENV, LD_PRELOAD, PYTHONUSERBASE and their successors) executes code as the service account before its first instruction. Remove the declaration, or add it to the shipped example contract if the deployment genuinely needs it"
@@ -3072,6 +3248,16 @@ require_unit_environment_allowed() {
     # systemd allows several assignments on one Environment= line.
     for entry in ${value}; do
       [[ "${entry}" == *=* ]] || continue
+      # THE ONE PATH THIS DEPLOYMENT SETS, matched by VALUE and not by name.
+      # Every shipped unit declares Environment=PATH=<MCLOVING_TRUSTED_PATH>
+      # so that a pre-start helper's interpreter and the commands it resolves
+      # by name come from a trusted list rather than from whatever the
+      # service manager happened to inherit. Allowing the NAME would reopen
+      # precisely the hole that closes -- any other value is a PATH somebody
+      # else chose, and a drop-in repointing it at a writable directory is
+      # the attack -- so the pinned spelling is what passes here and every
+      # other PATH falls through to the default-deny refusal below.
+      [[ "${entry}" != "PATH=${MCLOVING_TRUSTED_PATH}" ]] || continue
       [[ "${entry%%=*}" != MCLOVING_* ]] || continue
       [[ -z "${allowed["${entry%%=*}"]:-}" ]] || continue
       offending+="${entry%%=*} "

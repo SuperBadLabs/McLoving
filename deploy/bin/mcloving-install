@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Install the McLoving single-host deployment lane for a rootless service
 # user. Digest verification is mandatory and fail-closed: nothing is copied
 # before every binary's sha256 matches the release manifest or an
@@ -298,14 +298,26 @@ for quadlet in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
   install -T -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
 done
 
+# RENDERED, not copied. The examples spell their absolute paths against an
+# example home, and two of those roots are not the operator's to guess: the
+# home this install was pointed at, and the XDG state root the SERVICE
+# MANAGER creates StateDirectory= leaves under. A verbatim copy under a
+# non-default absolute XDG_STATE_HOME named a workspace systemd was never
+# asked to create, and the guard then refused startup for its absence --
+# with nothing anywhere saying why. deployment_state_root is the same
+# derivation the declared-root validation already uses, so the contract and
+# the tree systemd builds come from one answer rather than two.
+#
+# render_contract_template creates the destination O_EXCL, which also
+# carries the reason `install -T` was spelled that way here: without it GNU
+# install copies INTO an existing directory at that path, and a directory
+# named agent.env would be reported as an installed placeholder while the
+# unit's EnvironmentFile= still names a directory and startup must fail.
+state_root="$(deployment_state_root "${home_dir}")"
 for contract in postgres db-init controller agent; do
   if [[ ! -f "${config_root}/${contract}.env" ]]; then
-    # -T: without it, GNU install copies the source *into* an existing
-    # directory at that path, so a directory named agent.env would be reported
-    # as an installed placeholder while the unit's EnvironmentFile= still
-    # names a directory and startup must fail.
-    install -T -m 0600 "${deploy_root}/env/${contract}.env.example" \
-      "${config_root}/${contract}.env"
+    render_contract_template "${deploy_root}/env/${contract}.env.example" \
+      "${config_root}/${contract}.env" "${home_dir}" "${state_root}"
     echo "installed placeholder contract ${config_root}/${contract}.env (edit before starting)"
   fi
 done

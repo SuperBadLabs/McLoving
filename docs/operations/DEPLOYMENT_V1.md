@@ -34,11 +34,22 @@ Durable state:
   (`StateDirectory=mcloving-agent mcloving-agent/workspace`; the agent
   refuses work if the workspace root does not exist).
 
+Both state paths are shown at their default location. systemd creates
+`StateDirectory=` leaves under the service manager's `XDG_STATE_HOME`, so a
+manager started with a custom absolute value puts them there instead; the
+installer renders the contracts against that same root.
+
 ## Environment contracts
 
 Each service reads exactly one environment file under `~/.config/mcloving/`
 (mode 0600). Templates live in `deploy/env/*.env.example`; the installer
-copies them into place once and never overwrites them. Every unit runs
+RENDERS them into place once and never overwrites them. Rendering resolves
+the absolute paths against the deployment being created: the example home
+becomes the installed home, and the runtime-state paths become the XDG state
+root the service manager creates `StateDirectory=` leaves under. That root is
+`~/.local/state` only while `XDG_STATE_HOME` is unset or relative -- with a
+custom absolute value, systemd builds the state tree there, and a contract
+copied verbatim would name a workspace that was never created. Every unit runs
 `mcloving-env-guard <service> <file>` as `ExecStartPre` and **fails closed**:
 a missing file, a missing or empty variable, or a value still carrying a
 `__SET_ME…__` placeholder stops the unit before the binary starts. The

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Fail-closed environment-contract guard, run as ExecStartPre of every
 # McLoving unit. A unit must refuse to start half-configured: any missing,
 # empty, or placeholder (__SET_ME…__) variable aborts startup, as do

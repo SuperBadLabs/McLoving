@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Upgrade the deployed McLoving binaries to a new verified release.
 #
 # usage: mcloving-upgrade --release-dir DIR (--manifest FILE | --checksums FILE)
