@@ -2319,6 +2319,68 @@ grep -q "dropin-shared (mode 777)" "${workdir}/logs/dropin-root.log" || {
   exit 1
 }
 chmod 0755 "${dropin_root_home}/dropin-shared"
+# A drop-in-declared EnvironmentFile IS a contract wherever it points:
+# existing at 0644 it must be refused under the contract file rule, and
+# admitted at owner-only.
+printf 'MCLOVING_EXTRA=1\n' > "${dropin_root_home}/dropin-shared/controller-extra.env"
+chmod 0644 "${dropin_root_home}/dropin-shared/controller-extra.env"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/dropin-contract.log" 2>&1; then
+  echo "upgrade proceeded over a group-readable drop-in-declared contract" >&2
+  exit 1
+fi
+grep -q "controller-extra.env (mode 644, expected owner-only)" \
+  "${workdir}/logs/dropin-contract.log" || {
+  echo "the drop-in-declared contract was not held to the contract rule:" >&2
+  cat "${workdir}/logs/dropin-contract.log" >&2
+  exit 1
+}
+chmod 0600 "${dropin_root_home}/dropin-shared/controller-extra.env"
+# The drop-in SOURCES are execution vectors: a writable .d directory or
+# drop-in file must refuse the transition before the restart executes
+# whatever was injected -- and the top-level unit file is as much a vector
+# as the drop-ins, newly covered by the same rule.
+dropin_d_dir="${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d"
+chmod 0777 "${dropin_d_dir}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/dropin-dir.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable drop-in directory" >&2
+  exit 1
+fi
+grep -q "service.d (mode 777)" "${workdir}/logs/dropin-dir.log" || {
+  echo "the writable .d directory refusal was not named:" >&2
+  cat "${workdir}/logs/dropin-dir.log" >&2
+  exit 1
+}
+chmod 0755 "${dropin_d_dir}"
+chmod 0666 "${dropin_d_dir}/override.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/dropin-file.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable drop-in file" >&2
+  exit 1
+fi
+grep -q "override.conf (mode 666)" "${workdir}/logs/dropin-file.log" || {
+  echo "the writable drop-in file refusal was not named:" >&2
+  cat "${workdir}/logs/dropin-file.log" >&2
+  exit 1
+}
+chmod 0644 "${dropin_d_dir}/override.conf"
+chmod 0666 "${dropin_root_home}/.config/systemd/user/mcloving-controller.service"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/unit-file-mode.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable unit file" >&2
+  exit 1
+fi
+grep -q "mcloving-controller.service (mode 666)" "${workdir}/logs/unit-file-mode.log" || {
+  echo "the writable unit-file refusal was not named:" >&2
+  cat "${workdir}/logs/unit-file-mode.log" >&2
+  exit 1
+}
+chmod 0644 "${dropin_root_home}/.config/systemd/user/mcloving-controller.service"
 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null
@@ -3240,7 +3302,12 @@ for raw in open(trace_path, encoding="utf-8", errors="replace"):
     if not tokens:
         continue
     if tokens[0] == "require_secure_ancestors":
-        roots = [token for token in tokens[2:] if token.startswith(prefix)]
+        # The install now performs its own walk AND the transition-grade
+        # revalidation of the installed tree: coverage is the UNION of
+        # every validated root set, not whichever call traced last.
+        if roots is None:
+            roots = []
+        roots.extend(token for token in tokens[2:] if token.startswith(prefix))
         continue
     if tokens[0] not in commands:
         continue

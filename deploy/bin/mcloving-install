@@ -130,9 +130,28 @@ done < <(deployment_unit_declared_roots "${home_dir}" \
   "${deploy_root}"/systemd/*.service \
   "${deploy_root}"/podman/*.container \
   "${deploy_root}"/podman/*.volume | sort -u)
+# The staged units' declared EnvironmentFiles are contracts wherever they
+# point, and enter the same walks the four standard destinations do.
+declared_contracts=()
+while IFS= read -r encoded_declared_contract; do
+  [[ -n "${encoded_declared_contract}" ]] || continue
+  decode_path_item_into decoded_declared_contract "${encoded_declared_contract}"
+  declared_contracts+=("${decoded_declared_contract}")
+done < <(deployment_unit_declared_contracts "${home_dir}" \
+  "${deploy_root}"/systemd/*.service \
+  "${deploy_root}"/podman/*.container \
+  "${deploy_root}"/podman/*.volume | sort -u)
 require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
-  "${contract_destinations[@]}" "${unit_declared_roots[@]}"
-require_secure_files "${home_dir}" "${contract_destinations[@]}"
+  "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
+  "${declared_contracts[@]}"
+require_secure_files "${home_dir}" "${contract_destinations[@]}" \
+  "${declared_contracts[@]}"
+# A reinstall over an existing deployment inherits whatever unit drop-ins
+# the operator has placed there since: the full transition-grade
+# revalidation covers the INSTALLED tree -- sources, drop-in directories,
+# and everything they declare -- before this install mutates anything. On
+# a fresh home every check inside skips what does not exist.
+require_deployment_integrity "${home_dir}"
 
 # Set before the hierarchy is created, not after. `mkdir -p` builds every
 # missing ancestor -- .local, .local/libexec, .config, .config/systemd,

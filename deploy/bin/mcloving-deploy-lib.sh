@@ -214,6 +214,40 @@ deployment_contract_path_variables() {
   esac
 }
 
+# require_integrity_files HOME FILE...
+#
+# The trust-input file rule for the install and transition walks: readable,
+# no group/other WRITE bit, owned by root or the home's owner. Unit files
+# and drop-ins are execution vectors -- ExecStart lives in them -- but are
+# legitimately world-READABLE, unlike contracts; a writable or foreign one
+# lets another local user inject directives the next restart executes.
+require_integrity_files() {
+  local home_dir="${1%/}" home_owner file mode_owner mode owner offending
+  shift
+  home_owner="$(stat -Lc '%u' "${home_dir}")" \
+    || deploy_fail "cannot stat deployment home ${home_dir}"
+  offending=""
+  for file in "$@"; do
+    [[ -e "${file}" ]] || continue
+    mode_owner="$(stat -Lc '%a %u' "${file}")" \
+      || deploy_fail "cannot stat unit source ${file}"
+    mode="${mode_owner%% *}"
+    owner="${mode_owner##* }"
+    if (( (8#${mode} & 8#022) != 0 )); then
+      offending+="${file} (mode ${mode}) "
+    fi
+    if [[ "${owner}" != "0" && "${owner}" != "${home_owner}" ]]; then
+      offending+="${file} (owned by uid ${owner}, expected uid ${home_owner} or root) "
+    fi
+    if [[ ! -r "${file}" ]]; then
+      offending+="${file} (unreadable by uid ${EUID}) "
+    fi
+  done
+  if [[ -n "${offending}" ]]; then
+    deploy_fail "unit or drop-in source(s) group- or world-writable, foreign-owned, or unreadable: ${offending% }-- another local user could inject directives the next service start executes; run chmod go-w (or restore ownership) on them and retry"
+  fi
+}
+
 # deployment_config_root HOME / deployment_state_root HOME /
 # deployment_cache_root HOME -> the XDG base directories as the user
 # manager resolves them, one per line on stdout.
@@ -307,6 +341,50 @@ deployment_cache_root() {
   fi
 }
 
+# deployment_unit_source_files UNIT_FILE... -> encoded items: every file
+# the unit parse READS -- the unit files themselves plus <unit>.d/*.conf
+# drop-ins. One enumeration for the parser and for source validation, so
+# what is parsed and what is judged cannot diverge: everything the parser
+# reads is an execution vector (ExecStart lives in these files).
+deployment_unit_source_files() {
+  local unit_file dropin
+  for unit_file in "$@"; do
+    [[ -f "${unit_file}" ]] || continue
+    encode_path_item "${unit_file}"
+    for dropin in "${unit_file}.d"/*.conf; do
+      [[ -f "${dropin}" ]] && encode_path_item "${dropin}"
+    done
+  done
+  return 0
+}
+
+# deployment_unit_declared_contracts HOME UNIT_FILE... -> encoded items:
+# every EnvironmentFile= value the units and their drop-ins declare, with
+# the optional "-" prefix stripped and %h expanded, WHEREVER it points --
+# an EnvironmentFile IS a contract, and one declared outside the home is
+# validated under the same rules as any contract, with its chain walked to
+# "/" per the outside-home stop rule. Non-absolute values are dropped here
+# because systemd itself refuses them.
+deployment_unit_declared_contracts() {
+  local home_dir="${1%/}" line value path encoded_source decoded_source
+  local source_files=()
+  shift
+  while IFS= read -r encoded_source; do
+    [[ -n "${encoded_source}" ]] || continue
+    decode_path_item_into decoded_source "${encoded_source}"
+    source_files+=("${decoded_source}")
+  done < <(deployment_unit_source_files "$@")
+  [[ ${#source_files[@]} -gt 0 ]] || return 0
+  while IFS= read -r line; do
+    value="${line#EnvironmentFile=}"
+    path="${value#-}"
+    path="${path//%h/${home_dir}}"
+    case "${path}" in
+      /*) encode_path_item "${path}" ;;
+    esac
+  done < <(grep -hE '^EnvironmentFile=' "${source_files[@]}" | sed -e 's/[[:space:]]*$//')
+}
+
 # deployment_unit_declared_roots HOME UNIT_FILE... -> the home-relative
 # directories the DEPLOYMENT'S OWN unit declarations cause to exist, one per
 # line. The installer's managed_roots covers what the installer creates, but
@@ -327,17 +405,18 @@ deployment_unit_declared_roots() {
   state_base="$(deployment_state_root "${home_dir}")"
   cache_base="$(deployment_cache_root "${home_dir}")"
   # systemd and Quadlet merge <unit>.d/*.conf drop-ins into the unit, so a
-  # drop-in adding EnvironmentFile= declares a path the transition is about
+  # drop-in adding a path directive declares a path the transition is about
   # to trust -- the round-12 lesson (drop-in descendants count) applied to
   # this parser. Validation is additive, so the union of path-bearing
   # directives across unit and drop-ins suffices; no precedence resolution.
-  for unit_file in "$@"; do
-    [[ -f "${unit_file}" ]] || continue
-    source_files+=("${unit_file}")
-    for dropin in "${unit_file}.d"/*.conf; do
-      [[ -f "${dropin}" ]] && source_files+=("${dropin}")
-    done
-  done
+  # The file list comes from deployment_unit_source_files, the same
+  # enumeration source validation judges.
+  local encoded_source decoded_source
+  while IFS= read -r encoded_source; do
+    [[ -n "${encoded_source}" ]] || continue
+    decode_path_item_into decoded_source "${encoded_source}"
+    source_files+=("${decoded_source}")
+  done < <(deployment_unit_source_files "$@")
   [[ ${#source_files[@]} -gt 0 ]] || return 0
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -364,18 +443,25 @@ deployment_unit_declared_roots() {
       RuntimeDirectory)
         :
         ;;
-      WorkingDirectory | EnvironmentFile)
-        path="${value#-}"
-        path="${path//%h/${home_dir}}"
+      WorkingDirectory)
+        # Declared targets are validated WHEREVER they point: an absolute
+        # path outside the home is exactly the one another local user may
+        # control, and the outside-home chain rule (walk to "/") already
+        # knows how to judge it. EnvironmentFile= is a CONTRACT and is
+        # enumerated by deployment_unit_declared_contracts instead.
+        path="${value//%h/${home_dir}}"
         case "${path}" in
-          "${home_dir}"/*) encode_path_item "${path}" ;;
+          /*) encode_path_item "${path}" ;;
         esac
+        ;;
+      EnvironmentFile)
+        :
         ;;
       Volume)
         path="${value%%:*}"
         path="${path//%h/${home_dir}}"
         case "${path}" in
-          "${home_dir}"/*) encode_path_item "${path}" ;;
+          /*) encode_path_item "${path}" ;;
         esac
         ;;
     esac
@@ -1219,7 +1305,8 @@ require_deployment_integrity() {
     "${quadlet_root}"/mcloving-*.container "${quadlet_root}"/mcloving-*.volume; do
     [[ -f "${unit_file}" ]] && unit_files+=("${unit_file}")
   done
-  local unit_declared_roots=() encoded_root
+  local unit_declared_roots=() declared_contracts=() unit_source_files=()
+  local dropin_dirs=() encoded_root encoded_item decoded_item
   if [[ ${#unit_files[@]} -gt 0 ]]; then
     local decoded_declared_root
     while IFS= read -r encoded_root; do
@@ -1227,10 +1314,32 @@ require_deployment_integrity() {
       decode_path_item_into decoded_declared_root "${encoded_root}"
       unit_declared_roots+=("${decoded_declared_root}")
     done < <(deployment_unit_declared_roots "${home_dir}" "${unit_files[@]}" | sort -u)
+    # EVERYTHING the parser reads (sources) and everything it declares
+    # (targets) enters validation -- no filtered category. Sources: the
+    # unit files themselves and their drop-ins, judged by the integrity
+    # file rule, with their .d directories joining the chain roots.
+    # Declared EnvironmentFiles are contracts and get the contract file
+    # rule, wherever they point.
+    while IFS= read -r encoded_item; do
+      [[ -n "${encoded_item}" ]] || continue
+      decode_path_item_into decoded_item "${encoded_item}"
+      unit_source_files+=("${decoded_item}")
+    done < <(deployment_unit_source_files "${unit_files[@]}")
+    while IFS= read -r encoded_item; do
+      [[ -n "${encoded_item}" ]] || continue
+      decode_path_item_into decoded_item "${encoded_item}"
+      declared_contracts+=("${decoded_item}")
+    done < <(deployment_unit_declared_contracts "${home_dir}" "${unit_files[@]}" | sort -u)
+    for unit_file in "${unit_files[@]}"; do
+      [[ -d "${unit_file}.d" ]] && dropin_dirs+=("${unit_file}.d")
+    done
   fi
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
-    "${contract_destinations[@]}" "${unit_declared_roots[@]}"
-  require_secure_files "${home_dir}" "${contract_destinations[@]}"
+    "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
+    "${declared_contracts[@]}" "${dropin_dirs[@]}"
+  require_secure_files "${home_dir}" "${contract_destinations[@]}" \
+    "${declared_contracts[@]}"
+  require_integrity_files "${home_dir}" "${unit_source_files[@]}"
 }
 
 # acquire_transition_lock LIBEXEC_ROOT
