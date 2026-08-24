@@ -449,54 +449,101 @@ deployment_runtime_root() {
   printf '/run/user/%s\n' "${home_uid}"
 }
 
-# deployment_xdg_search_entries HOME VALUE DEFAULT_LIST -> the absolute
-# directories a colon-separated XDG SEARCH LIST contributes, one per line.
+# deployment_xdg_search_entries HOME VALUE DEFAULT_LIST SEMANTICS -> the
+# absolute directories a colon-separated XDG SEARCH LIST contributes, one
+# per line.
 #
-# XDG_CONFIG_DIRS and XDG_DATA_DIRS are lists rather than single bases, but
-# they get the SAME applicability rule the single bases get, applied per
-# entry: an inherited value speaks for this deployment when the target home
-# is the invoking user's own (the environment describes that account's
-# manager) or when the entry lies inside the target home. Round 30 ignored
-# these two variables outright on the grounds that "an env var should not
-# steer the validator", and that argument was never sound -- XDG_CONFIG_HOME
-# steers it too, under exactly this rule. The applicability gate is the
-# principle; a blanket ignore was not.
+# SEMANTICS is "selection" (what systemd ACTUALLY searches) or "merge" (that
+# plus the spec defaults). The distinction is the round-32 distinction one
+# level up, and getting it backwards in either direction is a real defect:
 #
-# The spec DEFAULTS are always included, in union with whatever the
-# variable contributes, rather than being replaced by it. Where the two
-# disagree the union validates a directory systemd would not read, which is
-# over-validation -- the safe direction -- while replacement risks the one
-# outcome that matters: a directory systemd DOES read and this never sees.
-# Relative entries are dropped, exactly as the XDG spec and systemd's own
-# lookup do.
+#   selection -- a nonempty variable REPLACES the default list, exactly as
+#     the XDG base directory spec says and as systemd implements. Verified
+#     on systemd 255: with XDG_CONFIG_DIRS=/tmp/A,
+#     `systemd-analyze --user unit-paths` drops /etc/xdg/systemd/user
+#     entirely and puts /tmp/A/systemd/user in its position. A MAIN UNIT
+#     FILE is selected by first match, so a union here would resolve to a
+#     file systemd would never load -- worse than missing one, because the
+#     lane would then report and validate the wrong "effective" unit and
+#     miss the real shadow.
+#
+#   merge -- union with the defaults. DROP-INS are merged rather than
+#     selected, so validating a directory systemd would not read costs
+#     nothing while missing one it does read is the only outcome that
+#     matters. This is the round-31 argument, which stands unchanged for
+#     the merge use and was only ever wrong when applied to selection.
+#
+# The applicability rule is the same in both modes and unchanged: an
+# inherited entry speaks for this deployment when the target home is the
+# invoking user's own or when the entry lies inside the target home.
+# Relative entries are dropped, as the spec and systemd's own lookup do.
+# When the variable is set but NO entry applies -- an inherited value
+# describing some other account while validating a scratch home -- the
+# defaults stand, because the manager for that home would use its own
+# environment and the spec default is the only estimate available here.
 deployment_xdg_search_entries() {
-  local home_dir="${1%/}" value="$2" default_list="$3"
-  local entry rest emitted
+  local home_dir="${1%/}" value="$2" default_list="$3" semantics="${4:-merge}"
+  local set_state="${5:-unset}"
+  local entry rest
+  local -a adopted=()
   local -A search_seen=()
-  for rest in "${default_list}" "${value}"; do
-    while [[ -n "${rest}" ]]; do
-      entry="${rest%%:*}"
-      if [[ "${entry}" == "${rest}" ]]; then
-        rest=""
-      else
-        rest="${rest#*:}"
-      fi
-      [[ "${entry}" == /* ]] || continue
-      entry="${entry%/}"
-      [[ -n "${entry}" ]] || continue
-      # The default list is unconditional; an entry that came from the
-      # environment must pass the applicability gate.
-      if [[ ":${default_list}:" != *":${entry}:"* ]]; then
-        deployment_xdg_value_applies "${home_dir}" "${entry}" || continue
-      fi
+  rest="${value}"
+  while [[ -n "${rest}" ]]; do
+    entry="${rest%%:*}"
+    if [[ "${entry}" == "${rest}" ]]; then
+      rest=""
+    else
+      rest="${rest#*:}"
+    fi
+    [[ "${entry}" == /* ]] || continue
+    entry="${entry%/}"
+    [[ -n "${entry}" ]] || continue
+    deployment_xdg_value_applies "${home_dir}" "${entry}" || continue
+    [[ -z "${search_seen["${entry}"]:-}" ]] || continue
+    search_seen["${entry}"]=1
+    adopted+=("${entry}")
+  done
+  local -a defaults=()
+  rest="${default_list}"
+  while [[ -n "${rest}" ]]; do
+    entry="${rest%%:*}"
+    if [[ "${entry}" == "${rest}" ]]; then
+      rest=""
+    else
+      rest="${rest#*:}"
+    fi
+    [[ "${entry}" == /* ]] || continue
+    entry="${entry%/}"
+    [[ -n "${entry}" ]] || continue
+    defaults+=("${entry}")
+  done
+  if [[ ${#adopted[@]} -eq 0 ]]; then
+    # SET-BUT-EMPTY is an EMPTY LIST to systemd, not "use the default" --
+    # verified: XDG_CONFIG_DIRS= drops /etc/xdg/systemd/user from
+    # `systemd-analyze --user unit-paths` entirely, where unsetting it keeps
+    # the entry. The XDG spec says empty means default; systemd does not,
+    # and systemd is what loads the units. This only speaks for the target
+    # home when the environment describes that home's manager: an inherited
+    # empty value seen while validating somebody else's home says nothing,
+    # so the defaults stand there.
+    if [[ "${set_state}" == "set" && -z "${value}" ]] \
+      && deployment_xdg_value_applies "${home_dir}" "${home_dir}"; then
+      return 0
+    fi
+    printf '%s\n' "${defaults[@]}"
+    return 0
+  fi
+  printf '%s\n' "${adopted[@]}"
+  if [[ "${semantics}" == "merge" ]]; then
+    for entry in "${defaults[@]}"; do
       [[ -z "${search_seen["${entry}"]:-}" ]] || continue
       search_seen["${entry}"]=1
-      emitted="${entry}"
-      printf '%s\n' "${emitted}"
+      printf '%s\n' "${entry}"
     done
-  done
+  fi
   return 0
 }
+
 
 # The Quadlet source extensions this lane could ship, and the unit each
 # generates. Quadlet does not install its sources as units: it GENERATES a
@@ -566,35 +613,82 @@ deployment_unit_names() {
   return 0
 }
 
-# deployment_unit_load_paths HOME CLASS FAMILY -> encoded items: the base
-# directories the manager searches, IN SYSTEMD'S OWN PRECEDENCE ORDER,
-# whether or not they exist.
+# require_absolute_xdg_search_lists HOME -- refuse a relative entry in
+# XDG_CONFIG_DIRS or XDG_DATA_DIRS, by name, in the MAIN shell.
+#
+# systemd does not drop a relative XDG search entry: it makes it absolute
+# against the MANAGER'S WORKING DIRECTORY. Verified by running
+# `systemd-analyze --user unit-paths` with XDG_CONFIG_DIRS=relative from
+# two directories, which reported /tmp/relative/systemd/user and
+# /usr/relative/systemd/user respectively.
+#
+# That is ambient-context substitution, and this deployment cannot resolve
+# it: the validator does not run in the manager's working directory and has
+# no way to learn it. Mirroring the behaviour with THIS process's cwd would
+# resolve a different directory than systemd will, which for MAIN UNIT
+# SELECTION means naming the wrong effective file -- the exact defect this
+# round is closing, reintroduced from the other end. So it is refused by
+# name, consistent with the guard's refusal of relative class paths, and
+# the repair is to spell the entry absolutely.
+require_absolute_xdg_search_lists() {
+  local home_dir="${1%/}" list_name list_value entry rest offending=""
+  for list_name in XDG_CONFIG_DIRS XDG_DATA_DIRS; do
+    [[ -v "${list_name}" ]] || continue
+    list_value="${!list_name}"
+    rest="${list_value}"
+    while [[ -n "${rest}" ]]; do
+      entry="${rest%%:*}"
+      if [[ "${entry}" == "${rest}" ]]; then
+        rest=""
+      else
+        rest="${rest#*:}"
+      fi
+      [[ -n "${entry}" ]] || continue
+      [[ "${entry}" != /* ]] || continue
+      offending+="${list_name} entry ${entry} "
+    done
+  done
+  if [[ -n "${offending}" ]]; then
+    deploy_fail "unit search list(s) carry a relative entry: ${offending% }-- systemd resolves a relative XDG search entry against the service manager's working directory, which this deployment cannot observe, so the unit file it would actually load cannot be determined; spell the entry as an absolute path and retry"
+  fi
+}
+
+# deployment_unit_load_paths HOME CLASS FAMILY [SEMANTICS] -> encoded
+# items: the base directories the manager searches, IN SYSTEMD'S OWN
+# PRECEDENCE ORDER, whether or not they exist.
 #
 # CLASS is "user" (writable by the service account), "system" (root-owned),
-# or "all". FAMILY is "systemd" (where .service units and their drop-ins
-# live) or "quadlet" (where .container/.volume sources live).
+# or "all". FAMILY is "systemd" or "quadlet". SEMANTICS is "selection" --
+# exactly what systemd searches -- or "merge" (the default), which is that
+# list plus the XDG spec defaults a nonempty variable replaced.
 #
-# ORDER IS LOAD-BEARING now, not decorative. Drop-in validation is additive
-# and does not care, but a MAIN unit file is resolved by FIRST MATCH: the
-# highest-priority path holding the name wins and systemd runs that file
-# alone. deployment_effective_unit_file below walks this list in order, so
-# the order here is the difference between validating the file systemd runs
-# and validating a file it ignores. It was transcribed from
-# `systemd-analyze --user unit-paths` on systemd 255 and the suite asserts
-# the two still agree.
+# WHY TWO LISTS. A drop-in is MERGED, so a union costs only the validation
+# of a file nothing reads. A MAIN UNIT FILE is SELECTED by first match, so
+# a union is actively wrong: it can name a file systemd would never load,
+# which is worse than missing one because the lane would then report and
+# validate the wrong "effective" unit and miss the real shadow. The merge
+# list is a strict superset of the selection list, so nothing that was
+# validated before stops being validated.
 #
-# The user-writable entries are the ones this deployment can neither own
-# nor prevent writes to: $XDG_RUNTIME_DIR/systemd/user and
-# $XDG_DATA_HOME/systemd/user are writable by the service account and are
-# not managed roots. Generator and transient outputs are included for the
-# same reason: they are ordinary directories under the runtime tree, and
-# user.control is exactly where `systemctl --user edit` writes.
+# THE MODEL WAS READ OFF THE MANAGER, not the manual, and reproduces
+# `systemd-analyze --user unit-paths` on systemd 255 exactly under the
+# default environment, under XDG_CONFIG_DIRS overrides, and under
+# XDG_DATA_DIRS overrides:
 #
-# XDG_CONFIG_DIRS and XDG_DATA_DIRS contribute through
-# deployment_xdg_search_entries, which applies the same applicability rule
-# the single bases get and keeps the spec defaults in union.
+#   * XDG_CONFIG_DIRS is pure replacement. Its entries occupy one slot
+#     between the config home and /etc/systemd/user, and a nonempty value
+#     removes /etc/xdg/systemd/user entirely.
+#   * XDG_DATA_DIRS is replacement TOO, but its spec defaults happen to be
+#     re-added by systemd's own hardcoded vendor tail, so membership looks
+#     unchanged while the ORDER moves. With XDG_DATA_DIRS=/tmp/D the
+#     manager reports /tmp/D, then /usr/local/lib, /usr/local/share,
+#     /usr/lib, /usr/share -- not the default's /usr/local/share,
+#     /usr/share, /usr/local/lib, /usr/lib. Order decides selection, so the
+#     vendor tail is spelled out here and deduplicated FIRST-WINS against
+#     everything already emitted, which is what produces both orderings
+#     from one derivation.
 deployment_unit_load_paths() {
-  local home_dir="${1%/}" want_class="$2" family="$3"
+  local home_dir="${1%/}" want_class="$2" family="$3" semantics="${4:-merge}"
   local config_base data_base runtime_base home_uid
   config_base="$(deployment_config_root "${home_dir}")"
   data_base="$(deployment_data_root "${home_dir}")"
@@ -603,11 +697,23 @@ deployment_unit_load_paths() {
   # Two parallel arrays rather than one classified string: a path may carry
   # any byte, and pairing by index keeps the transport convention intact.
   local -a ordered_paths=() ordered_class=()
+  local -A load_path_seen=()
   local search_entry
 
-  load_path_add() { # PATH CLASS
+  load_path_add() { # PATH CLASS -- first occurrence wins, as systemd dedups
+    [[ -n "$1" ]] || return 0
+    [[ -z "${load_path_seen["$1"]:-}" ]] || return 0
+    load_path_seen["$1"]=1
     ordered_paths+=("$1")
     ordered_class+=("$2")
+  }
+
+  load_path_add_search() { # BASE_DIR -- classified by where it is
+    if [[ "$1" == "${home_dir}" || "$1" == "${home_dir}"/* ]]; then
+      load_path_add "$1/systemd/user" user
+    else
+      load_path_add "$1/systemd/user" system
+    fi
   }
 
   case "${family}" in
@@ -621,12 +727,9 @@ deployment_unit_load_paths() {
       load_path_add "${config_base}/systemd/user" user
       while IFS= read -r search_entry; do
         [[ -n "${search_entry}" ]] || continue
-        if [[ "${search_entry}" == "${home_dir}" || "${search_entry}" == "${home_dir}"/* ]]; then
-          load_path_add "${search_entry}/systemd/user" user
-        else
-          load_path_add "${search_entry}/systemd/user" system
-        fi
-      done < <(deployment_xdg_search_entries "${home_dir}" "${XDG_CONFIG_DIRS:-}" "/etc/xdg")
+        load_path_add_search "${search_entry}"
+      done < <(deployment_xdg_search_entries "${home_dir}" "${XDG_CONFIG_DIRS:-}" \
+        "/etc/xdg" "${semantics}" "${XDG_CONFIG_DIRS+set}")
       load_path_add "/etc/systemd/user" system
       if [[ -n "${runtime_base}" ]]; then
         load_path_add "${runtime_base}/systemd/user" user
@@ -638,15 +741,18 @@ deployment_unit_load_paths() {
       load_path_add "${data_base}/systemd/user" user
       while IFS= read -r search_entry; do
         [[ -n "${search_entry}" ]] || continue
-        if [[ "${search_entry}" == "${home_dir}" || "${search_entry}" == "${home_dir}"/* ]]; then
-          load_path_add "${search_entry}/systemd/user" user
-        else
-          load_path_add "${search_entry}/systemd/user" system
-        fi
+        load_path_add_search "${search_entry}"
       done < <(deployment_xdg_search_entries "${home_dir}" "${XDG_DATA_DIRS:-}" \
-        "/usr/local/share:/usr/share")
+        "/usr/local/share:/usr/share" "${semantics}" "${XDG_DATA_DIRS+set}")
+      # systemd's own hardcoded vendor tail, in its order. Under the default
+      # environment every share entry here is already present from
+      # XDG_DATA_DIRS and is dropped by the first-wins dedup, which is why
+      # the default ordering comes out share-then-lib and the overridden one
+      # comes out lib-and-share interleaved.
       load_path_add "/usr/local/lib/systemd/user" system
+      load_path_add "/usr/local/share/systemd/user" system
       load_path_add "/usr/lib/systemd/user" system
+      load_path_add "/usr/share/systemd/user" system
       if [[ -n "${runtime_base}" ]]; then
         load_path_add "${runtime_base}/systemd/generator.late" user
       fi
@@ -663,11 +769,11 @@ deployment_unit_load_paths() {
       load_path_add "/usr/share/containers/systemd" system
       ;;
     *)
-      unset -f load_path_add
+      unset -f load_path_add load_path_add_search
       return 0
       ;;
   esac
-  unset -f load_path_add
+  unset -f load_path_add load_path_add_search
 
   local index=0
   while (( index < ${#ordered_paths[@]} )); do
@@ -713,7 +819,7 @@ deployment_effective_unit_file() {
       encode_path_item "${candidate}"
       return 0
     fi
-  done < <(deployment_unit_load_paths "${home_dir}" all "${family}")
+  done < <(deployment_unit_load_paths "${home_dir}" all "${family}" selection)
   return 0
 }
 
@@ -2211,6 +2317,10 @@ require_deployment_integrity() {
     deployment_unit_load_paths "${home_dir}" all quadlet
   )
   if [[ ${#unit_files[@]} -gt 0 ]]; then
+    # BEFORE anything resolves: a relative XDG search entry makes the
+    # effective unit file undeterminable, so it is refused here in the main
+    # shell rather than silently resolving to the wrong directory.
+    require_absolute_xdg_search_lists "${home_dir}"
     # BEFORE anything parses: constructs systemd would consume that the
     # assignment parser does not model are a loud refusal here in the main
     # shell -- inside the derivation substitutions below a refusal would

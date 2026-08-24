@@ -3486,6 +3486,71 @@ fi
   }
   rm -f "${shadow_control}/mcloving-controller.service"
 )
+# A shadow reachable ONLY through a configured XDG_CONFIG_DIRS entry. The
+# generated mcloving-postgres.service has no file in the config home, so
+# the configured entry -- which sits one slot below it -- is what wins.
+# This is the end-to-end proof that switching the selection list to
+# replacement semantics did not lose coverage of the entries systemd DOES
+# search.
+xdgshadow_root="${dropin_root_home}/xdgshadow"
+mkdir -p "${xdgshadow_root}/systemd/user"
+chmod 0755 "${xdgshadow_root}" "${xdgshadow_root}/systemd" \
+  "${xdgshadow_root}/systemd/user"
+printf '[Service]\nExecStart=%%h/shadow-bin/tool\n' \
+  > "${xdgshadow_root}/systemd/user/mcloving-postgres.service"
+chmod 0666 "${xdgshadow_root}/systemd/user/mcloving-postgres.service"
+if XDG_CONFIG_DIRS="${xdgshadow_root}" \
+  "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdgshadow.log" 2>&1; then
+  echo "upgrade proceeded over a shadow reachable through XDG_CONFIG_DIRS" >&2
+  exit 1
+fi
+grep -q "xdgshadow/systemd/user/mcloving-postgres.service (mode 666)" \
+  "${workdir}/logs/xdgshadow.log" || {
+  echo "the XDG_CONFIG_DIRS shadow was not judged:" >&2
+  cat "${workdir}/logs/xdgshadow.log" >&2
+  exit 1
+}
+# With the variable unset the very same file is not a load path at all, so
+# it is neither reported nor validated -- the selection list must not
+# invent entries the manager would not search.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdgshadow-unset.log" 2>&1 || {
+  echo "upgrade refused over a file that is not on any load path:" >&2
+  cat "${workdir}/logs/xdgshadow-unset.log" >&2
+  exit 1
+}
+if grep -q "xdgshadow" "${workdir}/logs/xdgshadow-unset.log"; then
+  echo "a file outside every load path was reported as shadowing:" >&2
+  cat "${workdir}/logs/xdgshadow-unset.log" >&2
+  exit 1
+fi
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+rm -rf "${xdgshadow_root}"
+# A RELATIVE XDG search entry is resolved by systemd against the service
+# manager's working directory, which this deployment cannot observe -- so
+# the file that would actually be loaded is undeterminable and the entry is
+# refused by name rather than resolved against the wrong directory.
+if XDG_CONFIG_DIRS="relative-search-entry" \
+  "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/xdg-relative.log" 2>&1; then
+  echo "upgrade proceeded with a relative XDG_CONFIG_DIRS entry" >&2
+  exit 1
+fi
+grep -q "XDG_CONFIG_DIRS entry relative-search-entry" \
+  "${workdir}/logs/xdg-relative.log" || {
+  echo "the relative XDG search entry was not refused by name:" >&2
+  cat "${workdir}/logs/xdg-relative.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused relative-XDG upgrade still moved the current release" >&2
+  exit 1
+}
 rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
 # The derivation itself, against systemd's own answer where the host can
 # give one. `systemd-analyze --user unit-paths` is the authority; every
@@ -3494,13 +3559,32 @@ rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
 (
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  # SELECTION is what systemd-analyze reports and what a main unit file is
+  # resolved over; MERGE is the union used for drop-in enumeration. The two
+  # are asserted separately below because confusing them is the defect this
+  # round closed.
   loadpath_all=""
   while IFS= read -r encoded_loadpath; do
     [[ -n "${encoded_loadpath}" ]] || continue
     decode_path_item_into decoded_loadpath "${encoded_loadpath}"
     # shellcheck disable=SC2154 # assigned through the nameref above
     loadpath_all+="${decoded_loadpath}"$'\n'
+  done < <(deployment_unit_load_paths "${HOME}" all systemd selection)
+  loadpath_merge=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    loadpath_merge+="${decoded_loadpath}"$'\n'
   done < <(deployment_unit_load_paths "${HOME}" all systemd)
+  # The merge list must remain a strict superset: drop-in validation must
+  # not have shrunk when selection stopped unioning.
+  while IFS= read -r selection_path; do
+    [[ -n "${selection_path}" ]] || continue
+    grep -qx "${selection_path}" <<<"${loadpath_merge}" || {
+      echo "the merge load path list lost ${selection_path}, which selection still searches" >&2
+      exit 1
+    }
+  done <<<"${loadpath_all}"
   # The XDG search lists contribute their spec defaults unconditionally,
   # and those are root-owned, so they belong to the system class.
   loadpath_system=""
@@ -3516,6 +3600,104 @@ rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
       exit 1
     }
   done
+  # REPLACEMENT vs UNION, asserted where the two genuinely disagree. A
+  # nonempty XDG_CONFIG_DIRS removes the /etc/xdg default from what systemd
+  # searches; the merge list keeps it, because validating a directory
+  # systemd would not read costs nothing for a MERGED drop-in and missing
+  # one it does read is the only outcome that matters.
+  xdg_probe="${dropin_root_home}/xdg-semantics"
+  mkdir -p "${xdg_probe}/systemd/user"
+  chmod 0755 "${xdg_probe}" "${xdg_probe}/systemd" "${xdg_probe}/systemd/user"
+  selection_overridden=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    selection_overridden+="${decoded_loadpath}"$'\n'
+  done < <(XDG_CONFIG_DIRS="${xdg_probe}" \
+    deployment_unit_load_paths "${dropin_root_home}" all systemd selection)
+  merge_overridden=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    merge_overridden+="${decoded_loadpath}"$'\n'
+  done < <(XDG_CONFIG_DIRS="${xdg_probe}" \
+    deployment_unit_load_paths "${dropin_root_home}" all systemd)
+  grep -qx "${xdg_probe}/systemd/user" <<<"${selection_overridden}" || {
+    echo "the selection list ignored a configured XDG_CONFIG_DIRS entry" >&2
+    exit 1
+  }
+  if grep -qx /etc/xdg/systemd/user <<<"${selection_overridden}"; then
+    echo "the selection list kept the /etc/xdg default while XDG_CONFIG_DIRS was set; systemd REPLACES it, so first-match could name a file systemd never loads" >&2
+    exit 1
+  fi
+  grep -qx /etc/xdg/systemd/user <<<"${merge_overridden}" || {
+    echo "the merge list dropped the /etc/xdg default; drop-in validation must stay a union" >&2
+    exit 1
+  }
+  # Set-but-EMPTY is an empty list to systemd, not "use the default".
+  selection_empty=""
+  while IFS= read -r encoded_loadpath; do
+    [[ -n "${encoded_loadpath}" ]] || continue
+    decode_path_item_into decoded_loadpath "${encoded_loadpath}"
+    selection_empty+="${decoded_loadpath}"$'\n'
+  done < <(
+    # An intentionally EMPTY value, not a missing one: the distinction is
+    # the whole point of this assertion.
+    # shellcheck disable=SC1007
+    XDG_CONFIG_DIRS= HOME="${dropin_root_home}" \
+      deployment_unit_load_paths "${dropin_root_home}" all systemd selection
+  )
+  if grep -qx /etc/xdg/systemd/user <<<"${selection_empty}"; then
+    echo "an empty XDG_CONFIG_DIRS still searched the /etc/xdg default; systemd searches nothing there" >&2
+    exit 1
+  fi
+  # The consequence, on real files: first match over each list. The real
+  # spec defaults are root-owned, so this uses writable STAND-INS for the
+  # default and configured positions and does the first-match itself --
+  # the same loop deployment_effective_unit_file runs.
+  xdg_default_standin="${dropin_root_home}/xdg-standin-default"
+  xdg_configured_standin="${dropin_root_home}/xdg-standin-configured"
+  mkdir -p "${xdg_default_standin}" "${xdg_configured_standin}"
+  chmod 0755 "${xdg_default_standin}" "${xdg_configured_standin}"
+  printf '[Service]\nExecStart=/bin/true\n' \
+    > "${xdg_default_standin}/mcloving-probe.service"
+  printf '[Service]\nExecStart=/bin/false\n' \
+    > "${xdg_configured_standin}/mcloving-probe.service"
+  first_match_over() { # SEMANTICS
+    local base
+    while IFS= read -r base; do
+      [[ -n "${base}" ]] || continue
+      if [[ -f "${base}/mcloving-probe.service" ]]; then
+        printf '%s' "${base}/mcloving-probe.service"
+        return 0
+      fi
+    done < <(deployment_xdg_search_entries "${dropin_root_home}" \
+      "${xdg_configured_standin}" "${xdg_default_standin}" "$1" set)
+    return 0
+  }
+  [[ "$(first_match_over selection)" == "${xdg_configured_standin}/mcloving-probe.service" ]] || {
+    echo "selection semantics resolved to the default stand-in, not the configured entry" >&2
+    exit 1
+  }
+  # Merge is a SET, not an order: what it must not do is lose either entry.
+  # Its ordering is deliberately unasserted, because nothing resolves a
+  # first match over it -- that is exactly the property this round
+  # separated out.
+  merge_entries="$(deployment_xdg_search_entries "${dropin_root_home}" \
+    "${xdg_configured_standin}" "${xdg_default_standin}" merge set)"
+  for merge_expected in "${xdg_configured_standin}" "${xdg_default_standin}"; do
+    grep -qx "${merge_expected}" <<<"${merge_entries}" || {
+      echo "merge semantics dropped ${merge_expected}; the union must keep both" >&2
+      exit 1
+    }
+  done
+  selection_entries="$(deployment_xdg_search_entries "${dropin_root_home}" \
+    "${xdg_configured_standin}" "${xdg_default_standin}" selection set)"
+  if grep -qx "${xdg_default_standin}" <<<"${selection_entries}"; then
+    echo "selection semantics kept the replaced default; systemd searches only the configured list" >&2
+    exit 1
+  fi
+  rm -rf "${xdg_probe}" "${xdg_default_standin}" "${xdg_configured_standin}"
   if command -v systemd-analyze >/dev/null 2>&1 \
     && systemd-analyze --user unit-paths >/dev/null 2>&1; then
     # ORDER as well as membership: a main unit file is resolved by first
