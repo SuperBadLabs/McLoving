@@ -274,17 +274,163 @@ if "${libexec}/helpers/mcloving-env-guard" controller \
   exit 1
 fi
 
-free_port() {
-  python3 - <<'PY'
+# reserve_port -> a TCP port on 127.0.0.1 the KERNEL WILL NOT HAND to an
+# unrelated process, verified free at selection time.
+#
+# The previous derivation bound 127.0.0.1:0, read the port the kernel
+# assigned, and closed the socket -- then wrote that port into a contract
+# the controller, the agent-control listener, or podman bound seconds to
+# minutes later. Everything the kernel auto-assigns comes out of
+# /proc/sys/net/ipv4/ip_local_port_range, so the interval between "we
+# picked it" and "the service binds it" is precisely the interval in which
+# the kernel may hand the same port to any other process on the machine.
+# On a busy runner it eventually does: CI run 32730559625 job 97441620218
+# failed at [6/9] with "bind agent control to 127.0.0.1:60553 / Address
+# already in use", and 60553 sits inside this kernel's 32768-60999
+# ephemeral range.
+#
+# Ports are therefore drawn from a band OUTSIDE that range -- above its
+# high end where there is room, otherwise below its low end -- so no
+# amount of unrelated activity can be given the same number. Selection
+# still bind-probes, and retries with a fresh candidate on EADDRINUSE, so a
+# port some other process deliberately holds is skipped rather than
+# handed out; the band is what removes the race, and the probe is what
+# removes a deliberate collision.
+#
+# The probe deliberately does NOT set SO_REUSEADDR. Rust's std (and
+# therefore tokio's) TcpListener::bind does not set it either, so a port in
+# TIME_WAIT that a REUSEADDR probe would call free is one the controller
+# would fail to bind; the strictest consumer decides what "free" means.
+#
+# Rejected alternatives, for the record. Having the SERVICE bind port 0 and
+# report its own port is the structurally best answer in general, but the
+# controller has no such mode -- MCLOVING_LISTEN and MCLOVING_AGENT_LISTEN
+# are bound as given (bins/controller/src/main.rs) and the chosen port is
+# never reported -- and the contract is filled BEFORE anything starts,
+# because the agent's MCLOVING_CONTROLLER_URI, the health helper's probe
+# endpoint, and podman's publish override all read it from there. Adding a
+# port-0 reporting mode to a production binary to settle a test flake is
+# the wrong trade. HOLDING the probe socket open until handoff does not
+# work at all: SO_REUSEADDR does not permit two live listeners on one
+# address (that is SO_REUSEPORT, which the controller does not set), so the
+# socket must be closed before the service binds -- which restores exactly
+# the window it was meant to close.
+reserved_ports=()
+reserve_port() {
+  local chosen
+  chosen="$(python3 - "${reserved_ports[@]}" <<'PY'
+import errno
+import random
 import socket
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
+import sys
+
+DEFAULT_RANGE = (32768, 60999)
+
+
+def ephemeral_range():
+    try:
+        with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as handle:
+            low, high = handle.read().split()[:2]
+        return int(low), int(high)
+    except (OSError, ValueError):
+        # A host that will not report its range is assumed to use the kernel
+        # default rather than treated as having none: assuming "no ephemeral
+        # range" would put every candidate back inside it.
+        return DEFAULT_RANGE
+
+
+low, high = ephemeral_range()
+bands = []
+if high < 65535:
+    bands.append((high + 1, 65535))
+if low > 10240:
+    # Below the range, but well clear of the registered-service ports an
+    # unrelated daemon is likely to want.
+    bands.append((10240, low - 1))
+if not bands:
+    raise SystemExit(
+        "test-deployment: this host's ip_local_port_range "
+        f"({low}-{high}) leaves no port band outside the kernel's ephemeral "
+        "allocation, so no selection here can avoid racing an unrelated "
+        "process; narrow the range or run the suite on a host that has one"
+    )
+
+taken = {int(argument) for argument in sys.argv[1:]}
+for attempt in range(256):
+    # The band above the ephemeral range is preferred and only abandoned
+    # after it has been given a real chance: the band BELOW the range,
+    # where one exists, shares space with registered services an unrelated
+    # daemon may claim at any time, so it is a fallback rather than a
+    # coin-flip alternative.
+    band_low, band_high = bands[0] if attempt < 128 else random.choice(bands)
+    port = random.randint(band_low, band_high)
+    if port in taken:
+        continue
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError as error:
+            if error.errno in (errno.EADDRINUSE, errno.EACCES):
+                continue
+            raise
+    print(port)
+    sys.exit(0)
+
+raise SystemExit(
+    "test-deployment: could not find a free port outside the kernel's "
+    f"ephemeral range ({low}-{high}) in 256 attempts; something is holding "
+    "the non-ephemeral bands open"
+)
 PY
+  )" || exit 1
+  reserved_ports+=("${chosen}")
+  printf '%s\n' "${chosen}"
 }
-pg_port="$(free_port)"
-api_port="$(free_port)"
-agent_port="$(free_port)"
+
+# require_reserved_ports_free LABEL=PORT... -- re-verify immediately before
+# anything binds, and say WHAT holds the port if one is gone.
+#
+# The band removes the kernel-assignment race; this removes the remaining
+# ambiguity. Without it a port taken between selection and start surfaces
+# only as "public API did not answer within bound" plus a bind error buried
+# in a service log, and the first thing anyone reading that has to work out
+# is whether the port was ever free. Failing here says so directly, with
+# the holder named where the host will tell us.
+require_reserved_ports_free() {
+  local entry label port holder offending=""
+  for entry in "$@"; do
+    label="${entry%%=*}"
+    port="${entry##*=}"
+    if python3 - "${port}" <<'PY'
+import errno
+import socket
+import sys
+
+with socket.socket() as probe:
+    try:
+        probe.bind(("127.0.0.1", int(sys.argv[1])))
+    except OSError as error:
+        if error.errno in (errno.EADDRINUSE, errno.EACCES):
+            sys.exit(1)
+        raise
+sys.exit(0)
+PY
+    then
+      continue
+    fi
+    holder="$(ss -ltnp "sport = :${port}" 2>/dev/null | tail -n +2)"
+    [[ -n "${holder}" ]] || holder="(no listener reported by ss; the port may be held by a non-listening socket or by another namespace)"
+    offending+="${label} port ${port} is no longer free: ${holder} "
+  done
+  if [[ -n "${offending}" ]]; then
+    echo "the ports reserved for this run were taken between selection and start: ${offending%% }" >&2
+    echo "these are drawn from outside the kernel's ephemeral range ($(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown)), so this is a deliberate binder rather than an ephemeral-allocation race" >&2
+    exit 1
+  fi
+}
+pg_port="$(reserve_port)"
+api_port="$(reserve_port)"
+agent_port="$(reserve_port)"
 
 organization_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 project_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
@@ -730,6 +876,8 @@ derived_argv() { # OUT_ARRAY_NAME JSON_FILE JQ_PATH
 }
 
 echo "== [6/9] postgres (derived from quadlet) -> db-init -> controller -> agent"
+require_reserved_ports_free "postgres-publish=${pg_port}" \
+  "controller-public-api=${api_port}" "controller-agent-control=${agent_port}"
 "${unit_command}" "${smoke_quadlet_root}/mcloving-postgres.container" \
   --home "${home}" --publish-override "127.0.0.1:${pg_port}" \
   --name-override "${container_name}" --volume-override "${volume_name}" \
