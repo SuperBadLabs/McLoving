@@ -4894,6 +4894,135 @@ chmod 0755 "${absent_hook_dir}"
   done
 )
 rm -rf "${absent_hook_dir}" "${absent_hook_dropin}/absent.conf"
+# EXECUTION HOOKS. A shell, language runtime, or the dynamic loader acts on
+# these automatically at process start -- BASH_ENV is sourced before the
+# first line of a script, an LD_PRELOAD constructor runs before main() --
+# so an attacker never has to touch a classified variable. The defence is
+# in three layers and each gate below names which layer it exercises.
+#
+# LAYER 1, validation time: a DECLARATION is refused, in a contract or in a
+# unit Environment= directive. This is the layer that works, because it runs
+# before the unit is ever started.
+hook_env_file="${dropin_root_home}/.config/mcloving/agent.env"
+cp "${hook_env_file}" "${workdir}/hook-agent.env.orig"
+printf 'BASH_ENV=%%h/hook-payload.sh\n' >> "${hook_env_file}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/hook-contract.log" 2>&1; then
+  echo "upgrade proceeded over a contract declaring BASH_ENV" >&2
+  exit 1
+fi
+grep -q "execution-hook variable(s) declared: BASH_ENV declared in" \
+  "${workdir}/logs/hook-contract.log" || {
+  echo "the declared execution hook was not refused by name:" >&2
+  cat "${workdir}/logs/hook-contract.log" >&2
+  exit 1
+}
+cp "${workdir}/hook-agent.env.orig" "${hook_env_file}"
+chmod 0600 "${hook_env_file}"
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused execution-hook upgrade still moved the current release" >&2
+  exit 1
+}
+# A drop-in Environment= reaches the service without passing through any
+# contract file, so it is refused on its own path.
+hook_dropin_dir="${dropin_unit_root}/mcloving-controller.service.d"
+mkdir -p "${hook_dropin_dir}"
+chmod 0755 "${hook_dropin_dir}"
+printf '[Service]\nEnvironment=LD_PRELOAD=%%h/hook-payload.so\n' \
+  > "${hook_dropin_dir}/hook.conf"
+chmod 0644 "${hook_dropin_dir}/hook.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/hook-dropin.log" 2>&1; then
+  echo "upgrade proceeded over a drop-in setting LD_PRELOAD" >&2
+  exit 1
+fi
+grep -q "execution-hook variable(s) set by a unit Environment= directive: LD_PRELOAD" \
+  "${workdir}/logs/hook-dropin.log" || {
+  echo "the drop-in execution hook was not refused by name:" >&2
+  cat "${workdir}/logs/hook-dropin.log" >&2
+  exit 1
+}
+rm -f "${hook_dropin_dir}/hook.conf"
+# LAYER 2, the unit level: UnsetEnvironment= is the ONLY thing that can
+# protect the pre-start guard itself, since the hook runs before the guard's
+# first line. Deleting it must therefore be refused -- validate what must
+# exist, not merely what does.
+cp "${dropin_unit_root}/mcloving-agent.service" "${workdir}/hook-agent.unit.orig"
+grep -v '^UnsetEnvironment=' "${workdir}/hook-agent.unit.orig" \
+  > "${dropin_unit_root}/mcloving-agent.service"
+chmod 0644 "${dropin_unit_root}/mcloving-agent.service"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/hook-unstripped.log" 2>&1; then
+  echo "upgrade proceeded over a unit that no longer strips execution hooks" >&2
+  exit 1
+fi
+grep -q "unit(s) no longer strip execution-hook variables:" \
+  "${workdir}/logs/hook-unstripped.log" || {
+  echo "the missing UnsetEnvironment= was not refused by name:" >&2
+  cat "${workdir}/logs/hook-unstripped.log" >&2
+  exit 1
+}
+cp "${workdir}/hook-agent.unit.orig" "${dropin_unit_root}/mcloving-agent.service"
+chmod 0644 "${dropin_unit_root}/mcloving-agent.service"
+# EVERY shipped unit strips EVERY hook variable -- derived from the
+# denylist, so adding a variable to it without adding it to the units fails
+# here rather than shipping a gap.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  for hook_unit in "${MCLOVING_DEPLOY_UNITS[@]}"; do
+    hook_unit_path="${dropin_unit_root}/${hook_unit}"
+    for hook_var in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+      grep -q "^UnsetEnvironment=.*\b${hook_var}\b" "${hook_unit_path}" || {
+        echo "${hook_unit} does not strip ${hook_var}" >&2
+        exit 1
+      }
+    done
+  done
+  for hook_unit in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
+    hook_unit_path="${dropin_root_home}/.config/containers/systemd/${hook_unit}"
+    for hook_var in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+      grep -q "^UnsetEnvironment=.*\b${hook_var}\b" "${hook_unit_path}" || {
+        echo "${hook_unit} does not strip ${hook_var}" >&2
+        exit 1
+      }
+    done
+  done
+)
+# LAYER 3, the guard: it cannot protect ITSELF -- the hook has already run
+# by the time its first line executes -- but it can refuse to let one reach
+# the SERVICE BINARY that starts after it.
+if ( set -a
+     # shellcheck disable=SC1090,SC1091
+     . "${config}/agent.env"
+     set +a
+     export LD_PRELOAD="${home}/hook-payload.so"
+     INVOCATION_ID=mcloving-smoke bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
+       "${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" \
+     ) > "${workdir}/logs/hook-guard.log" 2>&1; then
+  echo "the guard admitted an execution hook that would reach the service binary" >&2
+  exit 1
+fi
+grep -q "execution-hook variable(s) reach this service: LD_PRELOAD=" \
+  "${workdir}/logs/hook-guard.log" || {
+  echo "the guard did not name the execution hook:" >&2
+  cat "${workdir}/logs/hook-guard.log" >&2
+  exit 1
+}
+# Acceptance: with no hook anywhere, the transition proceeds.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the execution-hook gate" >&2
+  exit 1
+}
+rm -f "${workdir}/hook-agent.env.orig" "${workdir}/hook-agent.unit.orig"
 # INSTALLATION ROOTS come from the running manager where it can say. Writing
 # to the wrong root is the one failure that is silent and total: units land
 # where the manager never searches and daemon-reload finds nothing.

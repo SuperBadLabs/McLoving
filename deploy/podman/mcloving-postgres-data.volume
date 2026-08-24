@@ -6,3 +6,10 @@ VolumeName=mcloving-postgres-data
 
 [Install]
 WantedBy=default.target
+
+[Service]
+# The generated volume service runs podman as the service user, so the
+# dynamic loader honours LD_PRELOAD there exactly as it does anywhere else.
+# Every unit this deployment ships strips the execution hooks, without
+# exception, so there is no unit to reason about separately.
+UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS

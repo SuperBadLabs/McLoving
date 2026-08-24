@@ -10,6 +10,16 @@ Wants=mcloving-controller.service
 After=mcloving-controller.service
 
 [Service]
+# EXECUTION HOOKS ARE STRIPPED BEFORE ANY OF THIS UNIT'S PROCESSES START.
+# bash sources BASH_ENV before the first line of a script, and the dynamic
+# loader runs an LD_PRELOAD constructor before main(), so the pre-start
+# guard cannot defend itself from inside itself -- by the time its code
+# runs, the hook has already executed. systemd applies UnsetEnvironment= to
+# the composed environment before exec, which beats a manager-level value
+# and one this unit's own EnvironmentFile= declares alike. Validation
+# refuses such a declaration as well; this is the layer that protects the
+# guard itself.
+UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GLIBC_TUNABLES PYTHONSTARTUP PYTHONPATH PERL5OPT PERL5LIB RUBYOPT NODE_OPTIONS
 Type=exec
 # EnvironmentFile without "-" fails the unit when the contract file is absent.
 EnvironmentFile=%h/.config/mcloving/agent.env

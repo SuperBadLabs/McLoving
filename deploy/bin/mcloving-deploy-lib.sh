@@ -1364,6 +1364,46 @@ deployment_unit_source_files() {
 # shellcheck disable=SC2034  # read by the smoke suite's coverage gate too
 MCLOVING_UNIT_PATH_DIRECTIVES="EnvironmentFile|StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|Volume"
 
+# EXECUTION-HOOK VARIABLES: names a shell, language runtime, or the dynamic
+# loader acts on automatically at process start.
+#
+# THE CRITERION, which is what makes this maintainable -- the list is only
+# its current output. A variable belongs here when BOTH hold:
+#
+#   1. a runtime the deployment starts (the loader, bash, python, perl,
+#      node) consults it WITHOUT ANY COOPERATION from the program, and
+#   2. consulting it either LOADS OR EXECUTES CODE the value names, or
+#      alters startup behaviour the program cannot countermand, and it does
+#      so BEFORE the program's own first instruction.
+#
+# Clause 2 is what separates these from ordinary configuration. PATH is
+# deliberately NOT here: it selects among programs the unit already asked
+# to run rather than injecting code into one, and this lane refuses a
+# non-absolute Exec executable anyway (round 29), so PATH cannot redirect
+# what the units start. HOME and LANG are not here for the same reason --
+# they are read BY programs, not acted on FOR them.
+#
+# Applying the criterion to what the deployment can plausibly execute:
+# the dynamic loader (every binary), bash (every helper), and the runtimes
+# a future release might ship.
+# shellcheck disable=SC2034  # read by mcloving-env-guard and the smoke suite
+MCLOVING_EXECUTION_HOOK_VARIABLES=(
+  BASH_ENV          # bash sources it before the script body
+  ENV               # POSIX sh equivalent
+  SHELLOPTS         # forces shell options the script cannot countermand
+  BASHOPTS          # same, for shopt-style options
+  LD_PRELOAD        # loader runs its constructors before main()
+  LD_LIBRARY_PATH   # loader resolves libraries from it before main()
+  LD_AUDIT          # loader runs an audit module before main()
+  GLIBC_TUNABLES    # alters loader behaviour before main()
+  PYTHONSTARTUP     # python executes it at interpreter start
+  PYTHONPATH        # python imports from it, running module top level
+  PERL5OPT          # carries -M, which loads a module at start
+  PERL5LIB          # perl resolves modules from it
+  RUBYOPT           # carries -r, which requires a library at start
+  NODE_OPTIONS      # carries --require, which loads a module at start
+)
+
 # The command directives that name an EXECUTABLE the transition runs.
 # Separate from the path list above because their VALUE SYNTAX differs --
 # a command line, not a bare path -- so extraction and the loud pre-check
@@ -2856,6 +2896,110 @@ verify_staged_release() {
     || deploy_fail "release ${release_path} has identity ${actual}, not ${expected}; refusing to use it"
 }
 
+# require_no_execution_hooks HOME CONTRACT_FILE... -- refuse, by name, any
+# declaration of an execution-hook variable, in a contract or in a unit's
+# own Environment= directives.
+#
+# WHERE THE DEFENCE HAS TO LIVE, and why it cannot live in the guard.
+# BASH_ENV is sourced by bash BEFORE the first line of the guard's body, and
+# the dynamic loader runs an LD_PRELOAD constructor before main(). Both were
+# confirmed here rather than assumed, including that unsetting BASH_ENV on
+# the guard's own first line still runs the hook. So a check inside the
+# guard is theatre for the guard's own process: by the time any guard code
+# executes, the attacker's code already has.
+#
+# This check runs at VALIDATION time -- inside the transition, before the
+# unit is ever started -- which is early enough to matter, and it judges the
+# DECLARATION rather than the file the declaration names. That distinction
+# is deliberate: securing the hook target would only bound who may rewrite
+# it, while the objection is that arbitrary code is being injected into a
+# process that never asked to run it. A hook script under a perfectly
+# validated %h tree is still a hook, so round 37's argument validation does
+# not make one acceptable.
+require_no_execution_hooks() {
+  local home_dir="${1%/}" contract_file hook_name line key value entry
+  shift
+  local offending=""
+  local -A hook_lookup=()
+  for hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+    hook_lookup["${hook_name}"]=1
+  done
+  # Contracts: every assignment the file makes.
+  for contract_file in "$@"; do
+    [[ -f "${contract_file}" ]] || continue
+    while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+      [[ -n "${hook_lookup["${key}"]:-}" ]] || continue
+      offending+="${key} declared in ${contract_file} "
+    done < <(parse_environment_file "${contract_file}" 2>/dev/null || true)
+  done
+  if [[ -n "${offending}" ]]; then
+    deploy_fail "execution-hook variable(s) declared: ${offending% }-- a shell, language runtime, or the dynamic loader acts on these automatically at process start, loading or executing code the value names before the program's own first instruction, so declaring one hands arbitrary code execution to whoever can write the file it points at; remove the declaration (securing its target is not sufficient, because the objection is that the code runs at all)"
+  fi
+  return 0
+}
+
+# require_unit_environment_hooks_absent UNIT_SOURCE... -- the same refusal
+# for Environment= directives in units and their drop-ins, which reach the
+# service without passing through any contract file.
+require_unit_environment_hooks_absent() {
+  local line key value entry hook_name offending=""
+  local -A hook_lookup=()
+  for hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+    hook_lookup["${hook_name}"]=1
+  done
+  [[ $# -gt 0 ]] || return 0
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ "${key}" == "Environment" ]] || continue
+    # systemd allows several assignments on one Environment= line.
+    for entry in ${value}; do
+      [[ "${entry}" == *=* ]] || continue
+      [[ -n "${hook_lookup["${entry%%=*}"]:-}" ]] || continue
+      offending+="${entry%%=*} "
+    done
+  done < <(deployment_unit_assignment_lines "$@")
+  if [[ -n "${offending}" ]]; then
+    deploy_fail "execution-hook variable(s) set by a unit Environment= directive: ${offending% }-- these are acted on by a shell, language runtime, or the dynamic loader before the program's own first instruction, so the deployment would execute code of somebody else's choosing on the next start; remove the directive"
+  fi
+  return 0
+}
+
+# require_unit_hook_stripping HOME UNIT_FILE... -- assert every shipped unit
+# still strips the hook variables with UnsetEnvironment=.
+#
+# This is the layer that protects the GUARD ITSELF, which nothing inside the
+# guard can do. systemd applies UnsetEnvironment= to the composed
+# environment before exec, so it beats a manager-level variable AND one the
+# unit's own EnvironmentFile= declares -- both confirmed here -- while
+# ordinary variables survive. Asserting the directive is still present is
+# the round-34 pattern: the walks validate what exists, so something must
+# assert what must exist, or the protection can be quietly deleted.
+require_unit_hook_stripping() {
+  local home_dir="${1%/}" unit_file hook_name declared missing=""
+  shift
+  [[ $# -gt 0 ]] || return 0
+  local line key value entry
+  for unit_file in "$@"; do
+    [[ -f "${unit_file}" ]] || continue
+    declared=""
+    while IFS= read -r line; do
+      key="${line%%=*}"
+      value="${line#*=}"
+      [[ "${key}" == "UnsetEnvironment" ]] || continue
+      declared+="${value} "
+    done < <(deployment_unit_assignment_lines "${unit_file}")
+    for hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+      [[ " ${declared} " != *" ${hook_name} "* ]] || continue
+      missing+="${unit_file}:${hook_name} "
+    done
+  done
+  if [[ -n "${missing}" ]]; then
+    deploy_fail "unit(s) no longer strip execution-hook variables: ${missing% }-- UnsetEnvironment= is the only layer that can protect the pre-start guard itself, because a shell or the dynamic loader acts on these before the guard's first line runs; restore the directive"
+  fi
+  return 0
+}
+
 # require_deployment_assets_present HOME -- assert that every file this
 # deployment MUST have is actually there, before a transition stops
 # anything.
@@ -3130,6 +3274,30 @@ require_deployment_integrity() {
     "${load_path_roots[@]}" "${dropin_dirs[@]}" "${unit_source_files[@]}"
   require_secure_files "${home_dir}" "${contract_destinations[@]}" \
     "${declared_contracts[@]}"
+  # EXECUTION HOOKS, refused at validation time -- the only moment early
+  # enough, since a shell or the loader acts on them before the guard's own
+  # first line. Contracts and declared contracts alike, because a drop-in
+  # can point EnvironmentFile= anywhere.
+  require_no_execution_hooks "${home_dir}" "${contract_destinations[@]}" \
+    ${declared_contracts[@]+"${declared_contracts[@]}"}
+  if [[ ${#unit_source_files[@]} -gt 0 ]]; then
+    require_unit_environment_hooks_absent "${unit_source_files[@]}"
+  fi
+  # And the deployment's OWN units must still strip them. Only the
+  # deployment's own -- an administrative override is somebody else's file
+  # and is reported rather than dictated to (round 32).
+  local own_unit_files=() own_unit_name
+  for own_unit_name in "${MCLOVING_DEPLOY_UNITS[@]}"; do
+    [[ -f "${unit_root}/${own_unit_name}" ]] \
+      && own_unit_files+=("${unit_root}/${own_unit_name}")
+  done
+  for own_unit_name in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
+    [[ -f "${quadlet_root}/${own_unit_name}" ]] \
+      && own_unit_files+=("${quadlet_root}/${own_unit_name}")
+  done
+  if [[ ${#own_unit_files[@]} -gt 0 ]]; then
+    require_unit_hook_stripping "${home_dir}" "${own_unit_files[@]}"
+  fi
   require_integrity_files "${home_dir}" "${unit_source_files[@]}" \
     "${release_binaries[@]}" "${helper_files[@]}" \
     "${declared_executables[@]}"

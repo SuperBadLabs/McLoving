@@ -283,6 +283,26 @@ done < <(deployment_contract_path_variables "${service}")
 # that reaches the service from outside the contract, or disagrees with it,
 # is REFUSED by name with both values shown, because the digest inventory
 # pins what the CONTRACT declares and an ambient value is watched by nothing.
+# EXECUTION HOOKS in the environment this service will receive.
+#
+# Stated honestly about what this can and cannot do: it CANNOT protect this
+# guard's own process. bash sources BASH_ENV before the first line of this
+# script and the loader runs an LD_PRELOAD constructor before main(), so by
+# the time this check executes, a hook aimed at the GUARD has already run.
+# What it does protect is the SERVICE BINARY, which systemd starts after
+# this guard exits: a hook still present in the composed environment would
+# reach it. The layers that protect the guard are UnsetEnvironment= in the
+# unit, which strips before exec, and the validation-time refusal of any
+# declaration -- both of which run outside this process.
+guard_hook_offending=""
+for guard_hook_name in "${MCLOVING_EXECUTION_HOOK_VARIABLES[@]}"; do
+  [[ -v "MCLOVING_EFFECTIVE_ENV[${guard_hook_name}]" ]] || continue
+  guard_hook_offending+="${guard_hook_name}=${MCLOVING_EFFECTIVE_ENV[${guard_hook_name}]} "
+done
+if [[ -n "${guard_hook_offending}" ]]; then
+  fail "execution-hook variable(s) reach this service: ${guard_hook_offending% }-- a shell, language runtime, or the dynamic loader acts on these automatically at process start, loading or executing code the value names before the service binary's own first instruction; the units strip them with UnsetEnvironment= and validation refuses any declaration, so one arriving here means both were bypassed"
+fi
+
 guard_env_offending=""
 for guard_name in "${guard_classified[@]}"; do
   [[ -v "MCLOVING_EFFECTIVE_ENV[${guard_name}]" ]] || continue
