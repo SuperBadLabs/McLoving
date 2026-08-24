@@ -409,20 +409,104 @@ deployment_cache_root() {
   fi
 }
 
+# deployment_unit_dropin_dirs UNIT_FILE... -> encoded items: every drop-in
+# DIRECTORY systemd consults for these unit names that EXISTS on disk,
+# deduplicated across the whole argument list.
+#
+# systemd.unit(5) does not consult only "<unit>.d". For a unit named
+# NAME.TYPE living in a configuration directory, systemd reads *.conf out
+# of ALL of these, and the deployment's own units match several of them:
+#
+#   TYPE.d                 type-wide -- applies to EVERY unit of that type,
+#                          so "service.d" applies to all three services
+#   PREFIX-.TYPE.d         dash-truncated name prefixes, truncated at EVERY
+#                          dash and not just the first: systemd walks
+#                          foo-bar-baz.service -> foo-bar-.service.d ->
+#                          foo-.service.d, so "mcloving-.service.d" applies
+#                          to every unit this deployment ships
+#   BASE@.TYPE.d           the template directory of an instantiated
+#                          BASE@INSTANCE unit (none are shipped today; the
+#                          form is enumerated so adding one is not a gap)
+#   NAME.TYPE.d            the exact unit directory -- the ONLY form this
+#                          enumeration used to cover
+#
+# Precedence among them is systemd's business and irrelevant here:
+# validation is ADDITIVE, so the union is what must be secured and parsed.
+# Enumerating only NAME.TYPE.d left a group/world-writable service.d or
+# mcloving-.service.d free to inject an ExecStart= or an external
+# EnvironmentFile= that the next transition's restart consumes, with
+# neither the drop-in source nor the paths it declares ever validated.
+#
+# Quadlet follows the same drop-in convention on the .container/.volume
+# side. Where a given systemd version consults FEWER of these forms than
+# are enumerated here the cost is validating a file nothing reads, which
+# is the safe direction; the dangerous direction is a form systemd honours
+# that this never sees.
+#
+# Only directories that EXIST are emitted, and that is not a gap: the
+# configuration directory holding them is itself a managed root under the
+# ancestor rule, so no other local user can create one -- the same
+# containing-directory bound that makes wildcard EnvironmentFile=
+# expansion safe.
+deployment_unit_dropin_dirs() {
+  local unit_file unit_dir unit_base unit_type unit_name prefix_part rest
+  local dropin_candidate
+  local -A dropin_seen=()
+  local -a dropin_forms=()
+  for unit_file in "$@"; do
+    [[ -f "${unit_file}" ]] || continue
+    [[ "${unit_file}" == */* ]] || continue
+    unit_dir="${unit_file%/*}"
+    unit_base="${unit_file##*/}"
+    [[ "${unit_base}" == *.* ]] || continue
+    unit_type="${unit_base##*.}"
+    unit_name="${unit_base%.*}"
+    [[ -n "${unit_type}" && -n "${unit_name}" ]] || continue
+    dropin_forms=("${unit_dir}/${unit_type}.d")
+    prefix_part="${unit_name%%@*}"
+    if [[ "${unit_name}" == *@* ]]; then
+      dropin_forms+=("${unit_dir}/${prefix_part}@.${unit_type}.d")
+    fi
+    # Truncate at every dash, right to left, exactly as systemd's
+    # unit_name_build_prefixes does. An empty prefix ends the walk:
+    # systemd builds no drop-in directory for it.
+    rest="${prefix_part}"
+    while [[ "${rest}" == *-* ]]; do
+      rest="${rest%-*}"
+      [[ -n "${rest}" ]] || break
+      dropin_forms+=("${unit_dir}/${rest}-.${unit_type}.d")
+    done
+    dropin_forms+=("${unit_dir}/${unit_name}.${unit_type}.d")
+    for dropin_candidate in "${dropin_forms[@]}"; do
+      [[ -d "${dropin_candidate}" ]] || continue
+      [[ -z "${dropin_seen["${dropin_candidate}"]:-}" ]] || continue
+      dropin_seen["${dropin_candidate}"]=1
+      encode_path_item "${dropin_candidate}"
+    done
+  done
+  return 0
+}
+
 # deployment_unit_source_files UNIT_FILE... -> encoded items: every file
-# the unit parse READS -- the unit files themselves plus <unit>.d/*.conf
-# drop-ins. One enumeration for the parser and for source validation, so
-# what is parsed and what is judged cannot diverge: everything the parser
-# reads is an execution vector (ExecStart lives in these files).
+# the unit parse READS -- the unit files themselves plus the *.conf of
+# every drop-in directory systemd consults for them
+# (deployment_unit_dropin_dirs, which is far more than "<unit>.d"). One
+# enumeration for the parser and for source validation, so what is parsed
+# and what is judged cannot diverge: everything the parser reads is an
+# execution vector (ExecStart lives in these files).
 deployment_unit_source_files() {
-  local unit_file dropin
+  local unit_file dropin dropin_dir encoded_dropin_dir
   for unit_file in "$@"; do
     [[ -f "${unit_file}" ]] || continue
     encode_path_item "${unit_file}"
-    for dropin in "${unit_file}.d"/*.conf; do
+  done
+  while IFS= read -r encoded_dropin_dir; do
+    [[ -n "${encoded_dropin_dir}" ]] || continue
+    decode_path_item_into dropin_dir "${encoded_dropin_dir}"
+    for dropin in "${dropin_dir}"/*.conf; do
       [[ -f "${dropin}" ]] && encode_path_item "${dropin}"
     done
-  done
+  done < <(deployment_unit_dropin_dirs "$@")
   return 0
 }
 
@@ -431,6 +515,17 @@ deployment_unit_source_files() {
 # consumers, and the suite's parse-coverage gate.
 # shellcheck disable=SC2034  # read by the smoke suite's coverage gate too
 MCLOVING_UNIT_PATH_DIRECTIVES="EnvironmentFile|StateDirectory|RuntimeDirectory|LogsDirectory|CacheDirectory|WorkingDirectory|Volume"
+
+# The command directives that name an EXECUTABLE the transition runs.
+# Separate from the path list above because their VALUE SYNTAX differs --
+# a command line, not a bare path -- so extraction and the loud pre-check
+# treat them differently, and because they are validated as trust-input
+# FILES rather than as contracts. systemd.service(5) documents the family;
+# every member is executed by the service manager as the service user, and
+# an override resetting any of them to an external path is code the next
+# restart runs.
+# shellcheck disable=SC2034  # read by the smoke suite's coverage gate too
+MCLOVING_UNIT_EXEC_DIRECTIVES="ExecStart|ExecStartPre|ExecStartPost|ExecReload|ExecStop|ExecStopPost|ExecCondition"
 
 # One backslash, named: spelling it inline in a [[ pattern draws
 # quoting advisories from the linter, and the continuation check reads better
@@ -484,10 +579,21 @@ deployment_unit_assignment_lines() {
 # substitution, where deploy_fail dies with the subshell and the caller
 # would continue on partial output): any construct systemd would consume
 # but the assignment parser does not model is a NAMED refusal, never a
-# silent partial validation. Two constructs qualify: line continuations,
-# and quote characters in the values of path-bearing directives.
+# silent partial validation. Four constructs qualify: line continuations;
+# quote characters in the values of path-bearing directives; a unit
+# specifier other than %h in either family (this deployment expands %h and
+# nothing else, and an unexpanded %t or %S would either be dropped as
+# non-absolute or validated at a literal path nothing ever uses); and any
+# Exec* command line whose EXECUTABLE this parser cannot confidently
+# extract -- a quoted or backslash-escaped executable, or one that is not
+# absolute after %h (systemd searches a bare filename in its own binary
+# path, which this deployment has no way to resolve or secure).
+#
+# The refusal is the class-closing half of the Exec fix: extraction that
+# quietly declined to model a spelling is exactly how an execution vector
+# escapes the walk, so every spelling is either extracted or named.
 require_parseable_unit_sources() {
-  local file line key value encoded_source
+  local file line key value encoded_source exec_value exec_token specifier_probe
   local source_files=()
   while IFS= read -r encoded_source; do
     [[ -n "${encoded_source}" ]] || continue
@@ -509,9 +615,53 @@ require_parseable_unit_sources() {
       key="${line%%=*}"
       key="${key%"${key##*[![:space:]]}"}"
       value="${line#*=}"
-      if [[ "${key}" =~ ^(${MCLOVING_UNIT_PATH_DIRECTIVES})$ ]] \
-        && [[ "${value}" == *[\"\']* ]]; then
-        deploy_fail "unit source ${file} declares ${key} with a quote character in its value; systemd unquotes path values but this deployment's parser does not model quoting, and word-splitting a quoted path would validate paths that do not exist -- spell the path unquoted and retry"
+      value="${value#"${value%%[![:space:]]*}"}"
+      if [[ "${key}" =~ ^(${MCLOVING_UNIT_PATH_DIRECTIVES})$ ]]; then
+        if [[ "${value}" == *[\"\']* ]]; then
+          deploy_fail "unit source ${file} declares ${key} with a quote character in its value; systemd unquotes path values but this deployment's parser does not model quoting, and word-splitting a quoted path would validate paths that do not exist -- spell the path unquoted and retry"
+        fi
+        # %h is the ONE specifier this deployment expands. Any other --
+        # %t, %S, %i, or the literal-percent %% -- survives expansion and
+        # is then either dropped as non-absolute or judged at a path
+        # systemd never uses, both of them silent under-validation.
+        specifier_probe="${value//%h/}"
+        if [[ "${specifier_probe}" == *%* ]]; then
+          deploy_fail "unit source ${file} declares ${key} with a unit specifier other than %h in its value (${value}); this deployment expands %h and nothing else, so the declared path would be validated at a spelling systemd never resolves to -- spell the path with %h or an absolute prefix and retry"
+        fi
+      fi
+      if [[ "${key}" =~ ^(${MCLOVING_UNIT_EXEC_DIRECTIVES})$ ]]; then
+        # An EMPTY assignment is systemd's legal reset -- it declares no
+        # command at all, so there is nothing to extract and nothing to
+        # refuse. This is the spelling a drop-in uses before setting its
+        # own ExecStart=, and it must stay accepted.
+        if [[ -n "${value}" ]]; then
+          # systemd's command-line prefixes: '-' (ignore failure), '@'
+          # (argv[0] override), '+' / '!' / '!!' (privilege variants), and
+          # ':' (no environment-variable substitution). They may be
+          # combined in any order ahead of the executable.
+          exec_value="${value}"
+          while [[ "${exec_value}" == [-@+!:]* ]]; do
+            exec_value="${exec_value#?}"
+          done
+          exec_value="${exec_value#"${exec_value%%[![:space:]]*}"}"
+          if [[ -z "${exec_value}" ]]; then
+            deploy_fail "unit source ${file} declares ${key} with command prefixes but no executable (${value}); systemd requires a command after the prefix characters -- spell the executable or use the empty ${key}= reset and retry"
+          fi
+          if [[ "${exec_value}" == [\"\']* ]]; then
+            deploy_fail "unit source ${file} declares ${key} with a QUOTED executable (${value}); systemd unquotes the command line but this deployment's parser does not model quoting, and taking the first whitespace-separated token would secure a path that does not exist -- spell the executable unquoted and retry"
+          fi
+          exec_token="${exec_value%%[[:space:]]*}"
+          if [[ "${exec_token}" == *"${MCLOVING_BACKSLASH}"* ]]; then
+            deploy_fail "unit source ${file} declares ${key} with a backslash escape in its executable (${value}); systemd unescapes the command line but this deployment's parser does not model escapes -- spell the executable without escapes and retry"
+          fi
+          specifier_probe="${exec_token#%h}"
+          if [[ "${specifier_probe}" == *%* ]]; then
+            deploy_fail "unit source ${file} declares ${key} with a unit specifier other than a leading %h in its executable (${exec_token}); this deployment expands a leading %h and nothing else, so the executable would be secured at a spelling systemd never resolves to -- spell it with a leading %h or an absolute prefix and retry"
+          fi
+          if [[ "${exec_token}" != /* && "${exec_token}" != %h/* ]]; then
+            deploy_fail "unit source ${file} declares ${key} with a non-absolute executable (${exec_token}); systemd resolves a bare filename against its own binary search path, which this deployment cannot enumerate or secure, so the command the next restart runs would be validated nowhere -- spell an absolute path (or %h-relative) and retry"
+          fi
+        fi
       fi
     done < "${file}"
   done
@@ -598,6 +748,68 @@ import sys
 for match in sorted(glob.glob(sys.argv[1])):
     print(base64.b64encode(os.fsencode(match)).decode("ascii"))
 GLOB
+}
+
+# deployment_unit_declared_executables HOME UNIT_FILE... -> encoded items:
+# the EXECUTABLE named by every Exec* command directive the units and their
+# drop-ins declare, with a leading %h expanded.
+#
+# The path-directive enumeration covers what a unit LOADS. This covers what
+# it RUNS. A secured operator drop-in resetting ExecStart= to
+# /srv/shared/tool was previously emitted by neither: the transition
+# validated the drop-in source itself, saw the file was fine, and then
+# restarted the unit into a binary whose mode, owner, and ancestor chain
+# nothing had judged -- so another local user able to write /srv/shared
+# gained code execution as the service account on that restart. Each
+# executable now takes the trust-input file rule (no group/other write,
+# root-or-home owner, regular, readable) and joins the shared ancestor
+# walk, wherever it points.
+#
+# Value syntax, per systemd.service(5) and matched exactly by the loud
+# pre-check in require_parseable_unit_sources:
+#   - an EMPTY assignment is a legal reset and declares no executable;
+#   - one or more prefix characters ('-', '@', '+', '!', '!!', ':') may
+#     lead, in any order, and are stripped;
+#   - the executable is the first whitespace-separated token;
+#   - a leading %h expands, and nothing else does.
+# Every spelling outside that -- quoted, backslash-escaped, specifier-bearing,
+# or non-absolute -- is a NAMED refusal there rather than a quiet skip here,
+# so this extractor never has to guess.
+#
+# Absence is legal and skipped by the file rule, exactly as it is for
+# declared contracts: the ancestor chain of the declared path is still
+# walked, so the directory an executable would appear in is judged even
+# before it exists.
+deployment_unit_declared_executables() {
+  local home_dir="${1%/}" line key value exec_token path
+  local encoded_source decoded_source
+  local source_files=()
+  shift
+  while IFS= read -r encoded_source; do
+    [[ -n "${encoded_source}" ]] || continue
+    decode_path_item_into decoded_source "${encoded_source}"
+    source_files+=("${decoded_source}")
+  done < <(deployment_unit_source_files "$@")
+  [[ ${#source_files[@]} -gt 0 ]] || return 0
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ "${key}" =~ ^(${MCLOVING_UNIT_EXEC_DIRECTIVES})$ ]] || continue
+    [[ -n "${value}" ]] || continue
+    while [[ "${value}" == [-@+!:]* ]]; do
+      value="${value#?}"
+    done
+    value="${value#"${value%%[![:space:]]*}"}"
+    exec_token="${value%%[[:space:]]*}"
+    [[ -n "${exec_token}" ]] || continue
+    # A LEADING %h only, matching the pre-check that refused every other
+    # specifier spelling: extractor and refusal agree on one grammar.
+    path="${exec_token/#%h/${home_dir}}"
+    case "${path}" in
+      /*) encode_path_item "${path}" ;;
+    esac
+  done < <(deployment_unit_assignment_lines "${source_files[@]}")
+  return 0
 }
 
 # deployment_unit_declared_roots HOME UNIT_FILE... -> the home-relative
@@ -1521,6 +1733,7 @@ require_deployment_integrity() {
     [[ -f "${unit_file}" ]] && unit_files+=("${unit_file}")
   done
   local unit_declared_roots=() declared_contracts=() unit_source_files=()
+  local declared_executables=()
   local dropin_dirs=() encoded_root encoded_item decoded_item
   if [[ ${#unit_files[@]} -gt 0 ]]; then
     # BEFORE anything parses: constructs systemd would consume that the
@@ -1536,10 +1749,12 @@ require_deployment_integrity() {
     done < <(deployment_unit_declared_roots "${home_dir}" "${unit_files[@]}" | sort -u)
     # EVERYTHING the parser reads (sources) and everything it declares
     # (targets) enters validation -- no filtered category. Sources: the
-    # unit files themselves and their drop-ins, judged by the integrity
-    # file rule, with their .d directories joining the chain roots.
-    # Declared EnvironmentFiles are contracts and get the contract file
-    # rule, wherever they point.
+    # unit files themselves and the *.conf of every drop-in directory
+    # systemd consults for them, judged by the integrity file rule, with
+    # those drop-in directories joining the chain roots. Declared
+    # EnvironmentFiles are contracts and get the contract file rule,
+    # wherever they point; declared Exec* executables are trust inputs and
+    # get the integrity file rule, wherever they point.
     while IFS= read -r encoded_item; do
       [[ -n "${encoded_item}" ]] || continue
       decode_path_item_into decoded_item "${encoded_item}"
@@ -1550,9 +1765,16 @@ require_deployment_integrity() {
       decode_path_item_into decoded_item "${encoded_item}"
       declared_contracts+=("${decoded_item}")
     done < <(deployment_unit_declared_contracts "${home_dir}" "${unit_files[@]}" | sort -u)
-    for unit_file in "${unit_files[@]}"; do
-      [[ -d "${unit_file}.d" ]] && dropin_dirs+=("${unit_file}.d")
-    done
+    while IFS= read -r encoded_item; do
+      [[ -n "${encoded_item}" ]] || continue
+      decode_path_item_into decoded_item "${encoded_item}"
+      declared_executables+=("${decoded_item}")
+    done < <(deployment_unit_declared_executables "${home_dir}" "${unit_files[@]}" | sort -u)
+    while IFS= read -r encoded_item; do
+      [[ -n "${encoded_item}" ]] || continue
+      decode_path_item_into decoded_item "${encoded_item}"
+      dropin_dirs+=("${decoded_item}")
+    done < <(deployment_unit_dropin_dirs "${unit_files[@]}")
   fi
   # The two INSTALLED TREES the transition executes from -- retained
   # releases and installed helpers -- are walked in full by the shared
@@ -1584,11 +1806,13 @@ require_deployment_integrity() {
   # judged.
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
     "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
-    "${declared_contracts[@]}" "${dropin_dirs[@]}" "${unit_source_files[@]}"
+    "${declared_contracts[@]}" "${declared_executables[@]}" \
+    "${dropin_dirs[@]}" "${unit_source_files[@]}"
   require_secure_files "${home_dir}" "${contract_destinations[@]}" \
     "${declared_contracts[@]}"
   require_integrity_files "${home_dir}" "${unit_source_files[@]}" \
-    "${release_binaries[@]}" "${helper_files[@]}"
+    "${release_binaries[@]}" "${helper_files[@]}" \
+    "${declared_executables[@]}"
 }
 
 # deployment_collect_trust_tree ROOT LABEL DIRS_ARRAY FILES_ARRAY

@@ -92,6 +92,27 @@ MCLOVING_UNIT_DIRS="$(encode_path_item "${unit_root}")
 $(encode_path_item "${quadlet_root}")"
 export MCLOVING_UNIT_DIRS
 
+# The drop-in directories systemd actually consults for these units, from
+# the library's one enumeration -- far more than "<unit>.d": the type-wide
+# service.d / container.d / volume.d and the dash-truncated
+# mcloving-.service.d apply to every unit this deployment ships. The
+# document's unit walk filters a SHARED configuration directory by the
+# mcloving- name prefix, which is right for top-level entries and wrong for
+# these -- "service.d" carries no such prefix, so a type-wide drop-in
+# changing the real configuration left the canonical document
+# byte-identical. Passing the DERIVED directories rather than a second name
+# pattern keeps writer, validator, and inventory on one authority.
+digest_unit_files=()
+for digest_unit_file in "${unit_root}"/mcloving-*.service \
+  "${quadlet_root}"/mcloving-*.container "${quadlet_root}"/mcloving-*.volume; do
+  [[ -f "${digest_unit_file}" ]] && digest_unit_files+=("${digest_unit_file}")
+done
+MCLOVING_UNIT_DROPIN_DIRS=""
+if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
+  MCLOVING_UNIT_DROPIN_DIRS="$(deployment_unit_dropin_dirs "${digest_unit_files[@]}")"
+fi
+export MCLOVING_UNIT_DROPIN_DIRS
+
 # The contracts may point their identity material OUTSIDE the walked trees
 # -- an external CA, an external bindings file -- and the runtime guard
 # validates those files while a config-tree-only inventory would record
@@ -187,6 +208,21 @@ def decode_path_items(text: str) -> list:
 # carry "..". Lexical only -- symlinked roots keep their per-record policy.
 unit_dirs = tuple(
     Path(posixpath.normpath(item)) for item in decode_path_items(unit_dirs_supplied)
+)
+
+# The drop-in directories systemd consults for this deployment's units,
+# derived by the shell wrapper from the library's one enumeration. Empty is
+# legal -- a deployment with no drop-ins at all -- but UNSET means the
+# document was built outside its wrapper and would silently omit them.
+dropin_dirs_supplied = os.environ.get("MCLOVING_UNIT_DROPIN_DIRS")
+if dropin_dirs_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_DROPIN_DIRS is not set; "
+        "run this through its shell wrapper"
+    )
+dropin_dirs = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(dropin_dirs_supplied)
 )
 
 
@@ -530,8 +566,19 @@ def unit_owned(path: Path, unit_dir: Path) -> bool:
     override.conf -- an active Restart= or ExecStart= override changing the
     real configuration while the canonical document stayed byte-identical.
     The unit root itself is kept, as before.
+
+    The name prefix is not the whole ownership test, because systemd
+    consults drop-in directories whose names carry no unit name at all: the
+    type-wide service.d / container.d / volume.d apply to every unit of
+    that type, this deployment's included. Those directories -- and
+    everything beneath them -- are owned by this deployment in the only
+    sense that matters to a drift baseline: their contents change what the
+    services actually run. They arrive here as the DERIVED list the library
+    enumerates, never as a second name pattern to keep in sync.
     """
     if path == unit_dir:
+        return True
+    if any(path == d or d in path.parents for d in dropin_dirs):
         return True
     try:
         first_component = path.relative_to(unit_dir).parts[0]

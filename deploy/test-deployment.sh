@@ -1647,7 +1647,17 @@ race_mode_before="$(stat -c '%a' "${libexec}")"
 race_status=0
 # The driver executes the helper's payload directly, bypassing the shell
 # wrapper that normally derives and exports the ancestor set, so it supplies
-# the same set through the same library derivation.
+# the same set through the same library derivation. The drop-in directory
+# set comes through the same derivation for the same reason: the payload
+# refuses to build a document without it rather than silently omitting the
+# type-wide and prefix drop-ins.
+race_dropin_dirs="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_unit_dropin_dirs "${smoke_unit_root}"/mcloving-*.service \
+    "${smoke_quadlet_root}"/mcloving-*.container \
+    "${smoke_quadlet_root}"/mcloving-*.volume
+)"
 race_ancestors="$(
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
@@ -1659,6 +1669,7 @@ race_ancestors="$(
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
+MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1719,6 +1730,7 @@ content_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
+MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
 import contextlib
@@ -1793,6 +1805,7 @@ ctime_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
+MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/ctime-probe.txt" <<'CTIMERACE' || ctime_race_status=$?
 import contextlib
@@ -1866,6 +1879,7 @@ listing_race_status=0
 MCLOVING_ANCESTOR_DIRS="${race_ancestors}" \
 MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
+MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_CONFIGURED_PATHS="" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}" <<'LISTRACE' || listing_race_status=$?
@@ -2697,6 +2711,279 @@ chmod 0755 "${wild_dir}"
 )
 rm -f "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/wildcard.conf"
 rm -rf "${wild_dir}"
+# systemd.unit(5) consults far more than "<unit>.d". A TYPE-WIDE
+# service.d/*.conf applies to every service, and a DASH-TRUNCATED prefix
+# directory such as mcloving-.service.d/*.conf applies to every unit whose
+# name starts with that prefix -- both of them to this deployment's units.
+# Enumerating only the exact directory left those sources unsecured and
+# the paths they declare unparsed, which is an ExecStart= or an external
+# EnvironmentFile= injected into the next transition's restart.
+dropin_unit_root="${dropin_root_home}/.config/systemd/user"
+typewide_dir="${dropin_unit_root}/service.d"
+prefix_dir="${dropin_unit_root}/mcloving-.service.d"
+mkdir -p "${typewide_dir}" "${prefix_dir}"
+# (1) The type-wide SOURCE itself takes the trust-input file rule.
+printf '[Service]\nRestart=always\n' > "${typewide_dir}/zz-typewide.conf"
+chmod 0666 "${typewide_dir}/zz-typewide.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/typewide-source.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable type-wide drop-in source" >&2
+  exit 1
+fi
+grep -q "zz-typewide.conf (mode 666)" "${workdir}/logs/typewide-source.log" || {
+  echo "the type-wide drop-in source was not judged:" >&2
+  cat "${workdir}/logs/typewide-source.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused type-wide-source upgrade still moved the current release" >&2
+  exit 1
+}
+# (2) And the paths the type-wide drop-in DECLARES are parsed. A secured
+# source that escapes the parser is the quieter half of the same gap.
+chmod 0644 "${typewide_dir}/zz-typewide.conf"
+mkdir -p "${dropin_root_home}/dropin-shared"
+chmod 0755 "${dropin_root_home}/dropin-shared"
+printf 'MCLOVING_TYPEWIDE=1\n' > "${dropin_root_home}/dropin-shared/typewide.env"
+chmod 0644 "${dropin_root_home}/dropin-shared/typewide.env"
+printf '[Service]\nEnvironmentFile=%%h/dropin-shared/typewide.env\n' \
+  > "${typewide_dir}/zz-typewide.conf"
+chmod 0644 "${typewide_dir}/zz-typewide.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/typewide-contract.log" 2>&1; then
+  echo "upgrade proceeded over a contract declared only by a type-wide drop-in" >&2
+  exit 1
+fi
+grep -q "typewide.env (mode 644, expected owner-only)" \
+  "${workdir}/logs/typewide-contract.log" || {
+  echo "the type-wide drop-in's declared contract escaped the parser:" >&2
+  cat "${workdir}/logs/typewide-contract.log" >&2
+  exit 1
+}
+chmod 0600 "${dropin_root_home}/dropin-shared/typewide.env"
+# (3) The dash-truncated PREFIX form, judged the same way. Its declared
+# contract sits in a world-writable directory, so the refusal names the
+# directory -- proving the chain walk reached a path only this form
+# declares.
+mkdir -p "${dropin_root_home}/prefix-shared"
+printf 'MCLOVING_PREFIX=1\n' > "${dropin_root_home}/prefix-shared/prefix.env"
+chmod 0600 "${dropin_root_home}/prefix-shared/prefix.env"
+chmod 0777 "${dropin_root_home}/prefix-shared"
+printf '[Service]\nEnvironmentFile=%%h/prefix-shared/prefix.env\n' \
+  > "${prefix_dir}/zz-prefix.conf"
+chmod 0644 "${prefix_dir}/zz-prefix.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/prefix-dropin.log" 2>&1; then
+  echo "upgrade proceeded over a contract declared only by a prefix drop-in" >&2
+  exit 1
+fi
+grep -q "prefix-shared (mode 777)" "${workdir}/logs/prefix-dropin.log" || {
+  echo "the prefix drop-in's declared contract escaped the parser:" >&2
+  cat "${workdir}/logs/prefix-dropin.log" >&2
+  exit 1
+}
+chmod 0755 "${dropin_root_home}/prefix-shared"
+# (4) Acceptance: with both forms secured the transition proceeds, and it
+# is the refusals above that prove the enumeration reached them -- an
+# enumeration that emitted nothing would pass this direction too.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured type-wide and prefix drop-ins did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the drop-in-form gate" >&2
+  exit 1
+}
+# Exactness of the enumeration itself, against the forms systemd builds:
+# every dash is a truncation point, not just the first, and a directory
+# that resembles none of the forms is NOT consulted.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  form_probe="${workdir}/dropin-form-probe"
+  rm -rf "${form_probe}"
+  mkdir -p "${form_probe}"
+  printf '[Service]\nExecStart=/bin/true\n' > "${form_probe}/foo-bar-baz.service"
+  mkdir -p "${form_probe}/service.d" "${form_probe}/foo-bar-.service.d" \
+    "${form_probe}/foo-.service.d" "${form_probe}/foo-bar-baz.service.d" \
+    "${form_probe}/unrelated.d" "${form_probe}/foo-bar.service.d"
+  form_seen=""
+  while IFS= read -r encoded_form; do
+    [[ -n "${encoded_form}" ]] || continue
+    decode_path_item_into decoded_form "${encoded_form}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    form_seen+="${decoded_form##*/}"$'\n'
+  done < <(deployment_unit_dropin_dirs "${form_probe}/foo-bar-baz.service")
+  for expected_form in service.d foo-bar-.service.d foo-.service.d \
+    foo-bar-baz.service.d; do
+    grep -qx "${expected_form}" <<<"${form_seen}" || {
+      echo "the drop-in enumeration missed ${expected_form}: ${form_seen}" >&2
+      exit 1
+    }
+  done
+  for rejected_form in unrelated.d foo-bar.service.d; do
+    if grep -qx "${rejected_form}" <<<"${form_seen}"; then
+      echo "the drop-in enumeration claimed ${rejected_form}, which systemd does not consult" >&2
+      exit 1
+    fi
+  done
+  rm -rf "${form_probe}"
+)
+# The canonical digest document must see the type-wide directory too: its
+# contents change what the services run, and the mcloving- name filter that
+# selects top-level entries out of a shared unit root does not match
+# "service.d".
+typewide_digests_before="$("${dropin_root_libexec}/helpers/mcloving-deployed-digests" --home "${dropin_root_home}")"
+printf '[Service]\nEnvironmentFile=%%h/dropin-shared/typewide.env\nRestart=always\n' \
+  > "${typewide_dir}/zz-typewide.conf"
+chmod 0644 "${typewide_dir}/zz-typewide.conf"
+typewide_digests_after="$("${dropin_root_libexec}/helpers/mcloving-deployed-digests" --home "${dropin_root_home}")"
+[[ "${typewide_digests_before}" != "${typewide_digests_after}" ]] || {
+  echo "editing a type-wide drop-in left the canonical digest document unchanged" >&2
+  exit 1
+}
+grep -q 'service.d/zz-typewide.conf' <<<"${typewide_digests_after}" || {
+  echo "the canonical document does not record the type-wide drop-in at all" >&2
+  exit 1
+}
+rm -rf "${typewide_dir}" "${prefix_dir}" "${dropin_root_home}/prefix-shared"
+rm -f "${dropin_root_home}/dropin-shared/typewide.env"
+# Exec* directives name the executables the transition RUNS, and an
+# override resetting one to an external path was emitted by no
+# enumeration: the drop-in source was judged, found fine, and the unit was
+# then restarted into a binary whose mode, owner, and ancestor chain
+# nothing had validated.
+exec_dropin_dir="${dropin_unit_root}/mcloving-controller.service.d"
+mkdir -p "${exec_dropin_dir}"
+exec_tool_dir="${dropin_root_home}/external-tools"
+mkdir -p "${exec_tool_dir}"
+printf '#!/bin/sh\nexit 0\n' > "${exec_tool_dir}/tool"
+chmod 0755 "${exec_tool_dir}/tool"
+printf '[Service]\nExecStart=\nExecStart=%%h/external-tools/tool --serve\n' \
+  > "${exec_dropin_dir}/exec.conf"
+chmod 0644 "${exec_dropin_dir}/exec.conf"
+# (1) The executable's ANCESTOR CHAIN. A world-writable directory holding
+# the command is a substitution between validation and restart.
+chmod 0777 "${exec_tool_dir}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/exec-chain.log" 2>&1; then
+  echo "upgrade proceeded over an ExecStart executable in a world-writable directory" >&2
+  exit 1
+fi
+grep -q "external-tools (mode 777)" "${workdir}/logs/exec-chain.log" || {
+  echo "the ExecStart executable's chain was not walked:" >&2
+  cat "${workdir}/logs/exec-chain.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused ExecStart-chain upgrade still moved the current release" >&2
+  exit 1
+}
+# (2) The executable's own FILE rule, with the directory left secure -- so
+# the refusal comes from the file and not from its parent.
+chmod 0755 "${exec_tool_dir}"
+chmod 0666 "${exec_tool_dir}/tool"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/exec-file.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable ExecStart executable" >&2
+  exit 1
+fi
+grep -q "tool (mode 666)" "${workdir}/logs/exec-file.log" || {
+  echo "the ExecStart executable was not judged by the trust-input rule:" >&2
+  cat "${workdir}/logs/exec-file.log" >&2
+  exit 1
+}
+# (3) systemd's command prefixes are stripped before the executable is
+# taken, and the whole Exec* family is covered -- not just ExecStart.
+printf '[Service]\nExecStartPre=-@%%h/external-tools/tool argv0\n' \
+  > "${exec_dropin_dir}/exec.conf"
+chmod 0644 "${exec_dropin_dir}/exec.conf"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd > "${workdir}/logs/exec-prefix.log" 2>&1; then
+  echo "rollback proceeded over a prefixed ExecStartPre naming a writable executable" >&2
+  exit 1
+fi
+grep -q "tool (mode 666)" "${workdir}/logs/exec-prefix.log" || {
+  echo "the prefixed ExecStartPre spelling escaped extraction:" >&2
+  cat "${workdir}/logs/exec-prefix.log" >&2
+  exit 1
+}
+chmod 0755 "${exec_tool_dir}/tool"
+# (4) An EMPTY assignment is systemd's legal reset and declares nothing --
+# it must not be mistaken for a command, and it must not refuse.
+printf '[Service]\nExecStartPost=\n' > "${exec_dropin_dir}/exec.conf"
+chmod 0644 "${exec_dropin_dir}/exec.conf"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null || {
+  echo "an empty Exec* reset was treated as a declaration" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+# (5) Acceptance: a SECURED external executable admits the transition. The
+# refusals above are what prove the extraction happened, so this only
+# proves the rule is not over-broad.
+printf '[Service]\nExecStart=\nExecStart=%%h/external-tools/tool --serve\n' \
+  > "${exec_dropin_dir}/exec.conf"
+chmod 0644 "${exec_dropin_dir}/exec.conf"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured external ExecStart did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the Exec gate" >&2
+  exit 1
+}
+# (6) The class-closing half: a command spelling this parser cannot
+# confidently reduce to one executable is a NAMED refusal, never a quiet
+# skip -- a skipped Exec* is exactly an execution vector outside the walk.
+exec_refusal_index=0
+while IFS='|' read -r exec_spelling exec_expect; do
+  [[ -n "${exec_spelling}" ]] || continue
+  exec_refusal_index=$((exec_refusal_index + 1))
+  printf '[Service]\n%s\n' "${exec_spelling}" > "${exec_dropin_dir}/exec.conf"
+  chmod 0644 "${exec_dropin_dir}/exec.conf"
+  if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+    --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+    --no-systemd > "${workdir}/logs/exec-unparseable-${exec_refusal_index}.log" 2>&1; then
+    echo "upgrade accepted an Exec* spelling the parser cannot model: ${exec_spelling}" >&2
+    exit 1
+  fi
+  grep -q "${exec_expect}" "${workdir}/logs/exec-unparseable-${exec_refusal_index}.log" || {
+    echo "the unparseable Exec* spelling was refused for the wrong reason (${exec_spelling}):" >&2
+    cat "${workdir}/logs/exec-unparseable-${exec_refusal_index}.log" >&2
+    exit 1
+  }
+  [[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+    echo "a refused unparseable-Exec upgrade still moved the current release" >&2
+    exit 1
+  }
+done <<'EXECSPELLINGS'
+ExecStart="/external tools/tool"|with a QUOTED executable
+ExecStart=%t/tool|unit specifier other than a leading %h in its executable
+ExecStart=tool --serve|with a non-absolute executable
+ExecStart=-|with command prefixes but no executable
+ExecStart=/opt/my\ tool|with a backslash escape in its executable
+EnvironmentFile=%t/extra.env|unit specifier other than %h in its value
+EXECSPELLINGS
+rm -f "${exec_dropin_dir}/exec.conf"
+rm -rf "${exec_tool_dir}"
 # Parse coverage, the class-closing check: any installed-source line that
 # even LOOKS like a path-bearing directive (sloppy match: optional
 # whitespace, key, optional whitespace, '=') must be extracted by the
@@ -2731,6 +3018,48 @@ rm -rf "${wild_dir}"
   }
   [[ "${sloppy}" -eq "${parsed}" ]] || {
     echo "parse coverage: ${sloppy} path-bearing directive lines in the installed sources but ${parsed} extracted by the parser; a spelling systemd consumes escaped extraction" >&2
+    exit 1
+  }
+  # The same differential over the COMMAND family. It is kept separate
+  # because the two lists carry different value grammars and a merged
+  # count would let a miss in one be masked by the other; both must
+  # balance, and a directive added to either constant is swept here
+  # without anyone remembering a third list.
+  exec_sloppy="$(cat "${coverage_sources[@]}" \
+    | grep -cE "^[[:space:]]*(${MCLOVING_UNIT_EXEC_DIRECTIVES})[[:space:]]*=")" || true
+  exec_parsed="$(deployment_unit_assignment_lines "${coverage_sources[@]}" \
+    | grep -cE "^(${MCLOVING_UNIT_EXEC_DIRECTIVES})=")" || true
+  [[ "${exec_sloppy}" -gt 0 ]] || {
+    echo "parse-coverage gate saw no Exec* directives; the command sweep went blind" >&2
+    exit 1
+  }
+  [[ "${exec_sloppy}" -eq "${exec_parsed}" ]] || {
+    echo "parse coverage: ${exec_sloppy} Exec* directive lines in the installed sources but ${exec_parsed} extracted by the parser; a command spelling systemd executes escaped extraction" >&2
+    exit 1
+  }
+  # And the executables themselves are actually EMITTED, not merely
+  # parsed: the shipped units name their commands with %h, so a
+  # deployment home must appear in every extracted executable. An
+  # extractor that returned nothing would satisfy the count differential
+  # above while validating no command at all.
+  exec_emitted=0
+  while IFS= read -r encoded_exec; do
+    [[ -n "${encoded_exec}" ]] || continue
+    decode_path_item_into decoded_exec "${encoded_exec}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    case "${decoded_exec}" in
+      "${dropin_root_home}"/*) exec_emitted=$((exec_emitted + 1)) ;;
+      *)
+        echo "an extracted Exec* executable is not %h-anchored: ${decoded_exec}" >&2
+        exit 1
+        ;;
+    esac
+  done < <(deployment_unit_declared_executables "${dropin_root_home}" \
+    "${dropin_root_home}/.config/systemd/user"/mcloving-*.service \
+    "${dropin_root_home}/.config/containers/systemd"/mcloving-*.container \
+    "${dropin_root_home}/.config/containers/systemd"/mcloving-*.volume | sort -u)
+  [[ "${exec_emitted}" -gt 0 ]] || {
+    echo "the Exec* extractor emitted no executables at all for the installed units" >&2
     exit 1
   }
   # Exactness over the separator spellings systemd permits: spaces and
