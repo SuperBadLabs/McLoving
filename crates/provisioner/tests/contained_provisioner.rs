@@ -68,9 +68,12 @@ const STARTUP_BUDGET_BEYOND_TEST_WORK_MS: u64 = REQUEST_INSTANCE_LIFETIME_MS;
 const FIXTURE_DELAYED_CREATE_MS: u64 = 200;
 
 /// Delay the two `DelayedCreateAfter*Snapshot` modes hold their create open
-/// for by default, chosen to answer inside the 200 ms those modes hold the
-/// raced inventory snapshot for. Only reached when a test does not widen the
-/// create itself; both current users do.
+/// for when a test does not widen it.
+///
+/// Both current users widen it to [`FIXTURE_RENDEZVOUS_CREATE_MS`] and pair
+/// that with a held snapshot response, so this is only the fallback those
+/// modes keep for an un-widened use — no test's window is measured against
+/// it.
 const FIXTURE_SNAPSHOT_CREATE_MS: u64 = 100;
 
 /// Delay the rendezvous-on-create cases ask the fixture to hold its create
