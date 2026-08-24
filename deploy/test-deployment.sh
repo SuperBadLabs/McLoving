@@ -1898,6 +1898,59 @@ external_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${ho
   exit 1
 }
 
+# A configured spelling that carries ".." -- .config/mcloving/../ca.pem --
+# has the walked config tree as a LEXICAL prefix while naming a file the
+# walk never visits. Unnormalized, the containment test classifies it as
+# covered, the record never exists, and substituting the real target leaves
+# the canonical document byte-identical. The path must be normalized
+# (lexically -- symlink policy stays per-class) before containment, so the
+# target is recorded, pinned, and its substitution visible.
+dotdot_target="${home}/.config/ca-dotdot.pem"
+cp "${pki}/controller-ca.pem" "${dotdot_target}"
+chmod 0644 "${dotdot_target}"
+cp "${config_dir}/agent.env" "${workdir}/agent.env.before-dotdot"
+sed -i "s#^MCLOVING_CONTROLLER_CA_PATH=.*#MCLOVING_CONTROLLER_CA_PATH=${home}/.config/mcloving/../ca-dotdot.pem#" \
+  "${config_dir}/agent.env"
+grep -q "^MCLOVING_CONTROLLER_CA_PATH=${home}/.config/mcloving/../ca-dotdot.pem\$" \
+  "${config_dir}/agent.env" || {
+  echo "dotdot gate could not rewrite MCLOVING_CONTROLLER_CA_PATH; contract shape changed" >&2
+  exit 1
+}
+dotdot_doc="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+python3 - "${dotdot_doc}" <<'DOTDOT'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+records = {record["path"]: record for record in document.get("configured_paths", [])}
+entry = records.get(".config/ca-dotdot.pem")
+if entry is None:
+    raise SystemExit(
+        f"the ..-spelled configured CA was not recorded under its normalized "
+        f"path: {sorted(records)}"
+    )
+if "sha256" not in entry or "mode" not in entry:
+    raise SystemExit(f"the ..-spelled CA record lacks digest or mode: {entry}")
+dotted = [path for path in records if "/../" in path or path.startswith("../")]
+if dotted:
+    raise SystemExit(f"unnormalized spellings leaked into the document: {dotted}")
+DOTDOT
+printf 'SUBSTITUTED-DOTDOT-TRUST-BYTES\n' > "${dotdot_target}"
+chmod 0644 "${dotdot_target}"
+dotdot_substituted="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+if [[ "${dotdot_doc}" == "${dotdot_substituted}" ]]; then
+  echo "substituting the ..-spelled CA left the digest re-read unchanged" >&2
+  exit 1
+fi
+cp "${workdir}/agent.env.before-dotdot" "${config_dir}/agent.env"
+chmod 0600 "${config_dir}/agent.env"
+rm -f "${dotdot_target}"
+dotdot_restored="$("${libexec}/helpers/mcloving-deployed-digests" --home "${home}")"
+[[ "${external_baseline}" == "${dotdot_restored}" ]] || {
+  echo "the re-read did not return to baseline after the ..-spelled CA was removed" >&2
+  exit 1
+}
+
 # A quoted multiline contract value carrying a newline in an absolute path
 # is legal to the shared parser and to systemd; the inventory transport
 # must carry it as ONE item with the right digest, never split it into
@@ -2381,6 +2434,53 @@ grep -q "mcloving-controller.service (mode 666)" "${workdir}/logs/unit-file-mode
   exit 1
 }
 chmod 0644 "${dropin_root_home}/.config/systemd/user/mcloving-controller.service"
+# A unit SOURCE that is a symlink to a securely-owned 0644 file passes the
+# trust-input file rule on the target itself; only the resolved ancestor
+# walk judges the target's parents, and a group/world-writable external
+# parent lets another local user replace the accepted unit wholesale
+# before the next manager start reads it. The sources must enter the same
+# file-chain derivation the declared contracts use: refusal names the
+# writable parent, and the same symlinked source with a secured parent
+# stays accepted.
+evil_unit_parent="${dropin_root_home}/evil-unit-parent"
+symlinked_unit="${dropin_root_home}/.config/systemd/user/mcloving-controller.service"
+mkdir -p "${evil_unit_parent}"
+mv "${symlinked_unit}" "${evil_unit_parent}/mcloving-controller.service"
+chmod 0644 "${evil_unit_parent}/mcloving-controller.service"
+ln -s "${evil_unit_parent}/mcloving-controller.service" "${symlinked_unit}"
+chmod 0777 "${evil_unit_parent}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/unit-symlink-parent.log" 2>&1; then
+  echo "upgrade accepted a unit source symlinked under a world-writable parent" >&2
+  exit 1
+fi
+grep -q "evil-unit-parent (mode 777)" "${workdir}/logs/unit-symlink-parent.log" || {
+  echo "the symlinked unit source's writable parent was not named:" >&2
+  cat "${workdir}/logs/unit-symlink-parent.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused symlinked-unit upgrade still moved the current release" >&2
+  exit 1
+}
+chmod 0755 "${evil_unit_parent}"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" != "${dropin_root_current}" ]] || {
+  echo "the secured symlinked unit source did not admit the transition" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release across the symlinked unit" >&2
+  exit 1
+}
+rm -f "${symlinked_unit}"
+mv "${evil_unit_parent}/mcloving-controller.service" "${symlinked_unit}"
+rm -rf "${evil_unit_parent}"
 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null
@@ -2485,6 +2585,63 @@ chmod 0700 "${transguard_libexec}/releases"
   echo "the secured leaf roots did not admit the transition" >&2
   exit 1
 }
+# RETAINED release directories and the binaries inside them are validated
+# nodes, derived by LISTING releases/ -- not from the current/previous
+# links: a retained releases/<id> (or a binary in one) gone
+# group/world-writable after publication would otherwise be hashed
+# successfully and then swapped by another local user between the byte
+# comparison and the service start. Refusal names the node; secured, the
+# same transitions proceed.
+chmod 0777 "${transguard_libexec}/${transguard_current}"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd > "${workdir}/logs/retained-dir-mode.log" 2>&1; then
+  echo "rollback proceeded over a world-writable retained release directory" >&2
+  exit 1
+fi
+grep -q "${transguard_current} (mode 777)" "${workdir}/logs/retained-dir-mode.log" || {
+  echo "the writable retained release directory was not named:" >&2
+  cat "${workdir}/logs/retained-dir-mode.log" >&2
+  exit 1
+}
+[[ "$(readlink "${transguard_libexec}/current")" != "${transguard_current}" ]] || {
+  echo "a refused retained-directory rollback still moved the current release" >&2
+  exit 1
+}
+chmod 0700 "${transguard_libexec}/${transguard_current}"
+chmod 0775 "${transguard_libexec}/${transguard_current}/mcloving-agent"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd > "${workdir}/logs/retained-binary-mode.log" 2>&1; then
+  echo "rollback proceeded over a group-writable retained release binary" >&2
+  exit 1
+fi
+grep -q "mcloving-agent (mode 775)" "${workdir}/logs/retained-binary-mode.log" || {
+  echo "the writable retained release binary was not named:" >&2
+  cat "${workdir}/logs/retained-binary-mode.log" >&2
+  exit 1
+}
+chmod 0755 "${transguard_libexec}/${transguard_current}/mcloving-agent"
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${transguard_libexec}/current")" == "${transguard_current}" ]] || {
+  echo "rollback did not restore the original release after the retained nodes were secured" >&2
+  exit 1
+}
+# Same rule on the upgrade entry point: the now-retained second release
+# carries a group-writable binary and the transition toward it refuses.
+transguard_retained2="$(readlink "${transguard_libexec}/previous")"
+chmod 0775 "${transguard_libexec}/${transguard_retained2}/mcloving-cli"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${transguard_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/retained-binary-upgrade.log" 2>&1; then
+  echo "upgrade proceeded over a group-writable retained release binary" >&2
+  exit 1
+fi
+grep -q "mcloving-cli (mode 775)" "${workdir}/logs/retained-binary-upgrade.log" || {
+  echo "the upgrade's writable retained binary was not named:" >&2
+  cat "${workdir}/logs/retained-binary-upgrade.log" >&2
+  exit 1
+}
+chmod 0755 "${transguard_libexec}/${transguard_retained2}/mcloving-cli"
 rm -rf "${transguard_home}"
 mkdir -p "${lock_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${lock_home}" \
@@ -2566,6 +2723,55 @@ sleep 0.3
 }
 kill "${shared_holder}" 2>/dev/null || true
 wait "${shared_holder}" 2>/dev/null || true
+# The lock is legitimately opened BEFORE the integrity walk, so the open
+# itself must be safe against a swapped lockfile: with libexec writable,
+# another user replaces .transition-lock with a symlink to any
+# service-user-writable file, and a truncating `exec 9>` would destroy
+# that target before any validation could refuse the deployment. Both
+# sides -- the exclusive transition open and the reader's shared open --
+# must refuse a symlinked lock by name, without truncating or modifying
+# what it points at.
+lock_victim="${workdir}/lock-victim.txt"
+printf 'LOCK-VICTIM-BYTES\n' > "${lock_victim}"
+ln -sfn "${lock_victim}" "${lock_libexec}/.transition-lock"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/lock-symlink.log" 2>&1; then
+  echo "an upgrade proceeded over a symlinked transition lock" >&2
+  exit 1
+fi
+grep -q "is a symlink; the deployment only ever creates it as a regular file" \
+  "${workdir}/logs/lock-symlink.log" || {
+  echo "the symlinked-lock refusal was not named:" >&2
+  cat "${workdir}/logs/lock-symlink.log" >&2
+  exit 1
+}
+[[ "$(cat "${lock_victim}")" == "LOCK-VICTIM-BYTES" ]] || {
+  echo "opening the symlinked transition lock truncated or modified its target" >&2
+  exit 1
+}
+[[ "$(readlink "${lock_libexec}/current")" == "${lock_current}" ]] || {
+  echo "a symlinked-lock refusal still moved the current release" >&2
+  exit 1
+}
+if "${lock_libexec}/helpers/mcloving-deployed-digests" --home "${lock_home}" \
+  > "${workdir}/logs/lock-symlink-shared.log" 2>&1; then
+  echo "the digest reader opened a symlinked transition lock" >&2
+  exit 1
+fi
+grep -q "is a symlink; the deployment only ever creates it as a regular file" \
+  "${workdir}/logs/lock-symlink-shared.log" || {
+  echo "the reader's symlinked-lock refusal was not named:" >&2
+  cat "${workdir}/logs/lock-symlink-shared.log" >&2
+  exit 1
+}
+[[ "$(cat "${lock_victim}")" == "LOCK-VICTIM-BYTES" ]] || {
+  echo "the reader's symlinked-lock open truncated or modified its target" >&2
+  exit 1
+}
+rm -f "${lock_libexec}/.transition-lock" "${lock_victim}"
+# The upgrade below is the acceptance direction: with the symlink gone the
+# open recreates a regular lockfile and the same transition proceeds.
 "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd >/dev/null

@@ -217,10 +217,11 @@ deployment_contract_path_variables() {
 # require_integrity_files HOME FILE...
 #
 # The trust-input file rule for the install and transition walks: readable,
-# no group/other WRITE bit, owned by root or the home's owner. Unit files
-# and drop-ins are execution vectors -- ExecStart lives in them -- but are
-# legitimately world-READABLE, unlike contracts; a writable or foreign one
-# lets another local user inject directives the next restart executes.
+# no group/other WRITE bit, owned by root or the home's owner. Unit files,
+# drop-ins, and retained release binaries are execution vectors --
+# ExecStart lives in the units, and the binaries are what it starts -- but
+# are legitimately world-READABLE, unlike contracts; a writable or foreign
+# one lets another local user control what the next restart executes.
 require_integrity_files() {
   local home_dir="${1%/}" home_owner file mode_owner mode owner offending
   shift
@@ -230,7 +231,7 @@ require_integrity_files() {
   for file in "$@"; do
     [[ -e "${file}" ]] || continue
     mode_owner="$(stat -Lc '%a %u' "${file}")" \
-      || deploy_fail "cannot stat unit source ${file}"
+      || deploy_fail "cannot stat trust-input file ${file}"
     mode="${mode_owner%% *}"
     owner="${mode_owner##* }"
     if (( (8#${mode} & 8#022) != 0 )); then
@@ -244,7 +245,7 @@ require_integrity_files() {
     fi
   done
   if [[ -n "${offending}" ]]; then
-    deploy_fail "unit or drop-in source(s) group- or world-writable, foreign-owned, or unreadable: ${offending% }-- another local user could inject directives the next service start executes; run chmod go-w (or restore ownership) on them and retry"
+    deploy_fail "trust-input file(s) (unit, drop-in, or retained release binary) group- or world-writable, foreign-owned, or unreadable: ${offending% }-- another local user could control what the next service start executes; run chmod go-w (or restore ownership) on them and retry"
   fi
 }
 
@@ -274,14 +275,37 @@ require_integrity_files() {
 # configuration root -- describes nobody's view of the target tree and is
 # ignored like a relative value.
 deployment_xdg_value_applies() {
-  local home_dir="${1%/}" value="${2%/}"
+  local home_dir="${1%/}" value="${2%/}" normalized_home normalized_value
   if [[ "${home_dir}" == "${HOME%/}" ]]; then
     return 0
   fi
-  if [[ "${value}" == "${home_dir}"/* ]]; then
+  # The inside-the-target-home judgment is a lexical prefix test, so BOTH
+  # sides are lexically normalized first: an inherited value spelled
+  # ${home}/.config/../../elsewhere carries the home as a lexical prefix
+  # while naming a tree outside it, and would otherwise be adopted as
+  # speaking for the target home. normpath only, never realpath -- the
+  # ancestor walk judges every symlink the spelling crosses on its own.
+  lexical_normalized_path_into normalized_home "${home_dir}"
+  lexical_normalized_path_into normalized_value "${value}"
+  if [[ "${normalized_value}" == "${normalized_home}"/* ]]; then
     return 0
   fi
   return 1
+}
+
+# lexical_normalized_path_into VARIABLE PATH -- the lexically collapsed
+# spelling (python's posixpath.normpath; NEVER realpath -- symlink policy
+# belongs to each consumer). The sentinel byte survives the command
+# substitution, so a path whose normalized spelling ends in a newline
+# round-trips exactly, same discipline as decode_path_item_into.
+lexical_normalized_path_into() {
+  # shellcheck disable=SC2178  # nameref assignment
+  local -n normalize_target_ref="$1"
+  normalize_target_ref="$(
+    python3 -c 'import posixpath, sys; sys.stdout.write(posixpath.normpath(sys.argv[1]))' "$2" \
+      && printf x
+  )" || deploy_fail "cannot normalize a path spelling"
+  normalize_target_ref="${normalize_target_ref%x}"
 }
 
 # encode_path_item PATH -> one base64 line (no wrap).
@@ -1334,12 +1358,132 @@ require_deployment_integrity() {
       [[ -d "${unit_file}.d" ]] && dropin_dirs+=("${unit_file}.d")
     done
   fi
+  # The RETAINED release inventory joins the walk, derived by LISTING
+  # releases/ rather than enumerating from the current/previous links: the
+  # links name at most two entries, while every retained releases/<id> is
+  # executable state the next transition hashes and adopts. The inventory
+  # validates the releases PARENT already, but a retained directory (or a
+  # binary inside one) gone group/world-writable after publication would
+  # otherwise be hashed -- successfully -- and then swapped by another
+  # local user between the byte comparison and the service start. Each
+  # real directory found joins the validated-node set (its mode and
+  # ownership are judged like every managed root); each regular file gets
+  # the trust-input file rule below (no group/other write, root-or-home
+  # owner; world-readable stays legal -- these are public binaries, not
+  # secrets). A symlinked entry is refused by name, the round-11 rule:
+  # stage_release only ever publishes real directories and regular files.
+  local release_walk=() release_node release_binaries=() walk_index=0
+  local dotglob_was_set=0
+  shopt -q dotglob && dotglob_was_set=1
+  shopt -s dotglob
+  if [[ -d "${libexec_root}/releases" ]]; then
+    release_walk=("${libexec_root}/releases"/*)
+  fi
+  while (( walk_index < ${#release_walk[@]} )); do
+    release_node="${release_walk[walk_index]}"
+    walk_index=$((walk_index + 1))
+    # An unmatched glob stays a literal pattern; nothing exists there.
+    [[ -e "${release_node}" || -L "${release_node}" ]] || continue
+    if [[ -L "${release_node}" ]]; then
+      (( dotglob_was_set )) || shopt -u dotglob
+      deploy_fail "retained release entry ${release_node} is a symlink; an entry that is itself a symlink is never published by stage_release -- refusing to trust the retained inventory"
+    fi
+    if [[ -d "${release_node}" ]]; then
+      managed_roots+=("${release_node}")
+      release_walk+=("${release_node}"/*)
+    elif [[ -f "${release_node}" ]]; then
+      release_binaries+=("${release_node}")
+    fi
+  done
+  (( dotglob_was_set )) || shopt -u dotglob
+  # Unit SOURCE files enter the ancestor walk alongside the declared
+  # targets: a top-level unit or drop-in .conf that is a symlink to a
+  # securely-owned file passes the trust-input file rule on the target
+  # itself, but only this chain derivation (lexical parents plus the
+  # recursively resolved target chains) judges the target's OWN parents --
+  # a group/world-writable external parent lets another local user replace
+  # the accepted unit source wholesale before the next manager start reads
+  # it. Same file-chain contract the declared contracts use: the final
+  # component resolves like any other, and the resulting file node is
+  # skipped by the directory checks while every directory on the way is
+  # judged.
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
     "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
-    "${declared_contracts[@]}" "${dropin_dirs[@]}"
+    "${declared_contracts[@]}" "${dropin_dirs[@]}" "${unit_source_files[@]}"
   require_secure_files "${home_dir}" "${contract_destinations[@]}" \
     "${declared_contracts[@]}"
-  require_integrity_files "${home_dir}" "${unit_source_files[@]}"
+  require_integrity_files "${home_dir}" "${unit_source_files[@]}" \
+    "${release_binaries[@]}"
+}
+
+# open_transition_lock_fd LIBEXEC_ROOT -- open fd 9 on the lockfile, safely.
+#
+# The lock is legitimately taken BEFORE require_deployment_integrity (the
+# integrity walk itself must run under the lock), so this open cannot lean
+# on any prior validation -- with libexec_root gone group/world-writable,
+# another local user could have swapped .transition-lock for a symlink to
+# any service-user-writable file, and a truncating `exec 9>` would follow
+# the link and destroy that target before the integrity check ever ran.
+# bash cannot open O_NOFOLLOW, and it cannot inherit a descriptor a child
+# helper opened (holding one in a coproc for the process lifetime trades a
+# closed race for a lock that silently vanishes if the holder dies), so the
+# open is made safe by construction instead:
+#
+#   1. The open uses APPEND mode (O_WRONLY|O_CREAT|O_APPEND) on both the
+#      exclusive and shared sides. Nothing is ever written through fd 9 --
+#      flock only needs a descriptor -- so this open can never truncate or
+#      modify ANY target, whatever the path resolves to. The damage class
+#      the truncating open enabled is gone unconditionally.
+#   2. A pre-open lstat refuses an existing symlinked lock by name: the
+#      deployment only ever creates the lock as a regular file, so a link
+#      there is never legitimate.
+#   3. A post-open recheck requires the descriptor actually opened to be
+#      the very inode the pre-open lstat saw (or, when this open created
+#      the file, the non-symlink regular file now at the path). A symlink
+#      swapped into the lstat->open window therefore cannot leave the lock
+#      held on an attacker-chosen file: the identities disagree and the
+#      transition is refused before flock.
+#
+# Residual window, argued explicitly: between the lstat and the open,
+# a swapped-in DANGLING symlink can cause O_CREAT to create an empty file
+# at a path its owner could already write -- nothing is truncated, nothing
+# is written, and the recheck then refuses the lock. That residue's
+# precondition is a group/world-writable libexec_root, which the
+# require_deployment_integrity call immediately following every
+# acquire_transition_lock (and install's chmod 0700 preceding its lock)
+# refuses -- so no transition ever proceeds from inside the window, and a
+# host in that state is already fully compromised for the service account
+# (the same writability lets helpers and releases be replaced wholesale).
+open_transition_lock_fd() {
+  local libexec_root="$1" lock_path pre_identity opened_identity post_identity
+  lock_path="${libexec_root}/.transition-lock"
+  if [[ -L "${lock_path}" ]]; then
+    deploy_fail "transition lock ${lock_path} is a symlink; the deployment only ever creates it as a regular file -- refusing to open it"
+  fi
+  pre_identity=""
+  if [[ -e "${lock_path}" ]]; then
+    pre_identity="$(stat -c '%d:%i' "${lock_path}")" \
+      || deploy_fail "cannot stat the deployment transition lock in ${libexec_root}"
+  fi
+  # Append mode: this open can never truncate anything, whatever the path
+  # resolves to. No content is ever written through fd 9.
+  exec 9>>"${lock_path}" \
+    || deploy_fail "cannot open the deployment transition lock in ${libexec_root}"
+  # fstat of what was actually opened: /proc/self/fd/9 resolves inside the
+  # stat process, which inherits the descriptor.
+  opened_identity="$(stat -Lc '%d:%i' /proc/self/fd/9)" \
+    || deploy_fail "cannot stat the opened transition lock descriptor for ${libexec_root}"
+  if [[ -n "${pre_identity}" ]]; then
+    [[ "${opened_identity}" == "${pre_identity}" ]] \
+      || deploy_fail "transition lock ${lock_path} changed identity while being opened; refusing to lock a substituted file"
+  else
+    [[ ! -L "${lock_path}" ]] \
+      || deploy_fail "transition lock ${lock_path} became a symlink while being opened; refusing to lock a substituted file"
+    post_identity="$(stat -c '%d:%i' "${lock_path}")" \
+      || deploy_fail "cannot stat the deployment transition lock in ${libexec_root}"
+    [[ "${opened_identity}" == "${post_identity}" ]] \
+      || deploy_fail "transition lock ${lock_path} changed identity while being created; refusing to lock a substituted file"
+  fi
 }
 
 # acquire_transition_lock LIBEXEC_ROOT
@@ -1352,11 +1496,11 @@ require_deployment_integrity() {
 # the loser then health-checks the winner's release and reports its own as
 # installed. Non-blocking on purpose: a queued transition would run against
 # a snapshot taken before the winner rewrote the links, so the only honest
-# behavior is a named refusal.
+# behavior is a named refusal. The open itself goes through
+# open_transition_lock_fd: non-truncating, symlink-refusing.
 acquire_transition_lock() {
   local libexec_root="$1"
-  exec 9>"${libexec_root}/.transition-lock" \
-    || deploy_fail "cannot open the deployment transition lock in ${libexec_root}"
+  open_transition_lock_fd "${libexec_root}"
   flock -n 9 \
     || deploy_fail "another deployment transition holds the lock for ${libexec_root}; refusing to interleave release state -- retry when it completes"
 }
@@ -1372,12 +1516,13 @@ acquire_transition_lock() {
 # naming one release: a document describing no deployment that ever
 # existed, exactly where a cutover drift snapshot needs a stable one.
 # Non-blocking like the exclusive side: a named refusal, never a silent
-# queue. Opened with append, not truncate -- a reader must not disturb the
-# lockfile a writer may be about to open.
+# queue. The open is the same non-truncating, symlink-refusing
+# open_transition_lock_fd as the writer's -- the reader runs as the service
+# user against the same swappable path and must not be usable as a
+# truncation (or lock-on-foreign-file) oracle either.
 acquire_transition_lock_shared() {
   local libexec_root="$1"
-  exec 9>>"${libexec_root}/.transition-lock" \
-    || deploy_fail "cannot open the deployment transition lock in ${libexec_root}"
+  open_transition_lock_fd "${libexec_root}"
   flock -s -n 9 \
     || deploy_fail "a deployment transition is in progress for ${libexec_root}; retry when it completes"
 }

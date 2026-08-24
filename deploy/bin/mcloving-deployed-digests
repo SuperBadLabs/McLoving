@@ -141,6 +141,7 @@ python3 - "${home_dir}" <<'PY'
 import base64
 import hashlib
 import json
+import posixpath
 import stat
 import subprocess
 import sys
@@ -155,7 +156,13 @@ NODE_KINDS = {
     stat.S_IFDIR: "directory",
 }
 
-home = Path(sys.argv[1])
+# Lexically normalized (posixpath.normpath, and ONLY that -- realpath would
+# resolve symlinks, and each class's symlink policy is applied per-record):
+# every containment and dedup comparison below is a lexical string
+# comparison, and an unnormalized spelling on either side makes two names
+# for one file compare as different files -- or, worse, a name for a file
+# the walks never visit compare as inside a walked tree.
+home = Path(posixpath.normpath(sys.argv[1]))
 libexec = home / ".local/libexec/mcloving"
 config = home / ".config/mcloving"
 unit_dirs_supplied = os.environ.get("MCLOVING_UNIT_DIRS")
@@ -174,7 +181,13 @@ def decode_path_items(text: str) -> list:
     ]
 
 
-unit_dirs = tuple(Path(item) for item in decode_path_items(unit_dirs_supplied))
+# Normalized like every other path that enters a comparison: the unit roots
+# participate in walked-tree containment and in home-relative record
+# spellings, and an XDG base inherited from the environment may legally
+# carry "..". Lexical only -- symlinked roots keep their per-record policy.
+unit_dirs = tuple(
+    Path(posixpath.normpath(item)) for item in decode_path_items(unit_dirs_supplied)
+)
 
 
 MAX_RECORD_ATTEMPTS = 3
@@ -592,8 +605,19 @@ walked_roots = (libexec / "releases", libexec / "helpers", *unit_dirs, config)
 
 
 def inside_walked_trees(path: Path) -> bool:
+    # BOTH sides normalized before the lexical prefix test. A configured
+    # spelling containing ".." -- /home/x/.config/mcloving/../ca.pem -- has
+    # the walked config root as a lexical prefix while naming a file the
+    # walk never visits: without normalization it is classified as covered
+    # and its real target's substitution never changes the document. The
+    # roots are normalized too, because an XDG base inherited from the
+    # environment may itself carry ".." legally. normpath, never realpath:
+    # containment here is about what the LEXICAL walks above recorded, and
+    # symlink policy stays per-class in the records themselves.
+    candidate = posixpath.normpath(str(path))
     for walked_root in walked_roots:
-        if path == walked_root or str(path).startswith(str(walked_root) + "/"):
+        root_text = posixpath.normpath(str(walked_root))
+        if candidate == root_text or candidate.startswith(root_text + "/"):
             return True
     return False
 
@@ -611,7 +635,12 @@ for line in decode_path_items(configured_supplied):
         parts = line.split(" ", 2)
         relative_configured.append((parts[1], parts[2] if len(parts) > 2 else ""))
         continue
-    candidate = Path(line)
+    # Normalized at intake, so the dedup set, the containment test, the
+    # record path, and the chain derivation all see one canonical spelling
+    # -- two contract spellings of one file collapse to one record instead
+    # of two, and a "..'d" spelling can no longer hide behind a walked
+    # root's prefix.
+    candidate = Path(posixpath.normpath(line))
     if not inside_walked_trees(candidate):
         absolute_configured.add(candidate)
 configured_paths = sorted(absolute_configured)
