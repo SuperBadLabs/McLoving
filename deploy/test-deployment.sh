@@ -846,6 +846,80 @@ grep -qE "must be an existing directory|not a directory: regular file" \
   exit 1
 }
 rm -f "${receipt_fifo}" "${receipt_kind_env}" "${workspace_kind_env}" "${workspace_file}"
+# The binaries read the PROCESS ENVIRONMENT, which systemd composes from
+# the manager environment, Environment= in the unit and its drop-ins, and
+# every EnvironmentFile= in order. A guard that judged only the parsed
+# contract validated one input while the service received another. This
+# guard runs as ExecStartPre of that very unit, so the composition is
+# already in its own environment and is READ rather than re-derived.
+ambient_env="${home}/ambient.env"
+cp "${config}/agent.env" "${ambient_env}"
+chmod 0600 "${ambient_env}"
+mkdir -p "${home}/ambient-wide"
+printf 'session_epoch=0\n' > "${home}/ambient-wide/receipt"
+chmod 0600 "${home}/ambient-wide/receipt"
+# (1) A classified path variable supplied ONLY by the environment. The
+# digest inventory pins what the CONTRACT declares, so an ambient value is
+# validated once and then unwatched -- refused by name.
+if MCLOVING_AGENT_SESSION_RECEIPT_PATH="${home}/ambient-wide/receipt" \
+  "${libexec}/helpers/mcloving-env-guard" agent "${ambient_env}" \
+  > "${workdir}/logs/guard-ambient-absent.log" 2>&1; then
+  echo "env guard accepted a classified path supplied only by the environment" >&2
+  exit 1
+fi
+grep -q "MCLOVING_AGENT_SESSION_RECEIPT_PATH (service environment says ${home}/ambient-wide/receipt, ${ambient_env} does not declare it)" \
+  "${workdir}/logs/guard-ambient-absent.log" || {
+  echo "the ambient classified path was not named:" >&2
+  cat "${workdir}/logs/guard-ambient-absent.log" >&2
+  exit 1
+}
+# (2) A classified path set in BOTH but DISAGREEING: the document would pin
+# the contract's value while the service opened another.
+if MCLOVING_AGENT_WORKSPACE_ROOT="${home}/ambient-wide" \
+  "${libexec}/helpers/mcloving-env-guard" agent "${ambient_env}" \
+  > "${workdir}/logs/guard-ambient-differs.log" 2>&1; then
+  echo "env guard accepted an environment value disagreeing with the contract" >&2
+  exit 1
+fi
+grep -q "MCLOVING_AGENT_WORKSPACE_ROOT (service environment says ${home}/ambient-wide, ${ambient_env} says " \
+  "${workdir}/logs/guard-ambient-differs.log" || {
+  echo "the disagreeing environment value was not named:" >&2
+  cat "${workdir}/logs/guard-ambient-differs.log" >&2
+  exit 1
+}
+# (3) Acceptance: the same variable set in the environment to the SAME
+# value the contract declares is no asymmetry at all -- this is what
+# ExecStartPre sees in production, where systemd has loaded the contract
+# into the environment itself, so refusing it would refuse every real
+# start.
+ambient_workspace="$(sed -n 's/^MCLOVING_AGENT_WORKSPACE_ROOT=//p' "${ambient_env}")"
+[[ -n "${ambient_workspace}" ]] || {
+  echo "ambient gate could not read the contract's workspace root; contract shape changed" >&2
+  exit 1
+}
+MCLOVING_AGENT_WORKSPACE_ROOT="${ambient_workspace}" \
+  "${libexec}/helpers/mcloving-env-guard" agent "${ambient_env}" >/dev/null || {
+  echo "env guard refused an environment value identical to the contract's" >&2
+  exit 1
+}
+# (4) The composition is actually APPLIED, not merely compared: a contract
+# whose non-path variable still carries its placeholder is admitted when
+# the environment supplies the real value, because that is what the binary
+# receives. Same mechanism, observed from the other side.
+placeholder_env="${home}/placeholder-ambient.env"
+sed 's/^MCLOVING_AGENT_ID=.*/MCLOVING_AGENT_ID=__SET_ME_AGENT_ID__/' \
+  "${config}/agent.env" > "${placeholder_env}"
+chmod 0600 "${placeholder_env}"
+if "${libexec}/helpers/mcloving-env-guard" agent "${placeholder_env}" >/dev/null 2>&1; then
+  echo "env guard accepted a placeholder with nothing overriding it" >&2
+  exit 1
+fi
+MCLOVING_AGENT_ID=smoke-agent \
+  "${libexec}/helpers/mcloving-env-guard" agent "${placeholder_env}" >/dev/null || {
+  echo "env guard judged the contract placeholder rather than the value the service receives" >&2
+  exit 1
+}
+rm -rf "${ambient_env}" "${placeholder_env}" "${home}/ambient-wide"
 effect_plan="${home}/effect-plan.json"
 printf '{}' > "${effect_plan}"
 chmod 0644 "${effect_plan}"
@@ -1864,6 +1938,14 @@ race_status=0
 # set comes through the same derivation for the same reason: the payload
 # refuses to build a document without it rather than silently omitting the
 # type-wide and prefix drop-ins.
+race_shadowing_units="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_shadowing_unit_files "${home}" \
+    "${smoke_unit_root}"/mcloving-*.service \
+    "${smoke_quadlet_root}"/mcloving-*.container \
+    "${smoke_quadlet_root}"/mcloving-*.volume
+)"
 race_system_dropin_dirs="$(
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
@@ -1892,6 +1974,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
 import io
@@ -1954,6 +2037,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
 import contextlib
@@ -2030,6 +2114,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/ctime-probe.txt" <<'CTIMERACE' || ctime_race_status=$?
 import contextlib
@@ -2105,6 +2190,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 MCLOVING_CONFIGURED_PATHS="" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}" <<'LISTRACE' || listing_race_status=$?
@@ -3253,6 +3339,154 @@ XDG_CONFIG_DIRS="${xdgconf_root}" "${repo_root}/deploy/bin/mcloving-upgrade" \
 "${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
   --no-systemd >/dev/null
 rm -rf "${xdgconf_root}" "${dropin_root_home}/xdg-shared"
+# A main unit file is SELECTED, not merged: the first load path in
+# precedence order holding the name wins and every lower one is ignored
+# entirely. ~/.config/systemd/user.control outranks ~/.config/systemd/user,
+# so a file planted there shadows the installed unit and its ExecStart is
+# what the next restart executes.
+shadow_control="${dropin_root_home}/.config/systemd/user.control"
+mkdir -p "${shadow_control}"
+chmod 0755 "${shadow_control}"
+mkdir -p "${dropin_root_home}/shadow-bin"
+printf '#!/bin/sh\nexit 0\n' > "${dropin_root_home}/shadow-bin/tool"
+chmod 0755 "${dropin_root_home}/shadow-bin/tool" "${dropin_root_home}/shadow-bin"
+printf '[Service]\nExecStart=%%h/shadow-bin/tool\n' \
+  > "${shadow_control}/mcloving-controller.service"
+chmod 0666 "${shadow_control}/mcloving-controller.service"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/shadow-unit.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable unit file shadowing the installed one" >&2
+  exit 1
+fi
+grep -q "user.control/mcloving-controller.service (mode 666)" \
+  "${workdir}/logs/shadow-unit.log" || {
+  echo "the shadowing unit file was not judged:" >&2
+  cat "${workdir}/logs/shadow-unit.log" >&2
+  exit 1
+}
+grep -q "notice: unit file .*user.control/mcloving-controller.service outranks" \
+  "${workdir}/logs/shadow-unit.log" || {
+  echo "the shadowing unit file was not reported to the operator:" >&2
+  cat "${workdir}/logs/shadow-unit.log" >&2
+  exit 1
+}
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused shadowing-unit upgrade still moved the current release" >&2
+  exit 1
+}
+# A SECURED shadow is validated and REPORTED, not refused: systemd's load
+# path exists so an administrator can override a unit, and a deployment
+# that refused to upgrade over that mechanism would be un-upgradable with
+# no repair it could perform. What closes the hole is that the override is
+# judged like any other source, which the refusal above proves.
+chmod 0644 "${shadow_control}/mcloving-controller.service"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/shadow-secured.log" 2>&1 || {
+  echo "upgrade refused a secured administrative unit override:" >&2
+  cat "${workdir}/logs/shadow-secured.log" >&2
+  exit 1
+}
+grep -q "notice: unit file .*user.control/mcloving-controller.service outranks" \
+  "${workdir}/logs/shadow-secured.log" || {
+  echo "the secured shadowing unit passed without being reported:" >&2
+  cat "${workdir}/logs/shadow-secured.log" >&2
+  exit 1
+}
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+# The canonical document records it, so an override appearing or changing
+# is drift the re-read can see.
+shadow_digests="$("${dropin_root_libexec}/helpers/mcloving-deployed-digests" \
+  --home "${dropin_root_home}")"
+printf '%s' "${shadow_digests}" > "${workdir}/shadow-digests.json"
+python3 - "${workdir}/shadow-digests.json" <<'SHADOWDOC'
+import json
+import pathlib
+import sys
+
+document = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if "shadowing_units" not in document:
+    raise SystemExit(
+        "the canonical document has no shadowing_units key; a unit override "
+        "deciding what actually runs would be invisible drift"
+    )
+recorded = {record["path"] for record in document["shadowing_units"]}
+if not any("user.control/mcloving-controller.service" in entry for entry in recorded):
+    raise SystemExit(f"the shadowing unit was not recorded: {sorted(recorded)}")
+SHADOWDOC
+rm -f "${shadow_control}/mcloving-controller.service" "${workdir}/shadow-digests.json"
+# The QUADLET-GENERATED name is the case an installed-file comparison would
+# never notice: mcloving-postgres.service has no installed file at all, so
+# a planted one shadows a unit this deployment owns and never wrote.
+printf '[Service]\nExecStart=%%h/shadow-bin/tool\n' \
+  > "${shadow_control}/mcloving-postgres.service"
+chmod 0666 "${shadow_control}/mcloving-postgres.service"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/shadow-generated.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable shadow of the generated postgres service" >&2
+  exit 1
+fi
+grep -q "user.control/mcloving-postgres.service (mode 666)" \
+  "${workdir}/logs/shadow-generated.log" || {
+  echo "the shadow of the generated service was not judged:" >&2
+  cat "${workdir}/logs/shadow-generated.log" >&2
+  exit 1
+}
+rm -f "${shadow_control}/mcloving-postgres.service"
+# Acceptance: with nothing planted the transition proceeds and no notice is
+# emitted -- the resolver must not claim the installed file shadows itself.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/shadow-none.log" 2>&1
+if grep -q "outranks this deployment" "${workdir}/logs/shadow-none.log"; then
+  echo "the resolver reported a shadow where none was planted:" >&2
+  cat "${workdir}/logs/shadow-none.log" >&2
+  exit 1
+fi
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the shadow gate" >&2
+  exit 1
+}
+# First-match precedence, asserted directly rather than inferred from the
+# refusals: with the same name in both directories the resolver must pick
+# the higher-priority one, and with only the installed file it must pick
+# that. systemd 255 was confirmed to agree by planting the same pair under
+# a throwaway unit name and reading FragmentPath back from the manager.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  resolved_installed="$(
+    encoded="$(deployment_effective_unit_file "${dropin_root_home}" \
+      mcloving-controller.service)"
+    decode_path_item_into decoded "${encoded}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    printf '%s' "${decoded}"
+  )"
+  [[ "${resolved_installed}" == "${dropin_unit_root}/mcloving-controller.service" ]] || {
+    echo "with no shadow planted the resolver chose ${resolved_installed}, not the installed unit" >&2
+    exit 1
+  }
+  printf '[Service]\nExecStart=%%h/shadow-bin/tool\n' \
+    > "${shadow_control}/mcloving-controller.service"
+  chmod 0644 "${shadow_control}/mcloving-controller.service"
+  resolved_shadow="$(
+    encoded="$(deployment_effective_unit_file "${dropin_root_home}" \
+      mcloving-controller.service)"
+    decode_path_item_into decoded "${encoded}"
+    printf '%s' "${decoded}"
+  )"
+  [[ "${resolved_shadow}" == "${shadow_control}/mcloving-controller.service" ]] || {
+    echo "with a shadow in user.control the resolver chose ${resolved_shadow}, not the higher-priority file" >&2
+    exit 1
+  }
+  rm -f "${shadow_control}/mcloving-controller.service"
+)
+rm -rf "${shadow_control}" "${dropin_root_home}/shadow-bin"
 # The derivation itself, against systemd's own answer where the host can
 # give one. `systemd-analyze --user unit-paths` is the authority; every
 # path it names must be in this derivation. It is not a hard dependency of
@@ -3284,13 +3518,22 @@ rm -rf "${xdgconf_root}" "${dropin_root_home}/xdg-shared"
   done
   if command -v systemd-analyze >/dev/null 2>&1 \
     && systemd-analyze --user unit-paths >/dev/null 2>&1; then
+    # ORDER as well as membership: a main unit file is resolved by first
+    # match, so a derivation that listed the same paths in a different
+    # order would resolve a shadow to the wrong file.
+    manager_paths="$(systemd-analyze --user unit-paths)"
     while IFS= read -r manager_path; do
       [[ -n "${manager_path}" ]] || continue
       grep -qx "${manager_path}" <<<"${loadpath_all}" || {
         echo "systemd searches ${manager_path} for user units and this derivation does not enumerate it" >&2
         exit 1
       }
-    done < <(systemd-analyze --user unit-paths)
+    done <<<"${manager_paths}"
+    [[ "${manager_paths}" == "${loadpath_all%$'\n'}" ]] || {
+      echo "the derived load path order does not match systemd's:" >&2
+      diff <(printf '%s\n' "${manager_paths}") <(printf '%s' "${loadpath_all}") >&2 || true
+      exit 1
+    }
   else
     echo "load-path parity against systemd-analyze skipped: no usable systemd-analyze --user on this host"
   fi
@@ -3326,6 +3569,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${sysdrop_dirs_env}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${sysdrop_dirs_env}" \
+MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   > "${workdir}/system-dropin-digests.json" <<'SYSCHAIN'
 import sys

@@ -229,6 +229,69 @@ require_min_bytes() {
   fi
 }
 
+# EFFECTIVE ENVIRONMENT, not merely the parsed contract file.
+#
+# The binaries read their configuration from the PROCESS ENVIRONMENT, which
+# systemd composes from the manager's own environment, Environment= in the
+# unit and its drop-ins, and every EnvironmentFile= in order. A guard that
+# judged only the parsed contract validated one input while the service
+# received another: an ambient MCLOVING_AGENT_SESSION_RECEIPT_PATH, or an
+# injected MCLOVING_EFFECT_RUNTIME_PLAN naming a file under a
+# world-writable ancestor, reached the binary having passed no class rule
+# at all.
+#
+# The composition is READ, never re-derived. This guard runs as
+# ExecStartPre of the very unit whose environment is in question, so
+# systemd has ALREADY performed that composition and the answer is sitting
+# in this process's own environment. Re-deriving it would mean
+# reimplementing systemd's precedence between Environment= and
+# EnvironmentFile= and the manager environment -- a second implementation
+# that must agree with systemd's forever, which is exactly the failure
+# shape this lane refuses elsewhere (the C-escape decision in round 31).
+# Reading it is both simpler and strictly more faithful: whatever systemd
+# decided wins, this sees, including precedence rules that change between
+# versions. Run by hand with no such environment -- as the smoke suite runs
+# it -- nothing is set and the parsed contract stands unchanged.
+#
+# ASYMMETRY IS REFUSED for the classified path variables. A classified path
+# that reaches the service from outside the contract file is validated here
+# and then invisible forever after: mcloving-deployed-digests builds the
+# canonical drift baseline by reading the CONTRACT, so an ambient value is
+# pinned by nothing and its substitution changes no document. The contract
+# is this lane's interface, and the repair is to declare the variable in
+# it. Non-path variables absent from the contract are deliberately not
+# imported: they carry no filesystem path, so no class rule applies to
+# them, and importing every ambient MCLOVING_* would let unrelated
+# environment noise satisfy the required-variable checks.
+guard_classified=()
+while IFS=' ' read -r _ _ guard_path_variable _; do
+  [[ -n "${guard_path_variable:-}" ]] || continue
+  guard_classified+=("${guard_path_variable}")
+done < <(deployment_contract_path_variables "${service}")
+
+guard_env_offending=""
+for guard_name in "${guard_classified[@]}"; do
+  [[ -v "${guard_name}" ]] || continue
+  guard_env_value="${!guard_name}"
+  if [[ ! -v "MCLOVING_CONTRACT[${guard_name}]" ]]; then
+    guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} does not declare it) "
+  elif [[ "${guard_env_value}" != "${MCLOVING_CONTRACT[${guard_name}]}" ]]; then
+    guard_env_offending+="${guard_name} (service environment says ${guard_env_value}, ${env_file} says ${MCLOVING_CONTRACT[${guard_name}]}) "
+  fi
+done
+if [[ -n "${guard_env_offending}" ]]; then
+  fail "classified path variable(s) reach this service from outside its contract file: ${guard_env_offending% }-- the binary opens what the ENVIRONMENT carries, while the deployment's digest inventory pins what the CONTRACT declares, so a value supplied ambiently or by a unit Environment= override is validated once here and then unwatched; declare it in ${env_file} (or remove the override) and retry"
+fi
+
+# With the asymmetry refused, anything still set in the environment agrees
+# with the contract or is a non-path variable the service will actually
+# receive. Either way the environment is what the binary reads, so it is
+# what every check below judges.
+for guard_name in "${!MCLOVING_CONTRACT[@]}"; do
+  [[ -v "${guard_name}" ]] || continue
+  MCLOVING_CONTRACT["${guard_name}"]="${!guard_name}"
+done
+
 # Every enumerated class path must be ABSOLUTE before anything dereferences
 # it -- checked ahead of the per-service branches, so the refusal names the
 # actual defect instead of whichever downstream check trips first. A

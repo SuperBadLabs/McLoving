@@ -567,28 +567,32 @@ deployment_unit_names() {
 }
 
 # deployment_unit_load_paths HOME CLASS FAMILY -> encoded items: the base
-# directories the manager searches, one per line, whether or not they exist.
+# directories the manager searches, IN SYSTEMD'S OWN PRECEDENCE ORDER,
+# whether or not they exist.
 #
 # CLASS is "user" (writable by the service account), "system" (root-owned),
-# or "all". FAMILY is "systemd" (where .service drop-ins live) or "quadlet"
-# (where .container/.volume drop-ins live).
+# or "all". FAMILY is "systemd" (where .service units and their drop-ins
+# live) or "quadlet" (where .container/.volume sources live).
 #
-# systemd.unit(5) Table 2 is the authority for the systemd family, and a
-# drop-in for one of our units is merged from EVERY entry in it -- not only
-# from the directory the main unit happens to live in, which is all the
-# previous derivation looked at. The user-writable entries are the load-
-# bearing half of this fix: $XDG_RUNTIME_DIR/systemd/user and
-# $XDG_DATA_HOME/systemd/user are writable by the service account, are NOT
-# managed roots, and a drop-in placed in either is merged into our units
-# with nothing in the old derivation securing it or parsing the paths it
-# declares. Generator and transient outputs are included for the same
-# reason: they are ordinary directories under the runtime tree.
+# ORDER IS LOAD-BEARING now, not decorative. Drop-in validation is additive
+# and does not care, but a MAIN unit file is resolved by FIRST MATCH: the
+# highest-priority path holding the name wins and systemd runs that file
+# alone. deployment_effective_unit_file below walks this list in order, so
+# the order here is the difference between validating the file systemd runs
+# and validating a file it ignores. It was transcribed from
+# `systemd-analyze --user unit-paths` on systemd 255 and the suite asserts
+# the two still agree.
 #
-# $XDG_DATA_DIRS is deliberately NOT honoured for the vendor entries. It is
-# system scope, not account scope, and the documented default is what a
-# rootless user manager uses on every host this lane targets; adopting an
-# inherited value would let an environment variable steer the validator at
-# exactly the vendor paths it is meant to judge.
+# The user-writable entries are the ones this deployment can neither own
+# nor prevent writes to: $XDG_RUNTIME_DIR/systemd/user and
+# $XDG_DATA_HOME/systemd/user are writable by the service account and are
+# not managed roots. Generator and transient outputs are included for the
+# same reason: they are ordinary directories under the runtime tree, and
+# user.control is exactly where `systemctl --user edit` writes.
+#
+# XDG_CONFIG_DIRS and XDG_DATA_DIRS contribute through
+# deployment_xdg_search_entries, which applies the same applicability rule
+# the single bases get and keeps the spec defaults in union.
 deployment_unit_load_paths() {
   local home_dir="${1%/}" want_class="$2" family="$3"
   local config_base data_base runtime_base home_uid
@@ -596,82 +600,153 @@ deployment_unit_load_paths() {
   data_base="$(deployment_data_root "${home_dir}")"
   runtime_base="$(deployment_runtime_root "${home_dir}")"
   home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || home_uid=""
-  local -a user_paths=() system_paths=()
+  # Two parallel arrays rather than one classified string: a path may carry
+  # any byte, and pairing by index keeps the transport convention intact.
+  local -a ordered_paths=() ordered_class=()
+  local search_entry
+
+  load_path_add() { # PATH CLASS
+    ordered_paths+=("$1")
+    ordered_class+=("$2")
+  }
+
   case "${family}" in
     systemd)
-      user_paths+=("${config_base}/systemd/user.control")
-      user_paths+=("${config_base}/systemd/user")
+      load_path_add "${config_base}/systemd/user.control" user
       if [[ -n "${runtime_base}" ]]; then
-        user_paths+=(
-          "${runtime_base}/systemd/user.control"
-          "${runtime_base}/systemd/transient"
-          "${runtime_base}/systemd/generator.early"
-          "${runtime_base}/systemd/user"
-          "${runtime_base}/systemd/generator"
-          "${runtime_base}/systemd/generator.late"
-        )
+        load_path_add "${runtime_base}/systemd/user.control" user
+        load_path_add "${runtime_base}/systemd/transient" user
+        load_path_add "${runtime_base}/systemd/generator.early" user
       fi
-      user_paths+=("${data_base}/systemd/user")
-      # The two XDG SEARCH LISTS systemd's user_dirs() consults, which this
-      # list omitted entirely: XDG_CONFIG_DIRS (default /etc/xdg) and
-      # XDG_DATA_DIRS (default /usr/local/share:/usr/share). Verified
-      # against `systemd-analyze --user unit-paths` on systemd 255 rather
-      # than against the manual: it reports /etc/xdg/systemd/user between
-      # the config home and /etc/systemd/user, and the two data dirs between
-      # the data home and /usr/local/lib/systemd/user.
-      #
-      # Each entry is classified by WHERE IT IS, not by which variable
-      # produced it: an entry inside the target home is writable by the
-      # service account and joins the user class, everything else is
-      # root-owned in practice and joins the system class, which is
-      # validated and additionally reported.
-      local search_entry
+      load_path_add "${config_base}/systemd/user" user
       while IFS= read -r search_entry; do
         [[ -n "${search_entry}" ]] || continue
         if [[ "${search_entry}" == "${home_dir}" || "${search_entry}" == "${home_dir}"/* ]]; then
-          user_paths+=("${search_entry}/systemd/user")
+          load_path_add "${search_entry}/systemd/user" user
         else
-          system_paths+=("${search_entry}/systemd/user")
+          load_path_add "${search_entry}/systemd/user" system
         fi
-      done < <(
-        deployment_xdg_search_entries "${home_dir}" "${XDG_CONFIG_DIRS:-}" "/etc/xdg"
-        deployment_xdg_search_entries "${home_dir}" "${XDG_DATA_DIRS:-}" \
-          "/usr/local/share:/usr/share"
-      )
-      system_paths+=(
-        "/etc/systemd/user"
-        "/run/systemd/user"
-        "/usr/local/lib/systemd/user"
-        "/usr/lib/systemd/user"
-      )
+      done < <(deployment_xdg_search_entries "${home_dir}" "${XDG_CONFIG_DIRS:-}" "/etc/xdg")
+      load_path_add "/etc/systemd/user" system
+      if [[ -n "${runtime_base}" ]]; then
+        load_path_add "${runtime_base}/systemd/user" user
+      fi
+      load_path_add "/run/systemd/user" system
+      if [[ -n "${runtime_base}" ]]; then
+        load_path_add "${runtime_base}/systemd/generator" user
+      fi
+      load_path_add "${data_base}/systemd/user" user
+      while IFS= read -r search_entry; do
+        [[ -n "${search_entry}" ]] || continue
+        if [[ "${search_entry}" == "${home_dir}" || "${search_entry}" == "${home_dir}"/* ]]; then
+          load_path_add "${search_entry}/systemd/user" user
+        else
+          load_path_add "${search_entry}/systemd/user" system
+        fi
+      done < <(deployment_xdg_search_entries "${home_dir}" "${XDG_DATA_DIRS:-}" \
+        "/usr/local/share:/usr/share")
+      load_path_add "/usr/local/lib/systemd/user" system
+      load_path_add "/usr/lib/systemd/user" system
+      if [[ -n "${runtime_base}" ]]; then
+        load_path_add "${runtime_base}/systemd/generator.late" user
+      fi
       ;;
     quadlet)
-      # podman-systemd.unit(5) rootless search path. The per-uid system
-      # directory is included only when the home's uid is known.
-      user_paths+=("${config_base}/containers/systemd")
+      # podman-systemd.unit(5) rootless search path, most specific first.
+      load_path_add "${config_base}/containers/systemd" user
       [[ -n "${runtime_base}" ]] \
-        && user_paths+=("${runtime_base}/containers/systemd")
+        && load_path_add "${runtime_base}/containers/systemd" user
       [[ -n "${home_uid}" ]] \
-        && system_paths+=("/etc/containers/systemd/users/${home_uid}")
-      system_paths+=(
-        "/etc/containers/systemd/users"
-        "/etc/containers/systemd"
-        "/usr/share/containers/systemd"
-      )
+        && load_path_add "/etc/containers/systemd/users/${home_uid}" system
+      load_path_add "/etc/containers/systemd/users" system
+      load_path_add "/etc/containers/systemd" system
+      load_path_add "/usr/share/containers/systemd" system
       ;;
-    *) return 0 ;;
+    *)
+      unset -f load_path_add
+      return 0
+      ;;
   esac
-  local load_path
-  if [[ "${want_class}" == "user" || "${want_class}" == "all" ]]; then
-    for load_path in "${user_paths[@]}"; do
-      encode_path_item "${load_path}"
-    done
-  fi
-  if [[ "${want_class}" == "system" || "${want_class}" == "all" ]]; then
-    for load_path in "${system_paths[@]}"; do
-      encode_path_item "${load_path}"
-    done
-  fi
+  unset -f load_path_add
+
+  local index=0
+  while (( index < ${#ordered_paths[@]} )); do
+    if [[ "${want_class}" == "all" || "${want_class}" == "${ordered_class[index]}" ]]; then
+      encode_path_item "${ordered_paths[index]}"
+    fi
+    index=$((index + 1))
+  done
+  return 0
+}
+
+# deployment_effective_unit_file HOME UNIT_NAME -> one encoded item: the
+# file systemd would ACTUALLY load for UNIT_NAME, or nothing when no load
+# path holds it.
+#
+# A main unit file is not merged like a drop-in; it is SELECTED. The first
+# load path in precedence order that holds the name wins and every lower
+# one is ignored entirely. Seeding validation from the installed
+# ${unit_root} files alone therefore validated a file systemd may not run:
+# a 0666 mcloving-controller.service dropped into ~/.config/systemd/user.control
+# -- which outranks ~/.config/systemd/user -- shadows the installed unit
+# completely, and its ExecStart is what the next restart executes.
+#
+# Absence is normal and silent: a Quadlet-generated name has no file on
+# disk until the generator runs, and the deployment's own units resolve to
+# themselves.
+deployment_effective_unit_file() {
+  local home_dir="${1%/}" unit_name="$2" family candidate
+  local encoded_base decoded_base
+  [[ -n "${unit_name}" ]] || return 0
+  case "${unit_name}" in
+    *.service) family="systemd" ;;
+    *) family="quadlet" ;;
+  esac
+  while IFS= read -r encoded_base; do
+    [[ -n "${encoded_base}" ]] || continue
+    decode_path_item_into decoded_base "${encoded_base}"
+    candidate="${decoded_base}/${unit_name}"
+    # -f follows a symlink deliberately: systemd loads what the name
+    # resolves to, and the link's own target is judged by the trust-input
+    # file rule and the chain walk like any other source.
+    if [[ -f "${candidate}" ]]; then
+      encode_path_item "${candidate}"
+      return 0
+    fi
+  done < <(deployment_unit_load_paths "${home_dir}" all "${family}")
+  return 0
+}
+
+# deployment_shadowing_unit_files HOME INSTALLED_UNIT_FILE... -> encoded
+# items: for every unit NAME this deployment owns, the file systemd would
+# actually load when that file is NOT one of the installed ones.
+#
+# One derivation for the transition's validation and for the canonical
+# digest document, so what is judged and what is recorded cannot drift.
+# Names come from deployment_unit_names, so Quadlet-GENERATED names are
+# covered too: a planted mcloving-postgres.service shadows a unit that has
+# no installed file at all, which is the case an installed-file comparison
+# would never notice.
+deployment_shadowing_unit_files() {
+  local home_dir="${1%/}" unit_file decoded_name effective_unit_file
+  local encoded_item encoded_effective
+  shift
+  [[ $# -gt 0 ]] || return 0
+  local -A shadow_seen=()
+  for unit_file in "$@"; do
+    [[ -f "${unit_file}" ]] || continue
+    shadow_seen["${unit_file}"]=1
+  done
+  while IFS= read -r encoded_item; do
+    [[ -n "${encoded_item}" ]] || continue
+    decode_path_item_into decoded_name "${encoded_item}"
+    encoded_effective="$(deployment_effective_unit_file "${home_dir}" "${decoded_name}")"
+    [[ -n "${encoded_effective}" ]] || continue
+    decode_path_item_into effective_unit_file "${encoded_effective}"
+    [[ -z "${shadow_seen["${effective_unit_file}"]:-}" ]] || continue
+    shadow_seen["${effective_unit_file}"]=1
+    encode_path_item "${effective_unit_file}"
+  done < <(deployment_unit_names "$@")
   return 0
 }
 
@@ -2085,6 +2160,35 @@ require_deployment_integrity() {
     "${quadlet_root}"/mcloving-*.container "${quadlet_root}"/mcloving-*.volume; do
     [[ -f "${unit_file}" ]] && unit_files+=("${unit_file}")
   done
+  # The installed files are what this deployment WROTE. What systemd RUNS
+  # is the first match for each unit NAME across the load paths in
+  # precedence order, and a higher-priority path holding the same name
+  # shadows the installed file entirely -- its ExecStart is what the next
+  # restart executes while the installed one is never read. Both are
+  # validated: the shadow because it is what runs, the installed file
+  # because it still exists and its own integrity still matters (the shadow
+  # may be removed at any time, restoring it).
+  local shadowing_units=() effective_unit_file encoded_shadow
+  if [[ ${#unit_files[@]} -gt 0 ]]; then
+    while IFS= read -r encoded_shadow; do
+      [[ -n "${encoded_shadow}" ]] || continue
+      decode_path_item_into effective_unit_file "${encoded_shadow}"
+      shadowing_units+=("${effective_unit_file}")
+      unit_files+=("${effective_unit_file}")
+    done < <(deployment_shadowing_unit_files "${home_dir}" "${unit_files[@]}")
+    # Reported, not refused. systemd's load path exists so an administrator
+    # CAN override a unit, and a deployment that refused to upgrade because
+    # the host exercised that mechanism would be un-upgradable with no
+    # repair it could perform -- the same reasoning that keeps system-path
+    # drop-ins reported rather than refused. What closes the hole is that
+    # the shadow is now validated and parsed like any other source, so a
+    # world-writable one is refused by name on its own merits. The
+    # canonical digest document records these too, so an override appearing
+    # or changing is drift the re-read can see.
+    for effective_unit_file in "${shadowing_units[@]}"; do
+      deploy_notice "unit file ${effective_unit_file} outranks this deployment's own installed unit of the same name and is what the service manager will load; it is validated under the same rules as the installed sources, and is recorded in the canonical digest document"
+    done
+  fi
   local unit_declared_roots=() declared_contracts=() unit_source_files=()
   local declared_executables=() load_path_roots=() system_dropin_files=()
   local dropin_dirs=() encoded_root encoded_item decoded_item

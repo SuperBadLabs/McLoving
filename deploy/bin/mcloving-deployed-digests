@@ -124,6 +124,19 @@ fi
 export MCLOVING_UNIT_DROPIN_DIRS
 export MCLOVING_UNIT_SYSTEM_DROPIN_DIRS
 
+# A main unit file in a higher-priority load path SHADOWS the installed one
+# -- systemd loads it instead, and the installed file is never read. The
+# transition validates it and says so out loud; the canonical document must
+# pin its bytes too, or an override appearing, changing, or being removed
+# is drift the re-read cannot see. Through the same library derivation the
+# validator uses, so the two cannot disagree about what is shadowing what.
+MCLOVING_SHADOWING_UNITS=""
+if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
+  MCLOVING_SHADOWING_UNITS="$(deployment_shadowing_unit_files "${home_dir}" \
+    "${digest_unit_files[@]}")"
+fi
+export MCLOVING_SHADOWING_UNITS
+
 # The contracts may point their identity material OUTSIDE the walked trees
 # -- an external CA, an external bindings file -- and the runtime guard
 # validates those files while a config-tree-only inventory would record
@@ -249,6 +262,20 @@ if system_dropin_dirs_supplied is None:
 system_dropin_dirs = tuple(
     Path(posixpath.normpath(item))
     for item in decode_path_items(system_dropin_dirs_supplied)
+)
+
+# Main unit files that outrank this deployment's installed units. Empty is
+# the normal case; UNSET means the document was built outside its wrapper
+# and would silently omit an override that decides what actually runs.
+shadowing_units_supplied = os.environ.get("MCLOVING_SHADOWING_UNITS")
+if shadowing_units_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_SHADOWING_UNITS is not set; "
+        "run this through its shell wrapper"
+    )
+shadowing_units = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(shadowing_units_supplied)
 )
 
 
@@ -620,6 +647,9 @@ unit_entries = [
     if unit_owned(path, unit_dir)
 ]
 contract_entries = walk(config)
+# A shadowing unit is one FILE, not a tree: systemd selects it, it is not
+# merged. Its own chain is collected below with the other roots.
+shadowing_unit_entries = [path for path in shadowing_units if path.exists()]
 # Recorded whole, like any other drop-in directory: systemd reads every
 # file inside one regardless of basename.
 system_dropin_entries = [
@@ -676,6 +706,13 @@ for system_dropin_dir in sorted(system_dropin_dirs):
     if not collect_chain(system_dropin_dir):
         unresolvable_links.append(system_dropin_dir)
 
+# Same reasoning for a shadowing unit file: relaxing the directory that
+# holds it makes the file another local user can replace, while its own
+# record stays byte-identical.
+for shadowing_unit in sorted(shadowing_unit_entries):
+    if not collect_chain(shadowing_unit):
+        unresolvable_links.append(shadowing_unit)
+
 for link in sorted(
     {
         entry
@@ -688,6 +725,7 @@ for link in sorted(
             # somewhere, and that somewhere has parents another local user
             # may be able to rename. Same sweep, same reason.
             *system_dropin_entries,
+            *shadowing_unit_entries,
         )
         if entry.is_symlink()
     }
@@ -822,6 +860,14 @@ document = {
     # carry absolute spellings rather than home-relative ones. Normally
     # empty; non-empty is a fact about the host that the transition tools
     # also say out loud.
+    # Main unit files that outrank this deployment's own. Outside the home
+    # in the administrative cases, so absolute spellings there. Normally
+    # empty; non-empty means the service manager is running something other
+    # than what this deployment installed.
+    "shadowing_units": [
+        file_record(path, home)
+        for path in shadowing_unit_entries
+    ],
     "system_dropins": [
         file_record(path, home)
         for path in system_dropin_entries
