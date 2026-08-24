@@ -463,6 +463,17 @@ for root in roots:
     ascend(root, home)
     resolved_root = resolve_recording(root, root, [MAX_LINK_TRAVERSALS])
     chain_of(resolved_root)
+    # The root NODE itself joins the set, not only its parents: a leaf
+    # managed root -- helpers, releases -- relaxed to group/world-writable
+    # after installation is otherwise invisible to every consumer of this
+    # chain, and a writable helpers directory is a helper substitution
+    # waiting for the next transition. Consumers skip nodes that are not
+    # directories (files are judged by their own classes) and follow a
+    # symlinked node to its target, consistent with the ancestor rules;
+    # where a root may never legitimately BE a symlink -- retained release
+    # directories -- the round-11 lstat refusals still fire first in their
+    # own paths.
+    found.add(resolved_root)
 
 for path in sorted(found):
     # One item, one line, whatever bytes the path carries: the transport

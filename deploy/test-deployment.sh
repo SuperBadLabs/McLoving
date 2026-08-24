@@ -2294,6 +2294,49 @@ chmod 0755 "${transguard_home}/.local"
   echo "rollback did not restore the original release after the ancestor was secured" >&2
   exit 1
 }
+# LEAF managed roots are nodes in the validated set, not only their
+# parents: a helpers or releases directory relaxed after install is a
+# helper or release substitution waiting for the next transition.
+chmod 0777 "${transguard_libexec}/helpers"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${transguard_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/transguard-helpers.log" 2>&1; then
+  echo "upgrade proceeded over a world-writable helpers root" >&2
+  exit 1
+fi
+grep -q "helpers (mode 777)" "${workdir}/logs/transguard-helpers.log" || {
+  echo "the helpers-root refusal did not name the leaf:" >&2
+  cat "${workdir}/logs/transguard-helpers.log" >&2
+  exit 1
+}
+[[ "$(readlink "${transguard_libexec}/current")" == "${transguard_current}" ]] || {
+  echo "a refused helpers-root upgrade still moved the current release" >&2
+  exit 1
+}
+chmod 0700 "${transguard_libexec}/helpers"
+chmod 0777 "${transguard_libexec}/releases"
+if "${repo_root}/deploy/bin/mcloving-rollback" --home "${transguard_home}" \
+  --no-systemd > "${workdir}/logs/transguard-releases.log" 2>&1; then
+  echo "rollback proceeded over a world-writable releases root" >&2
+  exit 1
+fi
+grep -q "releases (mode 777)" "${workdir}/logs/transguard-releases.log" || {
+  echo "the releases-root refusal did not name the leaf:" >&2
+  cat "${workdir}/logs/transguard-releases.log" >&2
+  exit 1
+}
+if grep -q "rolling back" "${workdir}/logs/transguard-releases.log"; then
+  echo "the releases-root refusal came after the transition had begun" >&2
+  exit 1
+fi
+chmod 0700 "${transguard_libexec}/releases"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${transguard_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${transguard_libexec}/current")" != "${transguard_current}" ]] || {
+  echo "the secured leaf roots did not admit the transition" >&2
+  exit 1
+}
 rm -rf "${transguard_home}"
 mkdir -p "${lock_home}"
 "${repo_root}/deploy/bin/mcloving-install" --home "${lock_home}" \
