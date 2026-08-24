@@ -14,8 +14,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  rust:
-    name: Rust
+  # The Rust verification used to be a single serial job; the four rust-*
+  # jobs below run its suites in parallel, and the `rust` aggregator at the
+  # end reports the branch-protection check named "Rust". Each job restores
+  # its own Swatinem cache under a distinct shared-key so the jobs stop
+  # overwriting one another's saved caches.
+  rust-lint:
+    name: Rust lint
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -44,13 +49,75 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: foundation-linux
+          shared-key: foundation-linux-lint
       - name: Check formatting
         run: cargo +1.97.1 fmt --all -- --check
       - name: Verify lockfile
         run: cargo +1.97.1 metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Run Clippy
         run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
+
+  rust-tests:
+    name: Rust workspace tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reclaim runner disk before building
+        # The workspace outgrew the hosted runner's free space, and the failure
+        # is not a clean "no space" error: the linker takes SIGBUS on a
+        # truncated mapping, or the runner process itself dies mid-step, so a
+        # full disk reads as an unrelated toolchain crash. None of these
+        # preinstalled runtimes are used by this build.
+        run: |
+          set -euo pipefail
+          df -h /
+          # Unlink the two largest unused runtimes only. Reclaiming every
+          # preinstalled SDK frees more, but the extra unlink I/O runs against
+          # the same disk the build is about to use, and headroom is the point
+          # here, not maximum free space.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
+          df -h /
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux-tests
+      - name: Run tests outside the source-acquirer policy
+        run: >-
+          cargo +1.97.1 test --locked --workspace
+          --exclude mcloving-source-acquirer
+
+  rust-source-acquirer:
+    name: Rust source-acquirer suite
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reclaim runner disk before building
+        # The workspace outgrew the hosted runner's free space, and the failure
+        # is not a clean "no space" error: the linker takes SIGBUS on a
+        # truncated mapping, or the runner process itself dies mid-step, so a
+        # full disk reads as an unrelated toolchain crash. None of these
+        # preinstalled runtimes are used by this build.
+        run: |
+          set -euo pipefail
+          df -h /
+          # Unlink the two largest unused runtimes only. Reclaiming every
+          # preinstalled SDK frees more, but the extra unlink I/O runs against
+          # the same disk the build is about to use, and headroom is the point
+          # here, not maximum free space.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
+          df -h /
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux-source-acquirer
       - name: Prepare and activate source-acquirer isolation
         run: |
           bash scripts/prepare-source-transport-test-filesystems.sh
@@ -60,10 +127,49 @@ jobs:
             deploy/apparmor/mcloving-source-acquirer
           sudo apparmor_parser --replace --skip-cache \
             deploy/apparmor/mcloving-external-shadow-replay
-      - name: Run tests outside the source-acquirer policy
+      - name: Run source-acquirer tests with user-namespace authority
         run: >-
-          cargo +1.97.1 test --locked --workspace
-          --exclude mcloving-source-acquirer
+          aa-exec -p mcloving-source-acquirer --
+          cargo +1.97.1 test --locked -p mcloving-source-acquirer
+          -- --test-threads=1
+
+  rust-boundary-suites:
+    name: Rust boundary suites
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reclaim runner disk before building
+        # The workspace outgrew the hosted runner's free space, and the failure
+        # is not a clean "no space" error: the linker takes SIGBUS on a
+        # truncated mapping, or the runner process itself dies mid-step, so a
+        # full disk reads as an unrelated toolchain crash. None of these
+        # preinstalled runtimes are used by this build.
+        run: |
+          set -euo pipefail
+          df -h /
+          # Unlink the two largest unused runtimes only. Reclaiming every
+          # preinstalled SDK frees more, but the extra unlink I/O runs against
+          # the same disk the build is about to use, and headroom is the point
+          # here, not maximum free space.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
+          df -h /
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux-boundary
+      - name: Prepare and activate source-acquirer isolation
+        run: |
+          bash scripts/prepare-source-transport-test-filesystems.sh
+          bash scripts/validate-source-acquirer-apparmor.sh
+          bash scripts/validate-external-shadow-apparmor.sh
+          sudo apparmor_parser --replace --skip-cache \
+            deploy/apparmor/mcloving-source-acquirer
+          sudo apparmor_parser --replace --skip-cache \
+            deploy/apparmor/mcloving-external-shadow-replay
       - name: Run dependency resolver in its exact-capacity transport boundary
         run: bash scripts/dependency-resolver-contained.sh
       - name: Run external connector contracts and prove shadow network denial
@@ -90,11 +196,38 @@ jobs:
           grep -Fq 'invalid_config' target/shadow-replay-confined.log
           aa-exec -p mcloving-external-shadow-replay -- \
             ./target/debug/mcloving-external-shadow-network-probe
-      - name: Run source-acquirer tests with user-namespace authority
-        run: >-
-          aa-exec -p mcloving-source-acquirer --
-          cargo +1.97.1 test --locked -p mcloving-source-acquirer
-          -- --test-threads=1
+
+  rust:
+    name: Rust
+    # Branch protection requires a check named exactly "Rust". This
+    # aggregator holds that name over the parallel rust-* jobs above: it
+    # always runs, and its single step fails unless every needed job's
+    # result is literally "success", so `skipped` and `cancelled` fail the
+    # required check rather than slipping past it.
+    runs-on: ubuntu-24.04
+    needs:
+      - rust-lint
+      - rust-tests
+      - rust-source-acquirer
+      - rust-boundary-suites
+    if: always()
+    steps:
+      - name: Require every Rust suite to succeed
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS=' ' read -r job result; do
+            printf '%s: %s\n' "$job" "$result"
+            if [ "$result" != "success" ]; then
+              status=1
+            fi
+          done <<'RESULTS'
+          rust-lint ${{ needs.rust-lint.result }}
+          rust-tests ${{ needs.rust-tests.result }}
+          rust-source-acquirer ${{ needs.rust-source-acquirer.result }}
+          rust-boundary-suites ${{ needs.rust-boundary-suites.result }}
+          RESULTS
+          exit "$status"
 
   dependencies:
     name: Dependencies and licenses
