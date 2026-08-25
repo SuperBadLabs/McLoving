@@ -12,8 +12,12 @@ deferred findings). All fifteen protected checks pass on that second commit
 `Backup and restore`, `Isolated Linux amd64`, `Classify Windows impact`,
 `Windows agent`, and the lane's own new `Deployment lane` job — as they do on the first.
 
-This receipt closes `DEPLOY-001`. It was withheld until now for a reason worth
-recording: the implementation merged on 2026-08-24/25, but the board's Working
+**This receipt does not close `DEPLOY-001`, and the ticket is `ACTIVE`.** It
+records what the lane implements and what it is verified to do — a prerequisite
+for closure, not the whole of it. Two gates stood in the way; one is now met and
+the other is not.
+
+**Gate one, now met.** It was withheld until now for a reason worth recording: the implementation merged on 2026-08-24/25, but the board's Working
 rule bars an implementation ticket from `DONE` until
 `docs/threat-model/README.md` is reviewed and updated for every affected
 boundary, "including … deployment". That never happened — the threat model's
@@ -23,6 +27,22 @@ tickets carried one. **The board was correct to hold `DEPLOY-001` at `ACTIVE`,
 and the 2026-08-25 custodian handoff's claim that it was `DONE` was premature on
 those two receipts.** Both are now supplied: `TM-050` records the boundary, and
 this document records closure.
+
+**Gate two, NOT met — why the ticket stays `ACTIVE`.** The row's acceptance is
+"a scripted install on a clean host brings up the controller and agent and passes
+the deployable-runtime gate", for a lane defined as "systemd units or podman
+quadlets". `deploy/test-deployment.sh` passes `--no-systemd` to install, upgrade
+and rollback, and starts postgres from a quadlet-*derived* command — so **systemd
+never generates, enables, orders or starts anything, in any gate.** The install,
+contract, digest and rollback mechanics are proven; the service-managed lane is
+not. Closing on the first while the row names the second is precisely the
+substitution this project's receipt rules exist to prevent.
+
+It is measured closable, which is why this is a gap rather than a redesign: on a
+stock `ubuntu-24.04` runner a linger-enabled dedicated account installs, enables
+and starts a real unit under its own `~/.config/systemd/user` and reports
+`active`, needing no change to `require_systemd_home`. Rootless podman under that
+account is the one open item, and the postgres quadlet needs it.
 
 Nothing in this lane grants production, canary, cutover, or Jenkins authority.
 
