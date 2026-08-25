@@ -215,12 +215,15 @@ controller and the agent are killed and reaped by the exit trap, and
 is reached -- Ctrl-C leaves nothing behind. `SIGKILL` is the one exception,
 because it cannot be trapped: `kill -9` of the suite strands the controller
 and the agent, still running against a throwaway home the run may already
-have deleted. They are orphans (parent PID 1) named by their install path,
-so list them and clear them by PID rather than by pattern:
+have deleted, and leaves its postgres container and volume behind too. The
+services are orphans (parent PID 1) named by their install path, so list
+them and clear them by PID rather than by pattern:
 
 ```sh
 ps -eo pid,ppid,args |
   awk '/mcloving-smoke.*mcloving-(controller|agent)/ && !/awk/ {print}'
+podman ps -a  --format '{{.Names}}' | grep mcloving-smoke
+podman volume ls --format '{{.Name}}' | grep mcloving-smoke
 ```
 
 ## Limitations
