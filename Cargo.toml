@@ -48,3 +48,13 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "deny"
+
+# Dependencies are optimized even in dev/test builds; our own crates stay at
+# opt-level 0 so they remain debuggable and compile fast.
+#
+# Motivation, measured: the source-acquirer suite sha256s git's entire runtime
+# closure on every acquisition, and at opt-level 0 the sha2 implementation
+# dominated the run. That suite is 99.6% of the Foundation gate's wall clock
+# (27m17s of 27m24s), so this is the cheapest lever the gate has.
+[profile.dev.package."*"]
+opt-level = 2
