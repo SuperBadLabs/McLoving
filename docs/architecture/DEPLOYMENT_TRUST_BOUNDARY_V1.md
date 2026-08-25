@@ -14,7 +14,7 @@ down, decides the trust boundary, and determines the fate of each obligation the
 lane currently discharges.
 
 It is a decision record, not a plan of record for code. The implementation it
-authorises is tracked as `DEPLOY-003` on the execution board.
+authorizes is tracked as `DEPLOY-003` on the execution board.
 
 ---
 
@@ -184,13 +184,15 @@ Design-doc option B is "push enforcement into systemd rather than bespoke
 pre-checks", and its own §9 requires this to be measured rather than assumed.
 Measured on systemd 255 under `systemctl --user`, uid 1000:
 
-**13 directives enforced. 11 silently unenforced with the unit still starting.
-3 fail closed.**
+**13 directives enforced. 13 silently unenforced with the unit still starting,
+in two classes with different causes. 3 fail closed.**
 
 | | directives |
 |---|---|
 | **Enforced** | `NoNewPrivileges`, `PrivateUsers`, `RestrictAddressFamilies`, `SystemCallFilter`, `RestrictNamespaces`, `LockPersonality`, `MemoryDenyWriteExecute`, `MemoryMax`, `TasksMax`, `CPUQuota`, `LimitNOFILE`, `CPUAffinity`, `UnsetEnvironment` |
-| **Silently unenforced** | `ProtectSystem`, `ProtectHome`, `ReadOnlyPaths`, `InaccessiblePaths`, `BindReadOnlyPaths`, `PrivateTmp`, `PrivateNetwork`, `ProtectKernelTunables`, `ProtectControlGroups`, `ProtectProc`, `IPAddressDeny`, `IOReadBandwidthMax`, `AllowedCPUs` |
+| **Silently unenforced — needs a mount namespace** | `ProtectSystem`, `ProtectHome`, `ReadOnlyPaths`, `InaccessiblePaths`, `BindReadOnlyPaths`, `PrivateTmp`, `PrivateNetwork`, `ProtectKernelTunables`, `ProtectControlGroups`, `ProtectProc` (10) |
+| **Silently unenforced — needs BPF, absent from this build** | `IPAddressDeny` (1) |
+| **Silently unenforced — needs an undelegated cgroup controller** | `IOReadBandwidthMax`, `AllowedCPUs` (2) — a namespace fix would NOT help these; the remediation is root-side controller delegation |
 | **Fail closed (honest)** | `TemporaryFileSystem=` (226/NAMESPACE), `PrivateDevices=`, empty `CapabilityBoundingSet=` (218) |
 
 ### 4.1 Why, and why it is dangerous

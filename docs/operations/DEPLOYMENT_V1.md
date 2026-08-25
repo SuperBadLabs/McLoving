@@ -257,13 +257,17 @@ Named honestly; none of these are hidden behind defaults:
   operator actions via `mcloving-identity-admin`, not this lane.
 - **systemd sandboxing directives are NOT available to this lane, and fail
   OPEN if added.** Measured on systemd 255 under `systemctl --user`: thirteen
-  directives are enforced, **eleven are accepted and silently ignored while the
-  unit still starts and reports success**, and three fail closed. The silent
-  set is `ProtectSystem=`, `ProtectHome=`, `ReadOnlyPaths=`,
-  `InaccessiblePaths=`, `BindReadOnlyPaths=`, `PrivateTmp=`, `PrivateNetwork=`,
-  `ProtectKernelTunables=`, `ProtectControlGroups=`, `ProtectProc=`,
-  `IPAddressDeny=`, plus `IOReadBandwidthMax=` and `AllowedCPUs=`. Every one of
-  them needs a mount namespace (or BPF): systemd's executor forks
+  directives are enforced, **thirteen are accepted and silently ignored while
+  the unit still starts and reports success**, and three fail closed. The silent
+  thirteen fall into TWO classes with DIFFERENT causes and different
+  remediations -- do not treat them as one:
+
+  *Class 1, eleven namespace/BPF directives:* `ProtectSystem=`, `ProtectHome=`,
+  `ReadOnlyPaths=`, `InaccessiblePaths=`, `BindReadOnlyPaths=`, `PrivateTmp=`,
+  `PrivateNetwork=`, `ProtectKernelTunables=`, `ProtectControlGroups=`,
+  `ProtectProc=`, and `IPAddressDeny=` (the last needing BPF, which this build
+  lacks: note `-BPF_FRAMEWORK` in `systemctl --version`). Every one of the other
+  ten needs a mount namespace: systemd's executor forks
   `(sd-userns)`, Ubuntu's AppArmor `unprivileged_userns` profile denies it
   `CAP_SYS_ADMIN`, `unshare(CLONE_NEWNS)` returns `EPERM`, and systemd logs
   *"Failed to set up namespace, assuming containerized execution and ignoring"*
@@ -280,8 +284,15 @@ Named honestly; none of these are hidden behind defaults:
   filesystem hardening directive to this lane without a runtime proof that it
   is in effect**; the model is `require_shadow_apparmor_enforcement()` in
   `crates/external-connector/src/standalone.rs`, which reads
-  `/proc/self/attr/current` and refuses to run unconfined. Delegated cgroup
-  controllers are `cpu memory pids` only, so IO-bandwidth and cpuset bounds are
-  no-ops here too.
+  `/proc/self/attr/current` and refuses to run unconfined.
+
+  *Class 2, two cgroup directives:* `IOReadBandwidthMax=` (and its write twin)
+  and `AllowedCPUs=`. These fail for an unrelated reason -- the user manager is
+  delegated only the `cpu`, `memory` and `pids` controllers, so `io` and
+  `cpuset` are simply absent. **A user-namespace fix would not make these
+  work**, which is why they are listed apart: the remediation is a root-side
+  change to controller delegation, not an AppArmor or sysctl change. The
+  delegated three do work, so `MemoryMax=`, `TasksMax=` and `CPUQuota=` are
+  real bounds here.
 - **Agent probe is start-time only while the service runs.** Runtime agent
   health is journal-level; the full session probe requires a service stop.

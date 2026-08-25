@@ -3,14 +3,14 @@
 Date: 2026-08-25
 
 Verdict: PASS for the implementation gate at protected-main commits
-`52b2ecbc` (PR #84, the deployment lane) and `586230b` (PR #93, the follow-up
-closing five deferred findings). All fifteen protected checks pass on `586230b`
+`52b2ecb7641c38c956a2612614b50ea6fb3d344d` (PR #84, the deployment lane) and
+`586230bfb51c30eed268bc7ea31921928f68aaa4` (PR #93, the follow-up closing five
+deferred findings). All fifteen protected checks pass on that second commit
 — `Rust`, `Rust lint`, `Rust workspace tests`, `Rust boundary suites`,
 `Rust source-acquirer suite`, `Dependencies and licenses`, `Secret scan`,
 `Architecture records`, `Formal model`, `Controller PostgreSQL`,
 `Backup and restore`, `Isolated Linux amd64`, `Classify Windows impact`,
-`Windows agent`, and the lane's own new `Deployment lane` job — as they do on
-`52b2ecbc`.
+`Windows agent`, and the lane's own new `Deployment lane` job — as they do on the first.
 
 This receipt closes `DEPLOY-001`. It was withheld until now for a reason worth
 recording: the implementation merged on 2026-08-24/25, but the board's Working
