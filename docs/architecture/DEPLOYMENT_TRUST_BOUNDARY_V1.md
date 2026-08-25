@@ -264,7 +264,10 @@ both namespaces unprivileged on this host, because it ships a profile containing
 The lane currently discharges eight obligations on every transition. Attributed
 surface in `deploy/bin/mcloving-deploy-lib.sh` (4,199 lines; 4,036 attributed,
 163 blank separators) and gates in `deploy/test-deployment.sh` (600 named
-refusals in 230 blocks, of which 49 are not obligation work):
+refusal sites, counted as `rg -c '^\s*exit 1'` = 605 at this head; an earlier
+figure of "600 in 230 blocks" circulated in working notes, and while 600 is
+sound the block count could not be reproduced under any counting rule, so it is
+withdrawn rather than repeated):
 
 | | obligation | lines | gates | determination |
 |---|---|---:|---:|---|

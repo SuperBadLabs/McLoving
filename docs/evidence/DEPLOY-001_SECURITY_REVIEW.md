@@ -86,8 +86,9 @@ deferral.
 - a documented install/upgrade/rollback runbook in
   `docs/operations/DEPLOYMENT_V1.md`;
 - `deploy/test-deployment.sh`, which exercises install, health, upgrade,
-  rollback and digest re-read end to end without root — 600 named refusals in
-  230 blocks — and now runs as the `Deployment lane` job on every pull request.
+  rollback and digest re-read end to end without root — 605 named refusal sites
+  (`rg -c '^\s*exit 1' deploy/test-deployment.sh` at this head) — and now runs as
+  the `Deployment lane` job on every pull request.
 
 ## Bounded deliberately
 

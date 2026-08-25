@@ -436,19 +436,46 @@ jobs:
           set -x
           sudo useradd --create-home --shell /bin/bash mcloving-spike || echo "USERADD FAILED"
           sudo loginctl enable-linger mcloving-spike || echo "LINGER FAILED"
-          for i in $(seq 1 20); do
-            sudo -u mcloving-spike XDG_RUNTIME_DIR=/run/user/$(id -u mcloving-spike) \
-              systemctl --user is-system-running 2>&1 && break
+          U=$(id -u mcloving-spike)
+          # Round 1 of this spike set XDG_RUNTIME_DIR and nothing else, and every
+          # systemctl --user call answered "Failed to connect to bus: Permission
+          # denied". That was the probe's fault, not the approach's: `sudo -u`
+          # does not open a login session, so DBUS_SESSION_BUS_ADDRESS is never
+          # set and the client has no bus to talk to even though the manager is
+          # running -- /run/user/$U was created drwx------ by systemd, which is
+          # the proof it started. Both variables are set explicitly below.
+          asuser() { sudo -u mcloving-spike \
+            XDG_RUNTIME_DIR="/run/user/$U" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$U/bus" "$@"; }
+          for i in $(seq 1 30); do
+            asuser systemctl --user is-system-running 2>&1 && break
             sleep 1
           done
           echo "--- runtime dir ---"
-          sudo ls -ld /run/user/$(id -u mcloving-spike) || echo "NO RUNTIME DIR"
-          echo "--- can it run a unit? ---"
-          sudo -u mcloving-spike XDG_RUNTIME_DIR=/run/user/$(id -u mcloving-spike) \
-            systemd-run --user --wait --pipe /bin/echo SPIKE_UNIT_RAN 2>&1 || echo "TRANSIENT UNIT FAILED"
+          sudo ls -ld "/run/user/$U" || echo "NO RUNTIME DIR"
+          sudo ls -l "/run/user/$U/bus" || echo "NO BUS SOCKET"
+          echo "--- can it run a transient unit? ---"
+          asuser systemd-run --user --wait --pipe /bin/echo SPIKE_UNIT_RAN 2>&1 || echo "TRANSIENT UNIT FAILED"
+          echo "--- can it install and start a real unit? ---"
+          sudo -u mcloving-spike mkdir -p /home/mcloving-spike/.config/systemd/user
+          sudo -u mcloving-spike tee /home/mcloving-spike/.config/systemd/user/mcloving-spike-probe.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=spike probe
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'echo SPIKE_REAL_UNIT_STARTED in %h'
+          [Install]
+          WantedBy=default.target
+          UNIT
+          asuser systemctl --user daemon-reload 2>&1 || echo "DAEMON_RELOAD FAILED"
+          asuser systemctl --user enable --now mcloving-spike-probe.service 2>&1 || echo "ENABLE FAILED"
+          asuser systemctl --user is-active mcloving-spike-probe.service 2>&1 || echo "UNIT NOT ACTIVE"
+          asuser systemctl --user show -p FragmentPath mcloving-spike-probe.service 2>&1 || true
           echo "--- rootless podman as that account? (the quadlet needs it) ---"
-          sudo -u mcloving-spike XDG_RUNTIME_DIR=/run/user/$(id -u mcloving-spike) \
-            podman info --format '{{.Host.CgroupManager}}' 2>&1 || echo "PODMAN FAILED"
+          asuser podman info --format '{{.Host.CgroupManager}}' 2>&1 || echo "PODMAN FAILED"
+          echo "--- does the Quadlet generator exist for that user? ---"
+          asuser systemctl --user list-unit-files 2>&1 | head -3 || true
           sudo loginctl disable-linger mcloving-spike || true
           sudo userdel -r mcloving-spike || true
 
