@@ -2530,6 +2530,59 @@ grep -qxF "/" <<<"${above_home_decoded}" || {
 }
 chmod 0755 "${above_home_root}/plain/parent" "${above_home_root}/sticky/parent"
 
+# NEGATIVE: a managed root that is ITSELF sticky-world-writable is refused.
+# The sticky bit restricts renaming and unlinking OTHER people's entries; it
+# does not restrict CREATING a new one. For this lane that is the whole
+# attack, because drop-ins are MERGED -- an attacker only has to add a
+# previously absent .conf. An earlier revision of the exemption accepted this.
+sticky_root_home="${workdir}/sticky-root/home"
+rm -rf "${workdir}/sticky-root"
+mkdir -p "${sticky_root_home}/.config/systemd/user"
+chmod -R go-w "${workdir}/sticky-root"
+chmod 0755 "${workdir}/sticky-root" "${sticky_root_home}"
+chmod 1777 "${sticky_root_home}/.config/systemd/user"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${sticky_root_home}" \
+    "${sticky_root_home}/.config/systemd/user"
+) > "${workdir}/logs/sticky-managed-root.log" 2>&1; then
+  echo "the ancestor walk accepted a MANAGED ROOT at mode 1777; an attacker can" >&2
+  echo "create a drop-in there and systemd will merge it" >&2
+  exit 1
+fi
+chmod 0700 "${sticky_root_home}/.config/systemd/user"
+
+# NEGATIVE: a home reached through TWO symlinks refuses a writable directory
+# that holds an intermediate link. Ascending only the lexical spelling and the
+# final resolved one covers neither: svc -> /x/intermediate/home with
+# intermediate -> /y/real leaves /x unjudged, and a writable /x lets another
+# local user repoint the link and substitute the whole tree.
+twolink="${workdir}/twolink"
+rm -rf "${twolink}"
+mkdir -p "${twolink}/x" "${twolink}/y/real/home/.config/mcloving"
+chmod -R go-w "${twolink}"
+chmod 0755 "${twolink}" "${twolink}/x" "${twolink}/y" \
+  "${twolink}/y/real" "${twolink}/y/real/home"
+ln -s "${twolink}/y/real" "${twolink}/x/intermediate"
+ln -s "${twolink}/x/intermediate/home" "${twolink}/svc"
+chmod 0777 "${twolink}/x"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${twolink}/svc" "${twolink}/svc/.config/mcloving"
+) > "${workdir}/logs/twolink-home.log" 2>&1; then
+  echo "the ancestor walk accepted a writable directory holding an intermediate" >&2
+  echo "symlink on the way to the home" >&2
+  exit 1
+fi
+grep -q "x (mode 777)" "${workdir}/logs/twolink-home.log" || {
+  echo "the writable intermediate-link directory was not named in the refusal:" >&2
+  cat "${workdir}/logs/twolink-home.log" >&2
+  exit 1
+}
+chmod 0755 "${twolink}/x"
+
 
 # A chmod landing between a record's fstat and its pathname re-check must
 # not survive into the canonical document: the inode is unchanged, so a
