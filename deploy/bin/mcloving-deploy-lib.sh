@@ -2717,7 +2717,18 @@ try:
     if not stat.S_ISREG(os.fstat(descriptor).st_mode):
         raise SystemExit(f"environment file {path} is not a regular file")
     os.set_blocking(descriptor, True)
-    with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
+    # SURROGATEESCAPE, because a pathname is bytes and this lane says so
+    # everywhere else. A strict utf-8 decode made a contract that RENDERED
+    # perfectly unreadable on the very next guard run: a home ending in 0xff
+    # is a legal pathname, os.fsencode puts that byte in the file, and the
+    # parser then raised UnicodeDecodeError instead of returning the path.
+    # surrogateescape carries any byte through the decode unchanged and the
+    # encodes below put it back exactly, which is the round trip round 41
+    # established for os.fsencode/fsdecode and which
+    # mcloving-deployed-digests already spells this same way.
+    with os.fdopen(
+        descriptor, "r", encoding="utf-8", errors="surrogateescape", closefd=False
+    ) as handle:
         while True:
             raw = handle.readline()
             if not raw:
@@ -2735,8 +2746,14 @@ try:
                 sys.stderr.write("environment file line is not NAME=VALUE\n")
                 raise SystemExit(1)
             name = name.strip(WHITESPACE)
+            # Encoded the way they were decoded, or a surrogate that stood
+            # for one raw byte raises on the way out instead of becoming
+            # that byte again.
             out.write(
-                name.encode() + b"\0" + parse_value(value, handle).encode() + b"\0"
+                name.encode("utf-8", "surrogateescape")
+                + b"\0"
+                + parse_value(value, handle).encode("utf-8", "surrogateescape")
+                + b"\0"
             )
 finally:
     os.close(descriptor)

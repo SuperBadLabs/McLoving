@@ -5625,6 +5625,17 @@ chmod go-w "${render_probe}"
   # the next line. This lane carries arbitrary bytes in paths on purpose.
   weird_home='/home/na\me/q'"'"'uo"te/$dollar/with space'"${MCLOVING_BACKSLASH}"'tick`'
   weird_home="${weird_home}"$'\n'"second-line"
+  # A NON-UTF-8 BYTE, which is a legal pathname byte and was the one thing
+  # the renderer could produce that the parser then refused to read back.
+  weird_home="${weird_home}"$'\xff'"tail"
+  # The premise, inline so this gate cannot go vacuous if the parser's error
+  # handling is ever tightened back: a STRICT decode of that byte does fail.
+  printf 'MCLOVING_PROBE=%s\n' "${weird_home}" > "${render_probe}/bytes.env"
+  if python3 -c 'import sys; open(sys.argv[1], "r", encoding="utf-8").read()' \
+    "${render_probe}/bytes.env" 2>/dev/null; then
+    echo "a strict utf-8 read of a non-UTF-8 path byte succeeded; this gate's premise is gone" >&2
+    exit 1
+  fi
   render_contract_template "${repo_root}/deploy/env/agent.env.example" \
     "${render_probe}/weird.env" "${weird_home}" "${weird_home}/.local/state"
   weird_workspace=""
