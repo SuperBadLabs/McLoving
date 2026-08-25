@@ -5305,16 +5305,53 @@ SANITIZED
 # the guard's first line, which is too early for the guard to object. Three
 # layers close it and each is asserted here in both directions.
 #
-# (1) THE SHEBANGS, as a CLASS. This is precisely the case the round-41
-# sanitization gate above excludes by name ("a shebang is not an invocation
+# (1) THE SHEBANGS, for the helpers a UNIT STARTS. This is the case round
+# 41's sanitization gate excludes by name ("a shebang is not an invocation
 # this lane makes"), so nothing else covers it.
-python3 - "${repo_root}" <<'SHEBANG'
+#
+# The set is DERIVED from the shipped units' own Exec directives rather than
+# listed here, because the rule follows the threat and not a name: the
+# kernel resolves the interpreter of a process SYSTEMD starts, before the
+# guard's first line, using whatever PATH the unit hands it. A helper the
+# lane installs but no unit starts -- mcloving-unit-command, which round 41
+# already recorded as smoke-suite-only, and the operator-invoked
+# install/upgrade/rollback -- is reached through the invoking operator's own
+# PATH, which is their trust domain and their privileges, not the service
+# account's. Pinning those to one absolute location buys no unit-boundary
+# protection and costs real hosts: python3 lives in /usr/local/bin on some,
+# which MCLOVING_TRUSTED_PATH explicitly accepts and a hard-coded
+# /usr/bin/python3 does not. So they may resolve by name, provided the
+# interpreter they name is actually FINDABLE on the trusted path.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  python3 - "${repo_root}" "${MCLOVING_TRUSTED_PATH}" "${MCLOVING_UNIT_EXEC_DIRECTIVES}" <<'SHEBANG'
 import os
 import pathlib
+import re
+import shutil
 import stat
 import sys
 
-root = pathlib.Path(sys.argv[1]) / "deploy" / "bin"
+repo_root, trusted_path, exec_directives = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+root = repo_root / "deploy" / "bin"
+
+# Which helpers a unit starts, read off the units themselves.
+started = set()
+directive = re.compile(rf"^({exec_directives})\s*=\s*(\S+)", re.M)
+unit_sources = sorted((repo_root / "deploy" / "systemd").glob("*.service")) + sorted(
+    (repo_root / "deploy" / "podman").iterdir()
+)
+for unit in unit_sources:
+    if not unit.is_file():
+        continue
+    for _, command in directive.findall(unit.read_text()):
+        started.add(os.path.basename(command))
+if not started & {"mcloving-env-guard", "mcloving-health"}:
+    raise SystemExit(
+        "the unit Exec sweep found no known pre-start helper; the scan went blind"
+    )
+
 offenders = []
 checked = 0
 for helper in sorted(root.iterdir()):
@@ -5324,13 +5361,32 @@ for helper in sorted(root.iterdir()):
     if not lines or not lines[0].startswith("#!"):
         continue  # the sourced library carries no shebang and is never exec'd
     checked += 1
-    interpreter = lines[0][2:].strip().split()[0] if lines[0][2:].strip() else ""
-    if not interpreter.startswith("/") or os.path.basename(interpreter) == "env":
-        offenders.append(f"{helper.name}: {lines[0]}")
+    words = lines[0][2:].strip().split()
+    if not words:
+        offenders.append(f"{helper.name}: empty shebang")
+        continue
+    interpreter = words[0]
+    by_name = os.path.basename(interpreter) == "env"
+    if helper.name in started:
+        if by_name or not interpreter.startswith("/"):
+            offenders.append(
+                f"{helper.name}: {lines[0]} -- a unit starts this helper, so the "
+                "PATH the service manager carries would pick its interpreter"
+            )
+            continue
+    elif by_name:
+        # Not a unit's problem, but it still has to be findable, and findable
+        # on the list this lane trusts rather than on the caller's.
+        named = words[1] if len(words) > 1 else ""
+        if not named or shutil.which(named, path=trusted_path) is None:
+            offenders.append(
+                f"{helper.name}: {lines[0]} names {named or '(nothing)'}, which is "
+                f"not on the trusted path {trusted_path}"
+            )
         continue
     # An absolute name is only worth having when the file it names is one no
-    # other local user can replace -- the same rule require_secure_files
-    # applies to every other file this deployment's startup depends on.
+    # other local user can replace -- the rule require_secure_files applies
+    # to every other file this deployment's startup depends on.
     try:
         info = os.stat(interpreter)
     except OSError as error:
@@ -5346,12 +5402,11 @@ if checked < 5:
     raise SystemExit("the shebang sweep found too few helpers; the scan went blind")
 if offenders:
     raise SystemExit(
-        "shipped helper(s) resolve their interpreter by name rather than "
-        "naming it absolutely, so whatever PATH the service manager carries "
-        "decides which interpreter runs as the service account:\n  "
-        + "\n  ".join(offenders)
+        "shipped helper(s) resolve their interpreter in a way this deployment "
+        "cannot stand behind:\n  " + "\n  ".join(offenders)
     )
 SHEBANG
+)
 # (2) EVERY SHIPPED UNIT pins PATH, at the library's value and not a copy of
 # it that can drift. A unit added later without the directive inherits the
 # manager's PATH again, which is how this defect got in.
