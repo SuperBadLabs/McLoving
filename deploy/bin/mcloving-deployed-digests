@@ -320,9 +320,11 @@ def file_record(path: Path, root: Path) -> dict:
     # symlink yields the old target's bytes beside the new target's name, an
     # identity that never existed. The target is snapshotted before and
     # rechecked after; a link that moved under the read is retried.
+    outside_root = False
     try:
         relative = path.relative_to(root).as_posix()
     except ValueError:
+        outside_root = True
         # A physical ancestor outside the home tree -- the parent chain of a
         # symlinked root's resolved target -- has no home-relative spelling.
         # It is recorded under its absolute path: the document must pin its
@@ -405,7 +407,7 @@ def file_record(path: Path, root: Path) -> dict:
                     "uid": status.st_uid,
                     "gid": status.st_gid,
                 }
-                if stat.S_ISDIR(status.st_mode):
+                if stat.S_ISDIR(status.st_mode) and not outside_root:
                     # The entry-set digest gives a directory record listing
                     # identity of its own: an entry added or renamed changes
                     # this hash even when every surviving child record is
@@ -413,6 +415,27 @@ def file_record(path: Path, root: Path) -> dict:
                     # that moved. Read through the already-classified
                     # descriptor; the final pathname re-check (mtime/ctime)
                     # retries the record if the listing changes under it.
+                    #
+                    # NOT for a directory outside the deployment root. Since
+                    # the ancestor walk was extended above the home, the chain
+                    # reaches shared directories -- /tmp, /var/tmp, / -- whose
+                    # entries belong to other processes. Hashing those makes
+                    # the canonical document NON-DETERMINISTIC: two re-reads
+                    # seconds apart disagree because an unrelated process
+                    # created a file, which the smoke suite caught as
+                    # "digest re-read output is not deterministic". The
+                    # instability is also invisible to the retry above, which
+                    # only detects a listing moving DURING one read; across
+                    # two invocations each read is internally stable and the
+                    # hashes simply differ.
+                    #
+                    # Nothing is lost. What the ancestors section exists to
+                    # pin is stated at the top of this file -- "mode and owner
+                    # of every directory on the chain" -- because that is what
+                    # decides whether another local user can rename the
+                    # subtree aside. Mode, uid and gid are still recorded
+                    # above. The entry set of /tmp is not deployment state and
+                    # never was.
                     try:
                         listing = sorted(os.listdir(descriptor))
                     except OSError:

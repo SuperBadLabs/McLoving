@@ -219,7 +219,28 @@ require_secure_ancestors() {
       || deploy_fail "cannot stat deployment ancestor ${ancestor}"
     mode="${mode_owner%% *}"
     owner="${mode_owner##* }"
-    if (( (8#${mode} & 8#022) != 0 )); then
+    # THE STICKY EXEMPTION, which must be read together with the walk above
+    # the home added below -- neither is correct alone.
+    #
+    # `& 8#022` on its own calls /tmp and /var/tmp (1777) writable, and they
+    # are. But the question this rule asks is not "who may write here", it is
+    # "who may rename my subtree aside", and S_ISVTX is exactly the control
+    # that answers it: in a sticky directory only root, the directory's owner,
+    # and the entry's own owner may rename or unlink a child. Measured with a
+    # genuinely foreign uid: mv under a 1777 parent returns EPERM, under an
+    # 0777 parent it succeeds.
+    #
+    # Both of those owners are judged by the ownership rule below, which runs
+    # on every component of the chain INCLUDING the child that sits in the
+    # sticky directory -- so (sticky parent, root-or-home-owned child) is the
+    # safe pair and nothing is taken on trust that is not separately checked.
+    # A world-writable directory WITHOUT the bit stays refused, because there
+    # any local user may rename the child, which is the whole defect.
+    #
+    # Without this, the walk added below refuses every host: the suite
+    # installs into mktemp trees under TMPDIR, so a deployment home under
+    # /tmp carries 1777 in its chain by construction.
+    if (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
       offending+="${ancestor} (mode ${mode}) "
     fi
     # Ownership is judged independently of mode: a chain component owned by
@@ -2204,12 +2225,16 @@ deployment_unit_declared_roots() {
 # of every directory encountered in any traversal.
 #
 # Stop points: a chain inside the (resolved) home stops at the home
-# directory, whose own parents are the platform's -- the boundary the
-# installer has always drawn. A chain that leaves the home has no such
-# anchor and is walked to "/" inclusive. That deliberately refuses a
-# deployment routed through a sticky world-writable directory such as /tmp:
-# the sticky bit only narrows who may rename, and any attacker-owned
-# component inside such a chain defeats it entirely. A looping or dangling
+# directory, and the HOME'S OWN chain is then walked to "/" separately
+# below, so that stop is now a de-duplication rather than a boundary. A
+# chain that leaves the home has no anchor and is walked to "/" inclusive.
+# The sticky world-writable directories those walks reach -- /tmp, /var/tmp
+# -- are judged by require_secure_ancestors, which reads S_ISVTX; see the
+# sticky exemption there for why that is the right judgement rather than a
+# relaxation. The earlier text here argued the sticky refusal was deliberate
+# because "the sticky bit only narrows who may rename"; narrowing rename to
+# root, the directory's owner and the entry's owner is precisely the
+# guarantee this rule needs, and all three are judged by the ownership rule. A looping or dangling
 # link on the way to a root is refused by name rather than resolved around,
 # with resolution bounded like the kernel bounds ELOOP.
 deployment_ancestor_chain() {
@@ -2288,6 +2313,28 @@ def resolve_recording(origin, path, budget):
         chain_of(target_resolved)
         resolved = target_resolved
     return resolved
+
+
+# The home's OWN ancestors, lexically and through its resolved spelling,
+# walked to "/" like any chain that leaves the home. The boundary used to be
+# drawn at the home -- "its parents are the platform's" -- and that left the
+# single directory whose substitution replaces EVERY unit, contract, key and
+# binary at once completely unjudged: given a foreign-owned or
+# writable-without-sticky parent, another local user renames the whole home
+# aside and puts their own tree in its place.
+#
+# That is not a hypothetical consequence. Every ownership rule in this
+# library anchors its expected uid on `stat` of the home, so a substituted
+# home becomes its OWN trust anchor and its author's units pass the
+# trust-input rule with an arbitrary ExecStart -- measured end to end with a
+# foreign uid. It is also the exact attack this library's own refusal text
+# has always described.
+#
+# Both spellings, because a symlinked home has two sets of parents and
+# repointing the link is the same substitution by another route; ascend()
+# de-duplicates into `found`.
+ascend(home, "/")
+ascend(resolved_home, "/")
 
 
 for root in roots:
