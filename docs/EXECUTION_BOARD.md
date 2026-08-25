@@ -23,7 +23,8 @@ Jenkins authority. `CANARY-000` is complete: exact reviewed head
 protected-main commit `c6a238ae9acdc997d14850d1752cecd54feec8b9`, whose
 Foundation run `32080011592` and Windows run `32080011587` passed. `EXT-002` is
 complete, merged as `03a1f5d` through PR #72; the qualification lane has
-advanced to `CASE-001`, and `DEPLOY-001` holds the active implementation slot.
+advanced to `CASE-001`. `DEPLOY-001` is now DONE and `DEPLOY-003` holds the
+active implementation slot.
 `CANARY-001` remains the production ceremony, and any production effect still requires a separate fresh
 one-action owner authorization and every pre-action gate.
 
