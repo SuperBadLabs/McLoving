@@ -5770,6 +5770,56 @@ zero_open_status=0
   exit 1
 }
 rm -rf "${node_probe}"
+# A MANAGER ROOT OF "/" IS AN ANSWER, NOT A SILENCE. The empty string is
+# this lane's spelling for the root directory -- every XDG derivation here
+# strips the trailing slash, so XDG_STATE_HOME=/ yields "" and a leaf under
+# it comes out /mcloving-agent, which is correct. Deciding whether the
+# manager answered by testing that value for non-emptiness therefore read a
+# perfectly good "/" as "nobody could say" and fell back to the caller's
+# derivation -- rendering contracts outside the tree systemd builds, which
+# is the failure these functions exist to prevent. The verdict is the
+# helper's EXIT STATUS. Driven through the one seam that can pose as a
+# manager, since no test may reach into the real one's environment.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  xdg_root_home="${workdir}/xdg-root-probe-home"
+  # The premise, stated inline so this gate cannot go vacuous: the root
+  # really is spelled empty by the derivations everything else here uses.
+  [[ -z "$(XDG_STATE_HOME=/ deployment_state_root "${HOME}")" ]] || {
+    echo "a state root of / is no longer spelled as the empty string; this gate's premise is gone" >&2
+    exit 1
+  }
+  # (1) A manager that answers "/" must be USED. Under the pre-fix
+  # emptiness test this fell through to the caller's derivation.
+  deployment_manager_xdg_root() { printf '%s\n' ""; }
+  answered_root="$(deployment_effective_state_root "${xdg_root_home}")"
+  [[ -z "${answered_root}" ]] || {
+    echo "a manager answering / was discarded in favour of the caller's derivation (${answered_root})" >&2
+    exit 1
+  }
+  [[ "${answered_root}/mcloving-agent" == "/mcloving-agent" ]] || {
+    echo "a manager root of / composed a wrong leaf: ${answered_root}/mcloving-agent" >&2
+    exit 1
+  }
+  # The same for the cache and data derivations, which share the wrapper.
+  [[ -z "$(deployment_effective_cache_root "${xdg_root_home}")" ]] || {
+    echo "the cache derivation discarded a manager root of /" >&2
+    exit 1
+  }
+  [[ -z "$(deployment_effective_data_root "${xdg_root_home}")" ]] || {
+    echo "the data derivation discarded a manager root of /" >&2
+    exit 1
+  }
+  # (2) A manager that CANNOT say must still fall back, or the fix above
+  # would have turned every unreachable manager into a root of /.
+  deployment_manager_xdg_root() { return 1; }
+  fallback_root="$(deployment_effective_state_root "${xdg_root_home}")"
+  [[ "${fallback_root}" == "${xdg_root_home}/.local/state" ]] || {
+    echo "an unreachable manager did not fall back to the caller's derivation: ${fallback_root}" >&2
+    exit 1
+  }
+)
 # INSTALLATION ROOTS come from the running manager where it can say. Writing
 # to the wrong root is the one failure that is silent and total: units land
 # where the manager never searches and daemon-reload finds nothing.

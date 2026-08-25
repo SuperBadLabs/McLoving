@@ -996,8 +996,7 @@ deployment_manager_config_root() {
 # established, the caller's derivation otherwise.
 deployment_effective_config_root() {
   local home_dir="${1%/}" manager_root
-  if manager_root="$(deployment_manager_config_root "${home_dir}")" \
-    && [[ -n "${manager_root}" ]]; then
+  if manager_root="$(deployment_manager_config_root "${home_dir}")"; then
     printf '%s\n' "${manager_root}"
     return 0
   fi
@@ -1042,6 +1041,15 @@ deployment_config_root_source() {
 # came from the manager that serves THIS home, so an absolute path outside
 # the home is a place systemd will genuinely use, and the ancestor walk --
 # not this derivation -- is what judges whether it is safe.
+# WHETHER THE MANAGER ANSWERED IS ITS EXIT STATUS, never whether it said
+# something non-empty. The empty string is this lane's spelling for the ROOT
+# directory -- deployment_state_root and its siblings have always stripped
+# the trailing slash, so XDG_STATE_HOME=/ yields "" and a leaf under it
+# comes out /mcloving-agent, which is right. Testing the value for
+# non-emptiness therefore read a perfectly good answer of "/" as "no manager
+# could say" and fell back to the caller's derivation -- rendering contracts
+# outside the tree systemd builds, which is the failure these functions
+# exist to prevent.
 deployment_manager_xdg_root() {
   local home_dir="${1%/}" variable="$2" default_suffix="$3" value
   deployment_manager_speaks_for "${home_dir}" || return 1
@@ -1060,8 +1068,7 @@ deployment_manager_xdg_root() {
 # can find the workspace systemd created.
 deployment_effective_state_root() {
   local home_dir="${1%/}" manager_root
-  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_STATE_HOME .local/state)" \
-    && [[ -n "${manager_root}" ]]; then
+  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_STATE_HOME .local/state)"; then
     printf '%s\n' "${manager_root}"
     return 0
   fi
@@ -1070,8 +1077,7 @@ deployment_effective_state_root() {
 
 deployment_effective_cache_root() {
   local home_dir="${1%/}" manager_root
-  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_CACHE_HOME .cache)" \
-    && [[ -n "${manager_root}" ]]; then
+  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_CACHE_HOME .cache)"; then
     printf '%s\n' "${manager_root}"
     return 0
   fi
@@ -1080,8 +1086,7 @@ deployment_effective_cache_root() {
 
 deployment_effective_data_root() {
   local home_dir="${1%/}" manager_root
-  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_DATA_HOME .local/share)" \
-    && [[ -n "${manager_root}" ]]; then
+  if manager_root="$(deployment_manager_xdg_root "${home_dir}" XDG_DATA_HOME .local/share)"; then
     printf '%s\n' "${manager_root}"
     return 0
   fi
