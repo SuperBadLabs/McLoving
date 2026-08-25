@@ -99,6 +99,20 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT
+# An EXIT trap alone is not reached when the shell is signalled: bash runs it
+# on a normal or `exit`-ed end, but a SIGINT terminates the script without it,
+# and the services spawned above then outlive the run. Ctrl-C is the ordinary
+# way an operator abandons a run, so that path leaked as reliably as the
+# success path did. Converting each signal into an `exit` funnels it through
+# the one cleanup already written, with the 128+signo status that says which
+# signal ended the run -- and, being non-zero, preserves ${workdir} and its
+# diagnostics exactly as any other abnormal end does.
+#
+# SIGKILL cannot be trapped; a `kill -9` of the suite still strands its
+# services, and no in-process discipline can change that.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # `local` outside a function aborts under `set -e`, and the helpers put their
 # service logic in a top-level `case` block where that is easy to do by
@@ -1526,6 +1540,36 @@ run_with_env() { # ENV_FILE COMMAND...
   )
 }
 
+# spawn_with_env ENV_FILE COMMAND... -- the background-only twin of
+# run_with_env, for the long-lived services. INVOKE ONLY AS A BACKGROUND JOB.
+#
+# `run_with_env ... &` forks twice: once for the job, and again for the
+# function's own `( ... )`. ${!} therefore names the outer bash wrapper, not
+# the service that the inner fork exec's. Killing that wrapper -- which is
+# all the EXIT trap could ever do -- left the controller and the agent
+# running, reparented to init, against a ${workdir} the success path had
+# already deleted. Every clean pass leaked a pair.
+#
+# Exec'ing in the job's own fork makes ${!} the service itself, the same
+# single-process discipline the transition-lock holders below rely on.
+#
+# The BASHPID/$$ comparison is the invocation guard: the two differ only
+# inside a subshell, so a foreground call is caught here rather than by
+# `exec` silently replacing the running suite.
+spawn_with_env() { # ENV_FILE COMMAND...
+  local env_file="$1"
+  shift
+  if [[ "${BASHPID}" == "$$" ]]; then
+    echo "spawn_with_env must be invoked as a background job (&): $*" >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${env_file}"
+  set +a
+  exec "$@"
+}
+
 derived_argv() { # OUT_ARRAY_NAME JSON_FILE JQ_PATH
   # shellcheck disable=SC2034 # assigned through the nameref
   local -n out_ref="$1"
@@ -1776,7 +1820,7 @@ derived_argv controller_pre "${workdir}/controller.derived.json" '.exec_start_pr
 run_with_env "${controller_env}" "${controller_pre[@]}"
 controller_argv=()
 derived_argv controller_argv "${workdir}/controller.derived.json" '.exec_start'
-run_with_env "${controller_env}" "${controller_argv[@]}" \
+spawn_with_env "${controller_env}" "${controller_argv[@]}" \
   > "${workdir}/logs/controller.log" 2>&1 &
 controller_pid=$!
 controller_post=()
@@ -1794,7 +1838,7 @@ derived_argv agent_probe "${workdir}/agent.derived.json" '.exec_start_pre[1]'
 run_with_env "${agent_env}" "${agent_probe[@]}" | tee "${workdir}/logs/agent-probe.log"
 agent_argv=()
 derived_argv agent_argv "${workdir}/agent.derived.json" '.exec_start'
-run_with_env "${agent_env}" "${agent_argv[@]}" \
+spawn_with_env "${agent_env}" "${agent_argv[@]}" \
   > "${workdir}/logs/agent.log" 2>&1 &
 agent_pid=$!
 
