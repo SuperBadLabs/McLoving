@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Install the McLoving single-host deployment lane for a rootless service
 # user. Digest verification is mandatory and fail-closed: nothing is copied
 # before every binary's sha256 matches the release manifest or an
@@ -298,14 +298,43 @@ for quadlet in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
   install -T -m 0644 "${deploy_root}/podman/${quadlet}" "${quadlet_root}/${quadlet}"
 done
 
+# RENDERED, not copied. The examples spell their absolute paths against an
+# example home, and two of those roots are not the operator's to guess: the
+# home this install was pointed at, and the XDG state root the SERVICE
+# MANAGER creates StateDirectory= leaves under. A verbatim copy under a
+# non-default absolute XDG_STATE_HOME named a workspace systemd was never
+# asked to create, and the guard then refused startup for its absence --
+# with nothing anywhere saying why. deployment_state_root is the same
+# derivation the declared-root validation already uses, so the contract and
+# the tree systemd builds come from one answer rather than two.
+#
+# render_contract_template creates the destination O_EXCL, which also
+# carries the reason `install -T` was spelled that way here: without it GNU
+# install copies INTO an existing directory at that path, and a directory
+# named agent.env would be reported as an installed placeholder while the
+# unit's EnvironmentFile= still names a directory and startup must fail.
+# FROM THE RUNNING MANAGER where it can say, and the failure this avoids is
+# the one the contract rendering exists to fix, one level further out: the
+# shell's XDG_STATE_HOME is not what systemd consults. A manager started
+# with the default creates StateDirectory= leaves under ~/.local/state no
+# matter what the operator exports before running this command -- measured
+# on systemd 255 -- so rendering from the shell would point the contract at
+# a tree that is never created, which is exactly the guard refusal this
+# whole change set removed. Same shape as the configuration base above:
+# manager first, caller's derivation as the documented fallback, and SAY
+# which was used, since the two can only differ when something is already
+# surprising.
+state_root="$(deployment_effective_state_root "${home_dir}")"
+state_root_caller="$(deployment_state_root "${home_dir}")"
+if [[ "${state_root}" != "${state_root_caller}" ]]; then
+  deploy_notice "rendering contract state paths against the state root the running service manager uses (${state_root}), not the one this shell would derive (${state_root_caller}); systemd creates StateDirectory= leaves under the manager's XDG_STATE_HOME, and a contract rendered against this shell's would name a workspace that is never created"
+else
+  deploy_notice "contract state paths came from the $(deployment_state_root_source "${home_dir}") state root (${state_root})"
+fi
 for contract in postgres db-init controller agent; do
   if [[ ! -f "${config_root}/${contract}.env" ]]; then
-    # -T: without it, GNU install copies the source *into* an existing
-    # directory at that path, so a directory named agent.env would be reported
-    # as an installed placeholder while the unit's EnvironmentFile= still
-    # names a directory and startup must fail.
-    install -T -m 0600 "${deploy_root}/env/${contract}.env.example" \
-      "${config_root}/${contract}.env"
+    render_contract_template "${deploy_root}/env/${contract}.env.example" \
+      "${config_root}/${contract}.env" "${home_dir}" "${state_root}"
     echo "installed placeholder contract ${config_root}/${contract}.env (edit before starting)"
   fi
 done

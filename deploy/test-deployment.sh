@@ -202,6 +202,44 @@ if unaccounted:
     )
 CLASSCOVER
 
+# The shipped example contracts are TEMPLATES that mcloving-install renders
+# against the real home and the real XDG state root. Rendering rewrites two
+# prefixes, so every absolute path an example names has to live under the
+# template home -- a value added later that points anywhere else would be
+# copied through untouched and name a tree on the deployed host that nobody
+# chose. Checked as a class, because the defect this closes was one such
+# path nobody noticed.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  python3 - "${repo_root}" "${MCLOVING_CONTRACT_TEMPLATE_HOME}" <<'TEMPLATEPATHS'
+import pathlib
+import sys
+
+repo_root, template_home = pathlib.Path(sys.argv[1]), sys.argv[2]
+stray = []
+seen = 0
+for example in sorted((repo_root / "deploy" / "env").glob("*.env.example")):
+    for number, line in enumerate(example.read_text().splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        name, separator, value = stripped.partition("=")
+        if not separator or not value.startswith("/"):
+            continue
+        seen += 1
+        if value != template_home and not value.startswith(template_home + "/"):
+            stray.append(f"{example.name}:{number}: {name}={value}")
+if seen < 5:
+    raise SystemExit("the template-path sweep found too few absolute values; the scan went blind")
+if stray:
+    raise SystemExit(
+        "shipped example contract(s) name an absolute path outside the "
+        f"template home {template_home}, which mcloving-install's rendering "
+        "would copy through untouched:\n  " + "\n  ".join(stray)
+    )
+TEMPLATEPATHS
+)
 echo "== [0/9] pinned-digest drift guard"
 quadlet_image="$(sed -n 's/^Image=//p' "${repo_root}/deploy/podman/mcloving-postgres.container")"
 if [[ "${quadlet_image}" != "${MCLOVING_POSTGRES_IMAGE}" ]]; then
@@ -267,6 +305,33 @@ config_dir="${home}/.config/mcloving"
 config="${home}/.config/mcloving"
 unit_command="${libexec}/helpers/mcloving-unit-command"
 
+# RENDERED, not copied. Before any of the fixtures below rewrite them, the
+# freshly installed contracts must already name this deployment's own home
+# and its own state root -- the installer resolved both, so no operator and
+# no test fixture has to.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  # ASSIGNMENTS ONLY. A COMMENT that mentions the example home is
+  # documentation about the TEMPLATE and stays true of it -- rendering
+  # deliberately leaves comments alone, because rewriting them turned a
+  # sentence about the example into a false claim about this deployment.
+  if grep -rnE "^[A-Za-z_][A-Za-z0-9_]*=.*${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${config}/"; then
+    echo "the assignments listed above still name the example home after installation" >&2
+    exit 1
+  fi
+  # ...and the comment really is still there, so "assignments only" is a
+  # narrowed assertion rather than a disabled one.
+  grep -qF "example home ${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${config}/agent.env" || {
+    echo "the template's explanatory comment did not survive installation" >&2
+    exit 1
+  }
+)
+installed_workspace="$(sed -n 's/^MCLOVING_AGENT_WORKSPACE_ROOT=//p' "${config}/agent.env")"
+[[ "${installed_workspace}" == "${home}/.local/state/mcloving-agent/workspace" ]] || {
+  echo "the installed contract does not name the default state root: ${installed_workspace}" >&2
+  exit 1
+}
 echo "== [4/9] fail-closed contracts: placeholder contract must be refused"
 if "${libexec}/helpers/mcloving-env-guard" controller \
   "${config}/controller.env" >/dev/null 2>&1; then
@@ -534,11 +599,12 @@ printf '%s %s trusted-linux %s\n' "${agent_cert_sha256}" "${agent_id}" \
 chmod 0600 "${config}/agent-identity-bindings.txt"
 
 # Fill the installed placeholder contracts. The examples are the contract:
-# only placeholder values, endpoints, and the example home prefix change.
+# only placeholder values and endpoints change. The example home prefix used
+# to be rewritten here too; mcloving-install renders it now, and the gate
+# above asserts nothing is left for this to rewrite.
 fill_contract() {
   local file="$1"
   sed -i \
-    -e "s#/home/mcloving#${home}#g" \
     -e "s/127\.0\.0\.1:5432/127.0.0.1:${pg_port}/g" \
     -e "s/127\.0\.0\.1:8080/127.0.0.1:${api_port}/g" \
     -e "s/127\.0\.0\.1:8443/127.0.0.1:${agent_port}/g" \
@@ -5232,6 +5298,594 @@ if offenders:
         + "\n  ".join(offenders)
     )
 SANITIZED
+# THE UNIT BOUNDARY'S OWN PATH. Round 41 built a clean environment for every
+# interpreter this lane SPAWNS and left the units themselves inheriting the
+# service manager's -- so a shipped helper's `#!/usr/bin/env bash` still
+# resolved bash through that inherited value, and the KERNEL did it before
+# the guard's first line, which is too early for the guard to object. Three
+# layers close it and each is asserted here in both directions.
+#
+# (1) THE SHEBANGS, for the helpers a UNIT STARTS. This is the case round
+# 41's sanitization gate excludes by name ("a shebang is not an invocation
+# this lane makes"), so nothing else covers it.
+#
+# The set is DERIVED from the shipped units' own Exec directives rather than
+# listed here, because the rule follows the threat and not a name: the
+# kernel resolves the interpreter of a process SYSTEMD starts, before the
+# guard's first line, using whatever PATH the unit hands it. A helper the
+# lane installs but no unit starts -- mcloving-unit-command, which round 41
+# already recorded as smoke-suite-only, and the operator-invoked
+# install/upgrade/rollback -- is reached through the invoking operator's own
+# PATH, which is their trust domain and their privileges, not the service
+# account's. Pinning those to one absolute location buys no unit-boundary
+# protection and costs real hosts: python3 lives in /usr/local/bin on some,
+# which MCLOVING_TRUSTED_PATH explicitly accepts and a hard-coded
+# /usr/bin/python3 does not. So they may resolve by name, provided the
+# interpreter they name is actually FINDABLE on the trusted path.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  python3 - "${repo_root}" "${MCLOVING_TRUSTED_PATH}" "${MCLOVING_UNIT_EXEC_DIRECTIVES}" <<'SHEBANG'
+import os
+import pathlib
+import re
+import shutil
+import stat
+import sys
+
+repo_root, trusted_path, exec_directives = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+root = repo_root / "deploy" / "bin"
+
+# Which helpers a unit starts, read off the units themselves.
+started = set()
+directive = re.compile(rf"^({exec_directives})\s*=\s*(\S+)", re.M)
+unit_sources = sorted((repo_root / "deploy" / "systemd").glob("*.service")) + sorted(
+    (repo_root / "deploy" / "podman").iterdir()
+)
+for unit in unit_sources:
+    if not unit.is_file():
+        continue
+    for _, command in directive.findall(unit.read_text()):
+        started.add(os.path.basename(command))
+if not started & {"mcloving-env-guard", "mcloving-health"}:
+    raise SystemExit(
+        "the unit Exec sweep found no known pre-start helper; the scan went blind"
+    )
+
+offenders = []
+checked = 0
+for helper in sorted(root.iterdir()):
+    if not helper.is_file():
+        continue
+    lines = helper.read_text().splitlines()[:1]
+    if not lines or not lines[0].startswith("#!"):
+        continue  # the sourced library carries no shebang and is never exec'd
+    checked += 1
+    words = lines[0][2:].strip().split()
+    if not words:
+        offenders.append(f"{helper.name}: empty shebang")
+        continue
+    interpreter = words[0]
+    by_name = os.path.basename(interpreter) == "env"
+    if helper.name in started:
+        if by_name or not interpreter.startswith("/"):
+            offenders.append(
+                f"{helper.name}: {lines[0]} -- a unit starts this helper, so the "
+                "PATH the service manager carries would pick its interpreter"
+            )
+            continue
+    elif by_name:
+        # Not a unit's problem, but it still has to be findable, and findable
+        # on the list this lane trusts rather than on the caller's.
+        named = words[1] if len(words) > 1 else ""
+        if not named or shutil.which(named, path=trusted_path) is None:
+            offenders.append(
+                f"{helper.name}: {lines[0]} names {named or '(nothing)'}, which is "
+                f"not on the trusted path {trusted_path}"
+            )
+        continue
+    # An absolute name is only worth having when the file it names is one no
+    # other local user can replace -- the rule require_secure_files applies
+    # to every other file this deployment's startup depends on.
+    try:
+        info = os.stat(interpreter)
+    except OSError as error:
+        offenders.append(f"{helper.name}: {interpreter} cannot be stat-ed: {error}")
+        continue
+    if not stat.S_ISREG(info.st_mode):
+        offenders.append(f"{helper.name}: {interpreter} is not a regular file")
+    elif info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        offenders.append(
+            f"{helper.name}: {interpreter} is mode {info.st_mode & 0o777:o}"
+        )
+if checked < 5:
+    raise SystemExit("the shebang sweep found too few helpers; the scan went blind")
+if offenders:
+    raise SystemExit(
+        "shipped helper(s) resolve their interpreter in a way this deployment "
+        "cannot stand behind:\n  " + "\n  ".join(offenders)
+    )
+SHEBANG
+)
+# (2) EVERY SHIPPED UNIT pins PATH, at the library's value and not a copy of
+# it that can drift. A unit added later without the directive inherits the
+# manager's PATH again, which is how this defect got in.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  unpinned=""
+  pinned_count=0
+  for unit_source in "${repo_root}"/deploy/systemd/*.service \
+    "${repo_root}"/deploy/podman/*.container "${repo_root}"/deploy/podman/*.volume; do
+    if grep -qxF "Environment=PATH=${MCLOVING_TRUSTED_PATH}" "${unit_source}"; then
+      pinned_count=$((pinned_count + 1))
+    else
+      unpinned+="${unit_source##*/} "
+    fi
+  done
+  [[ -z "${unpinned}" ]] || {
+    echo "shipped unit(s) do not pin PATH at the library's trusted value: ${unpinned% }" >&2
+    exit 1
+  }
+  [[ "${pinned_count}" -eq 5 ]] || {
+    echo "expected five shipped units to pin PATH, found ${pinned_count}; the unit set changed" >&2
+    exit 1
+  }
+)
+# (3) THE DEFECT ITSELF, both directions. A writable directory ahead of
+# /usr/bin, a `bash` planted in it, and the pre-start helper the unit runs.
+# The shipped guard must ignore the plant; the pre-fix spelling must execute
+# it, or the assertion above proves nothing at all. The pre-fix helper is
+# RECONSTRUCTED from the shipped one rather than fetched out of git, so the
+# gate keeps proving itself in a shallow checkout and long after anyone
+# remembers which commit this was.
+path_attack="${workdir}/path-attack"
+rm -rf "${path_attack}"
+mkdir -p "${path_attack}/bin"
+cat > "${path_attack}/bin/bash" <<'EVILBASH'
+#!/bin/bash
+printf 'attacker interpreter executed as the service account\n' \
+  > "${MCLOVING_PATH_ATTACK_WITNESS}"
+exit 0
+EVILBASH
+chmod 0755 "${path_attack}/bin/bash"
+path_attack_witness="${path_attack}/witness"
+rm -f "${path_attack_witness}"
+# Acceptance: the installed guard still validates a good contract with the
+# hostile directory first on PATH, and does not touch the plant.
+MCLOVING_PATH_ATTACK_WITNESS="${path_attack_witness}" \
+  PATH="${path_attack}/bin:${PATH}" \
+  "${libexec}/helpers/mcloving-env-guard" agent "${config}/agent.env" \
+  > "${workdir}/logs/path-attack-shipped.log" 2>&1 || {
+  echo "the guard could not validate a good contract with a hostile PATH entry:" >&2
+  cat "${workdir}/logs/path-attack-shipped.log" >&2
+  exit 1
+}
+[[ ! -e "${path_attack_witness}" ]] || {
+  echo "the installed guard resolved its interpreter through a writable PATH entry" >&2
+  exit 1
+}
+# Refusal: the pre-fix shebang, and nothing else about the helper changed.
+prefix_guard="${path_attack}/prefix-env-guard"
+sed '1s|^#!/bin/bash$|#!/usr/bin/env bash|' \
+  "${libexec}/helpers/mcloving-env-guard" > "${prefix_guard}"
+chmod 0755 "${prefix_guard}"
+head -1 "${prefix_guard}" | grep -qxF '#!/usr/bin/env bash' || {
+  echo "the pre-fix guard reconstruction did not restore the by-name shebang" >&2
+  exit 1
+}
+rm -f "${path_attack_witness}"
+MCLOVING_PATH_ATTACK_WITNESS="${path_attack_witness}" \
+  PATH="${path_attack}/bin:${PATH}" \
+  "${prefix_guard}" agent "${config}/agent.env" \
+  > "${workdir}/logs/path-attack-prefix.log" 2>&1 || true
+[[ -e "${path_attack_witness}" ]] || {
+  echo "the pre-fix guard did not run the planted interpreter, so this gate would pass with the defect present" >&2
+  exit 1
+}
+rm -rf "${path_attack}"
+# (4) The unit rule admits the pinned PATH by VALUE and refuses any other
+# spelling, so permitting the deployment's own directive did not hand every
+# drop-in a way to move PATH wherever it likes.
+printf '[Service]\nEnvironment=PATH=/srv/writable\n' > "${reset_dropin_dir}/path.conf"
+chmod 0644 "${reset_dropin_dir}/path.conf"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/path-dropin.log" 2>&1; then
+  echo "upgrade proceeded over a drop-in repointing PATH at a writable directory" >&2
+  exit 1
+fi
+grep -q "set variable(s) this deployment does not recognise: PATH" \
+  "${workdir}/logs/path-dropin.log" || {
+  echo "the PATH drop-in was not refused by name:" >&2
+  cat "${workdir}/logs/path-dropin.log" >&2
+  exit 1
+}
+rm -f "${reset_dropin_dir}/path.conf"
+# THE PARSE FAILURE IS A VERDICT, which is the other half of the same
+# escalation. A contract of valid assignments, then a line without "=", then
+# PATH=/srv/writable: systemd complains about the bad line and loads the
+# PATH anyway, while this parser stops there -- and the `|| true` that used
+# to stand at the default-deny call turned that stop into "declares nothing
+# objectionable". The allowlist that exists to refuse exactly this PATH
+# never saw it, and the shebangs above are what would then have resolved
+# through it.
+parse_env_file="${dropin_root_home}/.config/mcloving/agent.env"
+cp "${parse_env_file}" "${workdir}/parse-agent.env.orig"
+printf 'THIS LINE HAS NO EQUALS SIGN\nPATH=/srv/writable\n' >> "${parse_env_file}"
+if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd > "${workdir}/logs/parse-failure.log" 2>&1; then
+  echo "upgrade proceeded over a contract whose parse failed, so every assignment after the malformed line went unjudged" >&2
+  exit 1
+fi
+grep -q "could not be parsed, so this deployment cannot say which variables it declares" \
+  "${workdir}/logs/parse-failure.log" || {
+  echo "the parse failure was not refused as a parse failure:" >&2
+  cat "${workdir}/logs/parse-failure.log" >&2
+  exit 1
+}
+# BEFORE the services are stopped, which is the whole point of refusing at
+# validation time rather than discovering it later.
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "a refused parse-failure upgrade still moved the current release" >&2
+  exit 1
+}
+# And the mechanism, pinned: the parser really does stop, and what the
+# pre-fix call site would have read really does omit the injected PATH. If
+# either of these stops holding, the refusal above is testing something else.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  if parse_environment_file "${parse_env_file}" >/dev/null 2>&1; then
+    echo "the contract parser accepted a line without '='; this gate no longer describes it" >&2
+    exit 1
+  fi
+  # Translate the NUL separators rather than letting command substitution
+  # drop them and warn. The INJECTED VALUE is what is looked for, not the
+  # name: a real agent contract legitimately declares several variables
+  # whose names end in _PATH.
+  swallowed="$(parse_environment_file "${parse_env_file}" 2>/dev/null | tr '\0' '\n' || true)"
+  [[ "${swallowed}" != *"/srv/writable"* ]] || {
+    echo "the swallowed-status reading saw the injected PATH after all; the gate's premise is wrong" >&2
+    exit 1
+  }
+  [[ "${swallowed}" == *MCLOVING_AGENT_ID* ]] || {
+    echo "the swallowed-status reading saw nothing at all; a partial parse is what made this dangerous" >&2
+    exit 1
+  }
+)
+cp "${workdir}/parse-agent.env.orig" "${parse_env_file}"
+chmod 0600 "${parse_env_file}"
+rm -f "${workdir}/parse-agent.env.orig"
+# Acceptance: the restored contract still completes a transition.
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+  --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+  --no-systemd >/dev/null
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${dropin_root_home}" \
+  --no-systemd >/dev/null
+[[ "$(readlink "${dropin_root_libexec}/current")" == "${dropin_root_current}" ]] || {
+  echo "rollback did not restore the original release after the PATH-boundary gates" >&2
+  exit 1
+}
+# THE RENDERED CONTRACT MUST PARSE BACK TO THE PATHS IT WAS RENDERED FOR.
+# That is the only property that matters, and this round's two rendering
+# findings broke it from opposite sides -- one by letting a substitution
+# chew through bytes an earlier substitution had inserted, the other by
+# handing the parser its own syntax inside a path. So it is asserted by
+# ROUND-TRIP through the lane's own parser, the authority the guard and the
+# inventory already read these files with, rather than against a spelling
+# written out here that could agree with a wrong renderer.
+render_probe="${workdir}/render-probe"
+rm -rf "${render_probe}"
+mkdir -p "${render_probe}"
+chmod go-w "${render_probe}"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  # Reads one value through the NUL transport, so a path carrying newlines,
+  # quotes or backslashes is compared as bytes rather than as a line.
+  rendered_value_into() { # VARIABLE FILE NAME
+    # shellcheck disable=SC2178,SC2034  # nameref: written here, read by the caller
+    local -n rendered_value_ref="$1"
+    local file="$2" wanted="$3" key value
+    rendered_value_ref=""
+    while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+      [[ "${key}" == "${wanted}" ]] || continue
+      # shellcheck disable=SC2034  # nameref: read by the caller, not here
+      rendered_value_ref="${value}"
+      return 0
+    done < <(parse_environment_file "${file}")
+    return 1
+  }
+  # (1) A STATE ROOT THAT CONTAINS THE TEMPLATE PREFIX. Sequential replaces
+  # let the home substitution rewrite the state root the first one inserted.
+  nested_state="/mnt/home/mcloving/state"
+  render_contract_template "${repo_root}/deploy/env/agent.env.example" \
+    "${render_probe}/nested.env" /srv/account "${nested_state}"
+  nested_workspace=""
+  rendered_value_into nested_workspace "${render_probe}/nested.env" \
+    MCLOVING_AGENT_WORKSPACE_ROOT
+  [[ "${nested_workspace}" == "${nested_state}/mcloving-agent/workspace" ]] || {
+    echo "a state root containing the template prefix was rewritten by the home substitution: ${nested_workspace}" >&2
+    exit 1
+  }
+  # ...and the home substitution still reached the paths that are not state,
+  # so preventing the overlap did not simply stop the second substitution.
+  nested_cert=""
+  rendered_value_into nested_cert "${render_probe}/nested.env" \
+    MCLOVING_AGENT_CERTIFICATE_PATH
+  [[ "${nested_cert}" == "/srv/account/.config/mcloving/pki/agent.pem" ]] || {
+    echo "the home substitution did not reach a non-state path: ${nested_cert}" >&2
+    exit 1
+  }
+  # (2) EVERY CHARACTER THE GRAMMAR GIVES MEANING TO, in one home: backslash
+  # (the reported case -- an escape to the parser), both quote kinds, a
+  # dollar, a space, and a newline, which a double-quoted run continues onto
+  # the next line. This lane carries arbitrary bytes in paths on purpose.
+  weird_home='/home/na\me/q'"'"'uo"te/$dollar/with space'"${MCLOVING_BACKSLASH}"'tick`'
+  weird_home="${weird_home}"$'\n'"second-line"
+  # A NON-UTF-8 BYTE, which is a legal pathname byte and was the one thing
+  # the renderer could produce that the parser then refused to read back.
+  weird_home="${weird_home}"$'\xff'"tail"
+  # The premise, inline so this gate cannot go vacuous if the parser's error
+  # handling is ever tightened back: a STRICT decode of that byte does fail.
+  printf 'MCLOVING_PROBE=%s\n' "${weird_home}" > "${render_probe}/bytes.env"
+  if python3 -c 'import sys; open(sys.argv[1], "r", encoding="utf-8").read()' \
+    "${render_probe}/bytes.env" 2>/dev/null; then
+    echo "a strict utf-8 read of a non-UTF-8 path byte succeeded; this gate's premise is gone" >&2
+    exit 1
+  fi
+  render_contract_template "${repo_root}/deploy/env/agent.env.example" \
+    "${render_probe}/weird.env" "${weird_home}" "${weird_home}/.local/state"
+  weird_workspace=""
+  rendered_value_into weird_workspace "${render_probe}/weird.env" \
+    MCLOVING_AGENT_WORKSPACE_ROOT
+  [[ "${weird_workspace}" == "${weird_home}/.local/state/mcloving-agent/workspace" ]] || {
+    echo "a rendered path carrying grammar characters did not survive the round trip:" >&2
+    printf 'wrote back: %q\nexpected:   %q\n' "${weird_workspace}" \
+      "${weird_home}/.local/state/mcloving-agent/workspace" >&2
+    exit 1
+  }
+  # The pre-fix spelling, asserted inline so the check above cannot go
+  # vacuous: the reviewer's own example, inserted raw, really is read back
+  # as something else -- `/home/na\me` returns as `/home/name`.
+  raw_probe_home="/home/na${MCLOVING_BACKSLASH}me"
+  printf 'MCLOVING_PROBE=%s\n' "${raw_probe_home}" > "${render_probe}/raw.env"
+  raw_back=""
+  rendered_value_into raw_back "${render_probe}/raw.env" MCLOVING_PROBE || raw_back=""
+  [[ "${raw_back}" != "${raw_probe_home}" ]] || {
+    echo "a raw backslash in a value now round-trips intact; this gate's premise is gone" >&2
+    exit 1
+  }
+  # (3) AN ORDINARY PATH STAYS UNQUOTED, so the operator who has to edit
+  # this file is not handed quoting they never needed.
+  render_contract_template "${repo_root}/deploy/env/agent.env.example" \
+    "${render_probe}/plain.env" /home/plain-probe /home/plain-probe/.local/state
+  grep -qxF 'MCLOVING_AGENT_WORKSPACE_ROOT=/home/plain-probe/.local/state/mcloving-agent/workspace' \
+    "${render_probe}/plain.env" || {
+    echo "an ordinary rendered path did not stay unquoted:" >&2
+    grep '^MCLOVING_AGENT_WORKSPACE_ROOT=' "${render_probe}/plain.env" >&2
+    exit 1
+  }
+  # (4) A COMMENT ABOUT THE TEMPLATE IS DOCUMENTATION ABOUT THE TEMPLATE.
+  # The whole-body replace rewrote comments too, turning a sentence about
+  # the example home into a false statement about this deployment.
+  grep -qF "example home ${MCLOVING_CONTRACT_TEMPLATE_HOME}" "${render_probe}/plain.env" || {
+    echo "the template's own explanatory comment was rewritten by rendering" >&2
+    exit 1
+  }
+)
+rm -rf "${render_probe}"
+# THE COMPLETE CONTRACT OR NONE OF IT. os.write() is one write(2): it
+# reports how many bytes it took, and taking fewer than it was given is a
+# SUCCESS rather than an error, so ignoring the result reported a truncated
+# contract as an installed one -- and the installer preserves whatever
+# contract it finds, so the truncation would be adopted as deliberate on
+# every later run.
+short_write="${workdir}/short-write"
+rm -rf "${short_write}"
+mkdir -p "${short_write}"
+chmod go-w "${short_write}"
+short_template="${repo_root}/deploy/env/controller.env.example"
+short_template_bytes="$(stat -c '%s' "${short_template}")"
+[[ "${short_template_bytes}" -gt 1024 ]] || {
+  echo "the controller template is only ${short_template_bytes} bytes; the file-size limit below no longer truncates it" >&2
+  exit 1
+}
+# THE HAZARD IS REAL, in one line of the same language: under a file-size
+# limit a single os.write takes SOME bytes and returns normally. Measured
+# rather than assumed, and without hard-coding what `ulimit -f 1` means in
+# bytes on this shell.
+raw_short="$(
+  ( ulimit -f 1
+    python3 -c '
+import os
+import sys
+
+body = b"x" * 8192
+descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    print(os.write(descriptor, body), len(body))
+finally:
+    os.close(descriptor)
+' "${short_write}/raw.probe" ) 2>/dev/null
+)"
+read -r raw_written raw_total <<<"${raw_short}"
+[[ -n "${raw_written}" && "${raw_written}" -gt 0 && "${raw_written}" -lt "${raw_total}" ]] || {
+  echo "a single os.write under a file-size limit did not return short (${raw_short:-nothing}); this gate's premise is gone" >&2
+  exit 1
+}
+rm -f "${short_write}/raw.probe"
+# Refusal direction: the render must fail under that limit, name the byte
+# counts rather than raising a traceback, and leave NO partial contract.
+short_status=0
+( ulimit -f 1
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  render_contract_template "${short_template}" "${short_write}/controller.env" \
+    /home/short-write-probe /home/short-write-probe/.local/state
+) > "${workdir}/logs/short-write.log" 2>&1 || short_status=$?
+[[ "${short_status}" -ne 0 ]] || {
+  echo "the render reported success under a file-size limit that cannot hold the contract" >&2
+  exit 1
+}
+grep -q "could not be written in full" "${workdir}/logs/short-write.log" || {
+  echo "the short write was not refused as an incomplete write:" >&2
+  cat "${workdir}/logs/short-write.log" >&2
+  exit 1
+}
+[[ ! -e "${short_write}/controller.env" ]] || {
+  echo "a truncated contract survived the refusal ($(stat -c '%s' "${short_write}/controller.env") of ${short_template_bytes} bytes); the next install would preserve it" >&2
+  exit 1
+}
+# Acceptance direction: with no limit in the way, the same call renders the
+# whole template.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  render_contract_template "${short_template}" "${short_write}/controller.env" \
+    /home/short-write-probe /home/short-write-probe/.local/state
+)
+short_rendered_bytes="$(stat -c '%s' "${short_write}/controller.env")"
+[[ "${short_rendered_bytes}" -gt 1024 ]] || {
+  echo "the unrestricted render produced only ${short_rendered_bytes} bytes" >&2
+  exit 1
+}
+grep -q '^MCLOVING_AGENT_IDENTITY_BINDINGS_PATH=' "${short_write}/controller.env" || {
+  echo "the rendered contract is missing its last assignment, so it is still truncated" >&2
+  exit 1
+}
+rm -rf "${short_write}"
+# CONTRACTS ARE OPENED THROUGH A CLASSIFIED DESCRIPTOR. Every caller reaches
+# the parser after a `-f` test, so the test and the open judge two different
+# moments: a contract atomically replaced in between is a different file by
+# the time it is read. The window is staged here exactly as the callers open
+# it -- check a regular file, replace the name, then parse -- because that
+# needs no hook to be deterministic and is precisely what a caller does.
+node_probe="${workdir}/contract-node"
+rm -rf "${node_probe}"
+mkdir -p "${node_probe}"
+printf 'MCLOVING_AGENT_ID=fine\n' > "${node_probe}/contract.env"
+[[ -f "${node_probe}/contract.env" ]] || {
+  echo "the staged contract is not a regular file; the window this gate opens is not the callers'" >&2
+  exit 1
+}
+mkfifo "${node_probe}/swap.fifo"
+mv "${node_probe}/swap.fifo" "${node_probe}/contract.env"
+ln -s /dev/zero "${node_probe}/zero.env"
+printf 'MCLOVING_AGENT_ID=fine\n' > "${node_probe}/regular.env"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  # Acceptance first: a regular file still parses to the same NUL-separated
+  # pairs, so the classification did not change what a contract means.
+  parsed_regular="$(parse_environment_file "${node_probe}/regular.env" | tr '\0' ' ')"
+  [[ "${parsed_regular}" == "MCLOVING_AGENT_ID fine " ]] || {
+    echo "the classified parser changed what a regular contract parses to: [${parsed_regular}]" >&2
+    exit 1
+  }
+  # A FIFO swapped into the name must be refused, and refused WITHOUT
+  # blocking -- a refusal that arrives only when the timeout kills it is the
+  # defect wearing the right message.
+  for node_name in contract zero; do
+    node_status=0
+    timeout 20 bash -c \
+      'source "$1"; parse_environment_file "$2"' _ \
+      "${libexec}/helpers/mcloving-deploy-lib.sh" \
+      "${node_probe}/${node_name}.env" \
+      > "${workdir}/logs/contract-node-${node_name}.log" 2>&1 || node_status=$?
+    [[ "${node_status}" -ne 124 ]] || {
+      echo "parsing the ${node_name} node blocked until the timeout killed it" >&2
+      exit 1
+    }
+    [[ "${node_status}" -ne 0 ]] || {
+      echo "the parser accepted the ${node_name} node as a contract" >&2
+      exit 1
+    }
+    grep -q "is not a regular file" "${workdir}/logs/contract-node-${node_name}.log" || {
+      echo "the ${node_name} node was refused, but not as a node-kind refusal:" >&2
+      cat "${workdir}/logs/contract-node-${node_name}.log" >&2
+      exit 1
+    }
+  done
+)
+# THE HAZARD IS REAL, in one line of the same language the parser is written
+# in: opening the swapped-in name by pathname BLOCKS, which is what the
+# guard would do at ExecStartPre. If this ever stops blocking, the gate
+# above is defending against something that no longer exists and should be
+# revisited rather than quietly kept.
+prefix_open_status=0
+timeout 5 python3 -c \
+  'import sys; open(sys.argv[1], "r", encoding="utf-8").readline()' \
+  "${node_probe}/contract.env" >/dev/null 2>&1 || prefix_open_status=$?
+[[ "${prefix_open_status}" -eq 124 ]] || {
+  echo "opening the swapped-in FIFO by pathname did not block (status ${prefix_open_status}); this gate's premise is gone" >&2
+  exit 1
+}
+# And the device edition, bounded so proving it costs a second rather than
+# the machine's memory: a newline-free device grows one pending line until
+# the allocation fails.
+zero_open_status=0
+( ulimit -v 1000000
+  timeout 20 python3 -c \
+    'import sys; open(sys.argv[1], "r", encoding="utf-8").readline()' \
+    "${node_probe}/zero.env" ) >/dev/null 2>&1 || zero_open_status=$?
+[[ "${zero_open_status}" -ne 0 ]] || {
+  echo "reading a newline-free device by pathname returned a line; this gate's premise is gone" >&2
+  exit 1
+}
+rm -rf "${node_probe}"
+# A MANAGER ROOT OF "/" IS AN ANSWER, NOT A SILENCE. The empty string is
+# this lane's spelling for the root directory -- every XDG derivation here
+# strips the trailing slash, so XDG_STATE_HOME=/ yields "" and a leaf under
+# it comes out /mcloving-agent, which is correct. Deciding whether the
+# manager answered by testing that value for non-emptiness therefore read a
+# perfectly good "/" as "nobody could say" and fell back to the caller's
+# derivation -- rendering contracts outside the tree systemd builds, which
+# is the failure these functions exist to prevent. The verdict is the
+# helper's EXIT STATUS. Driven through the one seam that can pose as a
+# manager, since no test may reach into the real one's environment.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  xdg_root_home="${workdir}/xdg-root-probe-home"
+  # The premise, stated inline so this gate cannot go vacuous: the root
+  # really is spelled empty by the derivations everything else here uses.
+  [[ -z "$(XDG_STATE_HOME=/ deployment_state_root "${HOME}")" ]] || {
+    echo "a state root of / is no longer spelled as the empty string; this gate's premise is gone" >&2
+    exit 1
+  }
+  # (1) A manager that answers "/" must be USED. Under the pre-fix
+  # emptiness test this fell through to the caller's derivation.
+  deployment_manager_xdg_root() { printf '%s\n' ""; }
+  answered_root="$(deployment_effective_state_root "${xdg_root_home}")"
+  [[ -z "${answered_root}" ]] || {
+    echo "a manager answering / was discarded in favour of the caller's derivation (${answered_root})" >&2
+    exit 1
+  }
+  [[ "${answered_root}/mcloving-agent" == "/mcloving-agent" ]] || {
+    echo "a manager root of / composed a wrong leaf: ${answered_root}/mcloving-agent" >&2
+    exit 1
+  }
+  # The same for the cache and data derivations, which share the wrapper.
+  [[ -z "$(deployment_effective_cache_root "${xdg_root_home}")" ]] || {
+    echo "the cache derivation discarded a manager root of /" >&2
+    exit 1
+  }
+  [[ -z "$(deployment_effective_data_root "${xdg_root_home}")" ]] || {
+    echo "the data derivation discarded a manager root of /" >&2
+    exit 1
+  }
+  # (2) A manager that CANNOT say must still fall back, or the fix above
+  # would have turned every unreachable manager into a root of /.
+  deployment_manager_xdg_root() { return 1; }
+  fallback_root="$(deployment_effective_state_root "${xdg_root_home}")"
+  [[ "${fallback_root}" == "${xdg_root_home}/.local/state" ]] || {
+    echo "an unreachable manager did not fall back to the caller's derivation: ${fallback_root}" >&2
+    exit 1
+  }
+)
 # INSTALLATION ROOTS come from the running manager where it can say. Writing
 # to the wrong root is the one failure that is silent and total: units land
 # where the manager never searches and daemon-reload finds nothing.
@@ -5266,6 +5920,68 @@ SANITIZED
     systemctl --user show -p UnitPath --value | tr ' ' '\n' \
       | grep -qx "${manager_base}/systemd/user" || {
       echo "the derived configuration base is not one the manager actually searches" >&2
+      exit 1
+    }
+    # THE QUADLET FAMILY, which has no UnitPath to ask for and so was left
+    # behind. Rounds 34/37 made the installer WRITE quadlets under the
+    # manager's base while the load-path derivation kept taking its base
+    # from the CALLER -- so a disagreeing shell moved the reader and left
+    # the writer where it was, which is the reader/writer split those rounds
+    # existed to close. Same perturbation as above, same answer required.
+    quadlet_first=""
+    decode_path_item_into quadlet_first \
+      "$(deployment_unit_load_paths "${HOME}" user quadlet | head -1)"
+    [[ "${quadlet_first}" == "${manager_base}/containers/systemd" ]] || {
+      echo "the quadlet search base is not the manager's configuration base (${quadlet_first} vs ${manager_base}/containers/systemd)" >&2
+      exit 1
+    }
+    perturbed_quadlet=""
+    decode_path_item_into perturbed_quadlet \
+      "$(XDG_CONFIG_HOME=/tmp/mcloving-install-root-probe \
+        deployment_unit_load_paths "${HOME}" user quadlet | head -1)"
+    [[ "${quadlet_first}" == "${perturbed_quadlet}" ]] || {
+      echo "this shell's XDG_CONFIG_HOME moved the quadlet search base away from the manager's (${quadlet_first} vs ${perturbed_quadlet})" >&2
+      exit 1
+    }
+    # THE STATE ROOT, which decides where a rendered contract POINTS and so
+    # whether the guard can find the workspace systemd made. There is no
+    # UnitPath to ground this one against -- systemd publishes no list of
+    # where it would create a StateDirectory= leaf -- so the manager's own
+    # environment is the authority, and the property asserted is the one
+    # that matters: this shell cannot move it.
+    [[ "$(deployment_state_root_source "${HOME}")" == "manager" ]] || {
+      echo "the running manager serves this home but was not used for the state root" >&2
+      exit 1
+    }
+    manager_state="$(deployment_effective_state_root "${HOME}")"
+    perturbed_state="$(XDG_STATE_HOME=/tmp/mcloving-state-root-probe \
+      deployment_effective_state_root "${HOME}")"
+    [[ "${manager_state}" == "${perturbed_state}" ]] || {
+      echo "this shell's XDG_STATE_HOME moved the state root away from the manager's (${manager_state} vs ${perturbed_state})" >&2
+      exit 1
+    }
+    # And the pre-fix derivation, asserted inline so the check above cannot
+    # quietly become vacuous: the CALLER's derivation does follow this
+    # shell, which is what made rendering from it wrong.
+    caller_state="$(XDG_STATE_HOME=/tmp/mcloving-state-root-probe \
+      deployment_state_root "${HOME}")"
+    [[ "${caller_state}" == "/tmp/mcloving-state-root-probe" ]] || {
+      echo "the caller's state derivation no longer follows this shell (${caller_state}); this gate's premise is gone" >&2
+      exit 1
+    }
+    # The declared-root derivation and the rendered contract have to agree,
+    # so they are asserted against ONE answer rather than two spellings.
+    declared_under_manager=""
+    while IFS= read -r encoded_state_root; do
+      [[ -n "${encoded_state_root}" ]] || continue
+      decode_path_item_into decoded_state_root "${encoded_state_root}"
+      # shellcheck disable=SC2154  # set via the nameref above
+      [[ "${decoded_state_root}" != "${manager_state}/mcloving-agent/workspace" ]] \
+        || declared_under_manager=1
+    done < <(XDG_STATE_HOME=/tmp/mcloving-state-root-probe \
+      deployment_unit_declared_roots "${HOME}" "${repo_root}"/deploy/systemd/*.service)
+    [[ -n "${declared_under_manager}" ]] || {
+      echo "the units' declared state roots did not follow the manager's state root (${manager_state})" >&2
       exit 1
     }
   else
@@ -6329,6 +7045,45 @@ xdg_state_roots="$(
 grep -q "^${xdg_home}/custom-state/mcloving-agent/workspace$" <<<"${xdg_state_roots}" || {
   echo "the declared-roots parser did not follow XDG_STATE_HOME:" >&2
   printf '%s\n' "${xdg_state_roots}" >&2
+  exit 1
+}
+# AND THE CONTRACT NAMES THAT SAME TREE, which is the half that was
+# missing. The declared-roots parser has followed XDG_STATE_HOME since round
+# 32; the installed contract had not -- so systemd created
+# <custom-state>/mcloving-agent/workspace while the contract still named
+# ~/.local/state/mcloving-agent/workspace, and the guard refused startup for
+# a workspace nothing had ever been asked to create. The two derivations are
+# COMPARED rather than each asserted against a spelling written out here,
+# because agreeing with each other is the property that matters.
+xdg_workspace="$(sed -n 's/^MCLOVING_AGENT_WORKSPACE_ROOT=//p' \
+  "${xdg_home}/.config/mcloving/agent.env")"
+grep -qxF "${xdg_workspace}" <<<"${xdg_state_roots}" || {
+  echo "the contract's workspace root (${xdg_workspace}) is not one of the units' declared state roots:" >&2
+  printf '%s\n' "${xdg_state_roots}" >&2
+  exit 1
+}
+[[ "${xdg_workspace}" == "${xdg_home}/custom-state/mcloving-agent/workspace" ]] || {
+  echo "the installed contract does not name the workspace systemd creates under XDG_STATE_HOME: ${xdg_workspace}" >&2
+  exit 1
+}
+# The pre-fix content is still on disk to compare against: the example names
+# its workspace under the template home, and copying that verbatim is what
+# named a tree that was never created.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  grep -q "^MCLOVING_AGENT_WORKSPACE_ROOT=${MCLOVING_CONTRACT_TEMPLATE_HOME}/\.local/state/" \
+    "${repo_root}/deploy/env/agent.env.example" || {
+    echo "the shipped example no longer spells its workspace under the template home; this gate no longer describes the defect" >&2
+    exit 1
+  }
+)
+# The guard's own verdict, which is where the operator met this: with the
+# state tree created where systemd would create it, the rendered contract
+# passes; the default tree the pre-fix copy named is not even there.
+mkdir -p "${xdg_home}/custom-state/mcloving-agent/workspace"
+[[ ! -e "${xdg_home}/.local/state/mcloving-agent/workspace" ]] || {
+  echo "the default state tree exists, so this gate cannot tell the two spellings apart" >&2
   exit 1
 }
 rm -rf "${xdg_home}"

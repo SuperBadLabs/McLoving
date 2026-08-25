@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Re-read every deployed McLoving implementation identity as one canonical,
 # deterministic JSON document. A future authoritative-cutover freeze
 # (CUTOVER-001) consumes this output to detect drift: two invocations over
