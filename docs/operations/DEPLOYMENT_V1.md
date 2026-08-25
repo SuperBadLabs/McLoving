@@ -255,5 +255,33 @@ Named honestly; none of these are hidden behind defaults:
   committed to (by hash) in the digest re-read.
 - **Single organization/project bootstrap.** Additional projects are
   operator actions via `mcloving-identity-admin`, not this lane.
+- **systemd sandboxing directives are NOT available to this lane, and fail
+  OPEN if added.** Measured on systemd 255 under `systemctl --user`: thirteen
+  directives are enforced, **eleven are accepted and silently ignored while the
+  unit still starts and reports success**, and three fail closed. The silent
+  set is `ProtectSystem=`, `ProtectHome=`, `ReadOnlyPaths=`,
+  `InaccessiblePaths=`, `BindReadOnlyPaths=`, `PrivateTmp=`, `PrivateNetwork=`,
+  `ProtectKernelTunables=`, `ProtectControlGroups=`, `ProtectProc=`,
+  `IPAddressDeny=`, plus `IOReadBandwidthMax=` and `AllowedCPUs=`. Every one of
+  them needs a mount namespace (or BPF): systemd's executor forks
+  `(sd-userns)`, Ubuntu's AppArmor `unprivileged_userns` profile denies it
+  `CAP_SYS_ADMIN`, `unshare(CLONE_NEWNS)` returns `EPERM`, and systemd logs
+  *"Failed to set up namespace, assuming containerized execution and ignoring"*
+  **at debug level only** before starting the unit anyway. Observed:
+  `ProtectHome=tmpfs` left a home fully readable including
+  `.ssh/authorized_keys`, and a `ReadOnlyPaths=` target was overwritten.
+  **`systemd-analyze --user security` is not evidence** — it reported
+  `✓ ProtectSystem=` and `✓ PrivateTmp=` for that same run, because it scores
+  declared configuration rather than achieved state, exactly as
+  `systemd-analyze --user unit-paths` recomputes from the caller's environment
+  instead of reporting the manager's own list. The units shipped here declare
+  only directives that work (`UnsetEnvironment=`, `Environment=PATH=`,
+  `StateDirectoryMode=`, `UMask=`, `NoNewPrivileges=`). **Do not add a
+  filesystem hardening directive to this lane without a runtime proof that it
+  is in effect**; the model is `require_shadow_apparmor_enforcement()` in
+  `crates/external-connector/src/standalone.rs`, which reads
+  `/proc/self/attr/current` and refuses to run unconfined. Delegated cgroup
+  controllers are `cpu memory pids` only, so IO-bandwidth and cpuset bounds are
+  no-ops here too.
 - **Agent probe is start-time only while the service runs.** Runtime agent
   health is journal-level; the full session probe requires a service stop.
