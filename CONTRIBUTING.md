@@ -15,6 +15,28 @@ behavior must remain explicit and must never be represented as successful.
 Use `codex/` for Codex implementation branches. Keep commits coherent and do
 not mix unrelated repairs into a ticket.
 
+## Closing a ticket
+
+Two artifacts are checked mechanically by
+`scripts/verify-ticket-closure-receipts.py`, which the Architecture records job
+runs on every pull request. Before a board row may read `DONE`:
+
+* write `docs/evidence/<TICKET>_SECURITY_REVIEW.md`, and
+* review `docs/threat-model/README.md` for every affected boundary and record
+  the affected threats, mitigations, verification evidence, and residual risks
+  there under the ticket's name. An unchanged section still needs an explicit
+  reviewed no-change receipt that names the ticket, because a boundary nothing
+  mentions is indistinguishable from a boundary nobody looked at.
+
+A ticket that genuinely owes neither -- a docs-only or board-replan ticket --
+needs an exemption in that script naming the ticket and stating why. The
+script also carries a debt ledger of tickets that closed before the gate
+existed without either artifact; it is reported on every run and may only
+shrink. Do not add to it to make a build pass, and do not turn a real gap into
+an exemption: both hide exactly what this gate exists to surface. Run
+`scripts/verify-ticket-closure-receipts.py --strict` to see the debt as
+failures.
+
 ## Source-acquirer tests on hosts that restrict unprivileged user namespaces
 
 The `mcloving-source-acquirer` suite drives a sealed launcher inside a kernel
