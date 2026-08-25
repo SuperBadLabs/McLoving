@@ -259,10 +259,10 @@ Named honestly; none of these are hidden behind defaults:
   OPEN if added.** Measured on systemd 255 under `systemctl --user`: thirteen
   directives are enforced, **thirteen are accepted and silently ignored while
   the unit still starts and reports success**, and three fail closed. The silent
-  thirteen fall into TWO classes with DIFFERENT causes and different
+  thirteen fall into THREE classes with DIFFERENT causes and different
   remediations -- do not treat them as one:
 
-  *Class 1, eleven namespace/BPF directives:* `ProtectSystem=`, `ProtectHome=`,
+  *Class 1, ten mount-namespace directives (and, separately, one BPF directive):* `ProtectSystem=`, `ProtectHome=`,
   `ReadOnlyPaths=`, `InaccessiblePaths=`, `BindReadOnlyPaths=`, `PrivateTmp=`,
   `PrivateNetwork=`, `ProtectKernelTunables=`, `ProtectControlGroups=`,
   `ProtectProc=`, and `IPAddressDeny=` (the last needing BPF, which this build

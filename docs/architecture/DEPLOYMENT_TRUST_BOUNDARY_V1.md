@@ -185,7 +185,7 @@ pre-checks", and its own §9 requires this to be measured rather than assumed.
 Measured on systemd 255 under `systemctl --user`, uid 1000:
 
 **13 directives enforced. 13 silently unenforced with the unit still starting,
-in two classes with different causes. 3 fail closed.**
+in three classes with different causes. 3 fail closed.**
 
 | | directives |
 |---|---|
@@ -262,12 +262,13 @@ both namespaces unprivileged on this host, because it ships a profile containing
 ## 5. The obligation determinations
 
 The lane currently discharges eight obligations on every transition. Attributed
-surface in `deploy/bin/mcloving-deploy-lib.sh` (4,199 lines; 4,036 attributed,
-163 blank separators) and gates in `deploy/test-deployment.sh` (600 named
-refusal sites, counted as `rg -c '^\s*exit 1'` = 605 at this head; an earlier
-figure of "600 in 230 blocks" circulated in working notes, and while 600 is
-sound the block count could not be reproduced under any counting rule, so it is
-withdrawn rather than repeated):
+surface in `deploy/bin/mcloving-deploy-lib.sh` (4,278 lines at this head, 4,199 when the
+attribution below was taken) and gates in `deploy/test-deployment.sh` (600 named
+refusal sites — `rg -c '^\s*exit 1' deploy/test-deployment.sh` = 608 at this
+head, the three added by this branch's own regression gates included. An earlier
+figure of "600 in 230 blocks" circulated in working notes: 600 was sound for its
+head, but the block count reproduced under no counting rule and is withdrawn
+rather than repeated):
 
 | | obligation | lines | gates | determination |
 |---|---|---:|---:|---|
@@ -379,13 +380,13 @@ it harder.**
    Eleven other check-then-use windows carry a stated bound; this one does not.
 3. **The suite specifies the model, not the ask.** Every ask is gated on the
    manager's `HOME` equalling the target home, and the suite installs into
-   `mktemp -d` trees — so **20 of 600 gates (3.3%)** exercise a real manager
+   `mktemp -d` trees — so **20 of 608 gates (3.3%)** exercise a real manager
    query, each behind a skip-with-notice guard. Acceptance criterion 5 leans on
    the suite as the lane's specification; on this evidence it currently specifies
    the fallback. **Making the suite able to exercise the ask path is the first
    implementation task, not an afterthought** — otherwise this record's central
    recommendation lands untested.
-4. **Three of eight hybrid sites label their derived answer.** The design
+4. **Three of seven hybrid sites label their derived answer.** The design
    document's claim that a derived fallback "must be labelled as derived, which
    the lane now does" holds for three. Unlabelled:
    `deployment_effective_cache_root`, `deployment_effective_data_root` (which

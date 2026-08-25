@@ -86,9 +86,13 @@ deferral.
 - a documented install/upgrade/rollback runbook in
   `docs/operations/DEPLOYMENT_V1.md`;
 - `deploy/test-deployment.sh`, which exercises install, health, upgrade,
-  rollback and digest re-read end to end without root — 605 named refusal sites
+  rollback and digest re-read without root — 608 named refusal sites
   (`rg -c '^\s*exit 1' deploy/test-deployment.sh` at this head) — and now runs as
-  the `Deployment lane` job on every pull request.
+  the `Deployment lane` job on every pull request. **It drives install, upgrade
+  and rollback with `--no-systemd`, and starts postgres by deriving the command
+  from the quadlet rather than letting systemd generate and start it**, so unit
+  generation, enablement, ordering and service-managed upgrade/rollback are not
+  exercised by any gate. See the residual risks.
 
 ## Bounded deliberately
 
@@ -109,6 +113,29 @@ revalidating this lane against the release that actually ships is `DEPLOY-002`.
   ships, the right to submit a pipeline equals the right to read that host's
   deployment credentials**, and an untrusted submission must not be run on a
   host whose credentials the operator is unwilling to disclose.
+- **The systemd write path is exercised by no gate, so this lane's clean-host
+  acceptance is demonstrated only for the derived-command path.**
+  `deploy/test-deployment.sh` passes `--no-systemd` to install, upgrade and
+  rollback, and starts postgres by deriving its invocation from the quadlet
+  rather than letting systemd generate and start it. Unit generation,
+  enablement, `Requires=`/`After=` ordering, Quadlet generation and
+  service-managed upgrade/rollback are therefore unproven. The manager *read*
+  path is partly covered — three gates query a live manager where one is
+  reachable — but the *write* path is covered nowhere. The structural reason is
+  `require_systemd_home`: units resolve `%h` at the passwd home and the suite
+  installs into `mktemp -d` trees, so it must pass `--no-systemd`; CI runners
+  have no user session either.
+  **This is measured to be closable and is not closed.** On a stock
+  `ubuntu-24.04` runner, `useradd` + `loginctl enable-linger` with both
+  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` set gives a manager that
+  answers, runs transient units, reloads, and installs, enables and starts a
+  real unit under the account's own `~/.config/systemd/user` reporting
+  `active` — needing no change to `require_systemd_home`, because such an
+  account's `--home` *is* its passwd home. Rootless podman under that account
+  remains unresolved (`mkdir /run/user/<runner-uid>/libpod: permission denied`),
+  and the postgres quadlet needs it. Until that arm exists, treat this ticket's
+  clean-host claim as covering the install/contract/digest/rollback mechanics
+  and **not** the service-managed lane.
 - The operator is trusted for the host's directory configuration. The lane
   refuses to install onto a host whose ancestor chains permit a third party to
   write, but it cannot repair one.
