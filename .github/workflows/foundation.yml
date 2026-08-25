@@ -444,7 +444,11 @@ jobs:
           # set and the client has no bus to talk to even though the manager is
           # running -- /run/user/$U was created drwx------ by systemd, which is
           # the proof it started. Both variables are set explicitly below.
-          asuser() { sudo -u mcloving-spike \
+          # HOME matters as much as the bus: round 2 left it as the runner's,
+          # so podman read the RUNNER's config and died on
+          # "mkdir /run/user/1001/libpod: permission denied" -- 1001, not 1002.
+          # -H sets HOME to the target account's.
+          asuser() { sudo -u mcloving-spike -H \
             XDG_RUNTIME_DIR="/run/user/$U" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$U/bus" "$@"; }
           for i in $(seq 1 30); do
