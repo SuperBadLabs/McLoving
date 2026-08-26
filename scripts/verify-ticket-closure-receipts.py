@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections import Counter
 import sys
 from pathlib import Path
 
@@ -240,6 +241,13 @@ DISPATCH_TABLE_HEADER = "Slot"
 KNOWN_TABLE_HEADERS = frozenset(
     {TICKET_TABLE_HEADER, LANE_TABLE_HEADER, BATCH_TABLE_HEADER, DISPATCH_TABLE_HEADER}
 )
+# Raise a count when a table is genuinely added; a change here is deliberate.
+EXPECTED_TABLES = {
+    TICKET_TABLE_HEADER: 9,
+    LANE_TABLE_HEADER: 4,
+    BATCH_TABLE_HEADER: 1,
+    DISPATCH_TABLE_HEADER: 1,
+}
 
 # Lane tables overload their third column: it holds a status for closed lanes
 # and an execution class for open ones. A class is not an unknown status.
@@ -427,19 +435,22 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
     compared them, so a lane could read DONE while its ticket row did not.
     """
     errors: list[str] = []
+    # A mistyped header ("Batches") makes a cross-check vanish exactly when the
+    # view it checks might disagree. Rejecting every unfamiliar header would
+    # instead fail any future informational table, so what is pinned is that
+    # the expected tables are all still present and still spelled right.
+    seen = Counter(header[0] for header, _ in tables(text) if header)
+    for expected, count in sorted(EXPECTED_TABLES.items()):
+        if seen[expected] != count:
+            errors.append(
+                f"the board has {seen[expected]} tables headed {expected!r}, not "
+                f"{count}; a renamed or mistyped header removes that table from "
+                "every check, and a new one needs this count raised deliberately"
+            )
     for header, rows in tables(text):
         if not header:
             continue
-        if header[0] not in KNOWN_TABLE_HEADERS:
-            # A mistyped header ("Batches") makes the cross-check vanish
-            # exactly when the view it checks might disagree.
-            errors.append(
-                f"a board table is headed {header[0]!r}, which is not one of "
-                f"{', '.join(sorted(KNOWN_TABLE_HEADERS))}; an unrecognised "
-                "header silently removes that table from every check"
-            )
-            continue
-        if header[0] == TICKET_TABLE_HEADER:
+        if header[0] == TICKET_TABLE_HEADER or header[0] not in KNOWN_TABLE_HEADERS:
             continue
         view = header[0]
         for number, row in rows:
@@ -450,7 +461,14 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
                 )
                 continue
             claimed = row[2]
-            for ticket in VIEW_TICKET_ID.findall(row[1]):
+            named = VIEW_TICKET_ID.findall(row[1])
+            if not named:
+                errors.append(
+                    f"line {number}: the {view} table row names no ticket, so it "
+                    "cross-checks nothing while still claiming a status"
+                )
+                continue
+            for ticket in named:
                 if ticket not in statuses:
                     errors.append(
                         f"line {number}: the {view} table names {ticket}, which has "
@@ -719,6 +737,14 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
     if not statuses:
         return errors, [], ""
 
+    for ticket in sorted(
+        {name for name, status in statuses.items() if status == "DONE"}
+        - CLOSED_TICKETS
+    ):
+        errors.append(
+            f"{ticket} reads DONE but is not in CLOSED_TICKETS; add it, so that "
+            "removing its row later is an error rather than a quiet retirement"
+        )
     for ticket in sorted(CLOSED_TICKETS):
         if statuses.get(ticket) != "DONE":
             errors.append(

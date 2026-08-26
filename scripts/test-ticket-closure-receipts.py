@@ -93,7 +93,7 @@ def build(board: str = BOARD, threat_model: str = THREAT_MODEL) -> TemporaryDire
 
 
 @contextlib.contextmanager
-def synthetic(**overrides):
+def synthetic(closed=("AAA-001",), **overrides):
     """Run against a synthetic board with the historical ledgers cleared."""
     saved = {
         name: getattr(VERIFY, name).copy()
@@ -106,6 +106,12 @@ def synthetic(**overrides):
     }
     saved_floor = VERIFY.MINIMUM_TICKET_ROWS
     saved_closed = VERIFY.CLOSED_TICKETS
+    saved_tables = VERIFY.EXPECTED_TABLES
+    # The fixture board carries one ticket table and one lane table.
+    VERIFY.EXPECTED_TABLES = {
+        VERIFY.TICKET_TABLE_HEADER: 1,
+        VERIFY.LANE_TABLE_HEADER: 1,
+    }
     saved_baselines = {
         name: getattr(VERIFY, name)
         for name in (
@@ -115,7 +121,10 @@ def synthetic(**overrides):
             "THREAT_MODEL_DEBT_BASELINE",
         )
     }
-    VERIFY.CLOSED_TICKETS = frozenset()
+    # The fixture board's closed tickets. Empty would now fail, because a DONE
+    # row missing from the terminal baseline is an error, and so is a baseline
+    # name with no DONE row.
+    VERIFY.CLOSED_TICKETS = frozenset(closed)
     for _name in saved_baselines:
         setattr(VERIFY, _name, frozenset())
     for name in saved:
@@ -133,6 +142,7 @@ def synthetic(**overrides):
             getattr(VERIFY, name).update(value)
         VERIFY.MINIMUM_TICKET_ROWS = saved_floor
         VERIFY.CLOSED_TICKETS = saved_closed
+        VERIFY.EXPECTED_TABLES = saved_tables
         for _name, _value in saved_baselines.items():
             setattr(VERIFY, _name, _value)
 
@@ -433,7 +443,24 @@ class BoardParsing(unittest.TestCase):
         """A mistyped `Batches` removes the cross-check exactly when it matters."""
         errors = self._with_board(BOARD.replace("| Lane | Ticket or ordered chain |", "| Lanes | Ticket or ordered chain |"))
         self.assertTrue(
-            any("is not one of" in error for error in errors), errors
+            any("removes that table from every check" in error for error in errors),
+            errors,
+        )
+
+    def test_an_unrelated_informational_table_is_allowed(self):
+        """Pinning the expected tables must not ban new ones."""
+        errors = self._with_board(
+            BOARD + "\n## Notes\n\n| Metric | Value |\n|---|---|\n| Coverage | 91% |\n"
+        )
+        self.assertEqual(errors, [])
+
+    def test_a_view_row_naming_no_ticket_fails(self):
+        """A corrupted id leaves the row claiming a status it checks nothing against."""
+        errors = self._with_board(
+            BOARD.replace("| First lane | `AAA-001` | DONE |", "| First lane | `AAA_001` | DONE |")
+        )
+        self.assertTrue(
+            any("names no ticket" in error for error in errors), errors
         )
 
     def test_a_ticket_row_under_a_mistyped_header_fails(self):
@@ -594,6 +621,7 @@ class LedgerDiscipline(unittest.TestCase):
 
     def test_exempt_and_debt_are_mutually_exclusive(self):
         with build(board=BOARD.replace("| AAA-001 | DONE | — | Closed with a receipt and an attributed review |", "| AAA-001 | DONE | — | x |\n| CCC-001 | DONE | — | y |")) as name, synthetic(
+            closed=("AAA-001", "CCC-001"),
             RECEIPT_EXEMPT={"CCC-001": "nothing owed"},
             RECEIPT_DEBT={"CCC-001": "something owed"},
             THREAT_MODEL_EXEMPT={"CCC-001": "nothing owed"},
@@ -651,6 +679,14 @@ class ThisRepository(unittest.TestCase):
             errors, _, _ = check(Path(name))
         self.assertTrue(
             any(f"{victim} was closed" in error for error in errors), errors[:3]
+        )
+
+    def test_a_new_closure_must_join_the_terminal_baseline(self):
+        """Otherwise its row can be removed later and nothing notices."""
+        with build() as name, synthetic(closed=()):
+            errors, _, _ = check(Path(name))
+        self.assertTrue(
+            any("is not in CLOSED_TICKETS" in error for error in errors), errors
         )
 
     def test_the_closed_set_matches_the_board(self):
