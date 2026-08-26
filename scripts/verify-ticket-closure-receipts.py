@@ -38,6 +38,17 @@ from pathlib import Path
 
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
 
+# `\b` does not delimit a ticket id, because `-` is a non-word character: it
+# matches AAA-001 inside AAA-001-HARDEN, so a review of the longer ticket would
+# be credited to the shorter one. Ticket characters are the delimiter.
+TICKET_CHARACTER = "A-Za-z0-9-"
+
+
+def names(ticket: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?<![{TICKET_CHARACTER}]){re.escape(ticket)}(?![{TICKET_CHARACTER}])"
+    )
+
 RECEIPT_DIRECTORY = Path("docs") / "evidence"
 RECEIPT_SUFFIX = "_SECURITY_REVIEW.md"
 THREAT_MODEL = Path("docs") / "threat-model" / "README.md"
@@ -128,10 +139,11 @@ THREAT_MODEL_DEBT: dict[str, str] = {
     "MIG-003": "2026-07-31 759b633; compiler boundary, threat model untouched",
     "MIG-004": "2026-07-31 759b633; compiler boundary, threat model untouched",
     "MIG-005": "2026-08-01 393c938; library compiler, threat model untouched",
-    "CONSUMER-001": "2026-08-04 8102990; added TM-031 without naming the "
-    "ticket, and the verification-ownership table has no entry for it",
-    "ADMIN-001": "2026-08-05 1324bca; added TM-032 without naming the "
-    "ticket, and the verification-ownership table has no entry for it",
+    # CONSUMER-001 and ADMIN-001 left this ledger when identifier matching was
+    # corrected: TM-031 and TM-032 DO name them, in the Required verification
+    # column, as `docs/evidence/<TICKET>_SECURITY_REVIEW.md`. `\b` had refused
+    # that because `_` is a word character, so two real attributions read as
+    # absent for as long as the gate has existed.
     "SCM-001": "2026-08-08 0ca0142; source-acquisition boundary closed "
     "without touching the threat model at all",
     "CACHE-001": "2026-08-10 3787b42; added TM-036 without naming the "
@@ -206,7 +218,7 @@ RECEIPT_DEBT_BASELINE = frozenset({
     "OUTBOX-001", "SHADOW-001"
 })
 THREAT_MODEL_DEBT_BASELINE = frozenset({
-    "ADMIN-001", "CACHE-001", "CANARY-000", "CI-001", "CONSUMER-001",
+    "CACHE-001", "CANARY-000", "CI-001",
     "EXEC-001", "EXEC-002", "EXEC-003", "EXEC-004", "HYG-001",
     "MIG-001", "MIG-003", "MIG-004", "MIG-005", "OUTBOX-001", "SCM-001",
     "MIG-002", "MIG-006", "MIG-007", "SECRET-001", "WIN-003"
@@ -221,6 +233,9 @@ TICKET_TABLE_COLUMNS = 4
 LANE_TABLE_HEADER = "Lane"
 BATCH_TABLE_HEADER = "Batch"
 DISPATCH_TABLE_HEADER = "Slot"
+KNOWN_TABLE_HEADERS = frozenset(
+    {TICKET_TABLE_HEADER, LANE_TABLE_HEADER, BATCH_TABLE_HEADER, DISPATCH_TABLE_HEADER}
+)
 
 # Lane tables overload their third column: it holds a status for closed lanes
 # and an execution class for open ones. A class is not an unknown status.
@@ -409,11 +424,18 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
     """
     errors: list[str] = []
     for header, rows in tables(text):
-        if not header or header[0] not in (
-            LANE_TABLE_HEADER,
-            BATCH_TABLE_HEADER,
-            DISPATCH_TABLE_HEADER,
-        ):
+        if not header:
+            continue
+        if header[0] not in KNOWN_TABLE_HEADERS:
+            # A mistyped header ("Batches") makes the cross-check vanish
+            # exactly when the view it checks might disagree.
+            errors.append(
+                f"a board table is headed {header[0]!r}, which is not one of "
+                f"{', '.join(sorted(KNOWN_TABLE_HEADERS))}; an unrecognised "
+                "header silently removes that table from every check"
+            )
+            continue
+        if header[0] == TICKET_TABLE_HEADER:
             continue
         view = header[0]
         for number, row in rows:
@@ -505,7 +527,7 @@ def receipt_defects(path: Path, ticket: str) -> list[str]:
             f"found, and what residual risk was accepted, which does not fit in "
             f"under {RECEIPT_MINIMUM_BYTES}"
         )
-    if not re.search(rf"\b{re.escape(ticket)}\b", text):
+    if not names(ticket).search(text):
         defects.append(f"never names {ticket}, so nothing ties it to the closure")
     if not any(line.startswith("#") for line in text.splitlines()):
         defects.append("has no heading, so it is not a structured review document")
@@ -567,7 +589,7 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     data instead of parsing sentences. That is a threat-model change, not a
     gate change, and it needs its own ticket.
     """
-    pattern = re.compile(rf"\b{re.escape(ticket)}\b")
+    pattern = names(ticket)
     heading = re.compile(rf"^#{{2,3}} {re.escape(ticket)}\b.*\breviews?$", re.I)
 
     lines = text.splitlines()

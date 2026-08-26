@@ -257,6 +257,28 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_a_longer_ticket_id_does_not_credit_a_shorter_one(self):
+        """`\\b` matches AAA-001 inside AAA-001-HARDEN, because `-` is not a word char."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n## Security verification ownership\n\n"
+            "| Area | First implementation ticket |\n|---|---|\n"
+            "| Some area | AAA-001-HARDEN |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_a_receipt_filename_attributes_the_review(self):
+        """`\\b` refused this, because `_` IS a word character."""
+        with build(
+            threat_model=(
+                "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+                "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+                "| TM-999 | a threat | a mitigation | receipt in "
+                "`docs/evidence/AAA-001_SECURITY_REVIEW.md` | SEC | none |\n"
+            )
+        ) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        self.assertEqual(errors, [])
+
     def test_a_negative_ticket_led_heading_does_not_satisfy_it(self):
         """The denial, moved to the front of the heading."""
         errors = self._with_threat_model(
@@ -391,6 +413,13 @@ class BoardParsing(unittest.TestCase):
             errors, _, _ = check(Path(name))
         self.assertTrue(
             any("cross-checks nothing" in error for error in errors), errors
+        )
+
+    def test_a_mistyped_view_header_fails(self):
+        """A mistyped `Batches` removes the cross-check exactly when it matters."""
+        errors = self._with_board(BOARD.replace("| Lane | Ticket or ordered chain |", "| Lanes | Ticket or ordered chain |"))
+        self.assertTrue(
+            any("is not one of" in error for error in errors), errors
         )
 
     def test_a_ticket_row_under_a_mistyped_header_fails(self):
@@ -578,12 +607,13 @@ class ThisRepository(unittest.TestCase):
         """A ratchet, not a pin: obligations may be paid, never accrued."""
         errors, debt, summary = check(REPOSITORY)
         self.assertEqual(errors, [], "\n".join(errors))
-        # 30 until register attribution was narrowed to the Required
-        # verification column, which exposed MIG-002, MIG-006 and MIG-007.
-        # Those gaps are older than the rule that found them. Lower this as
-        # debt is paid; raising it needs the same argument.
+        # 30, then 33 when register attribution narrowed to the Required
+        # verification column and exposed MIG-002/006/007, then 31 when
+        # identifier matching stopped `\b` hiding ADMIN-001 and CONSUMER-001
+        # inside their own receipt filenames. Lower this as debt is paid;
+        # raising it needs an argument.
         self.assertLessEqual(
-            len(debt), 33, "closure debt may only shrink; lower this bound as it is paid"
+            len(debt), 31, "closure debt may only shrink; lower this bound as it is paid"
         )
         done = int(summary.split("done=")[1].split()[0])
         self.assertGreaterEqual(done, 80, "DONE tickets should not vanish from the board")
