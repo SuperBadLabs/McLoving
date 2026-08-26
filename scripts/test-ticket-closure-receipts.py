@@ -277,6 +277,34 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_a_denial_stated_before_the_word_review_is_vetoed(self):
+        """Isolates the negation-precedes-review branch of the veto."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | a threat | a mitigation | no review of AAA-001 exists "
+            "| SEC | none |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_test_vocabulary_is_not_a_denial(self):
+        """The veto must not refuse a review for describing its negative cases.
+
+        This column is full of `no-overwrite`, `missing-field`,
+        `non-broadening` and `absent-path`. A gate that reads those as denials
+        fails closed on correct work, which is its own kind of wrong answer.
+        """
+        with build(
+            threat_model=(
+                "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+                "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+                "| TM-999 | a threat | a mitigation | AAA-001 receipt covers "
+                "missing-field, no-overwrite and absent-path tests | SEC | none |\n"
+            )
+        ) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        self.assertEqual(errors, [])
+
     def test_a_heading_attributes_the_review(self):
         with build(
             threat_model="# Threat model\n\n## AAA-001 threat-model closure review\n\nReviewed.\n"

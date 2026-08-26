@@ -39,7 +39,11 @@ ticket; requiring a heading or a table row let
 `## TODO: <TICKET> has not been reviewed yet` do the same; requiring the ticket
 to lead the heading let `## <TICKET> review has not happened` do the same. Only
 a structure whose sole purpose is recording a review counts, and a negation
-veto then removes credit from a structure that reads as a denial.
+veto then removes credit from a structure that reads as a denial. The veto is
+scoped to phrases that negate the review itself, because this column is full of
+`no-overwrite`, `missing-field`, `non-broadening` and `absent-path` -- refusing
+a review for describing its own negative cases would be the gate failing closed
+on correct work.
 
 Know what that is: a heuristic over English, not a decision procedure. Four
 tightenings were each got past by one sentence in a new wrapper, and a denial

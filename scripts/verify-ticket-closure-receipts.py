@@ -459,9 +459,15 @@ def receipt_defects(path: Path, ticket: str) -> list[str]:
 # sentence wearing a different structure -- prose, then a heading, then a
 # heading the ticket led, then a verification cell. Denial is a property of
 # the words, and at some point the words have to be read.
+# Scoped to phrases that negate the REVIEW, not to any negative word. A blanket
+# word list vetoed ordinary test vocabulary -- this column is full of
+# "no-overwrite", "missing-field", "non-broadening", "absent-path" -- so a
+# genuine review could have been refused for describing its own negative
+# cases, which is a gate failing closed on correct work.
 NEGATION = re.compile(
-    r"\b(not|never|no|none|pending|todo|outstanding|unreviewed|missing"
-    r"|absent|await\w*)\b",
+    r"\b(?:not|never|no|nothing)\b[^.;|]{0,40}\breview"
+    r"|\breview\w*\b[^.;|]{0,40}\b(?:not|never|pending|outstanding|incomplete)\b"
+    r"|\b(?:todo|tbd|unreviewed|outstanding)\b",
     re.I,
 )
 NEGATION_WINDOW = 70
