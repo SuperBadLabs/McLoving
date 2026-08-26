@@ -317,9 +317,11 @@ def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
     statuses: dict[str, str] = {}
     errors: list[str] = []
     rows_seen = 0
+    authoritative: set[int] = set()
     for header, rows in tables(text):
         if not header or header[0] != TICKET_TABLE_HEADER:
             continue
+        authoritative.update(number for number, _ in rows)
         for number, row in rows:
             rows_seen += 1
             if len(row) < 2:
@@ -348,6 +350,26 @@ def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
                 )
                 continue
             statuses[ticket] = status
+    # A row that looks like a ticket but sits outside a recognised table is
+    # invisible here while `verify-execution-board.py` still counts it, so a
+    # mistyped header ("Tickets") would carry a DONE ticket past this gate and
+    # leave the row floor satisfied. Skipping a table is a parse failure, and
+    # this gate does not skip.
+    for number, line in enumerate(text.splitlines(), start=1):
+        if number in authoritative or not line.startswith("|"):
+            continue
+        row = [cell.strip() for cell in line.split("|")[1:-1]]
+        if len(row) < 2 or row[1] not in TICKET_STATUSES:
+            continue
+        if not re.fullmatch(r"[A-Z][A-Z0-9-]+", row[0]):
+            continue
+        errors.append(
+            f"line {number}: {row[0]} reads as a ticket row but is not inside a "
+            f"table headed {TICKET_TABLE_HEADER!r}; a ticket outside an "
+            "authoritative table carries no closure obligation here while the "
+            "board verifier still counts it"
+        )
+
     if not statuses:
         errors.append("no ticket rows were found")
     elif rows_seen < MINIMUM_TICKET_ROWS:

@@ -348,6 +348,25 @@ class BoardParsing(unittest.TestCase):
         errors = self._with_board(BOARD.replace("| AAA-001 | DONE |", "| notaticket | DONE |"))
         self.assertTrue(any("is not a ticket id" in error for error in errors), errors)
 
+    def test_a_ticket_row_under_a_mistyped_header_fails(self):
+        """`Tickets` hides a table here while the board verifier still reads it."""
+        errors = self._with_board(
+            BOARD
+            + "\n## Sneaky\n\n| Tickets | Status | Depends on | Objective |\n"
+            "|---|---|---|---|\n| NEW-001 | DONE | \u2014 | closed with nothing |\n"
+        )
+        self.assertTrue(
+            any("not inside a table headed" in error for error in errors), errors
+        )
+
+    def test_the_lane_and_batch_tables_are_not_mistaken_for_tickets(self):
+        """The real board must not trip the orphan check."""
+        board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
+        _statuses, errors = VERIFY.board_statuses(board)
+        self.assertEqual(
+            [e for e in errors if "not inside a table headed" in e], []
+        )
+
     def test_a_shrinking_denominator_fails(self):
         with build() as name:
             saved = VERIFY.MINIMUM_TICKET_ROWS
