@@ -266,6 +266,20 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_a_longer_ticket_led_heading_does_not_credit_a_shorter_one(self):
+        errors = self._with_threat_model(
+            "# Threat model\n\n## AAA-001-HARDEN threat-model closure review\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_a_tm_row_outside_the_register_does_not_attribute(self):
+        """A `TM-nnn` first cell is not proof of the threat register."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n## Tracking\n\n| ID | Status | Owner | Ticket |\n"
+            "|---|---|---|---|\n| TM-999 | PENDING | SEC | AAA-001 |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
     def test_a_receipt_filename_attributes_the_review(self):
         """`\\b` refused this, because `_` IS a word character."""
         with build(
@@ -461,6 +475,17 @@ class RedundantViews(unittest.TestCase):
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertTrue(any("but its ticket row reads" in e for e in errors), errors)
+
+    def test_a_view_naming_a_hyphen_suffixed_ticket_reads_it_whole(self):
+        """A narrow parser read `AAA-001-HARDEN` as `AAA-001`."""
+        board = BOARD.replace("| First lane | `AAA-001` | DONE |", "| First lane | `AAA-001-HARDEN` | DONE |")
+        with build(board=board) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        self.assertTrue(
+            any("AAA-001-HARDEN" in error and "no row in any ticket table" in error
+                for error in errors),
+            errors,
+        )
 
     def test_lane_naming_an_unknown_ticket_fails(self):
         with build(

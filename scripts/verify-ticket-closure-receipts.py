@@ -230,6 +230,10 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
 TICKET_TABLE_HEADER = "Ticket"
 # Ticket | Status | Depends on | Objective and acceptance
 TICKET_TABLE_COLUMNS = 4
+# The same identifier shape the authoritative rows use. A narrower pattern read
+# `AAA-001-HARDEN` as `AAA-001`, so a view could be checked against the wrong
+# ticket's status, or a valid row could fail as an unknown shorter ticket.
+VIEW_TICKET_ID = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?(?:-[A-Z0-9]+)*")
 LANE_TABLE_HEADER = "Lane"
 BATCH_TABLE_HEADER = "Batch"
 DISPATCH_TABLE_HEADER = "Slot"
@@ -446,7 +450,7 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
                 )
                 continue
             claimed = row[2]
-            for ticket in re.findall(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?", row[1]):
+            for ticket in VIEW_TICKET_ID.findall(row[1]):
                 if ticket not in statuses:
                     errors.append(
                         f"line {number}: the {view} table names {ticket}, which has "
@@ -561,6 +565,8 @@ REGISTER_ID = re.compile(r"TM-\d+")
 # happen, which is the opposite claim, and mentions in "Scenario" or "Primary
 # mitigations" are description rather than attribution.
 REGISTER_VERIFICATION_COLUMN = 3
+REGISTER_VERIFICATION_HEADER = "Required verification"
+REGISTER_COLUMNS = 6
 
 
 def threat_model_attribution(text: str, ticket: str) -> str | None:
@@ -590,7 +596,9 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     gate change, and it needs its own ticket.
     """
     pattern = names(ticket)
-    heading = re.compile(rf"^#{{2,3}} {re.escape(ticket)}\b.*\breviews?$", re.I)
+    heading = re.compile(
+        rf"^#{{2,3}} {re.escape(ticket)}(?![{TICKET_CHARACTER}]).*\breviews?$", re.I
+    )
 
     lines = text.splitlines()
     ownership_start: int | None = None
@@ -602,6 +610,19 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
             if line.startswith("## "):
                 ownership_end = number
                 break
+
+    # A `TM-nnn` first cell is not proof of the threat register: any other
+    # table could carry one, and a malformed row shifts the column this branch
+    # indexes. Membership is taken from the table whose header actually is the
+    # register's, so a four-column tracking table cannot donate an attribution.
+    register_rows: set[int] = set()
+    ownership_rows: set[int] = set()
+    for header, rows in tables(text):
+        if header[:1] == ["ID"] and REGISTER_VERIFICATION_HEADER in header:
+            if len(header) == REGISTER_COLUMNS:
+                register_rows.update(number for number, _ in rows)
+        elif header[:1] == ["Area"]:
+            ownership_rows.update(number for number, _ in rows)
 
     def denied(window: str) -> bool:
         return NEGATION.search(window) is not None
@@ -616,7 +637,7 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
         row = cells(line)
         if not row:
             continue
-        within_ownership = (
+        within_ownership = number in ownership_rows and (
             ownership_start is not None
             and ownership_start < number - 1 < ownership_end
         )
@@ -624,7 +645,7 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
             if denied(row[-1]):
                 continue
             return f"verification-ownership row at line {number}"
-        if REGISTER_ID.fullmatch(row[0]):
+        if number in register_rows and REGISTER_ID.fullmatch(row[0]):
             cell = row[REGISTER_VERIFICATION_COLUMN] if len(
                 row
             ) > REGISTER_VERIFICATION_COLUMN else ""
