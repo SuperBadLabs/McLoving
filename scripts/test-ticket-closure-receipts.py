@@ -348,6 +348,30 @@ class BoardParsing(unittest.TestCase):
         errors = self._with_board(BOARD.replace("| AAA-001 | DONE |", "| notaticket | DONE |"))
         self.assertTrue(any("is not a ticket id" in error for error in errors), errors)
 
+    def test_a_row_missing_columns_fails(self):
+        """Two cells are enough to be counted here and omitted over there."""
+        errors = self._with_board(
+            BOARD.replace(
+                "| BBB-001 | PENDING |",
+                "| NEW-001 | PENDING |\n| BBB-001 | PENDING |",
+            )
+        )
+        self.assertTrue(
+            any("not the 4 the table declares" in e for e in errors), errors
+        )
+
+    def test_a_truncated_redundant_view_row_fails(self):
+        """A lane row too short to state a status cross-checks nothing."""
+        board = BOARD.replace(
+            "| First lane | `AAA-001` | DONE | \u2014 | \u2014 |",
+            "| First lane | `AAA-001` |",
+        )
+        with build(board=board) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        self.assertTrue(
+            any("cross-checks nothing" in error for error in errors), errors
+        )
+
     def test_a_ticket_row_under_a_mistyped_header_fails(self):
         """`Tickets` hides a table here while the board verifier still reads it."""
         errors = self._with_board(

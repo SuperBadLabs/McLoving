@@ -216,6 +216,8 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
 # cell is `Ticket` carry authoritative status; the lane, batch and dispatch
 # tables are redundant views and are cross-checked against them.
 TICKET_TABLE_HEADER = "Ticket"
+# Ticket | Status | Depends on | Objective and acceptance
+TICKET_TABLE_COLUMNS = 4
 LANE_TABLE_HEADER = "Lane"
 BATCH_TABLE_HEADER = "Batch"
 DISPATCH_TABLE_HEADER = "Slot"
@@ -324,8 +326,17 @@ def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
         authoritative.update(number for number, _ in rows)
         for number, row in rows:
             rows_seen += 1
-            if len(row) < 2:
-                errors.append(f"line {number}: ticket row has fewer than two cells")
+            # Four cells, as the board verifier requires. A shorter row is
+            # counted here and omitted there, so a new ticket could satisfy
+            # the row floor while its dependencies, execution class and
+            # shared boundaries went unvalidated.
+            if len(row) < TICKET_TABLE_COLUMNS:
+                errors.append(
+                    f"line {number}: the row for {row[0] if row else '<empty>'} "
+                    f"has {len(row)} cells, not the {TICKET_TABLE_COLUMNS} the "
+                    "table declares; a short row is counted here and omitted by "
+                    "the board verifier"
+                )
                 continue
             ticket, status = row[0], row[1]
             if not re.fullmatch(r"[A-Z][A-Z0-9-]+", ticket):
@@ -398,6 +409,10 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
         view = header[0]
         for number, row in rows:
             if len(row) < 3:
+                errors.append(
+                    f"line {number}: the {view} table row has {len(row)} cells "
+                    "and cannot state a status, so it cross-checks nothing"
+                )
                 continue
             claimed = row[2]
             for ticket in re.findall(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?", row[1]):
