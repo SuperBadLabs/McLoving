@@ -59,7 +59,8 @@ ALLOWED_PAIR = re.compile(
 )
 # Whole components are too coarse to be boundaries: `bins/agent` is shared by
 # every ticket that touches the agent at all. A path token counts only when it
-# names a file.
+# names a file, and is compared whole -- two different `config.rs` files under
+# different crates are two boundaries, not one.
 BOUNDARY_STOPLIST = {
     "main", "master", "README.md", "docs", "x86_64", "true", "false", "DONE",
 }
@@ -73,8 +74,9 @@ def boundary_tokens(acceptance: str) -> set[str]:
         if len(token) < 3 or TICKET_ID.fullmatch(token) or SHA_LIKE.match(token):
             continue
         if "/" in token:
-            token = token.rsplit("/", 1)[-1]
-            if "." not in token:
+            # Keep the whole path. Reducing to a basename made
+            # `crates/a/config.rs` and `crates/b/config.rs` the same boundary.
+            if "." not in token.rsplit("/", 1)[-1]:
                 continue
         if not token or token in BOUNDARY_STOPLIST:
             continue

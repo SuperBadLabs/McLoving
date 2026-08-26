@@ -44,10 +44,13 @@ an exemption: both hide exactly what this gate exists to surface. Run
 `scripts/verify-ticket-closure-receipts.py --strict` to see the debt as
 failures.
 
-Both ledgers are capped at their current size, so "may only shrink" is now the
-gate's behaviour rather than this paragraph's request. Pay an obligation down
-and lower the cap in the same commit. Raising one is possible and is meant to
-be conspicuous: it is a recorded admission that closure discipline moved
+Both ledgers pin their **membership**, so "may only shrink" is the gate's
+behaviour rather than this paragraph's request. A ticket may leave a ledger by
+earning its artifact; none may enter. Pinning the size instead would not be
+enough -- paying one historical debt while admitting one newly closed ticket
+leaves the count unchanged, so a fresh gap gets laundered into a set that
+exists to record old ones. Widening a baseline is possible and is meant to be
+conspicuous: it is a recorded admission that closure discipline moved
 backwards, and it belongs in its own commit that says why.
 
 ## Source-acquirer tests on hosts that restrict unprivileged user namespaces

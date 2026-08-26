@@ -269,16 +269,41 @@ class CitedEvidence(unittest.TestCase):
 
 
 class LedgerDiscipline(unittest.TestCase):
-    def test_a_ledger_over_its_cap_fails(self):
+    def test_a_ticket_outside_the_baseline_fails(self):
+        """A newly closed ticket may not be admitted to a historical ledger."""
         with build() as name, synthetic():
-            saved = VERIFY.MAXIMUM_RECEIPT_DEBT
-            VERIFY.MAXIMUM_RECEIPT_DEBT = 0
+            saved = VERIFY.RECEIPT_DEBT_BASELINE
+            VERIFY.RECEIPT_DEBT_BASELINE = frozenset()
             VERIFY.RECEIPT_DEBT["AAA-001"] = "an admitted gap that should not fit"
             try:
                 errors, _, _ = check(Path(name))
             finally:
-                VERIFY.MAXIMUM_RECEIPT_DEBT = saved
+                VERIFY.RECEIPT_DEBT_BASELINE = saved
         self.assertTrue(any("may only shrink" in error for error in errors), errors)
+
+    def test_paying_one_debt_does_not_buy_room_for_another(self):
+        """The regression a cardinality cap cannot see.
+
+        Swapping a paid ticket for a newly closed one leaves `len(ledger)`
+        unchanged, so a count-based ratchet passes while a fresh gap is
+        laundered into history. Membership is what has to be pinned.
+        """
+        with build() as name, synthetic():
+            saved = VERIFY.RECEIPT_DEBT_BASELINE
+            VERIFY.RECEIPT_DEBT_BASELINE = frozenset({"OLD-001"})
+            VERIFY.RECEIPT_DEBT["AAA-001"] = "swapped in for the one just paid"
+            try:
+                errors, _, _ = check(Path(name))
+                size = len(VERIFY.RECEIPT_DEBT)
+            finally:
+                VERIFY.RECEIPT_DEBT_BASELINE = saved
+        self.assertEqual(
+            size, 1, "one out, one in: the count a cap would compare is unchanged"
+        )
+        self.assertTrue(
+            any("not in the receipt debt baseline" in error for error in errors),
+            errors,
+        )
 
     def test_a_stale_ledger_entry_fails(self):
         with build() as name, synthetic(RECEIPT_DEBT={"AAA-001": "already receipted"}):
@@ -360,16 +385,31 @@ class ThisRepository(unittest.TestCase):
             "raise MINIMUM_TICKET_ROWS with the board; a slack floor guards nothing",
         )
 
-    def test_the_caps_match_the_ledgers_they_bound(self):
-        """A cap loose enough to admit another entry is not a cap."""
-        self.assertEqual(len(VERIFY.RECEIPT_EXEMPT), VERIFY.MAXIMUM_RECEIPT_EXEMPT)
-        self.assertEqual(
-            len(VERIFY.THREAT_MODEL_EXEMPT), VERIFY.MAXIMUM_THREAT_MODEL_EXEMPT
+    def test_every_ledger_is_within_its_baseline(self):
+        for ledger, baseline, label in (
+            (VERIFY.RECEIPT_EXEMPT, VERIFY.RECEIPT_EXEMPT_BASELINE, "receipt exempt"),
+            (VERIFY.THREAT_MODEL_EXEMPT, VERIFY.THREAT_MODEL_EXEMPT_BASELINE, "tm exempt"),
+            (VERIFY.RECEIPT_DEBT, VERIFY.RECEIPT_DEBT_BASELINE, "receipt debt"),
+            (VERIFY.THREAT_MODEL_DEBT, VERIFY.THREAT_MODEL_DEBT_BASELINE, "tm debt"),
+        ):
+            self.assertLessEqual(set(ledger), set(baseline), f"{label} grew")
+
+    def test_no_baseline_is_derived_from_the_ledger_it_bounds(self):
+        """`frozenset(RECEIPT_DEBT)` would be an assertion that cannot fail."""
+        source = (SCRIPTS / "verify-ticket-closure-receipts.py").read_text(
+            encoding="utf-8"
         )
-        self.assertEqual(len(VERIFY.RECEIPT_DEBT), VERIFY.MAXIMUM_RECEIPT_DEBT)
-        self.assertEqual(
-            len(VERIFY.THREAT_MODEL_DEBT), VERIFY.MAXIMUM_THREAT_MODEL_DEBT
-        )
+        for ledger in (
+            "RECEIPT_EXEMPT",
+            "THREAT_MODEL_EXEMPT",
+            "RECEIPT_DEBT",
+            "THREAT_MODEL_DEBT",
+        ):
+            self.assertNotIn(
+                f"{ledger}_BASELINE = frozenset({ledger})",
+                source,
+                f"{ledger}_BASELINE must be written out literally",
+            )
 
 
 if __name__ == "__main__":

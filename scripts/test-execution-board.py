@@ -326,8 +326,22 @@ class RequiredEdgeTests(unittest.TestCase):
 
     def test_a_named_file_is_a_boundary(self) -> None:
         self.assertIn(
-            "mcloving-deploy-lib.sh",
+            "deploy/bin/mcloving-deploy-lib.sh",
             self.tokens("rewrites `deploy/bin/mcloving-deploy-lib.sh`"),
+        )
+
+    def test_same_basename_under_different_directories_is_two_boundaries(self) -> None:
+        """`crates/a/config.rs` and `crates/b/config.rs` are not one file."""
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| DDA-001 | PENDING | \u2014 | Rewrites `crates/a/config.rs` |\n"
+            "| DDB-001 | PENDING | \u2014 | Rewrites `crates/b/config.rs` |\n"
+        )
+        self.assertEqual(
+            [e for e in self.edges(board) if "both name" in e],
+            [],
+            "a shared basename must not invent a shared boundary",
         )
 
     def test_ticket_ids_and_shas_are_not_boundaries(self) -> None:

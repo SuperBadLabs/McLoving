@@ -36,11 +36,7 @@ import sys
 from pathlib import Path
 
 
-# Matches the same ticket-status rows as scripts/verify-execution-board.py.
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
-TICKET_ROW = re.compile(
-    r"^\| ([A-Z][A-Z0-9-]+) \| (" + "|".join(TICKET_STATUSES) + r") \| ([^|]+) \|"
-)
 
 RECEIPT_DIRECTORY = Path("docs") / "evidence"
 RECEIPT_SUFFIX = "_SECURITY_REVIEW.md"
@@ -161,15 +157,49 @@ THREAT_MODEL_DEBT["WIN-003"] = (
     "with no ownership-table row, register row, or closure-review heading"
 )
 
-# Both ledgers are closed sets that may only shrink. The caps below are the
-# mechanism behind that sentence: before them, "do not add to this ledger to
-# make a build pass" was prose enforced by nobody, and either dict was a
-# self-serve waiver. Lower a cap when you pay debt down; raising one is a
-# deliberate, reviewable admission that closure discipline went backwards.
-MAXIMUM_RECEIPT_EXEMPT = 50
-MAXIMUM_THREAT_MODEL_EXEMPT = 24
-MAXIMUM_RECEIPT_DEBT = 12
-MAXIMUM_THREAT_MODEL_DEBT = 18
+# Both ledgers are closed sets that may only shrink, and what follows is the
+# mechanism behind that sentence rather than a request that it be honoured.
+#
+# Capping the COUNT is not enough, and the first version of this did exactly
+# that: paying one historical debt while admitting one newly closed ticket
+# leaves the cardinality unchanged, so the ratchet passes and a fresh gap has
+# been laundered into history. What has to be pinned is MEMBERSHIP. A ticket
+# may leave a ledger by earning its artifact; none may ever enter.
+#
+# Removals need no edit here: a ticket that pays its debt and leaves the ledger
+# cannot quietly return, because `check_ledger` already rejects an entry for a
+# ticket that satisfies its obligation.
+# Written out literally on purpose. Deriving a baseline from the ledger it
+# bounds -- `frozenset(RECEIPT_DEBT)` -- is an assertion that cannot fail.
+RECEIPT_EXEMPT_BASELINE = frozenset({
+    "AGENT-001", "AGENT-002", "AGENT-003", "AGENT-004", "AGENT-005",
+    "AGENT-006", "API-002", "ARCH-001", "ARCH-002", "AUDIT-001",
+    "CI-001", "CTRL-001", "CTRL-002", "CTRL-003", "CTRL-004",
+    "DIFF-001", "E2E-001", "E2E-002", "E2E-003", "FOUND-001",
+    "FOUND-002", "INV-001", "INV-002", "INV-003", "INV-004", "IR-001",
+    "IR-002", "IR-003", "IR-004", "MIG-000", "MIG-001", "MIG-002",
+    "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "OPS-001", "OPS-002",
+    "OPS-003", "SEC-001", "SEC-002", "SEC-003", "TEST-001", "UI-001",
+    "UX-001", "UX-002", "WIN-001", "WIN-002", "WIN-003", "WIN-004"
+})
+THREAT_MODEL_EXEMPT_BASELINE = frozenset({
+    "AGENT-004", "AGENT-005", "AGENT-006", "API-002", "ARCH-002",
+    "AUDIT-001", "CTRL-002", "CTRL-003", "CTRL-004", "E2E-001",
+    "E2E-002", "E2E-003", "FOUND-001", "FOUND-002", "IR-002", "IR-003",
+    "IR-004", "OPS-003", "SEC-001", "TEST-001", "UI-001", "UX-001",
+    "UX-002", "WIN-004"
+})
+RECEIPT_DEBT_BASELINE = frozenset({
+    "ALPHA-001", "CANARY-000", "DIFF-002", "EXEC-001", "EXEC-002",
+    "EXEC-003", "EXEC-004", "HYG-001", "MIG-006", "MIG-007",
+    "OUTBOX-001", "SHADOW-001"
+})
+THREAT_MODEL_DEBT_BASELINE = frozenset({
+    "ADMIN-001", "CACHE-001", "CANARY-000", "CI-001", "CONSUMER-001",
+    "EXEC-001", "EXEC-002", "EXEC-003", "EXEC-004", "HYG-001",
+    "MIG-001", "MIG-003", "MIG-004", "MIG-005", "OUTBOX-001", "SCM-001",
+    "SECRET-001", "WIN-003"
+})
 
 # The board's 15 tables in 4 row formats. Only the nine whose first header
 # cell is `Ticket` carry authoritative status; the lane, batch and dispatch
@@ -338,7 +368,7 @@ def cited_documents(repository: Path, text: str) -> list[str]:
     """
     errors: list[str] = []
     for path in sorted(set(DOC_PATH.findall(text))):
-        if not (repository / path).exists():
+        if not (repository / path).is_file():
             errors.append(
                 f"the board cites {path}, which does not exist; write it, or stop "
                 "citing it as evidence"
@@ -409,21 +439,21 @@ def check_ledger(
     debt: dict[str, str],
     statuses: dict[str, str],
     satisfied: set[str],
-    exempt_cap: int,
-    debt_cap: int,
+    exempt_baseline: frozenset[str],
+    debt_baseline: frozenset[str],
 ) -> list[str]:
     """Reject stale or misdirected ledger entries so neither ledger drifts."""
     errors: list[str] = []
-    for name, ledger, cap in (
-        ("exemption", exempt, exempt_cap),
-        ("debt", debt, debt_cap),
+    for name, ledger, baseline in (
+        ("exemption", exempt, exempt_baseline),
+        ("debt", debt, debt_baseline),
     ):
-        if len(ledger) > cap:
+        for ticket in sorted(set(ledger) - baseline):
             errors.append(
-                f"the {obligation} {name} ledger holds {len(ledger)} entries but is "
-                f"capped at {cap}; it may only shrink. Write the missing artifact "
-                "instead of recording another admission, or raise the cap in its "
-                "own commit and say why closure discipline went backwards"
+                f"{ticket} is not in the {obligation} {name} baseline; that ledger "
+                "may only shrink. A ticket closing today owes the artifact -- write "
+                "it, rather than admitting a new gap into a set that exists to "
+                "record old ones"
             )
         for ticket in sorted(ledger):
             if ticket not in statuses:
@@ -485,8 +515,8 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
         RECEIPT_DEBT,
         statuses,
         receipted,
-        MAXIMUM_RECEIPT_EXEMPT,
-        MAXIMUM_RECEIPT_DEBT,
+        RECEIPT_EXEMPT_BASELINE,
+        RECEIPT_DEBT_BASELINE,
     )
     errors += check_ledger(
         "threat-model",
@@ -494,8 +524,8 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
         THREAT_MODEL_DEBT,
         statuses,
         reviewed,
-        MAXIMUM_THREAT_MODEL_EXEMPT,
-        MAXIMUM_THREAT_MODEL_DEBT,
+        THREAT_MODEL_EXEMPT_BASELINE,
+        THREAT_MODEL_DEBT_BASELINE,
     )
 
     debt: list[str] = []
