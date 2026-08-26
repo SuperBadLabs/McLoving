@@ -102,7 +102,15 @@ a foreign-owned or writable-without-sticky parent can be renamed aside and repla
 and the substituted home becomes its own trust anchor. Reproduced with a genuinely
 foreign uid. **Moderate**: a stock `/home` install under root-owned 0755 is not
 exposed; shared-group deploy roots, 0777 container volume roots and `--home` into a
-scratch tree are. Secrets stay out of reach (`mcloving-env-guard` pins to `$EUID`).
+scratch tree are. **Secrets do NOT stay out of reach where it is exposed, and an
+earlier revision of this record said they did.** An attacker-authored unit with an
+arbitrary `ExecStart` passes `require_integrity_files` against the substituted home,
+and the user manager then runs it AS the service account. From there the original
+renamed-aside home's 0600 contracts and mTLS key are readable, because they are
+owned by exactly that uid. `require_secret_files "${EUID}"` is a check the lane
+performs on itself, not a sandbox: code already executing as the service account is
+not subject to it, and a hostile unit simply omits it. Treat home substitution as
+credential compromise, not merely as arbitrary execution.
 A fix exists on `codex/deploy-004-ancestor-above-home` and is tracked as
 `DEPLOY-004`; it was split out of this change because it produced five P1 review
 findings across two rounds without converging, and the correction-round cap applies
