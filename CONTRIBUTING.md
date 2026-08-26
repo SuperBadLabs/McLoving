@@ -50,8 +50,8 @@ tightenings were each got past by one sentence in a new wrapper, and a denial
 phrased without a vetoed word would still pass. The durable fix is a
 machine-readable attribution field in the threat model -- a column holding a
 ticket id and nothing else -- so the gate reads data rather than parsing
-sentences. Until that exists, treat a green gate as evidence that the record
-has the right shape, not that the review happened.
+sentences. That is `HYG-002`. Until it lands, treat a green gate as evidence
+that the record has the right shape, not that the review happened.
 
 A ticket that genuinely owes neither -- a docs-only or board-replan ticket --
 needs an exemption in that script naming the ticket and stating why. The

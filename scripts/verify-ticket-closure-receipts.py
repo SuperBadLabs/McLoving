@@ -257,7 +257,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 104
+MINIMUM_TICKET_ROWS = 105
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
@@ -592,7 +592,17 @@ REGISTER_ID = re.compile(r"TM-\d+")
 # mitigations" are description rather than attribution.
 REGISTER_VERIFICATION_COLUMN = 3
 REGISTER_VERIFICATION_HEADER = "Required verification"
-REGISTER_COLUMNS = 6
+# The register's complete schema. Matching only "first cell is ID, and
+# `Required verification` appears somewhere" let a two-column tracking table
+# donate an attribution.
+REGISTER_HEADER = [
+    "ID",
+    "Scenario",
+    "Primary mitigations",
+    REGISTER_VERIFICATION_HEADER,
+    "Owner",
+    "Residual risk",
+]
 
 
 def threat_model_attribution(text: str, ticket: str) -> str | None:
@@ -619,7 +629,7 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     durable fix is a machine-readable attribution field in the threat model --
     one column that holds a ticket id and nothing else -- so the gate reads
     data instead of parsing sentences. That is a threat-model change, not a
-    gate change, and it needs its own ticket.
+    gate change, and it is filed as `HYG-002`.
     """
     pattern = names(ticket)
     heading = re.compile(
@@ -644,7 +654,7 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     register_rows: dict[int, int] = {}
     ownership_rows: set[int] = set()
     for header, rows in tables(text):
-        if header[:1] == ["ID"] and REGISTER_VERIFICATION_HEADER in header:
+        if header == REGISTER_HEADER:
             # Take the column from the header rather than assuming its
             # position. A fixed index survives a column reorder and then reads
             # the wrong cell, so a mitigation mention would satisfy closure

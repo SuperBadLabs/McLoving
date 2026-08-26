@@ -97,7 +97,9 @@ BOUNDARY_STOPLIST = {
 }
 
 
-FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+# An extension starts with a letter. `1.97.1` and `127.0.0.1` are a version
+# and an address, not files two tickets can share.
+FILE_SUFFIX = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
 SEPARATED = re.compile(r"[-_]")
 
 
