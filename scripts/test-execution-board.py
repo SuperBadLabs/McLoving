@@ -355,6 +355,29 @@ class RequiredEdgeTests(unittest.TestCase):
         errors = self.edges(board)
         self.assertTrue(any("without backticks" in error for error in errors), errors)
 
+    def test_ordinary_literals_are_not_boundaries(self) -> None:
+        """Two tickets quoting `--strict` do not thereby share a boundary."""
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| IIA-001 | PENDING | \u2014 | Adds `--strict` and refuses `unsupported` |\n"
+            "| IIB-001 | PENDING | \u2014 | Also honours `--strict` for `unsupported` |\n"
+        )
+        self.assertEqual(
+            [e for e in self.edges(board) if "both name" in e],
+            [],
+            "a shared word is not a shared file",
+        )
+
+    def test_the_boundary_kinds_are_classified(self) -> None:
+        keep = ("TM-050", "deploy/bin/mcloving-install", "test-deployment.sh",
+                "mcloving-env-guard", "NoNewPrivileges=", "entries_sha256")
+        drop = ("--strict", "unsupported", "running", "MERGEABLE")
+        for token in keep:
+            self.assertTrue(VERIFY.is_boundary(token), token)
+        for token in drop:
+            self.assertFalse(VERIFY.is_boundary(token), token)
+
     def test_prose_slashes_are_not_paths(self) -> None:
         """`I/O`, `API/CLI` and `134/162` are not files, and there are 337 of them."""
         board = (

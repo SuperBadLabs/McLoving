@@ -282,6 +282,15 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_a_reordered_register_reads_the_right_column(self):
+        """A fixed index survives a reorder and then reads the wrong cell."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n| ID | Scenario | Required verification | Primary "
+            "mitigations | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | a threat | none | guards AAA-001 | SEC | none |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
     def test_a_tm_row_outside_the_register_does_not_attribute(self):
         """A `TM-nnn` first cell is not proof of the threat register."""
         errors = self._with_threat_model(
@@ -454,10 +463,19 @@ class BoardParsing(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
-    def test_a_view_row_naming_no_ticket_fails(self):
-        """A corrupted id leaves the row claiming a status it checks nothing against."""
+    def test_a_view_row_with_a_corrupted_id_fails(self):
+        """`FOUND-001_bad` still yields FOUND-001 and would pass silently."""
         errors = self._with_board(
-            BOARD.replace("| First lane | `AAA-001` | DONE |", "| First lane | `AAA_001` | DONE |")
+            BOARD.replace("| First lane | `AAA-001` | DONE |", "| First lane | `AAA-001_bad` | DONE |")
+        )
+        self.assertTrue(
+            any("is not a ticket" in error for error in errors), errors
+        )
+
+    def test_a_view_row_naming_no_ticket_fails(self):
+        """An empty ticket cell leaves the row claiming a status it checks nothing against."""
+        errors = self._with_board(
+            BOARD.replace("| First lane | `AAA-001` | DONE |", "| First lane |  | DONE |")
         )
         self.assertTrue(
             any("names no ticket" in error for error in errors), errors

@@ -128,6 +128,11 @@ An allowance fails as stale once the edge is declared, and also once the pair
 stops sharing a boundary, so an exception cannot outlive the gap it excused or
 quietly excuse the next one.
 
+Not every code span is a boundary. A boundary is a path, a filename, a
+`TM-nnn` id, a systemd directive, or a separated identifier such as
+`mcloving-env-guard`; a bare word or a CLI flag is vocabulary two tickets may
+share without depending on each other.
+
 **Backtick every path you name in acceptance criteria.** The rule reads
 backticked tokens only, so an unquoted path is invisible to it. Detecting bare
 path-shaped text is not viable here -- the board's prose carries 337 such

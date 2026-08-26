@@ -97,6 +97,29 @@ BOUNDARY_STOPLIST = {
 }
 
 
+FILE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+SEPARATED = re.compile(r"[-_]")
+
+
+def is_boundary(token: str) -> bool:
+    """Is this code span a thing two tickets can SHARE, or just a word?
+
+    The rule is about files, helpers and `TM-nnn` boundaries. Every backticked
+    span of three characters or more was reaching it, so two unrelated tickets
+    quoting `--strict` or `unsupported` were required to declare an edge -- the
+    check refusing correct work rather than catching a missing dependency.
+    """
+    if THREAT_ID.fullmatch(token):
+        return True
+    if token.startswith("-"):  # a CLI flag is a spelling, not a boundary
+        return False
+    if "/" in token or FILE_SUFFIX.search(token):
+        return True
+    if token.endswith("="):  # a systemd directive
+        return True
+    return SEPARATED.search(token) is not None
+
+
 def boundary_tokens(acceptance: str, repository: Path | None = None) -> set[str]:
     """Named things a ticket's acceptance criteria commit it to."""
     found: set[str] = set()
@@ -127,7 +150,7 @@ def boundary_tokens(acceptance: str, repository: Path | None = None) -> set[str]
                     continue
             elif "." not in token.rsplit("/", 1)[-1] and token.count("/") < 2:
                 continue
-        if not token or token in BOUNDARY_STOPLIST:
+        if not token or token in BOUNDARY_STOPLIST or not is_boundary(token):
             continue
         found.add(token)
     found.update(THREAT_ID.findall(acceptance))

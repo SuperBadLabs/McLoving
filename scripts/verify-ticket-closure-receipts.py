@@ -461,6 +461,14 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
                 )
                 continue
             claimed = row[2]
+            leftover = VIEW_TICKET_ID.sub(" ", row[1])
+            if re.search(r"[A-Za-z0-9_]", leftover.replace("`", " ")):
+                errors.append(
+                    f"line {number}: the {view} table row has identifier text "
+                    f"{leftover.strip()!r} that is not a ticket; a corrupted id "
+                    "keeps the row claiming a status it checks nothing against"
+                )
+                continue
             named = VIEW_TICKET_ID.findall(row[1])
             if not named:
                 errors.append(
@@ -633,12 +641,17 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     # table could carry one, and a malformed row shifts the column this branch
     # indexes. Membership is taken from the table whose header actually is the
     # register's, so a four-column tracking table cannot donate an attribution.
-    register_rows: set[int] = set()
+    register_rows: dict[int, int] = {}
     ownership_rows: set[int] = set()
     for header, rows in tables(text):
         if header[:1] == ["ID"] and REGISTER_VERIFICATION_HEADER in header:
-            if len(header) == REGISTER_COLUMNS:
-                register_rows.update(number for number, _ in rows)
+            # Take the column from the header rather than assuming its
+            # position. A fixed index survives a column reorder and then reads
+            # the wrong cell, so a mitigation mention would satisfy closure
+            # while the real verification cell said nothing.
+            column = header.index(REGISTER_VERIFICATION_HEADER)
+            for number, _ in rows:
+                register_rows[number] = column
         elif header[:1] == ["Area"]:
             ownership_rows.update(number for number, _ in rows)
 
@@ -664,9 +677,8 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
                 continue
             return f"verification-ownership row at line {number}"
         if number in register_rows and REGISTER_ID.fullmatch(row[0]):
-            cell = row[REGISTER_VERIFICATION_COLUMN] if len(
-                row
-            ) > REGISTER_VERIFICATION_COLUMN else ""
+            column = register_rows[number]
+            cell = row[column] if len(row) > column else ""
             found = pattern.search(cell)
             if found is not None:
                 window = cell[
