@@ -53,6 +53,14 @@ OBSOLETE_README_MARKERS = (
 # padded DONE row could share a file with an open ticket and pass.
 TICKET_CELL_ID = re.compile(r"^[A-Z][A-Z0-9-]+$")
 BACKTICKED = re.compile(r"`([^`]+)`")
+# The boundary rule only sees backticked tokens, so an unbackticked path is
+# invisible to it. Detecting bare path-shaped text is not an option -- the
+# board's prose is full of `I/O`, `API/CLI`, `134/162` and `Linux/Windows`,
+# 337 such tokens, none of which is a file. So the convention is enforced
+# instead: if an unbackticked token resolves to a real file in this
+# repository, it was meant to be a path and must be quoted like one.
+BARE_PATH = re.compile(r"(?<![`\w/.-])((?:[\w.-]+/)+[\w.-]+)(?![`\w])")
+CODE_SPAN = re.compile(r"`[^`]*`")
 THREAT_ID = re.compile(r"\bTM-\d+\b")
 SHA_LIKE = re.compile(r"^[0-9a-f]{7,40}$")
 ALLOWED_PAIR = re.compile(
@@ -137,6 +145,16 @@ def required_edges(text: str, repository: Path | None = None) -> list[str]:
     }
 
     errors: list[str] = []
+    if repository is not None:
+        for ticket in sorted(rows):
+            plain = CODE_SPAN.sub(" ", rows[ticket][2])
+            for candidate in sorted({m.rstrip(".,;") for m in BARE_PATH.findall(plain)}):
+                if (repository / candidate).is_file():
+                    errors.append(
+                        f"{ticket} names the file {candidate} without backticks; "
+                        "the boundary rule only reads backticked tokens, so an "
+                        "unquoted path is invisible to it"
+                    )
     names = sorted(rows)
     for index, first in enumerate(names):
         for second in names[index + 1:]:
@@ -181,6 +199,16 @@ def required_edges(text: str, repository: Path | None = None) -> list[str]:
             errors.append(
                 f"board-graph allowance for {first} ~ {second} is stale: the "
                 "edge is now declared, so remove the allowance"
+            )
+        elif not (tokens[first] & tokens[second]) and not (
+            first.rsplit("-", 1)[0] == second.rsplit("-", 1)[0]
+            and rows[first][0] in REMAINING_STATUSES
+            and rows[second][0] in REMAINING_STATUSES
+        ):
+            errors.append(
+                f"board-graph allowance for {first} ~ {second} is stale: they no "
+                "longer share a boundary, and an allowance kept past its finding "
+                "would silently excuse the next one"
             )
     return errors
 

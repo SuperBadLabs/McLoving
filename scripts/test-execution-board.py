@@ -335,6 +335,38 @@ class RequiredEdgeTests(unittest.TestCase):
         )
         self.assertEqual(self.edges(board), [])
 
+    def test_an_unbackticked_real_path_fails(self) -> None:
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| FFA-001 | PENDING | \u2014 | Rewrites scripts/verify-execution-board.py |\n"
+        )
+        errors = self.edges(board)
+        self.assertTrue(any("without backticks" in error for error in errors), errors)
+
+    def test_prose_slashes_are_not_paths(self) -> None:
+        """`I/O`, `API/CLI` and `134/162` are not files, and there are 337 of them."""
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| FFB-001 | PENDING | \u2014 | Bounds I/O and API/CLI across 134/162 jobs |\n"
+        )
+        self.assertEqual(self.edges(board), [])
+
+    def test_an_allowance_outliving_its_boundary_fails(self) -> None:
+        """An exception kept past its finding would excuse the next one."""
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| GGA-001 | DONE | \u2014 | Owns `one-thing.sh` |\n"
+            "| GGB-001 | PENDING | \u2014 | Owns `another-thing.sh` |\n"
+            "\n<!-- board-graph: allow GGA-001 ~ GGB-001 -- they once shared a file -->\n"
+        )
+        errors = self.edges(board)
+        self.assertTrue(
+            any("no longer share a boundary" in error for error in errors), errors
+        )
+
     def test_an_argued_allowance_clears_it(self) -> None:
         board = self.BOARD + (
             "\n<!-- board-graph: allow AAA-001 ~ BBB-001 -- "

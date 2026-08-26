@@ -29,6 +29,9 @@ from tempfile import TemporaryDirectory
 
 SCRIPTS = Path(__file__).resolve().parent
 REPOSITORY = SCRIPTS.parent
+# Importing the verifier by path would otherwise drop a version-specific
+# .pyc into scripts/__pycache__ and dirty the worktree.
+sys.dont_write_bytecode = True
 
 _spec = importlib.util.spec_from_file_location(
     "verify_ticket_closure_receipts", SCRIPTS / "verify-ticket-closure-receipts.py"
@@ -299,6 +302,19 @@ class BoardParsing(unittest.TestCase):
             BOARD.replace("| AAA-001 | DONE |", "| AAA-001  |  DONE  |")
         )
         self.assertEqual(errors, [], "padding must not delete a row from the board")
+
+    def test_a_duplicate_ticket_row_fails_even_when_statuses_agree(self):
+        """Two rows, one id: the verifiers can read different definitions."""
+        errors = self._with_board(
+            BOARD.replace(
+                "| BBB-001 | PENDING |",
+                "| AAA-001 | DONE | \u2014 | A second, different row |\n"
+                "| BBB-001 | PENDING |",
+            )
+        )
+        self.assertTrue(
+            any("more than one authoritative row" in e for e in errors), errors
+        )
 
     def test_non_ticket_in_the_first_column_fails(self):
         errors = self._with_board(BOARD.replace("| AAA-001 | DONE |", "| notaticket | DONE |"))

@@ -338,8 +338,14 @@ def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
                     f"one of {', '.join(TICKET_STATUSES)}"
                 )
                 continue
-            if ticket in statuses and statuses[ticket] != status:
-                errors.append(f"ticket {ticket} is declared with conflicting statuses")
+            if ticket in statuses:
+                # Even when the statuses agree the rows may differ in their
+                # dependencies or acceptance text, and last-one-wins means two
+                # verifiers can read two different definitions of one ticket.
+                errors.append(
+                    f"ticket {ticket} has more than one authoritative row "
+                    f"(line {number}); one ticket, one row"
+                )
                 continue
             statuses[ticket] = status
     if not statuses:

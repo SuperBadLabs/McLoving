@@ -120,5 +120,13 @@ the finding:
 <!-- board-graph: allow AAA-001 ~ BBB-001 -- reason -->
 ```
 
-An allowance whose edge is later declared fails as stale, so an exception
-cannot outlive the gap it excused.
+An allowance fails as stale once the edge is declared, and also once the pair
+stops sharing a boundary, so an exception cannot outlive the gap it excused or
+quietly excuse the next one.
+
+**Backtick every path you name in acceptance criteria.** The rule reads
+backticked tokens only, so an unquoted path is invisible to it. Detecting bare
+path-shaped text is not viable here -- the board's prose carries 337 such
+tokens (`I/O`, `API/CLI`, `134/162`, `Linux/Windows`) and not one of them is a
+file -- so the convention is enforced from the other side: an unbackticked
+token that resolves to a real file in the repository fails the board.
