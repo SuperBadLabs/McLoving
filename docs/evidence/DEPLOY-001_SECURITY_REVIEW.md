@@ -95,9 +95,13 @@ deferral.
 - pre-`main()` execution hooks stripped at the unit boundary by
   `UnsetEnvironment=`, with a validation-time refusal of any contract that would
   reintroduce one;
-- the §2.1 ancestor invariant of `TM-050` established before every transition and
-  again at every service start, judged through symlinks with resolved target
-  chains joined to the walk, with creation bounds for paths that do not yet exist;
+- the §2.1 ancestor invariant of `TM-050` established before every transition,
+  judged through symlinks with resolved target chains joined to the walk, with
+  creation bounds for paths that do not yet exist. At service start the
+  re-establishment is PARTIAL: systemd loads the unit before any `ExecStartPre`,
+  and `mcloving-env-guard` walks only the environment file and configured secret
+  and state paths, not the unit, the guard binary, or the release binary --
+  a start-time verifier is PENDING under `DEPLOY-003`;
 - a deployed-digest re-read covering every installed executable, contracts and
   PKI committed by hash rather than by content, so `CUTOVER-001` can read
   deployed implementation digests without hand-assembled state;
