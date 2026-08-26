@@ -273,8 +273,16 @@ def read(path: Path) -> str:
         raise SystemExit(1)
 
 
+# `\|` is an escaped pipe inside a cell, not a boundary. Splitting on every
+# pipe shifts every later cell left, so a mitigations cell ending in
+# `... \| AAA-001` would put that ticket into the slot the verification column
+# is read from, crediting a review the real column never claimed.
+UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+
+
 def cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.split("|")[1:-1]]
+    parts = UNESCAPED_PIPE.split(line)[1:-1]
+    return [part.replace("\\|", "|").strip() for part in parts]
 
 
 def tables(text: str) -> list[tuple[list[str], list[tuple[int, list[str]]]]]:
@@ -330,12 +338,13 @@ def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
             # counted here and omitted there, so a new ticket could satisfy
             # the row floor while its dependencies, execution class and
             # shared boundaries went unvalidated.
-            if len(row) < TICKET_TABLE_COLUMNS:
+            if len(row) != TICKET_TABLE_COLUMNS:
                 errors.append(
                     f"line {number}: the row for {row[0] if row else '<empty>'} "
                     f"has {len(row)} cells, not the {TICKET_TABLE_COLUMNS} the "
                     "table declares; a short row is counted here and omitted by "
-                    "the board verifier"
+                    "the board verifier, and a long one loses the acceptance text "
+                    "past its extra pipe"
                 )
                 continue
             ticket, status = row[0], row[1]
@@ -369,7 +378,7 @@ def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
     for number, line in enumerate(text.splitlines(), start=1):
         if number in authoritative or not line.startswith("|"):
             continue
-        row = [cell.strip() for cell in line.split("|")[1:-1]]
+        row = cells(line)
         if len(row) < 2 or row[1] not in TICKET_STATUSES:
             continue
         if not re.fullmatch(r"[A-Z][A-Z0-9-]+", row[0]):
@@ -439,17 +448,30 @@ def cited_documents(repository: Path, text: str) -> list[str]:
     """Every `docs/...` path the board cites must exist.
 
     A closure that cites a receipt nobody wrote reads exactly like one that
-    cites a receipt somebody did. Scoped to `docs/` deliberately: rows also
-    cite code paths they RETIRED, such as HYG-001 naming `crates/state-machine`
-    after deleting it, and those are history rather than broken links.
+    cites a receipt somebody did.
+
+    Restricted to DONE rows, because an open ticket's acceptance criteria
+    routinely name the document it will produce, and requiring those to exist
+    would make the board refuse to plan work without a placeholder -- this gate
+    failing closed on correct work.
+
+    Scoped to `docs/` deliberately: rows also cite code paths they RETIRED,
+    such as HYG-001 naming `crates/state-machine` after deleting it, and those
+    are history rather than broken links.
     """
     errors: list[str] = []
-    for path in sorted(set(DOC_PATH.findall(text))):
-        if not (repository / path).is_file():
-            errors.append(
-                f"the board cites {path}, which does not exist; write it, or stop "
-                "citing it as evidence"
-            )
+    for header, rows in tables(text):
+        if not header or header[0] != TICKET_TABLE_HEADER:
+            continue
+        for number, row in rows:
+            if len(row) != TICKET_TABLE_COLUMNS or row[1] != "DONE":
+                continue
+            for path in sorted(set(DOC_PATH.findall(row[3]))):
+                if not (repository / path).is_file():
+                    errors.append(
+                        f"line {number}: {row[0]} is DONE and cites {path}, which "
+                        "does not exist; write it, or stop citing it as evidence"
+                    )
     return errors
 
 
@@ -569,7 +591,7 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
             return f"closure-review heading at line {number}"
         if not line.startswith("|") or not pattern.search(line):
             continue
-        row = [cell.strip() for cell in line.split("|")[1:-1]]
+        row = cells(line)
         if not row:
             continue
         within_ownership = (

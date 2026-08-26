@@ -229,6 +229,15 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_an_escaped_pipe_does_not_shift_the_verification_column(self):
+        """`\\|` in an earlier cell must not slide a ticket into column 3."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | a threat | guards a\\|b and AAA-001 | none | SEC | none |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
     def test_the_register_verification_column_attributes_the_review(self):
         with build(
             threat_model=(
@@ -348,6 +357,18 @@ class BoardParsing(unittest.TestCase):
         errors = self._with_board(BOARD.replace("| AAA-001 | DONE |", "| notaticket | DONE |"))
         self.assertTrue(any("is not a ticket id" in error for error in errors), errors)
 
+    def test_a_row_with_extra_columns_fails(self):
+        """An accidental pipe silently truncates the acceptance text."""
+        errors = self._with_board(
+            BOARD.replace(
+                "| AAA-001 | DONE | \u2014 | Closed with a receipt and an attributed review |",
+                "| AAA-001 | DONE | \u2014 | Closed | and also rewrites `shared.sh` |",
+            )
+        )
+        self.assertTrue(
+            any("not the 4 the table declares" in e for e in errors), errors
+        )
+
     def test_a_row_missing_columns_fails(self):
         """Two cells are enough to be counted here and omitted over there."""
         errors = self._with_board(
@@ -428,16 +449,34 @@ class RedundantViews(unittest.TestCase):
 
 
 class CitedEvidence(unittest.TestCase):
-    def test_citing_a_document_that_does_not_exist_fails(self):
+    def test_a_closed_ticket_citing_a_missing_document_fails(self):
         with build(
-            board=BOARD + "\nSee `docs/evidence/GHOST-999_SECURITY_REVIEW.md`.\n"
+            board=BOARD.replace(
+                "Closed with a receipt and an attributed review",
+                "Closure: `docs/evidence/GHOST-999_SECURITY_REVIEW.md`",
+            )
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertTrue(any("which does not exist" in error for error in errors), errors)
 
-    def test_citing_a_document_that_exists_passes(self):
+    def test_a_closed_ticket_citing_a_real_document_passes(self):
         with build(
-            board=BOARD + "\nSee `docs/evidence/AAA-001_SECURITY_REVIEW.md`.\n"
+            board=BOARD.replace(
+                "Closed with a receipt and an attributed review",
+                "Closure: `docs/evidence/AAA-001_SECURITY_REVIEW.md`",
+            )
+        ) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        self.assertEqual(errors, [])
+
+    def test_an_open_ticket_may_name_a_document_it_will_write(self):
+        """Planning work must not require a placeholder file first."""
+        with build(
+            board=BOARD.replace(
+                "| BBB-001 | PENDING | \u2014 | Not closed |",
+                "| BBB-001 | PENDING | \u2014 | Will produce "
+                "`docs/architecture/NEW_CONTRACT.md` |",
+            )
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])
