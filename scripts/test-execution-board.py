@@ -264,6 +264,23 @@ class RequiredEdgeTests(unittest.TestCase):
     def edges(self, board: str) -> list[str]:
         return VERIFY.required_edges(board)
 
+    def test_a_padded_row_still_carries_its_boundary(self) -> None:
+        """An exact-spacing parser drops the row, and with it the boundary."""
+        board = self.BOARD.replace(
+            "| AAA-001 | DONE | \u2014 |", "| AAA-001  |  DONE  |  \u2014  |"
+        )
+        self.assertTrue(
+            any("share a boundary" in error for error in self.edges(board)), board
+        )
+
+    def test_an_extensionless_file_is_a_boundary(self) -> None:
+        """`deploy/bin/mcloving-install` is a file; `bins/agent` is not."""
+        found = VERIFY.boundary_tokens(
+            "rewrites `deploy/bin/mcloving-install` and `bins/agent`", REPOSITORY
+        )
+        self.assertIn("deploy/bin/mcloving-install", found)
+        self.assertNotIn("bins/agent", found)
+
     BOARD = (
         "| Ticket | Status | Depends on | Objective and acceptance |\n"
         "|---|---|---|---|\n"
@@ -397,9 +414,14 @@ class RequiredEdgeHistoryTests(unittest.TestCase):
         self.assertEqual(VERIFY.required_edges(board), [])
         rows = {}
         for line in board.splitlines():
-            match = VERIFY.TICKET_ROW_FULL.match(line)
-            if match:
-                rows[match.group(1)] = VERIFY.TICKET_ID.findall(match.group(3))
+            if not line.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in line.split("|")[1:-1]]
+            if len(cells) < 4 or not VERIFY.TICKET_CELL_ID.match(cells[0]):
+                continue
+            if cells[1] not in VERIFY.TICKET_STATUSES:
+                continue
+            rows[cells[0]] = VERIFY.TICKET_ID.findall(cells[2])
         for successor, predecessor in self.PAIRS:
             self.assertIn(
                 predecessor,

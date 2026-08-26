@@ -47,10 +47,10 @@ OBSOLETE_README_MARKERS = (
 # four historical misses (the parents of c02ad71, abb32d7, 6145984, eb74330):
 # the shared-token rule alone catches two, the family rule alone catches three,
 # and together they catch all four.
-TICKET_ROW_FULL = re.compile(
-    r"^\| ([A-Z][A-Z0-9-]+) \| "
-    rf"({TICKET_STATUS_PATTERN}) \| ([^|]+) \|(.*)$"
-)
+# Rows are read by splitting cells. An exact-spacing regex omits a row padded
+# for alignment, and a row this function cannot see carries no boundary, so a
+# padded DONE row could share a file with an open ticket and pass.
+TICKET_CELL_ID = re.compile(r"^[A-Z][A-Z0-9-]+$")
 BACKTICKED = re.compile(r"`([^`]+)`")
 THREAT_ID = re.compile(r"\bTM-\d+\b")
 SHA_LIKE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -66,7 +66,7 @@ BOUNDARY_STOPLIST = {
 }
 
 
-def boundary_tokens(acceptance: str) -> set[str]:
+def boundary_tokens(acceptance: str, repository: Path | None = None) -> set[str]:
     """Named things a ticket's acceptance criteria commit it to."""
     found: set[str] = set()
     for token in BACKTICKED.findall(acceptance):
@@ -76,7 +76,13 @@ def boundary_tokens(acceptance: str) -> set[str]:
         if "/" in token:
             # Keep the whole path. Reducing to a basename made
             # `crates/a/config.rs` and `crates/b/config.rs` the same boundary.
-            if "." not in token.rsplit("/", 1)[-1]:
+            #
+            # An extension is a hint, not the test: `deploy/bin/mcloving-install`
+            # is a file and `bins/agent` is a component. Ask the repository
+            # first, and fall back to the extension for a path that does not
+            # exist yet -- a ticket may name a file it is about to add.
+            named_file = repository is not None and (repository / token).is_file()
+            if not named_file and "." not in token.rsplit("/", 1)[-1]:
                 continue
         if not token or token in BOUNDARY_STOPLIST:
             continue
@@ -85,15 +91,18 @@ def boundary_tokens(acceptance: str) -> set[str]:
     return found
 
 
-def required_edges(text: str) -> list[str]:
+def required_edges(text: str, repository: Path | None = None) -> list[str]:
     """Flag unordered ticket pairs that acceptance criteria say share a boundary."""
     rows: dict[str, tuple[str, list[str], str]] = {}
     for line in text.splitlines():
-        match = TICKET_ROW_FULL.match(line)
-        if match is None:
+        if not line.startswith("|"):
             continue
-        ticket, status, dependency_cell, acceptance = match.groups()
-        rows[ticket] = (status, TICKET_ID.findall(dependency_cell), acceptance)
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        if len(cells) < 4 or not TICKET_CELL_ID.match(cells[0]):
+            continue
+        if cells[1] not in TICKET_STATUSES:
+            continue
+        rows[cells[0]] = (cells[1], TICKET_ID.findall(cells[2]), cells[3])
 
     reachable: dict[str, set[str]] = {}
 
@@ -110,7 +119,9 @@ def required_edges(text: str) -> list[str]:
     allowed = {
         frozenset((a, b)): reason for a, b, reason in ALLOWED_PAIR.findall(text)
     }
-    tokens = {ticket: boundary_tokens(row[2]) for ticket, row in rows.items()}
+    tokens = {
+        ticket: boundary_tokens(row[2], repository) for ticket, row in rows.items()
+    }
 
     errors: list[str] = []
     names = sorted(rows)
@@ -392,7 +403,7 @@ def main() -> None:
     elif sorted(current_slots) != list(range(1, len(current_slots) + 1)):
         errors.append("current dispatch slots must be contiguous starting at 1")
 
-    errors += required_edges(text)
+    errors += required_edges(text, repository)
 
     if errors:
         fail(errors)

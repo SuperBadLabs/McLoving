@@ -186,9 +186,22 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_a_negative_heading_does_not_satisfy_it(self):
+        """Placement is not meaning: the same denial, in a heading."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n## TODO: AAA-001 has not been reviewed yet\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_a_negative_table_row_does_not_satisfy_it(self):
+        errors = self._with_threat_model(
+            "# Threat model\n\n| note | AAA-001 still outstanding |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
     def test_a_heading_attributes_the_review(self):
         with build(
-            threat_model="# Threat model\n\n## AAA-001 closure review\n\nReviewed.\n"
+            threat_model="# Threat model\n\n## AAA-001 threat-model closure review\n\nReviewed.\n"
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])

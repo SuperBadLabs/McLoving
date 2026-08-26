@@ -413,23 +413,54 @@ def receipt_defects(path: Path, ticket: str) -> list[str]:
     return defects
 
 
-def threat_model_attribution(text: str, ticket: str) -> str | None:
-    """Return where the threat model attributes a review to ``ticket``.
+OWNERSHIP_HEADING = "## Security verification ownership"
+REGISTER_ID = re.compile(r"TM-\d+")
 
-    Only a table row or a heading counts. A bare substring search was the old
-    test, and it credited any mention anywhere in 80 KB -- including a line
-    that says the review has NOT happened. Structural placement is what
-    separates an attributed record from a passing reference, and unlike a
-    blacklist of negative phrasings it cannot be talked around.
+
+def threat_model_attribution(text: str, ticket: str) -> str | None:
+    """Return where the threat model AFFIRMATIVELY attributes a review.
+
+    Three shapes count, and nothing else: a row in the verification-ownership
+    table whose ticket column names it, a row in the threat register, or a
+    closure-review heading the ticket leads.
+
+    Two weaker rules were tried and both could be satisfied by a sentence
+    saying the review had not happened. A bare substring search credited
+    `TODO: <TICKET> has not been reviewed yet`. Requiring merely a table row
+    or a heading credited `## TODO: <TICKET> has not been reviewed yet`, which
+    is the same claim in a structure. Placement is not meaning; what makes an
+    attribution affirmative is that the shape only exists to record a review.
     """
     pattern = re.compile(rf"\b{re.escape(ticket)}\b")
-    for number, line in enumerate(text.splitlines(), start=1):
-        if not pattern.search(line):
+    heading = re.compile(rf"^#{{2,3}} {re.escape(ticket)}\b.*\breview\b", re.I)
+
+    lines = text.splitlines()
+    ownership_start: int | None = None
+    ownership_end = len(lines)
+    for number, line in enumerate(lines):
+        if line.startswith(OWNERSHIP_HEADING):
+            ownership_start = number
+        elif ownership_start is not None and number > ownership_start:
+            if line.startswith("## "):
+                ownership_end = number
+                break
+
+    for number, line in enumerate(lines, start=1):
+        if heading.match(line):
+            return f"closure-review heading at line {number}"
+        if not line.startswith("|") or not pattern.search(line):
             continue
-        if line.startswith("|"):
-            return f"table row at line {number}"
-        if line.startswith("#"):
-            return f"heading at line {number}"
+        row = [cell.strip() for cell in line.split("|")[1:-1]]
+        if not row:
+            continue
+        within_ownership = (
+            ownership_start is not None
+            and ownership_start < number - 1 < ownership_end
+        )
+        if within_ownership and len(row) >= 2 and pattern.search(row[-1]):
+            return f"verification-ownership row at line {number}"
+        if REGISTER_ID.fullmatch(row[0]):
+            return f"threat-register row at line {number}"
     return None
 
 

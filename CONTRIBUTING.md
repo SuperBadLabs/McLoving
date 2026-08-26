@@ -26,14 +26,18 @@ runs on every pull request. Before a board row may read `DONE`:
   is not a receipt, and the gate rejects one, and
 * review `docs/threat-model/README.md` for every affected boundary and record
   the affected threats, mitigations, verification evidence, and residual risks
-  there under the ticket's name, **in a table row or a section heading**. An
+  there under the ticket's name, in one of the three shapes that exist to
+  record a review: a **verification-ownership row**, a **threat-register row**,
+  or a **closure-review heading the ticket leads**. An
   unchanged section still needs an explicit reviewed no-change receipt that
   names the ticket, because a boundary nothing mentions is indistinguishable
   from a boundary nobody looked at.
 
-Attribution has to be structural because a substring is not a review: a line
-reading `TODO: <TICKET> has not been reviewed yet` mentions the ticket exactly
-as well as a real review section does, and the gate used to accept it.
+Attribution has to be affirmative because neither a substring nor a shape is a
+review. A bare mention let `TODO: <TICKET> has not been reviewed yet` close a
+ticket; requiring merely a heading or a table row let
+`## TODO: <TICKET> has not been reviewed yet` do the same. Only a structure
+whose sole purpose is recording a review counts.
 
 A ticket that genuinely owes neither -- a docs-only or board-replan ticket --
 needs an exemption in that script naming the ticket and stating why. The
@@ -94,7 +98,9 @@ a well-formedness check could never have caught them. Tested retroactively
 against those four boards, this rule catches all four.
 
 Whole components are not boundaries: `bins/agent` is shared by everything that
-touches the agent, so a path token counts only when it names a file. If a pair
+touches the agent, so a path token counts only when it names a file -- asked of
+the repository, so extensionless executables like `deploy/bin/mcloving-install`
+count too. If a pair
 genuinely needs no edge, record the argument in the board rather than deleting
 the finding:
 
