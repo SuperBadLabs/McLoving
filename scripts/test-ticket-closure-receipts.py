@@ -199,6 +199,34 @@ class ThreatModelAttribution(unittest.TestCase):
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
+    def test_a_negative_threat_register_row_does_not_satisfy_it(self):
+        """A register row is only an attribution in the verification column."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | AAA-001 review has not happened | none | none | SEC | none |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_the_register_verification_column_attributes_the_review(self):
+        with build(
+            threat_model=(
+                "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+                "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+                "| TM-999 | a threat | a mitigation | receipt in AAA-001 | SEC | none |\n"
+            )
+        ) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        self.assertEqual(errors, [])
+
+    def test_a_residual_risk_mention_is_not_a_review(self):
+        errors = self._with_threat_model(
+            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | a threat | a mitigation | none | SEC | AAA-001 must still run |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
     def test_a_heading_attributes_the_review(self):
         with build(
             threat_model="# Threat model\n\n## AAA-001 threat-model closure review\n\nReviewed.\n"
@@ -368,8 +396,12 @@ class ThisRepository(unittest.TestCase):
         """A ratchet, not a pin: obligations may be paid, never accrued."""
         errors, debt, summary = check(REPOSITORY)
         self.assertEqual(errors, [], "\n".join(errors))
+        # 30 until register attribution was narrowed to the Required
+        # verification column, which exposed MIG-002, MIG-006 and MIG-007.
+        # Those gaps are older than the rule that found them. Lower this as
+        # debt is paid; raising it needs the same argument.
         self.assertLessEqual(
-            len(debt), 30, "closure debt may only shrink; lower this bound as it is paid"
+            len(debt), 33, "closure debt may only shrink; lower this bound as it is paid"
         )
         done = int(summary.split("done=")[1].split()[0])
         self.assertGreaterEqual(done, 80, "DONE tickets should not vanish from the board")

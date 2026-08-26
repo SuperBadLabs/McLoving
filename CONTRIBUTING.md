@@ -98,9 +98,11 @@ a well-formedness check could never have caught them. Tested retroactively
 against those four boards, this rule catches all four.
 
 Whole components are not boundaries: `bins/agent` is shared by everything that
-touches the agent, so a path token counts only when it names a file -- asked of
-the repository, so extensionless executables like `deploy/bin/mcloving-install`
-count too. If a pair
+touches the agent, so a path token counts only when it names a file. The
+repository decides when it knows the path; for one a ticket is about to create,
+a dotted basename or a nested path names a file while a two-segment path
+without a dot is a component root. Paths are normalised, so `scripts/x.py` and
+`./scripts/x.py` are one boundary. If a pair
 genuinely needs no edge, record the argument in the board rather than deleting
 the finding:
 

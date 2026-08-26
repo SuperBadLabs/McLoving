@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 import sys
 from datetime import date
@@ -58,9 +59,9 @@ ALLOWED_PAIR = re.compile(
     r"<!-- board-graph: allow ([A-Z][A-Z0-9-]+) ~ ([A-Z][A-Z0-9-]+) -- (.+?) -->"
 )
 # Whole components are too coarse to be boundaries: `bins/agent` is shared by
-# every ticket that touches the agent at all. A path token counts only when it
-# names a file, and is compared whole -- two different `config.rs` files under
-# different crates are two boundaries, not one.
+# every ticket that touches the agent at all. A path token is compared whole
+# and normalised -- two different `config.rs` files under different crates are
+# two boundaries, and `scripts/x.py` and `./scripts/x.py` are one.
 BOUNDARY_STOPLIST = {
     "main", "master", "README.md", "docs", "x86_64", "true", "false", "DONE",
 }
@@ -74,15 +75,27 @@ def boundary_tokens(acceptance: str, repository: Path | None = None) -> set[str]
         if len(token) < 3 or TICKET_ID.fullmatch(token) or SHA_LIKE.match(token):
             continue
         if "/" in token:
-            # Keep the whole path. Reducing to a basename made
-            # `crates/a/config.rs` and `crates/b/config.rs` the same boundary.
+            # Keep the whole path, normalised. Reducing to a basename made
+            # `crates/a/config.rs` and `crates/b/config.rs` one boundary, and
+            # leaving it raw made `scripts/x.py` and `./scripts/x.py` two.
+            token = posixpath.normpath(token)
             #
-            # An extension is a hint, not the test: `deploy/bin/mcloving-install`
-            # is a file and `bins/agent` is a component. Ask the repository
-            # first, and fall back to the extension for a path that does not
-            # exist yet -- a ticket may name a file it is about to add.
-            named_file = repository is not None and (repository / token).is_file()
-            if not named_file and "." not in token.rsplit("/", 1)[-1]:
+            # Directories are not boundaries; files are. An extension cannot
+            # tell them apart -- `deploy/bin/mcloving-install` is a 20 KB
+            # executable with no dot in it.
+            #
+            # Ask the repository when it knows the path. When it does not --
+            # a file the ticket is about to create -- fall back to shape: a
+            # dotted basename names a file, and so does a nested path, while
+            # a two-segment path with no dot is a component root such as
+            # `bins/agent` or `crates/domain`. The fallback must be textual,
+            # because the same board has to give the same answer whether or
+            # not the working tree is beside it.
+            resolved = None if repository is None else repository / token
+            if resolved is not None and resolved.exists():
+                if resolved.is_dir():
+                    continue
+            elif "." not in token.rsplit("/", 1)[-1] and token.count("/") < 2:
                 continue
         if not token or token in BOUNDARY_STOPLIST:
             continue

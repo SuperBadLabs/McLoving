@@ -262,7 +262,7 @@ class RequiredEdgeTests(unittest.TestCase):
         return VERIFY.boundary_tokens(acceptance)
 
     def edges(self, board: str) -> list[str]:
-        return VERIFY.required_edges(board)
+        return VERIFY.required_edges(board, REPOSITORY)
 
     def test_a_padded_row_still_carries_its_boundary(self) -> None:
         """An exact-spacing parser drops the row, and with it the boundary."""
@@ -271,6 +271,41 @@ class RequiredEdgeTests(unittest.TestCase):
         )
         self.assertTrue(
             any("share a boundary" in error for error in self.edges(board)), board
+        )
+
+    def test_equivalent_paths_are_one_boundary(self) -> None:
+        """`scripts/x.py` and `./scripts/x.py` name the same file."""
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| EEA-001 | DONE | \u2014 | Owns `scripts/helper.py` |\n"
+            "| EEB-001 | PENDING | \u2014 | Rewrites `./scripts/helper.py` |\n"
+        )
+        self.assertTrue(
+            any("share a boundary" in error for error in self.edges(board)), board
+        )
+
+    def test_a_file_that_does_not_exist_yet_is_a_boundary(self) -> None:
+        """Two tickets both creating `deploy/bin/new-helper` share it."""
+        found = VERIFY.boundary_tokens(
+            "creates `deploy/bin/new-helper`", REPOSITORY
+        )
+        self.assertIn("deploy/bin/new-helper", found)
+
+    def test_the_same_board_answers_the_same_without_a_working_tree(self) -> None:
+        """CI, a temp fixture and a bare checkout must agree.
+
+        An earlier version asked only the filesystem, so `bins/agent` was a
+        component beside the working tree and a boundary without it -- the
+        same board, two verdicts.
+        """
+        probe = (
+            "`bins/agent` `crates/domain` `deploy/bin/mcloving-install` "
+            "`deploy/bin/new-helper` `crates/a/config.rs` `scripts/helper.py`"
+        )
+        self.assertEqual(
+            VERIFY.boundary_tokens(probe, REPOSITORY),
+            VERIFY.boundary_tokens(probe, None),
         )
 
     def test_an_extensionless_file_is_a_boundary(self) -> None:
@@ -411,7 +446,7 @@ class RequiredEdgeHistoryTests(unittest.TestCase):
 
     def test_every_historically_missing_edge_is_declared_today(self) -> None:
         board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
-        self.assertEqual(VERIFY.required_edges(board), [])
+        self.assertEqual(VERIFY.required_edges(board, REPOSITORY), [])
         rows = {}
         for line in board.splitlines():
             if not line.startswith("|"):

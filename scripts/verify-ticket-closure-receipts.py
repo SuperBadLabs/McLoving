@@ -152,6 +152,17 @@ THREAT_MODEL_DEBT: dict[str, str] = {
 # is not an attributed review: it cannot be told apart from a passing
 # reference, and a sentence saying a ticket was NOT reviewed matches just as
 # well as one saying it was. Recorded as debt rather than credited.
+# Exposed by tightening register attribution to the verification column. All
+# three were credited by a mention in "Primary mitigations" or "Residual risk",
+# neither of which asserts that the ticket's evidence verified anything. The
+# gaps are older than the rule that found them: the ledger widened because the
+# predicate got stricter, not because closure discipline slipped.
+for _ticket in ("MIG-002", "MIG-006", "MIG-007"):
+    THREAT_MODEL_DEBT[_ticket] = (
+        "named in the threat register outside the Required verification column, "
+        "so no row asserts that this ticket's evidence verified the threat"
+    )
+
 THREAT_MODEL_DEBT["WIN-003"] = (
     "2026-08-04 d854c97; named only in prose at docs/threat-model/README.md, "
     "with no ownership-table row, register row, or closure-review heading"
@@ -198,7 +209,7 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
     "ADMIN-001", "CACHE-001", "CANARY-000", "CI-001", "CONSUMER-001",
     "EXEC-001", "EXEC-002", "EXEC-003", "EXEC-004", "HYG-001",
     "MIG-001", "MIG-003", "MIG-004", "MIG-005", "OUTBOX-001", "SCM-001",
-    "SECRET-001", "WIN-003"
+    "MIG-002", "MIG-006", "MIG-007", "SECRET-001", "WIN-003"
 })
 
 # The board's 15 tables in 4 row formats. Only the nine whose first header
@@ -415,6 +426,12 @@ def receipt_defects(path: Path, ticket: str) -> list[str]:
 
 OWNERSHIP_HEADING = "## Security verification ownership"
 REGISTER_ID = re.compile(r"TM-\d+")
+# `| ID | Scenario | Primary mitigations | Required verification | Owner |
+# Residual risk |`. Only "Required verification" asserts that a ticket's
+# evidence verifies the threat. "Residual risk" names tickets that must STILL
+# happen, which is the opposite claim, and mentions in "Scenario" or "Primary
+# mitigations" are description rather than attribution.
+REGISTER_VERIFICATION_COLUMN = 3
 
 
 def threat_model_attribution(text: str, ticket: str) -> str | None:
@@ -428,8 +445,10 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     saying the review had not happened. A bare substring search credited
     `TODO: <TICKET> has not been reviewed yet`. Requiring merely a table row
     or a heading credited `## TODO: <TICKET> has not been reviewed yet`, which
-    is the same claim in a structure. Placement is not meaning; what makes an
-    attribution affirmative is that the shape only exists to record a review.
+    is the same claim in a structure. Accepting any register row credited
+    `| TM-999 | <TICKET> review has not happened | ... |`. Placement is not
+    meaning; what makes an attribution affirmative is that the field exists
+    only to record a review.
     """
     pattern = re.compile(rf"\b{re.escape(ticket)}\b")
     heading = re.compile(rf"^#{{2,3}} {re.escape(ticket)}\b.*\breview\b", re.I)
@@ -460,7 +479,11 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
         if within_ownership and len(row) >= 2 and pattern.search(row[-1]):
             return f"verification-ownership row at line {number}"
         if REGISTER_ID.fullmatch(row[0]):
-            return f"threat-register row at line {number}"
+            if len(row) > REGISTER_VERIFICATION_COLUMN and pattern.search(
+                row[REGISTER_VERIFICATION_COLUMN]
+            ):
+                return f"threat-register verification column at line {number}"
+            continue
     return None
 
 
