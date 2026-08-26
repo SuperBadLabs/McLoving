@@ -199,12 +199,7 @@ deploy_notice() {
 # caller's umask decides those.
 require_secure_ancestors() {
   local home_dir="${1%/}" ancestor mode_owner mode owner home_owner offending chain
-  local resolved_home_dir sticky_traversal_only
   shift
-  # The resolved home, needed to tell a directory the lane merely TRAVERSES
-  # from one whose CONTENTS it consumes. See the sticky exemption below.
-  resolved_home_dir="$(readlink -f -- "${home_dir}")" \
-    || deploy_fail "deployment home ${home_dir} does not resolve"
   chain="$(deployment_ancestor_chain "${home_dir}" "$@")" \
     || deploy_fail "cannot derive the deployment ancestor chain"
   home_owner="$(stat -Lc '%u' "${home_dir}")" \
@@ -224,42 +219,7 @@ require_secure_ancestors() {
       || deploy_fail "cannot stat deployment ancestor ${ancestor}"
     mode="${mode_owner%% *}"
     owner="${mode_owner##* }"
-    # THE STICKY EXEMPTION, narrowly scoped -- read it together with the walk
-    # above the home added below; neither is correct alone, and the exemption
-    # is only sound for the traversal case.
-    #
-    # `& 8#022` on its own calls /tmp and /var/tmp (1777) writable, and they
-    # are. For a directory the lane merely TRAVERSES on the way to the home,
-    # the question is not "who may write here" but "who may move my subtree
-    # aside", and S_ISVTX answers exactly that: in a sticky directory only
-    # root, the directory's owner, and the entry's own owner may rename or
-    # unlink a child. Measured with a genuinely foreign uid: mv under a 1777
-    # parent returns EPERM, under an 0777 parent it succeeds. The child that
-    # sits in the sticky directory is itself judged by the ownership rule
-    # below, so (sticky parent, root-or-home-owned child) is a safe pair.
-    #
-    # IT IS NOT SAFE FOR A DIRECTORY WHOSE CONTENTS THE LANE CONSUMES, and an
-    # earlier revision of this rule got that wrong. S_ISVTX restricts renaming
-    # and unlinking OTHER people's entries; it does not restrict CREATING a
-    # new one. Measured: a foreign uid created 10-attacker.conf inside a 1777
-    # directory. For this lane that is the entire attack, because drop-ins are
-    # MERGED -- an attacker never has to replace anything, only add a
-    # previously absent service.d or unit-specific .conf, which systemd then
-    # merges into the unit. A managed root at 1777 must be refused.
-    #
-    # So the exemption applies to STRICT ANCESTORS OF THE HOME only. Those are
-    # pure traversal: the deployment owns nothing in them but the one child on
-    # the path, which is separately owner-checked. The home itself, anything
-    # inside it, and any root outside it get no exemption -- their contents
-    # are deployment state. That is also exactly what the suite needs and no
-    # more: it installs into mktemp trees under TMPDIR, so a home under /tmp
-    # carries 1777 strictly above it and nowhere else.
-    sticky_traversal_only=0
-    if [[ "${resolved_home_dir}" == "${ancestor%/}/"* ]]; then
-      sticky_traversal_only=1
-    fi
-    if (( (8#${mode} & 8#022) != 0 )) \
-      && { (( (8#${mode} & 8#1000) == 0 )) || (( sticky_traversal_only == 0 )); }; then
+    if (( (8#${mode} & 8#022) != 0 )); then
       offending+="${ancestor} (mode ${mode}) "
     fi
     # Ownership is judged independently of mode: a chain component owned by
@@ -2244,16 +2204,12 @@ deployment_unit_declared_roots() {
 # of every directory encountered in any traversal.
 #
 # Stop points: a chain inside the (resolved) home stops at the home
-# directory, and the HOME'S OWN chain is then walked to "/" separately
-# below, so that stop is now a de-duplication rather than a boundary. A
-# chain that leaves the home has no anchor and is walked to "/" inclusive.
-# The sticky world-writable directories those walks reach -- /tmp, /var/tmp
-# -- are judged by require_secure_ancestors, which reads S_ISVTX; see the
-# sticky exemption there for why that is the right judgement rather than a
-# relaxation. The earlier text here argued the sticky refusal was deliberate
-# because "the sticky bit only narrows who may rename"; narrowing rename to
-# root, the directory's owner and the entry's owner is precisely the
-# guarantee this rule needs, and all three are judged by the ownership rule. A looping or dangling
+# directory, whose own parents are the platform's -- the boundary the
+# installer has always drawn. A chain that leaves the home has no such
+# anchor and is walked to "/" inclusive. That deliberately refuses a
+# deployment routed through a sticky world-writable directory such as /tmp:
+# the sticky bit only narrows who may rename, and any attacker-owned
+# component inside such a chain defeats it entirely. A looping or dangling
 # link on the way to a root is refused by name rather than resolved around,
 # with resolution bounded like the kernel bounds ELOOP.
 deployment_ancestor_chain() {
@@ -2321,15 +2277,6 @@ def resolve_recording(origin, path, budget):
                 f"deployment path {origin} exceeds the symlink resolution bound at {candidate}"
             )
         budget[0] -= 1
-        # The directory HOLDING this link must be judged, not only the chains
-        # of the origin and of the final target. Resolving component by
-        # component walks through intermediate paths that belong to neither:
-        # with `svc -> /x/intermediate/home` and `intermediate -> /y/real`,
-        # the origin's chain covers svc's parents and the target's chain
-        # covers /y, while /x -- whose writability lets an attacker repoint
-        # `intermediate` and substitute the whole tree -- was covered by
-        # neither and went unjudged.
-        ascend(candidate, "/")
         target = os.readlink(candidate)
         if not os.path.isabs(target):
             target = os.path.join(os.path.dirname(candidate), target)
@@ -2341,32 +2288,6 @@ def resolve_recording(origin, path, budget):
         chain_of(target_resolved)
         resolved = target_resolved
     return resolved
-
-
-# The home's OWN ancestors, lexically and through its resolved spelling,
-# walked to "/" like any chain that leaves the home. The boundary used to be
-# drawn at the home -- "its parents are the platform's" -- and that left the
-# single directory whose substitution replaces EVERY unit, contract, key and
-# binary at once completely unjudged: given a foreign-owned or
-# writable-without-sticky parent, another local user renames the whole home
-# aside and puts their own tree in its place.
-#
-# That is not a hypothetical consequence. Every ownership rule in this
-# library anchors its expected uid on `stat` of the home, so a substituted
-# home becomes its OWN trust anchor and its author's units pass the
-# trust-input rule with an arbitrary ExecStart -- measured end to end with a
-# foreign uid. It is also the exact attack this library's own refusal text
-# has always described.
-#
-# The home is resolved COMPONENT BY COMPONENT through the same machinery the
-# roots use, not treated as two endpoints. Ascending only the lexical spelling
-# and the final resolved one misses every intermediate a multi-link home
-# crosses -- `svc -> /x/intermediate/home` with `intermediate -> /y/real`
-# leaves /x unjudged, and a 0777 /x is the same wholesale substitution reached
-# by a second link. resolve_recording joins each intermediate target's chain
-# and now each link's own directory too; ascend() de-duplicates into `found`.
-ascend(home, "/")
-ascend(resolve_recording(home, home, [MAX_LINK_TRAVERSALS]), "/")
 
 
 for root in roots:

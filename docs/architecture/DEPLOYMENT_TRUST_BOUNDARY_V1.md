@@ -86,7 +86,7 @@ availability of the transition itself.
 
 > Every path a deployment transition or service start will read or execute is,
 > at validation time, unwritable by any uid other than root or the service
-> account, along its entire resolved ancestor chain to `/`; and every path that
+> account, along its resolved ancestor chain **up to the deployment home**; and every path that
 > does not yet exist sits in a directory carrying that same property, so it
 > cannot be created either. Where the property cannot be established, the
 > transition refuses; it never proceeds on an unproven path.
@@ -94,6 +94,19 @@ availability of the transition itself.
 Every gate in the lane is a case of that one sentence. Stating it once is the
 substantive change this record makes — it was previously derived, separately, in
 dozens of places.
+
+**The stop at the home is a KNOWN GAP, not a boundary.** `deployment_ancestor_chain`
+walks no directory above the deployment home, and every ownership rule in the
+library derives its expected uid from `stat` of the home — so a home sitting under
+a foreign-owned or writable-without-sticky parent can be renamed aside and replaced,
+and the substituted home becomes its own trust anchor. Reproduced with a genuinely
+foreign uid. **Moderate**: a stock `/home` install under root-owned 0755 is not
+exposed; shared-group deploy roots, 0777 container volume roots and `--home` into a
+scratch tree are. Secrets stay out of reach (`mcloving-env-guard` pins to `$EUID`).
+A fix exists on `codex/deploy-004-ancestor-above-home` and is tracked as
+`DEPLOY-004`; it was split out of this change because it produced five P1 review
+findings across two rounds without converging, and the correction-round cap applies
+to it exactly as it applied to `DEPLOY-001`.
 
 *What the lane does NOT guarantee against adversary A.*
 
@@ -264,8 +277,8 @@ both namespaces unprivileged on this host, because it ships a profile containing
 The lane currently discharges eight obligations on every transition. Attributed
 surface in `deploy/bin/mcloving-deploy-lib.sh` (4,278 lines at this head, 4,199 when the
 attribution below was taken) and gates in `deploy/test-deployment.sh` (600 named
-refusal sites — `rg -c '^\s*exit 1' deploy/test-deployment.sh` = 608 at this
-head, the three added by this branch's own regression gates included. An earlier
+refusal sites — `rg -c '^\s*exit 1' deploy/test-deployment.sh` = 600 at this
+head. An earlier
 figure of "600 in 230 blocks" circulated in working notes: 600 was sound for its
 head, but the block count reproduced under no counting rule and is withdrawn
 rather than repeated):
@@ -380,7 +393,7 @@ it harder.**
    Eleven other check-then-use windows carry a stated bound; this one does not.
 3. **The suite specifies the model, not the ask.** Every ask is gated on the
    manager's `HOME` equalling the target home, and the suite installs into
-   `mktemp -d` trees — so **20 of 608 gates (3.3%)** exercise a real manager
+   `mktemp -d` trees — so **20 of 600 gates (3.3%)** exercise a real manager
    query, each behind a skip-with-notice guard. Acceptance criterion 5 leans on
    the suite as the lane's specification; on this evidence it currently specifies
    the fallback. **Making the suite able to exercise the ask path is the first

@@ -106,7 +106,7 @@ deferral.
 - a documented install/upgrade/rollback runbook in
   `docs/operations/DEPLOYMENT_V1.md`;
 - `deploy/test-deployment.sh`, which exercises install, health, upgrade,
-  rollback and digest re-read without root — 608 named refusal sites
+  rollback and digest re-read without root — 600 named refusal sites
   (`rg -c '^\s*exit 1' deploy/test-deployment.sh` at this head) — and now runs as
   the `Deployment lane` job on every pull request. **It drives install, upgrade
   and rollback with `--no-systemd`, and starts postgres by deriving the command
