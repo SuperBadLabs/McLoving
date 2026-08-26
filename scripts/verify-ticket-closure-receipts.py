@@ -152,6 +152,53 @@ THREAT_MODEL_DEBT: dict[str, str] = {
 }
 
 
+# WIN-003 is named in the threat model only in running prose. A prose mention
+# is not an attributed review: it cannot be told apart from a passing
+# reference, and a sentence saying a ticket was NOT reviewed matches just as
+# well as one saying it was. Recorded as debt rather than credited.
+THREAT_MODEL_DEBT["WIN-003"] = (
+    "2026-08-04 d854c97; named only in prose at docs/threat-model/README.md, "
+    "with no ownership-table row, register row, or closure-review heading"
+)
+
+# Both ledgers are closed sets that may only shrink. The caps below are the
+# mechanism behind that sentence: before them, "do not add to this ledger to
+# make a build pass" was prose enforced by nobody, and either dict was a
+# self-serve waiver. Lower a cap when you pay debt down; raising one is a
+# deliberate, reviewable admission that closure discipline went backwards.
+MAXIMUM_RECEIPT_EXEMPT = 50
+MAXIMUM_THREAT_MODEL_EXEMPT = 24
+MAXIMUM_RECEIPT_DEBT = 12
+MAXIMUM_THREAT_MODEL_DEBT = 18
+
+# The board's 15 tables in 4 row formats. Only the nine whose first header
+# cell is `Ticket` carry authoritative status; the lane, batch and dispatch
+# tables are redundant views and are cross-checked against them.
+TICKET_TABLE_HEADER = "Ticket"
+LANE_TABLE_HEADER = "Lane"
+BATCH_TABLE_HEADER = "Batch"
+DISPATCH_TABLE_HEADER = "Slot"
+
+# Lane tables overload their third column: it holds a status for closed lanes
+# and an execution class for open ones. A class is not an unknown status.
+EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
+
+# A floor under the parse. Every silent-skip failure on this project looked
+# like a smaller number that nobody was watching, so the count is pinned:
+# format drift that drops rows fails the gate instead of shrinking the
+# denominator. Raise this when tickets are added.
+MINIMUM_TICKET_ROWS = 102
+
+# A receipt must be able to carry a review. The smallest real receipt on the
+# board is 2,862 bytes; every one names the ticket it closes and is headed
+# markdown. `touch docs/evidence/<TICKET>_SECURITY_REVIEW.md` must not close a
+# ticket, so an empty or stub file is a violation, not a receipt.
+RECEIPT_MINIMUM_BYTES = 1000
+
+TABLE_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
+DOC_PATH = re.compile(r"`(docs/[A-Za-z0-9_./-]+)`")
+
+
 def read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -160,25 +207,147 @@ def read(path: Path) -> str:
         raise SystemExit(1)
 
 
+def cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.split("|")[1:-1]]
+
+
+def tables(text: str) -> list[tuple[list[str], list[tuple[int, list[str]]]]]:
+    """Split the board into (header, rows) pairs, one per markdown table.
+
+    A table is a `|`-row whose successor is a separator. The dispatch table's
+    separator is right-aligned (`|---:|`), so alignment colons are allowed.
+    """
+    lines = text.splitlines()
+    found: list[tuple[list[str], list[tuple[int, list[str]]]]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if (
+            line.startswith("|")
+            and index + 1 < len(lines)
+            and TABLE_SEPARATOR.match(lines[index + 1])
+        ):
+            header = cells(line)
+            rows: list[tuple[int, list[str]]] = []
+            cursor = index + 2
+            while cursor < len(lines) and lines[cursor].startswith("|"):
+                rows.append((cursor + 1, cells(lines[cursor])))
+                cursor += 1
+            found.append((header, rows))
+            index = cursor
+            continue
+        index += 1
+    return found
+
+
 def board_statuses(text: str) -> tuple[dict[str, str], list[str]]:
+    """Read every authoritative ticket row, and refuse to skip one silently.
+
+    The predecessor of this function matched rows with a regex and `continue`d
+    past anything that did not match, so a row with aligned padding or a
+    title-case status vanished from the denominator while the gate still
+    printed `-ok`. Here a row inside a ticket table that cannot be read is an
+    error, because an unreadable row and an absent obligation are the same
+    thing from outside.
+    """
     statuses: dict[str, str] = {}
     errors: list[str] = []
-    for line in text.splitlines():
-        match = TICKET_ROW.match(line)
-        if match is None:
+    rows_seen = 0
+    for header, rows in tables(text):
+        if not header or header[0] != TICKET_TABLE_HEADER:
             continue
-        ticket, status, _ = match.groups()
-        if ticket in statuses and statuses[ticket] != status:
-            errors.append(f"ticket {ticket} is declared with conflicting statuses")
-            continue
-        statuses[ticket] = status
+        for number, row in rows:
+            rows_seen += 1
+            if len(row) < 2:
+                errors.append(f"line {number}: ticket row has fewer than two cells")
+                continue
+            ticket, status = row[0], row[1]
+            if not re.fullmatch(r"[A-Z][A-Z0-9-]+", ticket):
+                errors.append(
+                    f"line {number}: {ticket!r} is not a ticket id, but it sits in "
+                    "the first column of a ticket table"
+                )
+                continue
+            if status not in TICKET_STATUSES:
+                errors.append(
+                    f"line {number}: {ticket} has status {status!r}, which is not "
+                    f"one of {', '.join(TICKET_STATUSES)}"
+                )
+                continue
+            if ticket in statuses and statuses[ticket] != status:
+                errors.append(f"ticket {ticket} is declared with conflicting statuses")
+                continue
+            statuses[ticket] = status
     if not statuses:
         errors.append("no ticket rows were found")
+    elif rows_seen < MINIMUM_TICKET_ROWS:
+        errors.append(
+            f"only {rows_seen} ticket rows parsed, below the pinned floor of "
+            f"{MINIMUM_TICKET_ROWS}; a row the gate cannot see carries no "
+            "obligation, so shrinking the denominator fails rather than passes"
+        )
     return statuses, errors
 
 
-def receipt_for(repository: Path, ticket: str) -> Path | None:
-    """Return the receipt backing ``ticket``, or None if it carries none."""
+def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
+    """Hold the lane, batch and dispatch tables to the authoritative rows.
+
+    These three formats restate ticket status in a different shape. Nothing
+    compared them, so a lane could read DONE while its ticket row did not.
+    """
+    errors: list[str] = []
+    for header, rows in tables(text):
+        if not header or header[0] not in (
+            LANE_TABLE_HEADER,
+            BATCH_TABLE_HEADER,
+            DISPATCH_TABLE_HEADER,
+        ):
+            continue
+        view = header[0]
+        for number, row in rows:
+            if len(row) < 3:
+                continue
+            claimed = row[2]
+            for ticket in re.findall(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?", row[1]):
+                if ticket not in statuses:
+                    errors.append(
+                        f"line {number}: the {view} table names {ticket}, which has "
+                        "no row in any ticket table"
+                    )
+                elif claimed in TICKET_STATUSES and statuses[ticket] != claimed:
+                    errors.append(
+                        f"line {number}: the {view} table reads {ticket} as "
+                        f"{claimed}, but its ticket row reads {statuses[ticket]}"
+                    )
+                elif claimed not in TICKET_STATUSES and claimed not in EXECUTION_CLASSES:
+                    errors.append(
+                        f"line {number}: the {view} table gives {ticket} a third "
+                        f"column of {claimed!r}, which is neither a status nor an "
+                        "execution class"
+                    )
+    return errors
+
+
+def cited_documents(repository: Path, text: str) -> list[str]:
+    """Every `docs/...` path the board cites must exist.
+
+    A closure that cites a receipt nobody wrote reads exactly like one that
+    cites a receipt somebody did. Scoped to `docs/` deliberately: rows also
+    cite code paths they RETIRED, such as HYG-001 naming `crates/state-machine`
+    after deleting it, and those are history rather than broken links.
+    """
+    errors: list[str] = []
+    for path in sorted(set(DOC_PATH.findall(text))):
+        if not (repository / path).exists():
+            errors.append(
+                f"the board cites {path}, which does not exist; write it, or stop "
+                "citing it as evidence"
+            )
+    return errors
+
+
+def receipt_path(repository: Path, ticket: str) -> Path | None:
+    """Return where ``ticket``'s receipt lives, whether or not it is adequate."""
     conventional = repository / RECEIPT_DIRECTORY / f"{ticket}{RECEIPT_SUFFIX}"
     if conventional.is_file():
         return conventional
@@ -188,21 +357,77 @@ def receipt_for(repository: Path, ticket: str) -> Path | None:
     return None
 
 
+def receipt_defects(path: Path, ticket: str) -> list[str]:
+    """Reject a file that occupies the receipt's name without doing its work.
+
+    Existence was the whole test before this. An empty file passed, so the
+    obligation could be discharged with `touch` -- the gate against closing a
+    ticket on nothing was itself satisfiable by nothing.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return [f"cannot be read: {error}"]
+    defects: list[str] = []
+    size = len(text.encode("utf-8"))
+    if size < RECEIPT_MINIMUM_BYTES:
+        defects.append(
+            f"is {size} bytes; a receipt records what was reviewed, what was "
+            f"found, and what residual risk was accepted, which does not fit in "
+            f"under {RECEIPT_MINIMUM_BYTES}"
+        )
+    if not re.search(rf"\b{re.escape(ticket)}\b", text):
+        defects.append(f"never names {ticket}, so nothing ties it to the closure")
+    if not any(line.startswith("#") for line in text.splitlines()):
+        defects.append("has no heading, so it is not a structured review document")
+    return defects
+
+
+def threat_model_attribution(text: str, ticket: str) -> str | None:
+    """Return where the threat model attributes a review to ``ticket``.
+
+    Only a table row or a heading counts. A bare substring search was the old
+    test, and it credited any mention anywhere in 80 KB -- including a line
+    that says the review has NOT happened. Structural placement is what
+    separates an attributed record from a passing reference, and unlike a
+    blacklist of negative phrasings it cannot be talked around.
+    """
+    pattern = re.compile(rf"\b{re.escape(ticket)}\b")
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not pattern.search(line):
+            continue
+        if line.startswith("|"):
+            return f"table row at line {number}"
+        if line.startswith("#"):
+            return f"heading at line {number}"
+    return None
+
+
 def check_ledger(
     obligation: str,
     exempt: dict[str, str],
     debt: dict[str, str],
     statuses: dict[str, str],
     satisfied: set[str],
+    exempt_cap: int,
+    debt_cap: int,
 ) -> list[str]:
     """Reject stale or misdirected ledger entries so neither ledger drifts."""
     errors: list[str] = []
-    for name, ledger in (("exemption", exempt), ("debt", debt)):
+    for name, ledger, cap in (
+        ("exemption", exempt, exempt_cap),
+        ("debt", debt, debt_cap),
+    ):
+        if len(ledger) > cap:
+            errors.append(
+                f"the {obligation} {name} ledger holds {len(ledger)} entries but is "
+                f"capped at {cap}; it may only shrink. Write the missing artifact "
+                "instead of recording another admission, or raise the cap in its "
+                "own commit and say why closure discipline went backwards"
+            )
         for ticket in sorted(ledger):
             if ticket not in statuses:
-                errors.append(
-                    f"{obligation} {name} names unknown ticket {ticket}"
-                )
+                errors.append(f"{obligation} {name} names unknown ticket {ticket}")
             elif statuses[ticket] != "DONE":
                 errors.append(
                     f"{obligation} {name} names {ticket}, which is "
@@ -221,40 +446,59 @@ def check_ledger(
     return errors
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="fail on recorded closure debt as well as on new violations",
-    )
-    arguments = parser.parse_args()
-
-    repository = Path(__file__).resolve().parents[1]
-    statuses, errors = board_statuses(read(repository / "docs" / "EXECUTION_BOARD.md"))
+def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
+    """Return (errors, debt, summary) for ``repository``."""
+    board = read(repository / "docs" / "EXECUTION_BOARD.md")
+    statuses, errors = board_statuses(board)
     if not statuses:
-        for message in errors:
-            print(f"closure-receipts error: {message}", file=sys.stderr)
-        raise SystemExit(1)
+        return errors, [], ""
 
     threat_model = read(repository / THREAT_MODEL)
     done = sorted(ticket for ticket, status in statuses.items() if status == "DONE")
 
-    receipted = {ticket for ticket in done if receipt_for(repository, ticket)}
+    errors += cross_check_views(board, statuses)
+    errors += cited_documents(repository, board)
+
+    receipted: set[str] = set()
+    for ticket in done:
+        path = receipt_path(repository, ticket)
+        if path is None:
+            continue
+        defects = receipt_defects(path, ticket)
+        if defects:
+            for defect in defects:
+                errors.append(
+                    f"{ticket}'s receipt {path.relative_to(repository)} {defect}"
+                )
+            continue
+        receipted.add(ticket)
+
     reviewed = {
         ticket
         for ticket in done
-        if re.search(rf"\b{re.escape(ticket)}\b", threat_model)
+        if threat_model_attribution(threat_model, ticket) is not None
     }
 
     errors += check_ledger(
-        "receipt", RECEIPT_EXEMPT, RECEIPT_DEBT, statuses, receipted
+        "receipt",
+        RECEIPT_EXEMPT,
+        RECEIPT_DEBT,
+        statuses,
+        receipted,
+        MAXIMUM_RECEIPT_EXEMPT,
+        MAXIMUM_RECEIPT_DEBT,
     )
     errors += check_ledger(
-        "threat-model", THREAT_MODEL_EXEMPT, THREAT_MODEL_DEBT, statuses, reviewed
+        "threat-model",
+        THREAT_MODEL_EXEMPT,
+        THREAT_MODEL_DEBT,
+        statuses,
+        reviewed,
+        MAXIMUM_THREAT_MODEL_EXEMPT,
+        MAXIMUM_THREAT_MODEL_DEBT,
     )
 
-    outstanding: list[str] = []
+    debt: list[str] = []
     for ticket in done:
         if ticket not in receipted and ticket not in RECEIPT_EXEMPT:
             message = (
@@ -262,16 +506,19 @@ def main() -> None:
                 f"{RECEIPT_DIRECTORY}/{ticket}{RECEIPT_SUFFIX}"
             )
             if ticket in RECEIPT_DEBT:
-                outstanding.append(f"{message} [{RECEIPT_DEBT[ticket]}]")
+                debt.append(f"{message} [{RECEIPT_DEBT[ticket]}]")
             else:
                 errors.append(
                     f"{message}; write the receipt, or add an exemption naming "
                     "the ticket and the reason it needs none"
                 )
         if ticket not in reviewed and ticket not in THREAT_MODEL_EXEMPT:
-            message = f"{ticket} is DONE but is named nowhere in {THREAT_MODEL}"
+            message = (
+                f"{ticket} is DONE but {THREAT_MODEL} attributes no review to it "
+                "in a table row or a heading"
+            )
             if ticket in THREAT_MODEL_DEBT:
-                outstanding.append(f"{message} [{THREAT_MODEL_DEBT[ticket]}]")
+                debt.append(f"{message} [{THREAT_MODEL_DEBT[ticket]}]")
             else:
                 errors.append(
                     f"{message}; the Working rule requires the affected "
@@ -280,24 +527,43 @@ def main() -> None:
                     "explicit reviewed no-change receipt"
                 )
 
-    for message in outstanding:
-        print(f"closure-receipts debt: {message}", file=sys.stderr)
+    if strict:
+        errors += [f"unpaid closure debt: {message}" for message in debt]
 
-    if arguments.strict:
-        errors += [f"unpaid closure debt: {message}" for message in outstanding]
-
-    if errors:
-        for message in errors:
-            print(f"closure-receipts error: {message}", file=sys.stderr)
-        raise SystemExit(1)
-
-    print(
+    summary = (
         "closure-receipts-ok "
         f"done={len(done)} receipted={len(receipted)} reviewed={len(reviewed)} "
         f"receipt_exempt={len(RECEIPT_EXEMPT)} "
         f"threat_model_exempt={len(THREAT_MODEL_EXEMPT)} "
-        f"debt={len(outstanding)}"
+        f"debt={len(debt)}"
     )
+    return errors, debt, summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail on recorded closure debt as well as on new violations",
+    )
+    parser.add_argument(
+        "--repository",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+        help="repository root to check (defaults to this script's repository)",
+    )
+    arguments = parser.parse_args()
+
+    errors, debt, summary = verify(arguments.repository, arguments.strict)
+
+    for message in debt:
+        print(f"closure-receipts debt: {message}", file=sys.stderr)
+    if errors:
+        for message in errors:
+            print(f"closure-receipts error: {message}", file=sys.stderr)
+        raise SystemExit(1)
+    print(summary)
 
 
 if __name__ == "__main__":

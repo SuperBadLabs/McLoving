@@ -21,12 +21,19 @@ Two artifacts are checked mechanically by
 `scripts/verify-ticket-closure-receipts.py`, which the Architecture records job
 runs on every pull request. Before a board row may read `DONE`:
 
-* write `docs/evidence/<TICKET>_SECURITY_REVIEW.md`, and
+* write `docs/evidence/<TICKET>_SECURITY_REVIEW.md`. It must name the ticket
+  it closes and be a real headed document -- an empty file at the right path
+  is not a receipt, and the gate rejects one, and
 * review `docs/threat-model/README.md` for every affected boundary and record
   the affected threats, mitigations, verification evidence, and residual risks
-  there under the ticket's name. An unchanged section still needs an explicit
-  reviewed no-change receipt that names the ticket, because a boundary nothing
-  mentions is indistinguishable from a boundary nobody looked at.
+  there under the ticket's name, **in a table row or a section heading**. An
+  unchanged section still needs an explicit reviewed no-change receipt that
+  names the ticket, because a boundary nothing mentions is indistinguishable
+  from a boundary nobody looked at.
+
+Attribution has to be structural because a substring is not a review: a line
+reading `TODO: <TICKET> has not been reviewed yet` mentions the ticket exactly
+as well as a real review section does, and the gate used to accept it.
 
 A ticket that genuinely owes neither -- a docs-only or board-replan ticket --
 needs an exemption in that script naming the ticket and stating why. The
@@ -36,6 +43,12 @@ shrink. Do not add to it to make a build pass, and do not turn a real gap into
 an exemption: both hide exactly what this gate exists to surface. Run
 `scripts/verify-ticket-closure-receipts.py --strict` to see the debt as
 failures.
+
+Both ledgers are capped at their current size, so "may only shrink" is now the
+gate's behaviour rather than this paragraph's request. Pay an obligation down
+and lower the cap in the same commit. Raising one is possible and is meant to
+be conspicuous: it is a recorded admission that closure discipline moved
+backwards, and it belongs in its own commit that says why.
 
 ## Source-acquirer tests on hosts that restrict unprivileged user namespaces
 
