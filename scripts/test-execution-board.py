@@ -166,9 +166,9 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
             self.assertNotIn(
                 synthetic_dependency,
                 {
-                    match.group(1)
+                    parsed[0]
                     for line in text.splitlines()
-                    if (match := VERIFY.TICKET_ROW.match(line)) is not None
+                    if (parsed := VERIFY.ticket_row(line)) is not None
                 },
             )
             current = next(
@@ -182,23 +182,22 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
             self.assertIsNotNone(current)
             assert current is not None
             _, current_ticket, _ = current.groups()
-            ticket_row = next(
+            old = next(
                 (
-                    match
+                    line
                     for line in text.splitlines()
-                    if (match := VERIFY.TICKET_ROW.match(line)) is not None
-                    and match.group(1) == current_ticket
+                    if (parsed := VERIFY.ticket_row(line)) is not None
+                    and parsed[0] == current_ticket
                 ),
                 None,
             )
-            self.assertIsNotNone(ticket_row)
-            assert ticket_row is not None
-            _, _, dependency_cell = ticket_row.groups()
+            self.assertIsNotNone(old)
+            assert old is not None
+            dependency_cell = VERIFY.row_cells(old)[2]
             dependencies = dependency_cell.strip()
             replacement = synthetic_dependency
             if dependencies != "-":
                 replacement = f"{dependencies}, {synthetic_dependency}"
-            old = ticket_row.group(0)
             new = old.replace(
                 f"| {dependency_cell} |",
                 f"| {replacement} |",
@@ -335,6 +334,18 @@ class RequiredEdgeTests(unittest.TestCase):
         )
         self.assertEqual(self.edges(board), [])
 
+    def test_an_escaped_pipe_does_not_truncate_the_acceptance_cell(self) -> None:
+        """`\\|` is content; splitting on it drops every boundary after it."""
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| HHA-001 | DONE | \u2014 | Matches `a\\|b` then rewrites `shared.sh` |\n"
+            "| HHB-001 | PENDING | \u2014 | Also rewrites `shared.sh` |\n"
+        )
+        self.assertTrue(
+            any("share a boundary" in error for error in self.edges(board)), board
+        )
+
     def test_an_unbackticked_real_path_fails(self) -> None:
         board = (
             "| Ticket | Status | Depends on | Objective and acceptance |\n"
@@ -443,6 +454,17 @@ class RequiredEdgeWiringTests(ExecutionBoardVerifierTests):
     deleting its call site left every test green -- the check was present,
     unwired, and untested for being wired.
     """
+
+    def test_a_padded_row_has_its_dependencies_validated(self) -> None:
+        """A dropped row is not merely unparsed; it is entirely unchecked."""
+        def pad(text: str) -> str:
+            return text.replace(
+                "| CASE-002 | PENDING |", "| CASE-002  |  PENDING  |", 1
+            ).replace("| CASE-002  |  PENDING  | CASE-001", "| CASE-002  |  PENDING  | GHOST-404", 1)
+
+        code, _stdout, stderr = self.run_verifier(board_transform=pad)
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("GHOST-404", stderr)
 
     def test_an_undeclared_shared_boundary_fails_the_verifier(self) -> None:
         def add_pair(board: str) -> str:

@@ -12,10 +12,6 @@ from pathlib import Path
 
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
 TICKET_STATUS_PATTERN = "|".join(TICKET_STATUSES)
-TICKET_ROW = re.compile(
-    r"^\| ([A-Z][A-Z0-9-]+) \| "
-    rf"({TICKET_STATUS_PATTERN}) \| ([^|]+) \|"
-)
 TICKET_ID = re.compile(r"[A-Z][A-Z0-9-]+")
 EXECUTION_CLASSES = {"SERIAL", "BATCH", "PARALLEL"}
 REMAINING_STATUSES = {"PENDING", "ACTIVE", "BLOCKED"}
@@ -61,6 +57,32 @@ BACKTICKED = re.compile(r"`([^`]+)`")
 # repository, it was meant to be a path and must be quoted like one.
 BARE_PATH = re.compile(r"(?<![`\w/.-])((?:[\w.-]+/)+[\w.-]+)(?![`\w])")
 CODE_SPAN = re.compile(r"`[^`]*`")
+# `\|` is an escaped pipe inside a cell, not a cell boundary. Splitting on
+# every pipe would cut the acceptance text short and drop the boundaries that
+# follow it.
+UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+
+
+def row_cells(line: str) -> list[str]:
+    parts = UNESCAPED_PIPE.split(line)[1:-1]
+    return [part.replace("\\|", "|").strip() for part in parts]
+
+
+def ticket_row(line: str) -> tuple[str, str, str, str] | None:
+    """Read one authoritative ticket row, whatever its cell padding.
+
+    The exact-spacing regex this replaces dropped a row padded for alignment,
+    and a dropped row is not validated at all -- its declared dependencies go
+    unchecked while every gate stays green.
+    """
+    if not line.startswith("|"):
+        return None
+    cells = row_cells(line)
+    if len(cells) < 4 or not TICKET_CELL_ID.match(cells[0]):
+        return None
+    if cells[1] not in TICKET_STATUSES:
+        return None
+    return cells[0], cells[1], cells[2], cells[3]
 THREAT_ID = re.compile(r"\bTM-\d+\b")
 SHA_LIKE = re.compile(r"^[0-9a-f]{7,40}$")
 ALLOWED_PAIR = re.compile(
@@ -116,14 +138,11 @@ def required_edges(text: str, repository: Path | None = None) -> list[str]:
     """Flag unordered ticket pairs that acceptance criteria say share a boundary."""
     rows: dict[str, tuple[str, list[str], str]] = {}
     for line in text.splitlines():
-        if not line.startswith("|"):
+        parsed = ticket_row(line)
+        if parsed is None:
             continue
-        cells = [cell.strip() for cell in line.split("|")[1:-1]]
-        if len(cells) < 4 or not TICKET_CELL_ID.match(cells[0]):
-            continue
-        if cells[1] not in TICKET_STATUSES:
-            continue
-        rows[cells[0]] = (cells[1], TICKET_ID.findall(cells[2]), cells[3])
+        ticket, status, dependency_cell, acceptance = parsed
+        rows[ticket] = (status, TICKET_ID.findall(dependency_cell), acceptance)
 
     reachable: dict[str, set[str]] = {}
 
@@ -256,10 +275,10 @@ def main() -> None:
 
     tickets: dict[str, tuple[str, list[str]]] = {}
     for line in text.splitlines():
-        match = TICKET_ROW.match(line)
-        if match is None:
+        parsed = ticket_row(line)
+        if parsed is None:
             continue
-        ticket, status, dependency_cell = match.groups()
+        ticket, status, dependency_cell, _acceptance = parsed
         if ticket in tickets:
             errors.append(f"ticket {ticket} is declared more than once")
             continue
