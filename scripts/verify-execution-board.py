@@ -34,6 +34,131 @@ OBSOLETE_README_MARKERS = (
 )
 
 
+# --- Required-edge inference -------------------------------------------------
+#
+# The checks above validate that every DECLARED edge is well formed: it points
+# at a real ticket, and the graph is acyclic. Nothing asked whether a REQUIRED
+# edge is present, and four times a ticket's acceptance criteria depended on
+# another ticket's work with no edge declared between them. This verifier
+# passed cleanly every time, because a missing edge is not an invalid one --
+# absence and correctness look identical to a well-formedness check.
+#
+# Two ways a pair is judged to share a boundary. Both were tested against the
+# four historical misses (the parents of c02ad71, abb32d7, 6145984, eb74330):
+# the shared-token rule alone catches two, the family rule alone catches three,
+# and together they catch all four.
+TICKET_ROW_FULL = re.compile(
+    r"^\| ([A-Z][A-Z0-9-]+) \| "
+    rf"({TICKET_STATUS_PATTERN}) \| ([^|]+) \|(.*)$"
+)
+BACKTICKED = re.compile(r"`([^`]+)`")
+THREAT_ID = re.compile(r"\bTM-\d+\b")
+SHA_LIKE = re.compile(r"^[0-9a-f]{7,40}$")
+ALLOWED_PAIR = re.compile(
+    r"<!-- board-graph: allow ([A-Z][A-Z0-9-]+) ~ ([A-Z][A-Z0-9-]+) -- (.+?) -->"
+)
+# Whole components are too coarse to be boundaries: `bins/agent` is shared by
+# every ticket that touches the agent at all. A path token counts only when it
+# names a file.
+BOUNDARY_STOPLIST = {
+    "main", "master", "README.md", "docs", "x86_64", "true", "false", "DONE",
+}
+
+
+def boundary_tokens(acceptance: str) -> set[str]:
+    """Named things a ticket's acceptance criteria commit it to."""
+    found: set[str] = set()
+    for token in BACKTICKED.findall(acceptance):
+        token = token.strip()
+        if len(token) < 3 or TICKET_ID.fullmatch(token) or SHA_LIKE.match(token):
+            continue
+        if "/" in token:
+            token = token.rsplit("/", 1)[-1]
+            if "." not in token:
+                continue
+        if not token or token in BOUNDARY_STOPLIST:
+            continue
+        found.add(token)
+    found.update(THREAT_ID.findall(acceptance))
+    return found
+
+
+def required_edges(text: str) -> list[str]:
+    """Flag unordered ticket pairs that acceptance criteria say share a boundary."""
+    rows: dict[str, tuple[str, list[str], str]] = {}
+    for line in text.splitlines():
+        match = TICKET_ROW_FULL.match(line)
+        if match is None:
+            continue
+        ticket, status, dependency_cell, acceptance = match.groups()
+        rows[ticket] = (status, TICKET_ID.findall(dependency_cell), acceptance)
+
+    reachable: dict[str, set[str]] = {}
+
+    def walk(ticket: str, seen: set[str]) -> None:
+        for dependency in rows.get(ticket, ("", [], ""))[1]:
+            if dependency in rows and dependency not in seen:
+                seen.add(dependency)
+                walk(dependency, seen)
+
+    for ticket in rows:
+        reachable[ticket] = set()
+        walk(ticket, reachable[ticket])
+
+    allowed = {
+        frozenset((a, b)): reason for a, b, reason in ALLOWED_PAIR.findall(text)
+    }
+    tokens = {ticket: boundary_tokens(row[2]) for ticket, row in rows.items()}
+
+    errors: list[str] = []
+    names = sorted(rows)
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            first_status = rows[first][0]
+            second_status = rows[second][0]
+            if (
+                first_status not in REMAINING_STATUSES
+                and second_status not in REMAINING_STATUSES
+            ):
+                continue
+            if second in reachable[first] or first in reachable[second]:
+                continue
+            if frozenset((first, second)) in allowed:
+                continue
+            shared = tokens[first] & tokens[second]
+            family = (
+                first.rsplit("-", 1)[0] == second.rsplit("-", 1)[0]
+                and first_status in REMAINING_STATUSES
+                and second_status in REMAINING_STATUSES
+            )
+            if not shared and not family:
+                continue
+            why = (
+                f"both name {', '.join(sorted(shared))}"
+                if shared
+                else "they are the same ticket family and both are remaining"
+            )
+            errors.append(
+                f"{first} and {second} share a boundary ({why}) but neither "
+                "reaches the other in the dependency graph; declare the edge, "
+                f"or record an argued exception as "
+                f"`<!-- board-graph: allow {first} ~ {second} -- reason -->`"
+            )
+    for pair in sorted(allowed, key=sorted):
+        first, second = sorted(pair)
+        if first not in rows or second not in rows:
+            errors.append(
+                f"board-graph allowance names {first} ~ {second}, and one of "
+                "them is not a ticket"
+            )
+        elif second in reachable[first] or first in reachable[second]:
+            errors.append(
+                f"board-graph allowance for {first} ~ {second} is stale: the "
+                "edge is now declared, so remove the allowance"
+            )
+    return errors
+
+
 def fail(messages: list[str]) -> None:
     for message in messages:
         print(f"execution-board error: {message}", file=sys.stderr)
@@ -264,6 +389,8 @@ def main() -> None:
         errors.append("current dispatch table exceeds the three-slot limit")
     elif sorted(current_slots) != list(range(1, len(current_slots) + 1)):
         errors.append("current dispatch slots must be contiguous starting at 1")
+
+    errors += required_edges(text)
 
     if errors:
         fail(errors)

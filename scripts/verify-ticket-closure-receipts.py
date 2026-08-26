@@ -187,7 +187,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 102
+MINIMUM_TICKET_ROWS = 104
 
 # A receipt must be able to carry a review. The smallest real receipt on the
 # board is 2,862 bytes; every one names the ticket it closes and is headed

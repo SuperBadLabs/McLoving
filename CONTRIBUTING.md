@@ -75,3 +75,29 @@ aa-exec -p mcloving-source-acquirer -- \
 The transport roots under `/tmp/mcloving-source-transport-*` are host-global:
 do not run two suites against them concurrently, and do not rebuild the crate
 while a suite is running.
+
+## Declaring dependency edges
+
+`scripts/verify-execution-board.py` checks that every edge you declare is well
+formed. It now also asks whether an edge you did *not* declare is required: if
+two tickets name the same file, helper or `TM-nnn` boundary in their acceptance
+criteria, at least one of them is still open, and neither reaches the other
+through the graph, the board fails.
+
+The rule exists because four separate reviews found the same mistake -- long
+fail-closed acceptance criteria with the edges underspecified -- and this
+verifier passed cleanly on all four. A missing edge is not an invalid one, so
+a well-formedness check could never have caught them. Tested retroactively
+against those four boards, this rule catches all four.
+
+Whole components are not boundaries: `bins/agent` is shared by everything that
+touches the agent, so a path token counts only when it names a file. If a pair
+genuinely needs no edge, record the argument in the board rather than deleting
+the finding:
+
+```text
+<!-- board-graph: allow AAA-001 ~ BBB-001 -- reason -->
+```
+
+An allowance whose edge is later declared fails as stale, so an exception
+cannot outlive the gap it excused.

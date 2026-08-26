@@ -250,5 +250,149 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
         self.assertIn("README contains obsolete implementation claim", stderr)
 
 
+class RequiredEdgeTests(unittest.TestCase):
+    """The boundary-sharing rule, proved able to fail in both directions.
+
+    A well-formedness check cannot tell a missing edge from a correct graph.
+    These fix the rule that can, including the exception mechanism -- an
+    allowance that outlives the gap it excused is itself a silent pass.
+    """
+
+    def tokens(self, acceptance: str) -> set[str]:
+        return VERIFY.boundary_tokens(acceptance)
+
+    def edges(self, board: str) -> list[str]:
+        return VERIFY.required_edges(board)
+
+    BOARD = (
+        "| Ticket | Status | Depends on | Objective and acceptance |\n"
+        "|---|---|---|---|\n"
+        "| AAA-001 | DONE | \u2014 | Owns `shared-thing.sh` |\n"
+        "| BBB-001 | PENDING | \u2014 | Also rewrites `shared-thing.sh` |\n"
+    )
+
+    def test_an_undeclared_shared_boundary_fails(self) -> None:
+        errors = self.edges(self.BOARD)
+        self.assertTrue(
+            any("share a boundary" in error for error in errors), errors
+        )
+
+    def test_declaring_the_edge_clears_it(self) -> None:
+        board = self.BOARD.replace(
+            "| BBB-001 | PENDING | \u2014 |", "| BBB-001 | PENDING | AAA-001 |"
+        )
+        self.assertEqual(self.edges(board), [])
+
+    def test_an_argued_allowance_clears_it(self) -> None:
+        board = self.BOARD + (
+            "\n<!-- board-graph: allow AAA-001 ~ BBB-001 -- "
+            "they touch different halves of the file -->\n"
+        )
+        self.assertEqual(self.edges(board), [])
+
+    def test_a_stale_allowance_fails(self) -> None:
+        board = self.BOARD.replace(
+            "| BBB-001 | PENDING | \u2014 |", "| BBB-001 | PENDING | AAA-001 |"
+        ) + (
+            "\n<!-- board-graph: allow AAA-001 ~ BBB-001 -- no longer needed -->\n"
+        )
+        errors = self.edges(board)
+        self.assertTrue(any("is stale" in error for error in errors), errors)
+
+    def test_an_allowance_for_a_non_ticket_fails(self) -> None:
+        board = self.BOARD + (
+            "\n<!-- board-graph: allow AAA-001 ~ GHOST-999 -- typo -->\n"
+        )
+        errors = self.edges(board)
+        self.assertTrue(any("is not a ticket" in error for error in errors), errors)
+
+    def test_two_closed_tickets_are_not_flagged(self) -> None:
+        board = self.BOARD.replace("| BBB-001 | PENDING |", "| BBB-001 | DONE |")
+        self.assertEqual(self.edges(board), [])
+
+    def test_the_same_family_flags_without_a_shared_token(self) -> None:
+        board = (
+            "| Ticket | Status | Depends on | Objective and acceptance |\n"
+            "|---|---|---|---|\n"
+            "| CCC-001 | PENDING | \u2014 | One thing |\n"
+            "| CCC-002 | PENDING | \u2014 | A different thing |\n"
+        )
+        errors = self.edges(board)
+        self.assertTrue(any("same ticket family" in error for error in errors), errors)
+
+    def test_a_whole_component_directory_is_not_a_boundary(self) -> None:
+        """`bins/agent` is shared by everything that touches the agent."""
+        self.assertNotIn("agent", self.tokens("rewrites `bins/agent` substantially"))
+
+    def test_a_named_file_is_a_boundary(self) -> None:
+        self.assertIn(
+            "mcloving-deploy-lib.sh",
+            self.tokens("rewrites `deploy/bin/mcloving-deploy-lib.sh`"),
+        )
+
+    def test_ticket_ids_and_shas_are_not_boundaries(self) -> None:
+        found = self.tokens("see `DEPLOY-004` at `4bf882b8ad041b990e45cc5f1e79dee81429a3e7`")
+        self.assertEqual(found, set())
+
+    def test_threat_ids_are_boundaries(self) -> None:
+        self.assertIn("TM-050", self.tokens("moves the TM-050 boundary"))
+
+
+class RequiredEdgeWiringTests(ExecutionBoardVerifierTests):
+    """The check must run from `main()`, not merely exist.
+
+    An earlier version of this suite called `required_edges` directly, so
+    deleting its call site left every test green -- the check was present,
+    unwired, and untested for being wired.
+    """
+
+    def test_an_undeclared_shared_boundary_fails_the_verifier(self) -> None:
+        def add_pair(board: str) -> str:
+            return board + (
+                "\n## Synthetic\n\n"
+                "| Ticket | Status | Depends on | Objective and acceptance |\n"
+                "|---|---|---|---|\n"
+                "| ZZA-001 | DONE | \u2014 | Owns `synthetic-boundary.sh` |\n"
+                "| ZZB-001 | PENDING | \u2014 | Rewrites `synthetic-boundary.sh` |\n"
+            )
+
+        code, _stdout, stderr = self.run_verifier(board_transform=add_pair)
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("share a boundary", stderr)
+
+
+class RequiredEdgeHistoryTests(unittest.TestCase):
+    """The rule is only worth its false positives if it catches the real ones.
+
+    Checked against the four graph corrections whose findings this rule exists
+    to have caught -- the parents of c02ad71, abb32d7, 6145984 and eb74330.
+    Those boards are history and are not reachable from a test fixture, so what
+    is pinned here is the property that made all four catchable: each pair was
+    unordered at the time, and each is ordered now.
+    """
+
+    PAIRS = (
+        ("DEPLOY-002", "DEPLOY-003"),
+        ("DEPLOY-002", "DEPLOY-004"),
+        ("DEPLOY-003", "DEPLOY-004"),
+        ("SEC-005", "DEPLOY-003"),
+    )
+
+    def test_every_historically_missing_edge_is_declared_today(self) -> None:
+        board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
+        self.assertEqual(VERIFY.required_edges(board), [])
+        rows = {}
+        for line in board.splitlines():
+            match = VERIFY.TICKET_ROW_FULL.match(line)
+            if match:
+                rows[match.group(1)] = VERIFY.TICKET_ID.findall(match.group(3))
+        for successor, predecessor in self.PAIRS:
+            self.assertIn(
+                predecessor,
+                rows.get(successor, []),
+                f"{successor} must declare {predecessor}; it was a missing edge once",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
