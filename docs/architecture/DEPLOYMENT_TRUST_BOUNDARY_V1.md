@@ -175,8 +175,23 @@ Rejected on measurement, for three independent reasons, any one of which is suff
    the obligations: rounds 29–41 — the thirteen consecutive rounds that never
    converged — are O1, O2, O3, O7 and O8, which concern *which unit file systemd
    selects across sixteen load paths* and *how the environment composes*.
-   Fifteen of those sixteen load paths are outside the deployment tree and
-   already root-owned. A root-owned deployment root retires **none** of them.
+   **Corrected by review, and the correction narrows this argument.** An earlier
+   revision claimed fifteen of the sixteen load paths were outside the deployment
+   tree and already root-owned. Measured on the manager's own `UnitPath`, they are
+   **3 root-owned** (`/etc/systemd/user`, `/etc/xdg/systemd/user`,
+   `/usr/lib/systemd/user`), **3 owned by the service account**
+   (`~/.config/systemd/user`, `/run/user/1000/systemd/transient`,
+   `/run/user/1000/systemd/generator.late`), and **10 absent** — and the absent
+   ones under `/run/user/<uid>` would be created by the service account. So one of
+   them, `~/.config/systemd/user`, IS the deployment tree.
+
+   Option A therefore reaches **more** than "none" of this class: making the
+   deployment root root-owned would take the unit directory with it. What it does
+   not reach is the rest — the root-owned system paths and the `/run/user/<uid>`
+   generator and transient directories stay outside any deployment root, drop-ins
+   merge from all of them, and the resolution machinery is still required to know
+   what systemd will do with them. The conclusion below stands on that narrower
+   ground rather than on the overstated one. A root-owned deployment root retires **none** of them.
 2. **Its benefit against this lane's adversary is zero**, because (§2.3)
    adversary A can already write nothing. Its benefit is against adversary B,
    which is `SEC-005`'s ticket and `SEC-005`'s chosen mechanism.
