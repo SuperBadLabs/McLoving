@@ -182,13 +182,25 @@ revalidating this lane against the release that actually ships is `DEPLOY-002`.
 - The database bootstrap trusts the container boundary and runs `psql` via
   `podman exec` as the PostgreSQL superuser; the database listens on loopback only.
 - Single host, no HA, no Kubernetes. Nothing here satisfies `CUTOVER-001`'s gates.
-- Six audit observations from the `DEPLOY-003` analysis are carried into that
-  ticket rather than fixed here, none of them a disclosure or escalation path:
-  a discarded mask answer that is then re-derived, an unbounded PID-recycling
-  window on `ExecMainPID` → `/proc/PID/environ`, a suite that exercises the
-  manager-query path in only 3.3% of its gates, four unlabelled derived
-  fallbacks, an install-time integrity check taken outside the transition lock,
-  and `NoNewPrivileges=` absent from the db-init unit and both quadlets.
+- Seven audit observations from the `DEPLOY-003` analysis are carried into that
+  ticket rather than fixed here, and they are the same seven the `DEPLOY-003`
+  row enumerates: a discarded mask answer that is then re-derived, an unbounded
+  PID-recycling window on `ExecMainPID` → `/proc/PID/environ`, four unlabelled
+  derived fallbacks, an install-time integrity check taken outside the
+  transition lock, `mcloving-env-guard` re-walking ancestors under no lock,
+  `NoNewPrivileges=` absent from the db-init unit and both quadlets, and no
+  start-time verification of the unit, the guard executable, or the selected
+  release binary.
+- **One of those seven is an escalation path, and an earlier revision of this
+  receipt said none was.** Where the deployment layout is exposed in the
+  `DEPLOY-004` sense, the missing start-time verification lets a substituted
+  unit execute as the service account, which reaches that account's own
+  credentials. The other six are not disclosure or escalation paths. Read this
+  line together with the `DEPLOY-004` severity: exposure is conditional, impact
+  where exposed is credential compromise.
+- Separately, and tracked as `DEPLOY-003`'s fourth acceptance item rather than
+  as an audit observation: the suite exercises the manager-query path in only
+  3.3% of its gates (20 of 600), so it currently specifies the derived path.
 
 ## Inventory denominator
 
