@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 import sys
 from datetime import date
@@ -11,10 +12,6 @@ from pathlib import Path
 
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
 TICKET_STATUS_PATTERN = "|".join(TICKET_STATUSES)
-TICKET_ROW = re.compile(
-    r"^\| ([A-Z][A-Z0-9-]+) \| "
-    rf"({TICKET_STATUS_PATTERN}) \| ([^|]+) \|"
-)
 TICKET_ID = re.compile(r"[A-Z][A-Z0-9-]+")
 EXECUTION_CLASSES = {"SERIAL", "BATCH", "PARALLEL"}
 REMAINING_STATUSES = {"PENDING", "ACTIVE", "BLOCKED"}
@@ -32,6 +29,232 @@ OBSOLETE_README_MARKERS = (
     "binary crates are compilable placeholders",
     "no controller, scheduler, or agent runtime is represented as implemented",
 )
+
+
+# --- Required-edge inference -------------------------------------------------
+#
+# The checks above validate that every DECLARED edge is well formed: it points
+# at a real ticket, and the graph is acyclic. Nothing asked whether a REQUIRED
+# edge is present, and four times a ticket's acceptance criteria depended on
+# another ticket's work with no edge declared between them. This verifier
+# passed cleanly every time, because a missing edge is not an invalid one --
+# absence and correctness look identical to a well-formedness check.
+#
+# Two ways a pair is judged to share a boundary. Both were tested against the
+# four historical misses (the parents of c02ad71, abb32d7, 6145984, eb74330):
+# the shared-token rule alone catches two, the family rule alone catches three,
+# and together they catch all four.
+# Rows are read by splitting cells. An exact-spacing regex omits a row padded
+# for alignment, and a row this function cannot see carries no boundary, so a
+# padded DONE row could share a file with an open ticket and pass.
+TICKET_CELL_ID = re.compile(r"^[A-Z][A-Z0-9-]+$")
+BACKTICKED = re.compile(r"`([^`]+)`")
+# The boundary rule only sees backticked tokens, so an unbackticked path is
+# invisible to it. Detecting bare path-shaped text is not an option -- the
+# board's prose is full of `I/O`, `API/CLI`, `134/162` and `Linux/Windows`,
+# 337 such tokens, none of which is a file. So the convention is enforced
+# instead: if an unbackticked token resolves to a real file in this
+# repository, it was meant to be a path and must be quoted like one.
+BARE_PATH = re.compile(r"(?<![`\w/.-])((?:[\w.-]+/)+[\w.-]+)(?![`\w])")
+CODE_SPAN = re.compile(r"`[^`]*`")
+# `\|` is an escaped pipe inside a cell, not a cell boundary. Splitting on
+# every pipe would cut the acceptance text short and drop the boundaries that
+# follow it.
+UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+
+
+def row_cells(line: str) -> list[str]:
+    parts = UNESCAPED_PIPE.split(line)[1:-1]
+    return [part.replace("\\|", "|").strip() for part in parts]
+
+
+def ticket_row(line: str) -> tuple[str, str, str, str] | None:
+    """Read one authoritative ticket row, whatever its cell padding.
+
+    The exact-spacing regex this replaces dropped a row padded for alignment,
+    and a dropped row is not validated at all -- its declared dependencies go
+    unchecked while every gate stays green.
+    """
+    if not line.startswith("|"):
+        return None
+    cells = row_cells(line)
+    if len(cells) < 4 or not TICKET_CELL_ID.match(cells[0]):
+        return None
+    if cells[1] not in TICKET_STATUSES:
+        return None
+    return cells[0], cells[1], cells[2], cells[3]
+THREAT_ID = re.compile(r"\bTM-\d+\b")
+SHA_LIKE = re.compile(r"^[0-9a-f]{7,40}$")
+ALLOWED_PAIR = re.compile(
+    r"<!-- board-graph: allow ([A-Z][A-Z0-9-]+) ~ ([A-Z][A-Z0-9-]+) -- (.+?) -->"
+)
+# Whole components are too coarse to be boundaries: `bins/agent` is shared by
+# every ticket that touches the agent at all. A path token is compared whole
+# and normalised -- two different `config.rs` files under different crates are
+# two boundaries, and `scripts/x.py` and `./scripts/x.py` are one.
+BOUNDARY_STOPLIST = {
+    "main", "master", "README.md", "docs", "x86_64", "true", "false", "DONE",
+}
+
+
+# An extension starts with a letter. `1.97.1` and `127.0.0.1` are a version
+# and an address, not files two tickets can share.
+FILE_SUFFIX = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
+SEPARATED = re.compile(r"[-_]")
+
+
+def is_boundary(token: str) -> bool:
+    """Is this code span a thing two tickets can SHARE, or just a word?
+
+    The rule is about files, helpers and `TM-nnn` boundaries. Every backticked
+    span of three characters or more was reaching it, so two unrelated tickets
+    quoting `--strict` or `unsupported` were required to declare an edge -- the
+    check refusing correct work rather than catching a missing dependency.
+    """
+    if THREAT_ID.fullmatch(token):
+        return True
+    if token.startswith("-"):  # a CLI flag is a spelling, not a boundary
+        return False
+    if "/" in token or FILE_SUFFIX.search(token):
+        return True
+    if token.endswith("="):  # a systemd directive
+        return True
+    return SEPARATED.search(token) is not None
+
+
+def boundary_tokens(acceptance: str, repository: Path | None = None) -> set[str]:
+    """Named things a ticket's acceptance criteria commit it to."""
+    found: set[str] = set()
+    for token in BACKTICKED.findall(acceptance):
+        token = token.strip()
+        if len(token) < 3 or TICKET_ID.fullmatch(token) or SHA_LIKE.match(token):
+            continue
+        if "/" in token:
+            # Keep the whole path, normalised. Reducing to a basename made
+            # `crates/a/config.rs` and `crates/b/config.rs` one boundary, and
+            # leaving it raw made `scripts/x.py` and `./scripts/x.py` two.
+            token = posixpath.normpath(token)
+            #
+            # Directories are not boundaries; files are. An extension cannot
+            # tell them apart -- `deploy/bin/mcloving-install` is a 20 KB
+            # executable with no dot in it.
+            #
+            # Ask the repository when it knows the path. When it does not --
+            # a file the ticket is about to create -- fall back to shape: a
+            # dotted basename names a file, and so does a nested path, while
+            # a two-segment path with no dot is a component root such as
+            # `bins/agent` or `crates/domain`. The fallback must be textual,
+            # because the same board has to give the same answer whether or
+            # not the working tree is beside it.
+            resolved = None if repository is None else repository / token
+            if resolved is not None and resolved.exists():
+                if resolved.is_dir():
+                    continue
+            elif "." not in token.rsplit("/", 1)[-1] and token.count("/") < 2:
+                continue
+        if not token or token in BOUNDARY_STOPLIST or not is_boundary(token):
+            continue
+        found.add(token)
+    found.update(THREAT_ID.findall(acceptance))
+    return found
+
+
+def required_edges(text: str, repository: Path | None = None) -> list[str]:
+    """Flag unordered ticket pairs that acceptance criteria say share a boundary."""
+    rows: dict[str, tuple[str, list[str], str]] = {}
+    for line in text.splitlines():
+        parsed = ticket_row(line)
+        if parsed is None:
+            continue
+        ticket, status, dependency_cell, acceptance = parsed
+        rows[ticket] = (status, TICKET_ID.findall(dependency_cell), acceptance)
+
+    reachable: dict[str, set[str]] = {}
+
+    def walk(ticket: str, seen: set[str]) -> None:
+        for dependency in rows.get(ticket, ("", [], ""))[1]:
+            if dependency in rows and dependency not in seen:
+                seen.add(dependency)
+                walk(dependency, seen)
+
+    for ticket in rows:
+        reachable[ticket] = set()
+        walk(ticket, reachable[ticket])
+
+    allowed = {
+        frozenset((a, b)): reason for a, b, reason in ALLOWED_PAIR.findall(text)
+    }
+    tokens = {
+        ticket: boundary_tokens(row[2], repository) for ticket, row in rows.items()
+    }
+
+    errors: list[str] = []
+    if repository is not None:
+        for ticket in sorted(rows):
+            plain = CODE_SPAN.sub(" ", rows[ticket][2])
+            for candidate in sorted({m.rstrip(".,;") for m in BARE_PATH.findall(plain)}):
+                if (repository / candidate).is_file():
+                    errors.append(
+                        f"{ticket} names the file {candidate} without backticks; "
+                        "the boundary rule only reads backticked tokens, so an "
+                        "unquoted path is invisible to it"
+                    )
+    names = sorted(rows)
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            first_status = rows[first][0]
+            second_status = rows[second][0]
+            if (
+                first_status not in REMAINING_STATUSES
+                and second_status not in REMAINING_STATUSES
+            ):
+                continue
+            if second in reachable[first] or first in reachable[second]:
+                continue
+            if frozenset((first, second)) in allowed:
+                continue
+            shared = tokens[first] & tokens[second]
+            family = (
+                first.rsplit("-", 1)[0] == second.rsplit("-", 1)[0]
+                and first_status in REMAINING_STATUSES
+                and second_status in REMAINING_STATUSES
+            )
+            if not shared and not family:
+                continue
+            why = (
+                f"both name {', '.join(sorted(shared))}"
+                if shared
+                else "they are the same ticket family and both are remaining"
+            )
+            errors.append(
+                f"{first} and {second} share a boundary ({why}) but neither "
+                "reaches the other in the dependency graph; declare the edge, "
+                f"or record an argued exception as "
+                f"`<!-- board-graph: allow {first} ~ {second} -- reason -->`"
+            )
+    for pair in sorted(allowed, key=sorted):
+        first, second = sorted(pair)
+        if first not in rows or second not in rows:
+            errors.append(
+                f"board-graph allowance names {first} ~ {second}, and one of "
+                "them is not a ticket"
+            )
+        elif second in reachable[first] or first in reachable[second]:
+            errors.append(
+                f"board-graph allowance for {first} ~ {second} is stale: the "
+                "edge is now declared, so remove the allowance"
+            )
+        elif not (tokens[first] & tokens[second]) and not (
+            first.rsplit("-", 1)[0] == second.rsplit("-", 1)[0]
+            and rows[first][0] in REMAINING_STATUSES
+            and rows[second][0] in REMAINING_STATUSES
+        ):
+            errors.append(
+                f"board-graph allowance for {first} ~ {second} is stale: they no "
+                "longer share a boundary, and an allowance kept past its finding "
+                "would silently excuse the next one"
+            )
+    return errors
 
 
 def fail(messages: list[str]) -> None:
@@ -77,10 +300,10 @@ def main() -> None:
 
     tickets: dict[str, tuple[str, list[str]]] = {}
     for line in text.splitlines():
-        match = TICKET_ROW.match(line)
-        if match is None:
+        parsed = ticket_row(line)
+        if parsed is None:
             continue
-        ticket, status, dependency_cell = match.groups()
+        ticket, status, dependency_cell, _acceptance = parsed
         if ticket in tickets:
             errors.append(f"ticket {ticket} is declared more than once")
             continue
@@ -264,6 +487,8 @@ def main() -> None:
         errors.append("current dispatch table exceeds the three-slot limit")
     elif sorted(current_slots) != list(range(1, len(current_slots) + 1)):
         errors.append("current dispatch slots must be contiguous starting at 1")
+
+    errors += required_edges(text, repository)
 
     if errors:
         fail(errors)
