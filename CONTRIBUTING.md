@@ -35,9 +35,19 @@ runs on every pull request. Before a board row may read `DONE`:
 
 Attribution has to be affirmative because neither a substring nor a shape is a
 review. A bare mention let `TODO: <TICKET> has not been reviewed yet` close a
-ticket; requiring merely a heading or a table row let
-`## TODO: <TICKET> has not been reviewed yet` do the same. Only a structure
-whose sole purpose is recording a review counts.
+ticket; requiring a heading or a table row let
+`## TODO: <TICKET> has not been reviewed yet` do the same; requiring the ticket
+to lead the heading let `## <TICKET> review has not happened` do the same. Only
+a structure whose sole purpose is recording a review counts, and a negation
+veto then removes credit from a structure that reads as a denial.
+
+Know what that is: a heuristic over English, not a decision procedure. Four
+tightenings were each got past by one sentence in a new wrapper, and a denial
+phrased without a vetoed word would still pass. The durable fix is a
+machine-readable attribution field in the threat model -- a column holding a
+ticket id and nothing else -- so the gate reads data rather than parsing
+sentences. Until that exists, treat a green gate as evidence that the record
+has the right shape, not that the review happened.
 
 A ticket that genuinely owes neither -- a docs-only or board-replan ticket --
 needs an exemption in that script naming the ticket and stating why. The

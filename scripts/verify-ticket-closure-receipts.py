@@ -230,6 +230,29 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # denominator. Raise this when tickets are added.
 MINIMUM_TICKET_ROWS = 104
 
+# Pinning the row COUNT is not enough: an edit that adds one ticket while
+# making another unparsable holds the count at 104 and silently drops the
+# removed ticket's obligations. DONE is terminal, so this set may only grow.
+# A name that leaves it has either lost its row or stopped reading DONE, and
+# both retire a closure obligation that nothing else records.
+CLOSED_TICKETS = frozenset({
+    "ADMIN-001", "AGENT-001", "AGENT-002", "AGENT-003", "AGENT-004",
+    "AGENT-005", "AGENT-006", "ALPHA-001", "API-002", "ARCH-001",
+    "ARCH-002", "AUDIT-001", "AUTHZ-001", "CACHE-001", "CANARY-000",
+    "CI-001", "CONSUMER-001", "CTRL-001", "CTRL-002", "CTRL-003",
+    "CTRL-004", "DEP-001", "DIFF-001", "DIFF-002", "DIFF-003",
+    "DISC-001", "E2E-001", "E2E-002", "E2E-003", "EXEC-001", "EXEC-002",
+    "EXEC-003", "EXEC-004", "EXT-001", "EXT-002", "FOUND-001",
+    "FOUND-002", "HYG-001", "IDP-001", "INPUT-001", "INV-001",
+    "INV-002", "INV-003", "INV-004", "IR-001", "IR-002", "IR-003",
+    "IR-004", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
+    "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
+    "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
+    "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",
+    "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001",
+    "UX-001", "UX-002", "WIN-001", "WIN-002", "WIN-003", "WIN-004"
+})
+
 # A receipt must be able to carry a review. The smallest real receipt on the
 # board is 2,862 bytes; every one names the ticket it closes and is headed
 # markdown. `touch docs/evidence/<TICKET>_SECURITY_REVIEW.md` must not close a
@@ -424,6 +447,19 @@ def receipt_defects(path: Path, ticket: str) -> list[str]:
     return defects
 
 
+# A veto, not a test. The affirmative structures below decide what counts;
+# this only takes credit away, so it can never make the gate more permissive.
+# It exists because three successive tightenings each got past by the same
+# sentence wearing a different structure -- prose, then a heading, then a
+# heading the ticket led, then a verification cell. Denial is a property of
+# the words, and at some point the words have to be read.
+NEGATION = re.compile(
+    r"\b(not|never|no|none|pending|todo|outstanding|unreviewed|missing"
+    r"|absent|await\w*)\b",
+    re.I,
+)
+NEGATION_WINDOW = 70
+
 OWNERSHIP_HEADING = "## Security verification ownership"
 REGISTER_ID = re.compile(r"TM-\d+")
 # `| ID | Scenario | Primary mitigations | Required verification | Owner |
@@ -449,9 +485,19 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
     `| TM-999 | <TICKET> review has not happened | ... |`. Placement is not
     meaning; what makes an attribution affirmative is that the field exists
     only to record a review.
+
+    KNOWN LIMITATION, stated because the alternative is pretending otherwise.
+    This reads English prose, and four successive tightenings were each got
+    past by the same denial in a new wrapper. Structure plus a negation veto
+    is a good heuristic and not a decision procedure: a denial phrased without
+    a vetoed word, inside an affirmative structure, would still pass. The
+    durable fix is a machine-readable attribution field in the threat model --
+    one column that holds a ticket id and nothing else -- so the gate reads
+    data instead of parsing sentences. That is a threat-model change, not a
+    gate change, and it needs its own ticket.
     """
     pattern = re.compile(rf"\b{re.escape(ticket)}\b")
-    heading = re.compile(rf"^#{{2,3}} {re.escape(ticket)}\b.*\breview\b", re.I)
+    heading = re.compile(rf"^#{{2,3}} {re.escape(ticket)}\b.*\breviews?$", re.I)
 
     lines = text.splitlines()
     ownership_start: int | None = None
@@ -464,8 +510,13 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
                 ownership_end = number
                 break
 
+    def denied(window: str) -> bool:
+        return NEGATION.search(window) is not None
+
     for number, line in enumerate(lines, start=1):
         if heading.match(line):
+            if denied(line):
+                continue
             return f"closure-review heading at line {number}"
         if not line.startswith("|") or not pattern.search(line):
             continue
@@ -477,11 +528,21 @@ def threat_model_attribution(text: str, ticket: str) -> str | None:
             and ownership_start < number - 1 < ownership_end
         )
         if within_ownership and len(row) >= 2 and pattern.search(row[-1]):
+            if denied(row[-1]):
+                continue
             return f"verification-ownership row at line {number}"
         if REGISTER_ID.fullmatch(row[0]):
-            if len(row) > REGISTER_VERIFICATION_COLUMN and pattern.search(
-                row[REGISTER_VERIFICATION_COLUMN]
-            ):
+            cell = row[REGISTER_VERIFICATION_COLUMN] if len(
+                row
+            ) > REGISTER_VERIFICATION_COLUMN else ""
+            found = pattern.search(cell)
+            if found is not None:
+                window = cell[
+                    max(0, found.start() - NEGATION_WINDOW) :
+                    found.end() + NEGATION_WINDOW
+                ]
+                if denied(window):
+                    continue
                 return f"threat-register verification column at line {number}"
             continue
     return None
@@ -508,6 +569,13 @@ def check_ledger(
                 "may only shrink. A ticket closing today owes the artifact -- write "
                 "it, rather than admitting a new gap into a set that exists to "
                 "record old ones"
+            )
+        for ticket in sorted(baseline - set(ledger)):
+            errors.append(
+                f"the {obligation} {name} baseline still names {ticket}, which has "
+                "left the ledger; drop it from the baseline in the same commit, or "
+                "the name stays permanently re-admittable and the ratchet only "
+                "holds against tickets that never owed anything"
             )
         for ticket in sorted(ledger):
             if ticket not in statuses:
@@ -536,6 +604,14 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
     statuses, errors = board_statuses(board)
     if not statuses:
         return errors, [], ""
+
+    for ticket in sorted(CLOSED_TICKETS):
+        if statuses.get(ticket) != "DONE":
+            errors.append(
+                f"{ticket} was closed and no longer reads DONE on the board "
+                f"(now {statuses.get(ticket, 'absent')}); a ticket cannot shed a "
+                "closure obligation by leaving the table"
+            )
 
     threat_model = read(repository / THREAT_MODEL)
     done = sorted(ticket for ticket, status in statuses.items() if status == "DONE")

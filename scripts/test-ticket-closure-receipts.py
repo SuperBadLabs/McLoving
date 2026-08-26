@@ -102,11 +102,26 @@ def synthetic(**overrides):
         )
     }
     saved_floor = VERIFY.MINIMUM_TICKET_ROWS
+    saved_closed = VERIFY.CLOSED_TICKETS
+    saved_baselines = {
+        name: getattr(VERIFY, name)
+        for name in (
+            "RECEIPT_EXEMPT_BASELINE",
+            "THREAT_MODEL_EXEMPT_BASELINE",
+            "RECEIPT_DEBT_BASELINE",
+            "THREAT_MODEL_DEBT_BASELINE",
+        )
+    }
+    VERIFY.CLOSED_TICKETS = frozenset()
+    for _name in saved_baselines:
+        setattr(VERIFY, _name, frozenset())
     for name in saved:
         getattr(VERIFY, name).clear()
     VERIFY.MINIMUM_TICKET_ROWS = 1
     for name, value in overrides.items():
         getattr(VERIFY, name).update(value)
+        if hasattr(VERIFY, f"{name}_BASELINE"):
+            setattr(VERIFY, f"{name}_BASELINE", frozenset(getattr(VERIFY, name)))
     try:
         yield
     finally:
@@ -114,6 +129,9 @@ def synthetic(**overrides):
             getattr(VERIFY, name).clear()
             getattr(VERIFY, name).update(value)
         VERIFY.MINIMUM_TICKET_ROWS = saved_floor
+        VERIFY.CLOSED_TICKETS = saved_closed
+        for _name, _value in saved_baselines.items():
+            setattr(VERIFY, _name, _value)
 
 
 def check(root: Path, strict: bool = False) -> tuple[list[str], list[str], str]:
@@ -224,6 +242,35 @@ class ThreatModelAttribution(unittest.TestCase):
             "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
             "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
             "| TM-999 | a threat | a mitigation | none | SEC | AAA-001 must still run |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_a_negative_ticket_led_heading_does_not_satisfy_it(self):
+        """The denial, moved to the front of the heading."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n## AAA-001 review has not happened\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_a_negative_verification_cell_does_not_satisfy_it(self):
+        """The denial, inside the one column that counts."""
+        errors = self._with_threat_model(
+            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | a threat | a mitigation | AAA-001 review has not happened "
+            "| SEC | none |\n"
+        )
+        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+
+    def test_a_heading_that_only_mentions_review_does_not_satisfy_it(self):
+        """Isolates the anchor from the veto: no negation word, still not a review.
+
+        The convention is `<TICKET> ... review` as the whole heading. A heading
+        that merely contains the word somewhere is a section ABOUT the review,
+        not a record of one.
+        """
+        errors = self._with_threat_model(
+            "# Threat model\n\n## AAA-001 review deferred to a later ticket\n"
         )
         self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
@@ -346,6 +393,15 @@ class LedgerDiscipline(unittest.TestCase):
             errors,
         )
 
+    def test_a_baseline_that_outlives_its_ledger_entry_fails(self):
+        """A paid name left in the baseline stays permanently re-admittable."""
+        with build() as name, synthetic():
+            VERIFY.RECEIPT_DEBT_BASELINE = frozenset({"PAID-001"})
+            errors, _, _ = check(Path(name))
+        self.assertTrue(
+            any("has left the ledger" in error for error in errors), errors
+        )
+
     def test_a_stale_ledger_entry_fails(self):
         with build() as name, synthetic(RECEIPT_DEBT={"AAA-001": "already receipted"}):
             errors, _, _ = check(Path(name))
@@ -405,6 +461,27 @@ class ThisRepository(unittest.TestCase):
         )
         done = int(summary.split("done=")[1].split()[0])
         self.assertGreaterEqual(done, 80, "DONE tickets should not vanish from the board")
+
+    def test_a_closed_ticket_cannot_leave_the_board(self):
+        """Swapping a removed row for a new one keeps the count and drops the debt."""
+        board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
+        victim = sorted(VERIFY.CLOSED_TICKETS)[0]
+        with build(board=board.replace(f"| {victim} | DONE |", f"| {victim} | DEFERRED |")) as name:
+            errors, _, _ = check(Path(name))
+        self.assertTrue(
+            any(f"{victim} was closed" in error for error in errors), errors[:3]
+        )
+
+    def test_the_closed_set_matches_the_board(self):
+        """A pinned set smaller than the board's DONE rows guards nothing."""
+        board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
+        statuses, _ = VERIFY.board_statuses(board)
+        done = {t for t, s in statuses.items() if s == "DONE"}
+        self.assertEqual(
+            done - set(VERIFY.CLOSED_TICKETS),
+            set(),
+            "add newly closed tickets to CLOSED_TICKETS",
+        )
 
     def test_every_ledger_entry_states_a_reason(self):
         for ledger in (
