@@ -164,8 +164,10 @@ revalidating this lane against the release that actually ships is `DEPLOY-002`.
 - **Namespace-based systemd hardening is silently unavailable under a user
   manager on Ubuntu 24.04+ at default settings** — measured: thirteen directives
   enforced, **thirteen** silently unenforced with the unit still reporting
-  success, three fail closed. The silent thirteen are three classes with
-  different causes: ten needing a mount namespace, one needing BPF this build
+  success, three fail closed. The silent thirteen are four classes with
+  different causes: nine needing a mount namespace, one needing a network
+  namespace (`PrivateNetwork=`, which fails for a different reason and must not
+  be remediated as a mount case), one needing BPF this build
   lacks (`IPAddressDeny=`), and two needing an undelegated cgroup controller
   (`IOReadBandwidthMax=`, `AllowedCPUs=`) — a user-namespace fix would not help
   the last two. The shipped units declare none of the failing directives,

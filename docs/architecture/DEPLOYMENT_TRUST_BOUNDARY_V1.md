@@ -221,12 +221,13 @@ pre-checks", and its own §9 requires this to be measured rather than assumed.
 Measured on systemd 255 under `systemctl --user`, uid 1000:
 
 **13 directives enforced. 13 silently unenforced with the unit still starting,
-in three classes with different causes. 3 fail closed.**
+in four classes with different causes. 3 fail closed.**
 
 | | directives |
 |---|---|
 | **Enforced** | `NoNewPrivileges`, `PrivateUsers`, `RestrictAddressFamilies`, `SystemCallFilter`, `RestrictNamespaces`, `LockPersonality`, `MemoryDenyWriteExecute`, `MemoryMax`, `TasksMax`, `CPUQuota`, `LimitNOFILE`, `CPUAffinity`, `UnsetEnvironment` |
-| **Silently unenforced — needs a mount namespace** | `ProtectSystem`, `ProtectHome`, `ReadOnlyPaths`, `InaccessiblePaths`, `BindReadOnlyPaths`, `PrivateTmp`, `PrivateNetwork`, `ProtectKernelTunables`, `ProtectControlGroups`, `ProtectProc` (10) |
+| **Silently unenforced — needs a mount namespace** | `ProtectSystem`, `ProtectHome`, `ReadOnlyPaths`, `InaccessiblePaths`, `BindReadOnlyPaths`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectControlGroups`, `ProtectProc` (9) |
+| **Silently unenforced — needs a network namespace** | `PrivateNetwork` (1) — a different failure from the mount cases and NOT fixed by a mount-namespace remediation; the probe logged *"the kernel does not support or we lack privileges for network namespace"* |
 | **Silently unenforced — needs BPF, absent from this build** | `IPAddressDeny` (1) |
 | **Silently unenforced — needs an undelegated cgroup controller** | `IOReadBandwidthMax`, `AllowedCPUs` (2) — a namespace fix would NOT help these; the remediation is root-side controller delegation |
 | **Fail closed (honest)** | `TemporaryFileSystem=` (226/NAMESPACE), `PrivateDevices=`, empty `CapabilityBoundingSet=` (218) |
