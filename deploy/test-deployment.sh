@@ -47,6 +47,52 @@ volume_name="mcloving-smoke-pgdata-${suffix}"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-smoke.XXXXXX")"
 controller_pid=""
 agent_pid=""
+# Every OTHER process this harness backgrounds. The two services above are
+# named variables the trap already reaches; these are not, and each was
+# killed only inline at its point of use. Any failure, signal, or `set -e`
+# abort between a spawn and that kill left the process running, reparented
+# to init. That is not hygiene: the transition-lock holders keep their
+# flock on `.transition-lock` for their whole lifetime, so an aborted run
+# can refuse the next run its lock. The inline discipline had already
+# failed silently -- the held-lock refusal gate below exits without killing
+# its holder -- which is why the trap now carries the list instead of every
+# exit path having to remember.
+background_pids=()
+
+# Record a backgrounded pid so the EXIT trap can reach it.
+register_background_pid() {
+  background_pids+=("$1")
+}
+
+# Kill, reap, and FORGET one registered pid. Deregistering BEFORE the kill
+# is what makes the trap's later drain safe: the trap can then never signal
+# a pid this function already reaped, and so can never hit an unrelated
+# process that inherited the number. Call sites keep using this where the
+# process must be gone before the next gate runs -- a transition lock has
+# to be released at that point, not at exit -- which leaves the drain as
+# purely the abort path.
+release_background_pid() {
+  local pid="$1"
+  local kept=()
+  local entry
+  for entry in "${background_pids[@]}"; do
+    [[ "${entry}" == "${pid}" ]] || kept+=("${entry}")
+  done
+  background_pids=("${kept[@]}")
+  kill "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" 2>/dev/null || true
+}
+
+# Drain whatever is still registered. Shared by the EXIT trap and by the
+# gate that proves this mechanism works.
+drain_background_pids() {
+  local pid
+  for pid in "${background_pids[@]}"; do
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" 2>/dev/null || true
+  done
+  background_pids=()
+}
 
 cleanup() {
   local status=$?
@@ -59,6 +105,7 @@ cleanup() {
     kill "${controller_pid}" >/dev/null 2>&1 || true
     wait "${controller_pid}" 2>/dev/null || true
   fi
+  drain_background_pids
   if [[ ${status} -ne 0 ]]; then
     # Capture the container's own account of the failure BEFORE the forced
     # removal below destroys it. Without this, the single most informative
@@ -240,6 +287,41 @@ if stray:
     )
 TEMPLATEPATHS
 )
+# The trap reaches a backgrounded process only if the spawn registered it
+# AND the drain actually kills it. Both halves are asserted here, against
+# real processes, because this failure is silent in every other way: the
+# suite still reports success while leaving a process at ppid=1 holding
+# whatever it took. Two probes, because the two halves are separable -- a
+# release must reap on its own (call sites depend on the lock being gone
+# before the next gate runs, not at exit) and must deregister, or the trap
+# would later signal a pid the kernel has since given to something else.
+sleep 120 &
+registry_probe_released=$!
+register_background_pid "${registry_probe_released}"
+sleep 120 &
+registry_probe_drained=$!
+register_background_pid "${registry_probe_drained}"
+
+release_background_pid "${registry_probe_released}"
+if kill -0 "${registry_probe_released}" 2>/dev/null; then
+  echo "release_background_pid left a released process running" >&2
+  exit 1
+fi
+if [[ " ${background_pids[*]} " == *" ${registry_probe_released} "* ]]; then
+  echo "release_background_pid left the pid registered; the trap would later signal a pid this run no longer owns" >&2
+  exit 1
+fi
+
+drain_background_pids
+if kill -0 "${registry_probe_drained}" 2>/dev/null; then
+  echo "drain_background_pids left a registered process running; the EXIT trap cannot reach what the spawns register" >&2
+  exit 1
+fi
+if [[ "${#background_pids[@]}" -ne 0 ]]; then
+  echo "drain_background_pids left ${#background_pids[@]} pids registered" >&2
+  exit 1
+fi
+
 echo "== [0/9] pinned-digest drift guard"
 quadlet_image="$(sed -n 's/^Image=//p' "${repo_root}/deploy/podman/mcloving-postgres.container")"
 if [[ "${quadlet_image}" != "${MCLOVING_POSTGRES_IMAGE}" ]]; then
@@ -1234,6 +1316,7 @@ with socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), Handler) as server:
     server.serve_forever()
 HEALTHSRV
 health_server_pid=$!
+register_background_pid "${health_server_pid}"
 for _ in $(seq 1 40); do
   curl --silent --fail --max-time 1 --noproxy '*' \
     "http://127.0.0.1:${health_live_port}/openapi.json" >/dev/null 2>&1 && break
@@ -1245,8 +1328,7 @@ timeout 20 env INVOCATION_ID=mcloving-smoke \
   bash -c 'SYSTEMD_EXEC_PID=$$ exec "$0" "$@"' \
   "${libexec}/helpers/mcloving-health" controller "${health_env}" \
   > "${workdir}/logs/health-effective.log" 2>&1 || health_effective_status=$?
-kill "${health_server_pid}" >/dev/null 2>&1 || true
-wait "${health_server_pid}" 2>/dev/null || true
+release_background_pid "${health_server_pid}"
 if [[ "${health_effective_status}" -ne 0 ]]; then
   echo "the health helper did not probe the address the unit was actually started on (exit ${health_effective_status}):" >&2
   cat "${workdir}/logs/health-effective.log" >&2
@@ -6439,6 +6521,7 @@ lock_current="$(readlink "${lock_libexec}/current")"
   && flock -n 200 \
   && exec sleep 60 ) &
 lock_holder=$!
+register_background_pid "${lock_holder}"
 lock_taken=""
 for _ in $(seq 1 50); do
   if ! flock -n "${lock_libexec}/.transition-lock" -c true 2>/dev/null; then
@@ -6449,14 +6532,14 @@ for _ in $(seq 1 50); do
 done
 [[ -n "${lock_taken}" ]] || {
   echo "the lock gate's holder never took the transition lock" >&2
-  kill "${lock_holder}" 2>/dev/null || true
+  release_background_pid "${lock_holder}"
   exit 1
 }
 if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${lock_home}" \
   --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
   --no-systemd > "${workdir}/logs/transition-lock.log" 2>&1; then
   echo "an upgrade proceeded while another transition held the deployment lock" >&2
-  kill "${lock_holder}" 2>/dev/null || true
+  release_background_pid "${lock_holder}"
   exit 1
 fi
 grep -q "another deployment transition holds the lock" \
@@ -6467,7 +6550,7 @@ grep -q "another deployment transition holds the lock" \
 }
 [[ "$(readlink "${lock_libexec}/current")" == "${lock_current}" ]] || {
   echo "a lock-refused upgrade still moved the current release" >&2
-  kill "${lock_holder}" 2>/dev/null || true
+  release_background_pid "${lock_holder}"
   exit 1
 }
 # The digest reader participates in the same lock, shared side: while a
@@ -6477,31 +6560,30 @@ grep -q "another deployment transition holds the lock" \
 if "${lock_libexec}/helpers/mcloving-deployed-digests" --home "${lock_home}" \
   > "${workdir}/logs/digests-under-lock.log" 2>&1; then
   echo "the digest reader ran while a transition held the lock exclusively" >&2
-  kill "${lock_holder}" 2>/dev/null || true
+  release_background_pid "${lock_holder}"
   exit 1
 fi
 grep -q "a deployment transition is in progress" \
   "${workdir}/logs/digests-under-lock.log" || {
   echo "the under-transition digest refusal was not named:" >&2
   cat "${workdir}/logs/digests-under-lock.log" >&2
-  kill "${lock_holder}" 2>/dev/null || true
+  release_background_pid "${lock_holder}"
   exit 1
 }
-kill "${lock_holder}" 2>/dev/null || true
-wait "${lock_holder}" 2>/dev/null || true
+release_background_pid "${lock_holder}"
 # Shared holders coexist: a concurrent digest read must not block another.
 ( exec 200>>"${lock_libexec}/.transition-lock" \
   && flock -s -n 200 \
   && exec sleep 60 ) &
 shared_holder=$!
+register_background_pid "${shared_holder}"
 sleep 0.3
 "${lock_libexec}/helpers/mcloving-deployed-digests" --home "${lock_home}" >/dev/null || {
   echo "a shared lock holder blocked a digest read" >&2
-  kill "${shared_holder}" 2>/dev/null || true
+  release_background_pid "${shared_holder}"
   exit 1
 }
-kill "${shared_holder}" 2>/dev/null || true
-wait "${shared_holder}" 2>/dev/null || true
+release_background_pid "${shared_holder}"
 # The lock is legitimately opened BEFORE the integrity walk, so the open
 # itself must be safe against a swapped lockfile: with libexec writable,
 # another user replaces .transition-lock with a symlink to any
