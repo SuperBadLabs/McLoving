@@ -215,7 +215,10 @@ degrades the record to `kind: unstable_entry`, which fails a freeze exactly as
 loudly as drift in the deployment itself. Directories whose CONTENTS the lane
 enumerates — the home, the managed roots, and external unit load paths such as
 `/etc/systemd/user` — are recorded in full, entry hash included, wherever they
-live.
+live. A symlink **component** of the chain carries its own record — its
+`lstat` owner and its target, and nothing else — because that owner is what the
+ancestor walk judges it on, and a document blind to it would report no drift
+across a change the next transition refuses.
 
 ## Smoke test
 

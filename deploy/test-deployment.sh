@@ -3102,6 +3102,59 @@ podman unshare chown -R 0:0 "${d004_foreign}/home"
 }
 podman unshare rm -rf "${d004_foreign}"
 
+# THE INVENTORY MUST SEE WHAT THE WALK JUDGES. require_secure_ancestors treats a
+# symlink component's own inode owner as security-relevant -- under S_ISVTX the
+# entry's owner may unlink and repoint it -- so a `chown -h` on an ancestor link
+# makes the very next transition refuse. The canonical deployed-digests document
+# is what a CUTOVER-001 freeze re-reads, and it was byte-identical across that
+# same chown, because the classified chain's `link` records were being dropped.
+# A freeze reporting no drift about a fact that has already invalidated the
+# deployment is the failure this project is named for, so: change ONLY the link
+# inode's owner and require the document to move, then hand it back and require
+# the document to return.
+d004_linkdig="${d004_root}/link-digest"
+rm -rf "${d004_linkdig}"
+mkdir -p "${d004_linkdig}/home" "${d004_linkdig}/stash/dot-local"
+ln -s "${d004_linkdig}/stash/dot-local" "${d004_linkdig}/home/.local"
+"${repo_root}/deploy/bin/mcloving-install" --home "${d004_linkdig}/home" \
+  --release-dir "${release_dir}" --checksums "${workdir}/checksums.sha256" \
+  --no-systemd > "${workdir}/logs/d004-link-digest-install.log" 2>&1 || {
+  echo "install refused a home whose .local is a symlink this account owns:" >&2
+  cat "${workdir}/logs/d004-link-digest-install.log" >&2
+  exit 1
+}
+d004_linkdig_helpers="${d004_linkdig}/home/.local/libexec/mcloving/helpers"
+"${d004_linkdig_helpers}/mcloving-deployed-digests" --home "${d004_linkdig}/home" \
+  > "${workdir}/logs/d004-link-digest-before.json"
+podman unshare chown -h 1:1 "${d004_linkdig}/home/.local"
+"${d004_linkdig_helpers}/mcloving-deployed-digests" --home "${d004_linkdig}/home" \
+  > "${workdir}/logs/d004-link-digest-foreign.json"
+if cmp -s "${workdir}/logs/d004-link-digest-before.json" \
+  "${workdir}/logs/d004-link-digest-foreign.json"; then
+  echo "the deployed-digests document is byte-identical across a chown -h on an ancestor symlink; a freeze would report no drift about a deployment the next transition will refuse" >&2
+  podman unshare rm -rf "${d004_linkdig}"
+  exit 1
+fi
+grep -q '"kind": "symlink"' "${workdir}/logs/d004-link-digest-foreign.json" || {
+  echo "the inventory records no symlink component for an ancestor that is one:" >&2
+  podman unshare rm -rf "${d004_linkdig}"
+  exit 1
+}
+# uid 0 INSIDE the namespace is this account outside it, so this hands the entry
+# back rather than giving it to root.
+podman unshare chown -h 0:0 "${d004_linkdig}/home/.local"
+"${d004_linkdig_helpers}/mcloving-deployed-digests" --home "${d004_linkdig}/home" \
+  > "${workdir}/logs/d004-link-digest-after.json"
+cmp -s "${workdir}/logs/d004-link-digest-before.json" \
+  "${workdir}/logs/d004-link-digest-after.json" || {
+  echo "the document did not return to baseline after the link inode was handed back; it is recording something volatile:" >&2
+  diff "${workdir}/logs/d004-link-digest-before.json" \
+    "${workdir}/logs/d004-link-digest-after.json" >&2 || true
+  podman unshare rm -rf "${d004_linkdig}"
+  exit 1
+}
+podman unshare rm -rf "${d004_linkdig}"
+
 rm -rf "${d004_root}"
 
 # A chmod landing between a record's fstat and its pathname re-check must

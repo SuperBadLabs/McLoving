@@ -57,19 +57,21 @@ passes.
 Every scenario is red on at least one baseline, and this branch is the only
 column in which every refusal names what is wrong with the host.
 
-**Eleven of these are carried as gates in `deploy/test-deployment.sh`**: ten of
-the twelve fixtures, plus one that asserts the chain's own content — that `/` is
+**Twelve gates in `deploy/test-deployment.sh`** carry ten of these twelve
+fixtures, plus one that asserts the chain's own content — that `/` is
 present, that the directory above the home is present and classified
 `traversal`, and that the home is classified `guarded` — because an acceptance
-proves nothing if the walk reached nothing. Two fixtures are deliberately not
+proves nothing if the walk reached nothing, and one that requires the digest
+inventory to move when only an ancestor symlink's inode changes hands. Two
+fixtures are deliberately not
 gates: `sticky-last-child-absent` is the same defect as the sibling-root gate in
 a different spelling and is covered by that gate's fixture being renamed so its
 absent entry sorts last, and `host-vartmp-squat` exercises the host's real
 `/var/tmp`, which a suite must not depend on the state of.
 
-The full suite was run end to end four times and passed each time — twice
-before review, once after the bypass fix and the two added gates, and once more
-after the final clarity change — at 336 s on a measured run, consistent with the
+The full suite was run end to end five times and passed each time — twice before
+review, and once after each of the three rounds of change that followed — at
+336 s on a measured run, consistent with the
 ~302 s the previous custodian recorded.
 
 `scripts/validate-foundation.sh` was **not** run here: every check it performs is
@@ -130,6 +132,30 @@ child scan now splits in the shell (`IFS=',' read -r -a`), with no pipeline and
 no last element to lose; the sibling-root fixture is renamed so its absent entry
 sorts last; and a further gate covers the degenerate one-child case directly.
 The `this branch, pre-review` column above is that hole, left in the record.
+
+### Round 2 — the inventory was blind to something the walk refuses
+
+The repository's review bot raised a P2 that my adversarial reviewer had seen and
+judged acceptable, and the bot was right. `require_secure_ancestors` treats a
+symlink component's own inode owner as security-relevant, but the classified
+chain's `link` records were being dropped from the deployed-digests inventory
+entirely. Measured: `podman unshare chown -h 1:1` on an ancestor symlink left the
+canonical document **byte-identical** while the very next transition refused the
+deployment by name.
+
+That is the project's defining failure in its exact shape — **a freeze reporting
+no drift about a fact that has already invalidated the deployment**. The two
+reviewers split on it because they were asking different questions: repointing a
+link does move the document (the resolved ancestor paths change), so it looked
+covered; changing only the *entry's owner* moves nothing, and that is the case
+the ownership rule exists for.
+
+A symlink component now carries its own record — path, `lstat` uid and gid, and
+its target — read twice around the `lstat` and refused if it moved. No mode (a
+symlink's is 0777 and unsettable), no digest, no timestamps: the same
+record-what-you-assert rule the traversal records follow. A gate installs into a
+home whose `.local` is a symlink, hands only the inode to a foreign uid, requires
+the document to move, hands it back, and requires the document to return.
 
 **The refusal's remedy text was also wrong, and that was the other reviewer's
 top finding.** The message ended "run chmod go-w (or restore ownership) on them
@@ -250,9 +276,9 @@ stable-facts-only, and a traversed ancestor swapped for a different directory
 with identical mode, uid and gid produces a byte-identical record. This is the
 design's own rule applied consistently — the document asserts about a directory
 it merely walks through exactly what the lane checks about it — and the
-`(st_dev, st_ino)` re-check still fires. The cost is diagnostic: a moved link no
-longer names itself in the document, it only shows up as a change in the
-resolved ancestor paths.
+`(st_dev, st_ino)` re-check still fires. An earlier revision of this receipt also
+claimed a moved link no longer names itself in the document; that was true and is
+no longer — see round 2 below.
 
 **Running the lane as root is refused, and that is policy rather than an
 accident.** With the anchor pinned to `${EUID}`, `sudo mcloving-install --home

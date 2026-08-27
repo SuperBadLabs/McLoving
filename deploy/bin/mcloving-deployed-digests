@@ -762,6 +762,14 @@ traversed_ancestors: set = set()
 # drop-in file beneath it. Recording the union without this precedence would
 # make the document's fidelity depend on which chain happened to arrive last.
 guarded_directories: set = set()
+# The symlink COMPONENTS the walk crossed. Not directories, so they carry no
+# mode, no listing and no digest -- but require_secure_ancestors judges the
+# link INODE's owner, because S_ISVTX grants unlink to the entry's owner, so a
+# foreign-owned link is one its owner may repoint. Dropping them from the
+# document made it byte-identical across a `chown -h` that the very next
+# transition would refuse: the freeze would have reported no drift about a fact
+# that had already invalidated the deployment (DEPLOY-004, review round 2).
+chain_links: set = set()
 unresolvable_links = []
 
 
@@ -787,6 +795,7 @@ def absorb_chain(text: str) -> None:
     """
     guarded_tokens = []
     traversal_tokens = []
+    link_tokens = []
     for line in text.splitlines():
         if not line:
             continue
@@ -797,7 +806,7 @@ def absorb_chain(text: str) -> None:
         elif kind == "traversal":
             traversal_tokens.append(fields[1])
         elif kind == "link":
-            continue
+            link_tokens.append(fields[1])
         else:
             # NOT a silent skip. A kind this document does not know is a
             # library that grew a class of node while its consumer went on
@@ -815,6 +824,7 @@ def absorb_chain(text: str) -> None:
     traversal_paths = decode_path_items("\n".join(traversal_tokens))
     chain_directories.update(guarded_paths)
     chain_directories.update(traversal_paths)
+    chain_links.update(decode_path_items("\n".join(link_tokens)))
     guarded_directories.update(guarded_paths)
     traversed_ancestors.difference_update(guarded_paths)
     traversed_ancestors.update(
@@ -947,6 +957,33 @@ for configured in configured_paths:
         unresolvable_links.append(configured)
 
 
+def link_record(path: Path) -> dict:
+    """Record a symlink COMPONENT by the facts the lane judges it on.
+
+    lstat, never stat: the point is the entry, not what it points at, and the
+    target is recorded separately by its own resolved path. Owner and target
+    only -- a symlink has no meaningful mode (0777, unsettable) and no content
+    to digest, and its timestamps move only when the entry is re-created, which
+    is the change the owner and target already show. Read twice around the
+    lstat and refused if it moved, the same shape as every other record here.
+    """
+    try:
+        before = os.readlink(path)
+        status = os.lstat(path)
+        after = os.readlink(path)
+    except OSError:
+        return {"path": home_relative(path), "kind": "unreadable_symlink"}
+    if before != after:
+        return {"path": home_relative(path), "kind": "unstable_entry"}
+    return {
+        "path": home_relative(path),
+        "kind": "symlink",
+        "uid": status.st_uid,
+        "gid": status.st_gid,
+        "symlink_target": before,
+    }
+
+
 def home_relative(path: Path) -> str:
     try:
         return path.relative_to(home).as_posix()
@@ -977,6 +1014,10 @@ document = {
         # (DEPLOY-004).
         file_record(Path(path), home, stable_only=path in traversed_ancestors)
         for path in sorted(chain_directories)
+    ]
+    + [
+        link_record(Path(path))
+        for path in sorted(chain_links)
     ]
     + [
         {"path": home_relative(link), "kind": "unresolvable_link_chain"}
