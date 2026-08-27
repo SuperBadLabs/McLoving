@@ -111,6 +111,12 @@ def build(board: str = BOARD, threat_model: str = THREAT_MODEL) -> TemporaryDire
     (root / "docs" / "evidence" / "AAA-001_SECURITY_REVIEW.md").write_text(
         RECEIPT, encoding="utf-8"
     )
+    # A real document that names a DIFFERENT ticket, so a test can point an
+    # attribution at evidence which exists and is about somebody else.
+    (root / "docs" / "evidence" / "ZZZ-001_SECURITY_REVIEW.md").write_text(
+        "# ZZZ-001 security review\n\n" + ("ZZZ-001 reviewed the boundary. " * 60),
+        encoding="utf-8",
+    )
     return directory
 
 
@@ -276,7 +282,12 @@ class ClosureAttribution(unittest.TestCase):
             "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
         )
         self.assertTrue(
-            any("closure-attribution tables" in error for error in errors), errors
+            any(
+                "closure-attribution tables" in error
+                or "Closure attribution` sections" in error
+                for error in errors
+            ),
+            errors,
         )
 
     # --- the nine recorded bypasses, each now structurally impossible ---
@@ -434,6 +445,42 @@ class ClosureAttribution(unittest.TestCase):
             "| BBB-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
         )
         self.assertTrue(any("not DONE" in error for error in errors), errors)
+
+    def test_an_evidence_document_that_never_names_the_ticket_is_refused(self):
+        """Existence was never the claim the row makes.
+
+        The row says a named document records THIS ticket's review. A path that
+        merely resolves witnesses the wrong fact, and this branch's own first
+        cut proved it: `ALPHA-001` was attributed to `docs/ALPHA_DEMO.md`, which
+        never mentions the ticket.
+        """
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/ZZZ-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(any("never names it" in error for error in errors), errors)
+
+    def test_an_evidence_path_that_escapes_docs_is_refused(self):
+        """`.` is a filename character, so `docs/../..` looks like a docs path."""
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/../../etc/passwd` |\n"
+        )
+        self.assertTrue(any("leaves docs/" in error for error in errors), errors)
+
+    def test_a_table_outside_the_heading_is_not_the_attribution_table(self):
+        """The heading is the rule, not a comment about the rule."""
+        errors = self._errors(
+            "# Threat model\n\n## Something else\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(
+            any("has no closure-attribution table" in error for error in errors),
+            errors,
+        )
 
     def test_a_short_row_is_an_error_not_a_skip(self):
         """An unreadable attribution row and an absent one look identical to the
@@ -715,6 +762,11 @@ class CitedEvidence(unittest.TestCase):
             any("which does not exist" in error for error in errors), errors
         )
 
+    def test_a_citation_that_escapes_docs_fails(self):
+        """Same containment rule as the attribution field, same reason."""
+        errors = self._cite("`docs/../../etc/passwd`")
+        self.assertTrue(any("does not exist" in error for error in errors), errors)
+
     def test_an_unbackticked_missing_document_fails(self):
         """The one the ticket names. The bare-path rule in the board verifier
         cannot backstop it: that rule fires only when the path RESOLVES."""
@@ -866,7 +918,9 @@ class ThisRepository(unittest.TestCase):
         # 30, then 33 when register attribution narrowed to the Required
         # verification column and exposed MIG-002/006/007, then 31 when
         # identifier matching stopped `\b` hiding ADMIN-001 and CONSUMER-001
-        # inside their own receipt filenames, then 50 under HYG-002.
+        # inside their own receipt filenames, then 50 under HYG-002, then 51 when that
+        # ticket's own binding rule caught ALPHA-001 pointing at a document that
+        # never names it.
         #
         # THE ARGUMENT FOR RAISING IT, since the comment above demands one.
         # HYG-002 replaced a predicate that read English with a table that holds
@@ -882,7 +936,7 @@ class ThisRepository(unittest.TestCase):
         # in this comment, naming what was disclosed and why it was not a
         # regression.
         self.assertLessEqual(
-            len(debt), 50, "closure debt may only shrink; lower this bound as it is paid"
+            len(debt), 51, "closure debt may only shrink; lower this bound as it is paid"
         )
         done = int(summary.split("done=")[1].split()[0])
         self.assertGreaterEqual(done, 80, "DONE tickets should not vanish from the board")

@@ -364,7 +364,6 @@ had never claimed one.
 | Ticket | Evidence |
 |---|---|
 | ADMIN-001 | `docs/evidence/ADMIN-001_SECURITY_REVIEW.md` |
-| ALPHA-001 | `docs/ALPHA_DEMO.md` |
 | AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |

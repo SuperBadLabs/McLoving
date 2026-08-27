@@ -207,6 +207,17 @@ for _ticket in (
 # name it -- `JENKINS_NATIVE_DIFFERENTIAL_V1.md` and `STATE_TRANSFER_V1.md` --
 # and neither is cited by any board row or threat-model structure, so promoting
 # one here would be this gate inventing an attribution rather than reading one.
+# ALPHA-001 was in the attribution table's first cut, pointing at
+# `docs/ALPHA_DEMO.md` because its board row cites that document as its closure.
+# The document never mentions ALPHA-001 -- it defines the demo, it does not
+# review the ticket -- so the row asserted something no document says. Caught by
+# this branch's own binding rule, in review, on this branch's own data.
+THREAT_MODEL_DEBT["ALPHA-001"] = (
+    "credited before HYG-002 by a closure-review heading in the threat model, "
+    "while the document its board row cites as closure never names the ticket, "
+    "so no document records a review of it"
+)
+
 for _ticket in ("DIFF-001", "MIG-005A"):
     THREAT_MODEL_DEBT[_ticket] = (
         "credited before HYG-002 by a register verification cell whose only "
@@ -281,6 +292,8 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
     "DIFF-001", "INV-001", "INV-002", "INV-003", "INV-004", "IR-001",
     "MIG-000", "MIG-005A", "OPS-001", "OPS-002", "SEC-002", "SEC-003",
     "WIN-001", "WIN-002",
+
+    "ALPHA-001",
 })
 
 # The board's 15 tables in 4 row formats. Only the nine whose first header
@@ -641,7 +654,8 @@ def cited_documents(repository: Path, text: str) -> list[str]:
                 # real directory `docs/evidence`. A directory that is there is
                 # not a document that is missing, and this check exists to
                 # answer the latter question.
-                if not (repository / posixpath.normpath(path)).is_file():
+                document = contained_document(repository, path)
+                if document is None or not document.is_file():
                     errors.append(
                         f"line {number}: {row[0]} is DONE and cites {path}, which "
                         "does not exist; write it, or stop citing it as evidence"
@@ -722,6 +736,23 @@ ATTRIBUTION_TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?(?:-[A-Z0-9]+)*")
 ATTRIBUTION_EVIDENCE = DOC_PATH
 
 
+def contained_document(repository: Path, cited: str) -> Path | None:
+    """Resolve a cited `docs/...` path, or None if it leaves `docs/`.
+
+    `.` is a legal filename character, so a path spelled `docs/../../.git/config`
+    matches every "looks like a docs path" pattern in this file and then resolves
+    wherever it likes. Both the citation check and the attribution field feed
+    user-controlled text straight into a filesystem probe, so both normalise
+    first and refuse anything that does not stay under `docs/` -- an evidence
+    path that escapes the documentation tree is not evidence, whatever it points
+    at. (HYG-002, review round 1.)
+    """
+    normalized = posixpath.normpath(cited)
+    if normalized != "docs" and not normalized.startswith("docs/"):
+        return None
+    return repository / normalized
+
+
 def closure_attributions(text: str) -> tuple[dict[str, str], list[str]]:
     """Read the closure-attribution table -> {ticket: evidence path}, defects.
 
@@ -736,7 +767,44 @@ def closure_attributions(text: str) -> tuple[dict[str, str], list[str]]:
     """
     attributions: dict[str, str] = {}
     errors: list[str] = []
-    matching = [rows for header, rows in tables(text) if header == ATTRIBUTION_HEADER]
+    # SCOPED TO ITS OWN SECTION. An earlier cut accepted a table with this
+    # header anywhere in the document, while the comment above claimed it was
+    # read from under the heading -- so `ATTRIBUTION_HEADING` was a constant
+    # that documented a rule nothing enforced, which is the same defect class
+    # this ticket exists to remove, one level up. Now the heading is the rule.
+    lines = text.splitlines()
+    headings = [
+        number
+        for number, line in enumerate(lines, start=1)
+        if line.startswith(ATTRIBUTION_HEADING)
+    ]
+    if len(headings) > 1:
+        # The first cut of this scoping took the LAST heading and silently
+        # ignored the rest -- reintroducing, one level up, exactly the ambiguity
+        # the duplicate-table rule below exists to refuse. Caught by that rule's
+        # own test going red, which is the entire argument for keeping negative
+        # tests that assert a message rather than an exit code.
+        errors.append(
+            f"{THREAT_MODEL} has {len(headings)} `{ATTRIBUTION_HEADING}` "
+            "sections; exactly one may exist, or which of them attributes a "
+            "review is decided by document order rather than by anyone"
+        )
+        return {}, errors
+    section_start = headings[0] if headings else None
+    section_end = len(lines) + 1
+    if section_start is not None:
+        for number, line in enumerate(lines[section_start:], start=section_start + 1):
+            if line.startswith("## "):
+                section_end = number
+                break
+    matching = [
+        rows
+        for header, rows in tables(text)
+        if header == ATTRIBUTION_HEADER
+        and rows
+        and section_start is not None
+        and section_start < rows[0][0] < section_end
+    ]
     if not matching:
         errors.append(
             f"{THREAT_MODEL} has no closure-attribution table; the gate reads "
@@ -889,11 +957,34 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
     # hypothetical here: `docs/evidence/` already holds a receipt for
     # `DEPLOY-001`, which reads ACTIVE, and no check in this file sees it.
     for ticket, evidence in sorted(attributions.items()):
-        if not (repository / evidence).is_file():
+        document = contained_document(repository, evidence)
+        if document is None:
+            errors.append(
+                f"{ticket} is attributed to {evidence}, which leaves docs/ once "
+                "normalised; an evidence path that escapes the documentation "
+                "tree is not evidence"
+            )
+        elif not document.is_file():
             errors.append(
                 f"{ticket} is attributed to {evidence}, which does not exist; "
                 "an attribution pointing at nothing is worse than none, because "
                 "it reads as evidence"
+            )
+        # THE DOCUMENT MUST BE ABOUT THIS TICKET. Existence was never the claim
+        # the row makes -- it says a named document records THIS ticket's review,
+        # and a path that merely resolves witnesses the wrong fact. Without this,
+        # a row could point at another ticket's receipt and pass, which is
+        # precisely the defect that put DIFF-001 and MIG-005A in the debt ledger
+        # rather than in this table. It was also present in this table's own
+        # first cut: `ALPHA-001` pointed at `docs/ALPHA_DEMO.md`, which never
+        # mentions the ticket.
+        elif not names(ticket).search(
+            document.read_text(encoding="utf-8", errors="replace")
+        ):
+            errors.append(
+                f"{ticket} is attributed to {evidence}, which never names it; "
+                "an evidence document that does not mention the ticket records "
+                "somebody else's review, or nobody's"
             )
         if statuses.get(ticket) != "DONE":
             errors.append(

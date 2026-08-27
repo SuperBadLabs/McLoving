@@ -154,6 +154,45 @@ ticket has a document, not a pattern.
 
 Test suites go 44 → 49 and 63 → 73.
 
+## Review round 1 — five findings, and the P1 was in my own table
+
+The bot raised five, all real, and the sharpest one exposed the same defect this
+ticket was written about, inside the fix for it.
+
+**P1 — the field witnessed the wrong fact.** An attribution row says *a named
+document records THIS ticket's review*. The first cut checked only that the path
+**resolved**, so a row could point at another ticket's receipt and pass. That is
+precisely why `DIFF-001` and `MIG-005A` were put in the debt ledger rather than
+this table — and the table's own first cut did it anyway: `ALPHA-001` was
+attributed to `docs/ALPHA_DEMO.md`, which **never mentions the ticket**. It
+defines the demo; it does not review the ticket. Measured across all twenty rows,
+that was the only one, and it is now in the debt ledger with that reason. Debt
+50 → 51. The evidence document must now name its ticket, reusing the `names()`
+helper the receipt rule already uses.
+
+**Two path-containment findings.** `.` is a legal filename character, so
+`docs/../../.git/config` matches every "looks like a docs path" pattern here and
+then resolves wherever it likes. Both the citation check and the attribution
+field fed user-controlled text straight into a filesystem probe. Both now
+normalise and refuse anything that does not stay under `docs/`.
+
+**One documentation-versus-behaviour finding, which is this ticket's own defect
+one level up.** The parser's comment said the table is read from under
+`## Closure attribution`; the code accepted a table with that header anywhere in
+the file, and `ATTRIBUTION_HEADING` was a constant documenting a rule nothing
+enforced — the same shape as the dead `REGISTER_VERIFICATION_COLUMN` this change
+deleted. The heading is now the rule.
+
+**And fixing that introduced a fresh one, caught by an existing test.** Scoping
+to the heading first took the *last* matching heading and ignored the rest,
+which silently reintroduced the ambiguity the duplicate-table rule exists to
+refuse — one level up, again. `test_two_tables_are_refused` went red for a real
+reason. Duplicate sections are now an error. **That is the argument for negative
+tests asserting a message rather than an exit code**: an exit-code assertion
+would have stayed green through it.
+
+All four new checks are mutation-proved, each turning its own named test red.
+
 ## Bounded deliberately
 
 Three defects were found while reproducing this ticket's items that are **larger
