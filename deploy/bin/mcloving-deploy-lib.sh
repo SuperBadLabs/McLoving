@@ -286,7 +286,14 @@ require_secure_ancestors() {
       # prefix of some path this walk entered, so it always has at least one
       # recorded child; a node that somehow has none is a chain the caller
       # cannot vouch for, and the whole exemption rests on the children.
-      (( ${#encoded_child_list[@]} > 0 )) && exempt=1
+      # Spelled as an `if` rather than `(( ... )) && exempt=1`. Measured: the
+      # AND-list form does not trip `set -e` here only because later statements
+      # overwrite its status -- move it to the end of a block and it starts
+      # aborting the installer silently. Not a bug today; a trap for whoever
+      # edits this next.
+      if (( ${#encoded_child_list[@]} > 0 )); then
+        exempt=1
+      fi
       for encoded_child in ${encoded_child_list[@]+"${encoded_child_list[@]}"}; do
         if [[ -z "${encoded_child}" ]]; then
           exempt=0

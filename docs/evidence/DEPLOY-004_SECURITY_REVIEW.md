@@ -65,9 +65,16 @@ a different spelling and is covered by that gate's fixture being renamed so its
 absent entry sorts last, and `host-vartmp-squat` exercises the host's real
 `/var/tmp`, which a suite must not depend on the state of.
 
-The full suite was run end to end three times and passed each time — twice
-before review and once after the bypass fix and the two added gates — at 336 s
-on a measured run, consistent with the ~302 s the previous custodian recorded. The five P1
+The full suite was run end to end four times and passed each time — twice
+before review, once after the bypass fix and the two added gates, and once more
+after the final clarity change — at 336 s on a measured run, consistent with the
+~302 s the previous custodian recorded.
+
+`scripts/validate-foundation.sh` was **not** run here: every check it performs is
+covered by a CI job that passed on this branch, except `actionlint`, which no CI
+job runs. `actionlint` was therefore run directly against
+`.github/workflows/*.yml` and is clean. Saying which of the two happened matters
+more than claiming the script ran. The five P1
 findings that stopped the earlier attempts map onto rows 4–8; the two
 acceptance rows are what prove the walk to `/` has not made ordinary
 deployments refuse.
