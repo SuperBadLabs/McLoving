@@ -341,6 +341,48 @@ inputs and a fresh explicit one-action owner grant.
 | Multibranch and organization-folder discovery | DISC-001 |
 | Deny-authority production shadow qualification | SHADOW-001 |
 
+## Closure attribution
+
+Machine-readable, and read by `scripts/verify-ticket-closure-receipts.py` as the
+ONLY thing that attributes a threat-model review to a closed ticket. Two columns:
+a ticket id, and the path to the document that records the review. Both are
+matched whole, so neither cell can hold a sentence -- which is the point, because
+every previous version of this rule inferred attribution from English and every
+one of them was defeated by a denial written in an affirmative shape.
+
+**This table is not the review.** The register above is, and the prose there is
+still where a reader learns what was examined and what risk remains. This table
+only records, in a form a program can check, that the review happened and where
+its evidence lives.
+
+**Do not add a row for a ticket whose evidence you have not read.** A row here is
+an assertion that a specific document records a specific ticket's review. The
+table it replaced was `Area | First implementation ticket`, which asserts who
+BUILT an area -- and the gate read that as a review for twenty-five tickets that
+had never claimed one.
+
+| Ticket | Evidence |
+|---|---|
+| ADMIN-001 | `docs/evidence/ADMIN-001_SECURITY_REVIEW.md` |
+| AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
+| CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
+| DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
+| DEPLOY-004 | `docs/evidence/DEPLOY-004_SECURITY_REVIEW.md` |
+| DIFF-002 | `docs/architecture/STATE_POLICY_DIFFERENTIAL_V1.md` |
+| DIFF-003 | `docs/evidence/DIFF-003_SECURITY_REVIEW.md` |
+| DISC-001 | `docs/evidence/DISC-001_SECURITY_REVIEW.md` |
+| EXT-001 | `docs/evidence/EXT-001_SECURITY_REVIEW.md` |
+| EXT-002 | `docs/evidence/EXT-002_SECURITY_REVIEW.md` |
+| HYG-002 | `docs/evidence/HYG-002_SECURITY_REVIEW.md` |
+| IDP-001 | `docs/evidence/IDP-001_SECURITY_REVIEW.md` |
+| INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
+| JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
+| OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
+| PROV-001 | `docs/evidence/PROV-001_SECURITY_REVIEW.md` |
+| REL-001 | `docs/evidence/REL-001_RELEASE_CEREMONY.md` |
+| SHADOW-001 | `docs/architecture/SHADOW_QUALIFICATION_V1.md` |
+| TRIG-001 | `docs/evidence/TRIG-001_SECURITY_REVIEW.md` |
+
 ## Residual-risk policy
 
 A ticket cannot mark a threat “eliminated” merely because a design mitigation

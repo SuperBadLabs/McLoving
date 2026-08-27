@@ -25,7 +25,14 @@ BoardTransform = Callable[[str], str]
 ReadmeTransform = Callable[[str], str]
 
 
-class ExecutionBoardVerifierTests(unittest.TestCase):
+class VerifierHarness(unittest.TestCase):
+    """Runs `main()` against a synthetic copy of the board and README.
+
+    Split out of `ExecutionBoardVerifierTests` by HYG-002 so a new suite can
+    drive the real entry point without inheriting -- and therefore re-running --
+    every test in that class.
+    """
+
     def run_verifier(
         self,
         board_transform: BoardTransform = lambda text: text,
@@ -66,6 +73,8 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
 
         return code, stdout.getvalue(), stderr.getvalue()
 
+
+class ExecutionBoardVerifierTests(VerifierHarness):
     def test_current_repository_passes(self) -> None:
         code, stdout, stderr = self.run_verifier()
         self.assertEqual(code, 0, stderr)
@@ -247,6 +256,179 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("README contains obsolete implementation claim", stderr)
+
+
+class TopologyAndDispatchParsing(VerifierHarness):
+    """HYG-002: the two loops that used to cut their own cells.
+
+    Both predated `row_cells` and split on every pipe. Padding never diverged
+    and neither did a pipe inside a code span; `\\|` did, and the topology loop
+    lost the whole row to it. The other half of the item is the loop's bare
+    `continue` on a class cell it did not recognise -- harmless where the
+    missing-classification check backstops it, and silent where a second row
+    supplies the class the skipped one withheld.
+    """
+
+    def _lane_row(self, text: str, predicate):
+        """The first topology row satisfying `predicate(chain_cell, class_cell)`."""
+        match = VERIFY.TOPOLOGY_SECTION.search(text)
+        self.assertIsNotNone(match, "the board has no topology section")
+        assert match is not None
+        for header, rows in VERIFY.markdown_tables(match.group(1)):
+            chain = header.index(VERIFY.TOPOLOGY_CHAIN_HEADER)
+            klass = header.index(VERIFY.TOPOLOGY_CLASS_HEADER)
+            for line, cells in rows:
+                if len(cells) == len(header) and predicate(cells[chain], cells[klass]):
+                    return line, cells, chain, klass
+        self.fail("no topology row matched the predicate")
+
+    @staticmethod
+    def _row(cells: list[str], lane: str, chain: int, chain_text: str,
+             klass: int, class_text: str) -> str:
+        rebuilt = ["—"] * len(cells)
+        rebuilt[0] = lane
+        rebuilt[chain] = chain_text
+        rebuilt[klass] = class_text
+        return "| " + " | ".join(rebuilt) + " |"
+
+    def test_an_escaped_pipe_cannot_hide_a_topology_row(self) -> None:
+        """One `\\|` deleted the row from the loop, and with it its ordering.
+
+        The exploit this fixes: a duplicate lane row declaring a SERIAL chain in
+        REVERSE order, hidden behind a single escaped pipe in the Lane cell. The
+        real row still classified every ticket, so the missing-classification
+        backstop was satisfied, and the reversed chain was never checked for the
+        dependency edges it inverts. Both verifiers passed green.
+        """
+        reversed_pair: list[str] = []
+
+        def hide_a_reversed_chain(text: str) -> str:
+            line, cells, chain, klass = self._lane_row(
+                text,
+                lambda chain_cell, class_cell: class_cell == "SERIAL"
+                and len(VERIFY.TICKET_ID.findall(chain_cell)) > 1,
+            )
+            tickets = VERIFY.TICKET_ID.findall(cells[chain])
+            reversed_pair[:] = [tickets[-1], tickets[-2]]
+            duplicate = self._row(
+                cells,
+                "Shadow lane \\| hidden",
+                chain,
+                " -> ".join(f"`{ticket}`" for ticket in reversed(tickets)),
+                klass,
+                "SERIAL",
+            )
+            return text.replace(line + "\n", line + "\n" + duplicate + "\n", 1)
+
+        code, _stdout, stderr = self.run_verifier(board_transform=hide_a_reversed_chain)
+        self.assertEqual(code, 1, stderr)
+        first, second = reversed_pair
+        self.assertIn(
+            f"SERIAL chain {first} -> {second} lacks a direct dependency edge",
+            stderr,
+        )
+
+    def test_an_escaped_pipe_in_a_dispatch_cell_is_content_not_a_boundary(self) -> None:
+        """The dispatch half of the same split, whose divergence runs the other way.
+
+        An escaped pipe in the successors cell made a legal row read as five
+        cells and be REFUSED. A verifier that rejects legal syntax is one people
+        edit around, so the row grammar is the same everywhere on this board.
+        """
+
+        def escape_a_pipe(text: str) -> str:
+            lines = text.splitlines()
+            self.assertIn(VERIFY.CURRENT_DISPATCH_HEADER, lines)
+            index = lines.index(VERIFY.CURRENT_DISPATCH_HEADER) + 2
+            row = lines[index].rstrip()
+            self.assertTrue(row.startswith("|") and row.endswith("|"), row[:40])
+            lines[index] = row[:-1].rstrip() + " -- and the successors A \\| B |"
+            return "\n".join(lines) + "\n"
+
+        code, stdout, stderr = self.run_verifier(board_transform=escape_a_pipe)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("execution-board-ok", stdout)
+
+    def test_a_ticket_status_in_an_open_lanes_class_cell_fails(self) -> None:
+        """The reachable half of the silent skip.
+
+        Lane tables overload the class column: a closed lane states `DONE`. A
+        SECOND row for an open ticket stating `PENDING` was therefore skipped as
+        an unrecognised class -- while the real row supplied `PARALLEL`, leaving
+        the ticket with two contradictory execution classes and no complaint.
+        """
+        named: list[str] = []
+
+        def duplicate_with_a_status(text: str) -> str:
+            statuses = {
+                parsed[0]: parsed[1]
+                for line in text.splitlines()
+                if (parsed := VERIFY.ticket_row(line)) is not None
+            }
+
+            def open_parallel(chain_cell: str, class_cell: str) -> bool:
+                found = VERIFY.TICKET_ID.findall(chain_cell)
+                return (
+                    class_cell == "PARALLEL"
+                    and len(found) == 1
+                    and statuses.get(found[0]) in VERIFY.REMAINING_STATUSES
+                )
+
+            line, cells, chain, klass = self._lane_row(text, open_parallel)
+            ticket = VERIFY.TICKET_ID.findall(cells[chain])[0]
+            named[:] = [ticket, statuses[ticket]]
+            duplicate = self._row(
+                cells, "Independent review (duplicate)", chain, f"`{ticket}`",
+                klass, statuses[ticket],
+            )
+            return text.replace(line + "\n", line + "\n" + duplicate + "\n", 1)
+
+        code, _stdout, stderr = self.run_verifier(board_transform=duplicate_with_a_status)
+        self.assertEqual(code, 1, stderr)
+        ticket, status = named
+        self.assertIn(f"states the ticket status {status!r}", stderr)
+        self.assertIn(f"{ticket} is still remaining", stderr)
+
+    def test_an_unreadable_class_cell_is_an_error_not_a_skip(self) -> None:
+        """A class cell that is neither a class nor a status must not be walked past."""
+
+        def corrupt_the_class(text: str) -> str:
+            line, cells, chain, klass = self._lane_row(
+                text,
+                lambda chain_cell, class_cell: class_cell in VERIFY.EXECUTION_CLASSES,
+            )
+            corrupted = self._row(
+                cells, cells[0], chain, cells[chain], klass, "PARALEL"
+            )
+            return text.replace(line + "\n", corrupted + "\n", 1)
+
+        code, _stdout, stderr = self.run_verifier(board_transform=corrupt_the_class)
+        self.assertEqual(code, 1, stderr)
+        self.assertIn(
+            "has class cell 'PARALEL', which is neither an execution class nor a "
+            "ticket status",
+            stderr,
+        )
+
+    def test_a_table_the_topology_loop_cannot_read_is_an_error(self) -> None:
+        """A renamed header would take every row in that table out of classification."""
+
+        def rename_a_lane_header(text: str) -> str:
+            match = VERIFY.TOPOLOGY_SECTION.search(text)
+            assert match is not None
+            section = match.group(1)
+            header = next(
+                line
+                for line in section.splitlines()
+                if line.startswith(f"| {VERIFY.TOPOLOGY_LANE_HEADER} |")
+            )
+            return text.replace(
+                header, header.replace(f"| {VERIFY.TOPOLOGY_LANE_HEADER} |", "| Lanes |", 1), 1
+            )
+
+        code, _stdout, stderr = self.run_verifier(board_transform=rename_a_lane_header)
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("which is not a lane table", stderr)
 
 
 class RequiredEdgeTests(unittest.TestCase):

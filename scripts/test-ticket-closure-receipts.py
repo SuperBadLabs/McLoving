@@ -71,9 +71,31 @@ THREAT_MODEL = """\
 | Area | First implementation ticket |
 |---|---|
 | The first area | AAA-001 |
+
+## Closure attribution
+
+| Ticket | Evidence |
+|---|---|
+| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |
 """
 
 RECEIPT = "# AAA-001 security review\n\n" + ("AAA-001 reviewed the boundary. " * 60)
+
+# HYG-002: the two redundant views whose third column is NOT overloaded. The
+# base fixture carries only a Lane table, and a Lane table is the one place an
+# execution class legitimately sits there -- so the bypass could not be written
+# against the fixture at all until these existed.
+BATCH_LEDGER = (
+    "\n## Batch ledger\n\n"
+    "| Batch | Tickets | Status | Outcome |\n|---|---|---|---|\n"
+    "| W0-A | AAA-001 | DONE | closed with a receipt |\n"
+)
+DISPATCH_QUEUE = (
+    "\n## Current dispatch\n\n"
+    "| Slot | Current ticket | Status | Dependency-critical successors |\n"
+    "|---:|---|---|---|\n"
+    "| 1 | `BBB-001` | PENDING | — |\n"
+)
 
 
 def build(board: str = BOARD, threat_model: str = THREAT_MODEL) -> TemporaryDirectory:
@@ -88,6 +110,12 @@ def build(board: str = BOARD, threat_model: str = THREAT_MODEL) -> TemporaryDire
     )
     (root / "docs" / "evidence" / "AAA-001_SECURITY_REVIEW.md").write_text(
         RECEIPT, encoding="utf-8"
+    )
+    # A real document that names a DIFFERENT ticket, so a test can point an
+    # attribution at evidence which exists and is about somebody else.
+    (root / "docs" / "evidence" / "ZZZ-001_SECURITY_REVIEW.md").write_text(
+        "# ZZZ-001 security review\n\n" + ("ZZZ-001 reviewed the boundary. " * 60),
+        encoding="utf-8",
     )
     return directory
 
@@ -197,184 +225,296 @@ class ReceiptSubstance(unittest.TestCase):
         self.assertTrue(any("no heading" in error for error in errors), errors)
 
 
-class ThreatModelAttribution(unittest.TestCase):
-    """A mention is not a review; a negative mention is the opposite of one."""
+class ClosureAttribution(unittest.TestCase):
+    """The attribution field, and every bypass that defeated its predecessor.
 
-    def _with_threat_model(self, threat_model: str) -> list[str]:
-        with build(threat_model=threat_model) as name, synthetic():
+    The class this replaces tested a predicate that read English in three
+    structural shapes with a negation veto. Nine of its tests were veto tests,
+    and each recorded a real bypass found in review. They are all kept here --
+    not as veto tests, which would be meaningless now, but as the stronger
+    assertion the old design could never make: this English, WHEREVER it
+    appears, does not attribute a review, because the only field that attributes
+    one cannot hold English at all.
+
+    Note on fixtures: every negative below supplies a WELL-FORMED attribution
+    table crediting some other ticket. Without one the table is missing, the
+    gate says so, and `attributes no review` appears for reasons that have
+    nothing to do with the bypass under test -- a green negative proving nothing.
+    That trap is not hypothetical; the first cut of this class fell into it.
+    """
+
+    OTHER = (
+        "\n## Closure attribution\n\n"
+        "| Ticket | Evidence |\n|---|---|\n"
+        "| BBB-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+    )
+
+    def _errors(self, threat_model: str, closed=("AAA-001",)) -> list[str]:
+        with build(threat_model=threat_model) as name, synthetic(closed=closed):
             errors, _, _ = check(Path(name))
         return errors
 
-    def test_prose_only_mention_fails(self):
-        errors = self._with_threat_model(
-            "# Threat model\n\nAAA-001 supplied some evidence elsewhere.\n"
+    def _unattributed(self, threat_model: str) -> None:
+        errors = self._errors(threat_model)
+        self.assertTrue(
+            any("attributes no review" in error for error in errors), errors
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
-    def test_a_sentence_denying_the_review_does_not_satisfy_it(self):
-        errors = self._with_threat_model(
-            "# Threat model\n\nTODO: AAA-001 has not been reviewed yet.\n"
-        )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
-
-    def test_a_negative_heading_does_not_satisfy_it(self):
-        """Placement is not meaning: the same denial, in a heading."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n## TODO: AAA-001 has not been reviewed yet\n"
-        )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
-
-    def test_a_negative_table_row_does_not_satisfy_it(self):
-        errors = self._with_threat_model(
-            "# Threat model\n\n| note | AAA-001 still outstanding |\n"
-        )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
-
-    def test_a_negative_threat_register_row_does_not_satisfy_it(self):
-        """A register row is only an attribution in the verification column."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-            "| TM-999 | AAA-001 review has not happened | none | none | SEC | none |\n"
-        )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
-
-    def test_an_escaped_pipe_does_not_shift_the_verification_column(self):
-        """`\\|` in an earlier cell must not slide a ticket into column 3."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-            "| TM-999 | a threat | guards a\\|b and AAA-001 | none | SEC | none |\n"
-        )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
-
-    def test_the_register_verification_column_attributes_the_review(self):
-        with build(
-            threat_model=(
-                "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-                "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-                "| TM-999 | a threat | a mitigation | receipt in AAA-001 | SEC | none |\n"
-            )
-        ) as name, synthetic():
+    def test_the_attribution_table_attributes_the_review(self):
+        with build() as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])
 
-    def test_a_residual_risk_mention_is_not_a_review(self):
-        errors = self._with_threat_model(
-            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-            "| TM-999 | a threat | a mitigation | none | SEC | AAA-001 must still run |\n"
+    def test_a_missing_table_attributes_nothing(self):
+        """Absence attributes nothing, and says so rather than passing."""
+        errors = self._errors("# Threat model\n")
+        self.assertTrue(
+            any("has no closure-attribution table" in error for error in errors),
+            errors,
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
-    def test_a_longer_ticket_id_does_not_credit_a_shorter_one(self):
-        """`\\b` matches AAA-001 inside AAA-001-HARDEN, because `-` is not a word char."""
-        errors = self._with_threat_model(
+    def test_two_tables_are_refused(self):
+        """Whichever came first would decide, which is nobody deciding."""
+        errors = self._errors(
+            "# Threat model\n"
+            + self.OTHER
+            + "\n## Closure attribution\n\n| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(
+            any(
+                "closure-attribution tables" in error
+                or "Closure attribution` sections" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    # --- the nine recorded bypasses, each now structurally impossible ---
+
+    def test_prose_only_mention_does_not_attribute(self):
+        self._unattributed(
+            "# Threat model\n\nAAA-001 was reviewed thoroughly.\n" + self.OTHER
+        )
+
+    def test_a_denial_in_prose_does_not_attribute(self):
+        self._unattributed(
+            "# Threat model\n\nTODO: AAA-001 has not been reviewed yet.\n" + self.OTHER
+        )
+
+    def test_a_denial_in_a_heading_does_not_attribute(self):
+        self._unattributed(
+            "# Threat model\n\n## TODO: AAA-001 has not been reviewed yet\n"
+            + self.OTHER
+        )
+
+    def test_a_ticket_led_denial_heading_does_not_attribute(self):
+        self._unattributed(
+            "# Threat model\n\n## AAA-001 review has not happened\n" + self.OTHER
+        )
+
+    def test_a_closure_review_heading_does_not_attribute(self):
+        """The old Shape A, affirmative and now inert: a heading is prose."""
+        self._unattributed(
+            "# Threat model\n\n## AAA-001 threat-model closure review\n" + self.OTHER
+        )
+
+    def test_an_ownership_row_does_not_attribute(self):
+        """The old Shape B, now inert."""
+        self._unattributed(
             "# Threat model\n\n## Security verification ownership\n\n"
             "| Area | First implementation ticket |\n|---|---|\n"
-            "| Some area | AAA-001-HARDEN |\n"
+            "| The first area | AAA-001 |\n" + self.OTHER
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
-    def test_a_longer_ticket_led_heading_does_not_credit_a_shorter_one(self):
-        errors = self._with_threat_model(
-            "# Threat model\n\n## AAA-001-HARDEN threat-model closure review\n"
+    def test_a_register_verification_cell_does_not_attribute(self):
+        """The old Shape C, now inert."""
+        self._unattributed(
+            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
+            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
+            "| TM-999 | a threat | a mitigation | receipt in AAA-001 | SEC | none |\n"
+            + self.OTHER
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
-    def test_a_reordered_register_reads_the_right_column(self):
-        """A fixed index survives a reorder and then reads the wrong cell."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n| ID | Scenario | Required verification | Primary "
-            "mitigations | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-            "| TM-999 | a threat | none | guards AAA-001 | SEC | none |\n"
+    def test_a_denial_in_the_ticket_column_is_not_a_ticket_id(self):
+        """The denial, in the one column that counts. It is not a denial the
+        gate detects -- it is a cell that is not a ticket id."""
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 review has not happened | "
+            "`docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
-
-    def test_a_tm_row_outside_the_register_does_not_attribute(self):
-        """A `TM-nnn` first cell is not proof of the threat register."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n## Tracking\n\n| ID | Status | Owner | Ticket |\n"
-            "|---|---|---|---|\n| TM-999 | PENDING | SEC | AAA-001 |\n"
+        self.assertTrue(any("is not a ticket id" in error for error in errors), errors)
+        self.assertTrue(
+            any("attributes no review" in error for error in errors), errors
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
-    def test_a_receipt_filename_attributes_the_review(self):
-        """`\\b` refused this, because `_` IS a word character."""
+    def test_a_denial_with_no_vetoed_word_still_fails(self):
+        """The bypass the old design conceded it could not close.
+
+        `review was declined by the boundary owner` contains no word the old
+        negation veto looked for, sits inside the one affirmative structure that
+        counted, and would have attributed a review. Here it is simply not a
+        ticket id, and no vocabulary decides that.
+        """
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 review was declined by the boundary owner | "
+            "`docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(any("is not a ticket id" in error for error in errors), errors)
+        self.assertTrue(
+            any("attributes no review" in error for error in errors), errors
+        )
+
+    def test_prose_adjacent_to_a_valid_row_is_not_read(self):
+        """The assertion the old code could never make.
+
+        A correct attribution for AAA-001, with a denial of that same review
+        immediately above and below it. The field is data; its surroundings are
+        not read at all, so the denial changes nothing.
+        """
         with build(
             threat_model=(
-                "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-                "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-                "| TM-999 | a threat | a mitigation | receipt in "
-                "`docs/evidence/AAA-001_SECURITY_REVIEW.md` | SEC | none |\n"
+                "# Threat model\n\nAAA-001 has never been reviewed.\n\n"
+                "## Closure attribution\n\n| Ticket | Evidence |\n|---|---|\n"
+                "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n\n"
+                "TODO: the AAA-001 review has not happened and is outstanding.\n"
             )
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])
 
-    def test_a_negative_ticket_led_heading_does_not_satisfy_it(self):
-        """The denial, moved to the front of the heading."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n## AAA-001 review has not happened\n"
+    # --- the field's own rules ---
+
+    def test_a_longer_ticket_id_does_not_credit_a_shorter_one(self):
+        """`-` is not a word boundary; the column is fullmatched, not searched."""
+        self._unattributed(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001-HARDEN | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
 
-    def test_a_negative_verification_cell_does_not_satisfy_it(self):
-        """The denial, inside the one column that counts."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-            "| TM-999 | a threat | a mitigation | AAA-001 review has not happened "
-            "| SEC | none |\n"
+    def test_an_evidence_cell_that_is_not_a_path_is_refused(self):
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | reviewed by the boundary owner |\n"
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+        self.assertTrue(
+            any("is not a backticked path" in error for error in errors), errors
+        )
 
-    def test_a_heading_that_only_mentions_review_does_not_satisfy_it(self):
-        """Isolates the anchor from the veto: no negation word, still not a review.
+    def test_an_evidence_cell_containing_a_path_is_still_refused(self):
+        """The cell IS the path. A cell that merely contains one is prose."""
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | see `docs/evidence/AAA-001_SECURITY_REVIEW.md` for detail |\n"
+        )
+        self.assertTrue(
+            any("is not a backticked path" in error for error in errors), errors
+        )
 
-        The convention is `<TICKET> ... review` as the whole heading. A heading
-        that merely contains the word somewhere is a section ABOUT the review,
-        not a record of one.
+    def test_an_evidence_path_that_does_not_exist_is_refused(self):
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/NOT_WRITTEN.md` |\n"
+        )
+        self.assertTrue(any("does not exist" in error for error in errors), errors)
+
+    def test_a_ticket_attributed_twice_is_refused(self):
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+            "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(any("attributed twice" in error for error in errors), errors)
+
+    def test_an_attribution_for_an_open_ticket_is_refused(self):
+        """Both ways. An entry for a ticket that never closed is stale or
+        premature, and nothing else in this file would ever notice."""
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+            "| BBB-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(any("not DONE" in error for error in errors), errors)
+
+    def test_an_evidence_document_that_never_names_the_ticket_is_refused(self):
+        """Existence was never the claim the row makes.
+
+        The row says a named document records THIS ticket's review. A path that
+        merely resolves witnesses the wrong fact, and this branch's own first
+        cut proved it: `ALPHA-001` was attributed to `docs/ALPHA_DEMO.md`, which
+        never mentions the ticket.
         """
-        errors = self._with_threat_model(
-            "# Threat model\n\n## AAA-001 review deferred to a later ticket\n"
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/ZZZ-001_SECURITY_REVIEW.md` |\n"
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+        self.assertTrue(any("never names it" in error for error in errors), errors)
 
-    def test_a_denial_stated_before_the_word_review_is_vetoed(self):
-        """Isolates the negation-precedes-review branch of the veto."""
-        errors = self._with_threat_model(
-            "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-            "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-            "| TM-999 | a threat | a mitigation | no review of AAA-001 exists "
-            "| SEC | none |\n"
+    def test_an_evidence_path_that_escapes_docs_is_refused(self):
+        """`.` is a filename character, so `docs/../..` looks like a docs path."""
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/../../etc/passwd` |\n"
         )
-        self.assertTrue(any("attributes no review" in e for e in errors), errors)
+        self.assertTrue(any("leaves docs/" in error for error in errors), errors)
 
-    def test_test_vocabulary_is_not_a_denial(self):
-        """The veto must not refuse a review for describing its negative cases.
+    def test_a_table_outside_the_heading_is_not_the_attribution_table(self):
+        """The heading is the rule, not a comment about the rule."""
+        errors = self._errors(
+            "# Threat model\n\n## Something else\n\n"
+            "| Ticket | Evidence |\n|---|---|\n"
+            "| AAA-001 | `docs/evidence/AAA-001_SECURITY_REVIEW.md` |\n"
+        )
+        self.assertTrue(
+            any("has no closure-attribution table" in error for error in errors),
+            errors,
+        )
 
-        This column is full of `no-overwrite`, `missing-field`,
-        `non-broadening` and `absent-path`. A gate that reads those as denials
-        fails closed on correct work, which is its own kind of wrong answer.
+    def test_a_symlinked_evidence_document_cannot_escape_docs(self):
+        """Lexical containment is not containment.
+
+        The cited string has no `..` in it at all. A committed symlink at
+        `docs/evidence/AAA-001_SECURITY_REVIEW.md -> ../../outside.md` passes
+        every spelling test and is then followed out of the tree by `is_file()`
+        and `read_text()`. Measured before the fix: evidence living outside the
+        repository was accepted, with `receipted=1`. This repository learned the
+        same lesson one ticket earlier, in DEPLOY-004's ancestor walk.
         """
-        with build(
-            threat_model=(
-                "# Threat model\n\n| ID | Scenario | Primary mitigations | Required "
-                "verification | Owner | Residual risk |\n|---|---|---|---|---|---|\n"
-                "| TM-999 | a threat | a mitigation | AAA-001 receipt covers "
-                "missing-field, no-overwrite and absent-path tests | SEC | none |\n"
+        with build() as name, synthetic():
+            root = Path(name)
+            outside = root / "outside.md"
+            outside.write_text(
+                "# outside\n\nAAA-001 was reviewed, honestly.\n" + ("x " * 600),
+                encoding="utf-8",
             )
-        ) as name, synthetic():
-            errors, _, _ = check(Path(name))
-        self.assertEqual(errors, [])
+            receipt = root / "docs" / "evidence" / "AAA-001_SECURITY_REVIEW.md"
+            receipt.unlink()
+            receipt.symlink_to(Path("..") / ".." / "outside.md")
+            errors, _, _ = check(root)
+        self.assertTrue(any("leaves docs/" in error for error in errors), errors)
 
-    def test_a_heading_attributes_the_review(self):
-        with build(
-            threat_model="# Threat model\n\n## AAA-001 threat-model closure review\n\nReviewed.\n"
-        ) as name, synthetic():
-            errors, _, _ = check(Path(name))
-        self.assertEqual(errors, [])
+    def test_a_short_row_is_an_error_not_a_skip(self):
+        """An unreadable attribution row and an absent one look identical to the
+        ticket each was supposed to credit."""
+        errors = self._errors(
+            "# Threat model\n\n## Closure attribution\n\n"
+            "| Ticket | Evidence |\n|---|---|\n| AAA-001 |\n"
+        )
+        self.assertTrue(
+            any("cells, not the 2" in error for error in errors), errors
+        )
 
 
 class BoardParsing(unittest.TestCase):
@@ -546,6 +686,57 @@ class RedundantViews(unittest.TestCase):
             errors, _, _ = check(Path(name))
         self.assertTrue(any("neither a status nor an execution class" in e for e in errors), errors)
 
+    # --- HYG-002: an execution class was accepted in ANY view's third column ---
+
+    def _errors_for(self, board: str) -> list[str]:
+        with build(board=board) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        return errors
+
+    def test_a_batch_row_may_not_state_an_execution_class(self):
+        """The half that was live end-to-end.
+
+        Rewriting the real board's Batch ledger row `W0-A` from `DONE` to
+        `SERIAL` passed BOTH verifiers: the class was accepted, the status
+        comparison was skipped, and the batch stopped asserting anything about
+        the ticket it names while still looking exactly like a claim.
+        """
+        errors = self._errors_for(
+            BOARD + BATCH_LEDGER.replace("| DONE |", "| SERIAL |")
+        )
+        self.assertTrue(
+            any("an execution class; only Lane rows overload" in e for e in errors),
+            errors,
+        )
+
+    def test_a_dispatch_row_may_not_state_an_execution_class(self):
+        """The half the ticket describes as unguarded, which is not quite right.
+
+        `verify-execution-board.py` already rejects a dispatch slot whose status
+        is not a ticket status. It is guarded here as well so that neither
+        cross-check depends on the other file continuing to carry it.
+        """
+        errors = self._errors_for(
+            BOARD + DISPATCH_QUEUE.replace("| PENDING |", "| SERIAL |")
+        )
+        self.assertTrue(
+            any("an execution class; only Lane rows overload" in e for e in errors),
+            errors,
+        )
+
+    def test_a_correct_batch_row_passes(self):
+        self.assertEqual(self._errors_for(BOARD + BATCH_LEDGER), [])
+
+    def test_a_lane_row_may_still_state_an_execution_class(self):
+        """The overload is real for Lane rows; the fix must not remove it.
+
+        Without this, tightening the rule to "the third column is always a
+        status" would pass every other test in this class and break every open
+        lane on the real board.
+        """
+        errors = self._errors_for(BOARD)
+        self.assertEqual([e for e in errors if "only Lane rows overload" in e], [])
+
 
 class CitedEvidence(unittest.TestCase):
     def test_a_closed_ticket_citing_a_missing_document_fails(self):
@@ -567,6 +758,75 @@ class CitedEvidence(unittest.TestCase):
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])
+
+    # --- HYG-002: the check read only backticked paths ---
+    #
+    # Four bypasses were demonstrated against the real board, and only ONE is
+    # the undelimited case the ticket describes. The other three are properly
+    # backticked and read as ordinary citations, which is why "require
+    # backticks" was never the fix: backticks are how a citation should be
+    # written, not what makes text a citation.
+
+    MISSING = "docs/architecture/DOES_NOT_EXIST.md"
+
+    def _cite(self, spelling: str) -> list[str]:
+        with build(
+            board=BOARD.replace(
+                "Closed with a receipt and an attributed review",
+                f"Closure: {spelling}",
+            )
+        ) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        return errors
+
+    def _fabricated(self, spelling: str) -> None:
+        errors = self._cite(spelling)
+        self.assertTrue(
+            any("which does not exist" in error for error in errors), errors
+        )
+
+    def test_a_citation_that_escapes_docs_fails(self):
+        """Same containment rule as the attribution field, same reason."""
+        errors = self._cite("`docs/../../etc/passwd`")
+        self.assertTrue(any("does not exist" in error for error in errors), errors)
+
+    def test_an_unbackticked_missing_document_fails(self):
+        """The one the ticket names. The bare-path rule in the board verifier
+        cannot backstop it: that rule fires only when the path RESOLVES."""
+        self._fabricated(self.MISSING)
+
+    def test_a_dot_slash_prefixed_missing_document_fails(self):
+        self._fabricated(f"`./{self.MISSING}`")
+
+    def test_an_angle_bracketed_missing_document_fails(self):
+        self._fabricated(f"`<{self.MISSING}>`")
+
+    def test_a_trailing_space_inside_backticks_does_not_hide_a_missing_document(self):
+        """One space between the path and the closing backtick was enough."""
+        self._fabricated(f"`{self.MISSING} `")
+
+    def test_an_unbackticked_real_document_passes(self):
+        """Loosening the scan must not turn every undelimited path into an error."""
+        self.assertEqual(self._cite("docs/evidence/AAA-001_SECURITY_REVIEW.md"), [])
+
+    def test_a_template_path_in_a_done_row_is_refused(self):
+        """Why the check asks `is_file`, not `exists`.
+
+        Scanning undelimited text picks up the leading fragment of a template
+        such as `docs/evidence/<TICKET>_SECURITY_REVIEW.md`, which truncates to
+        the real DIRECTORY `docs/evidence`. Relaxing to `exists` would admit
+        that -- and with it every citation of a directory where a document was
+        meant, which is most of the value of the rule.
+
+        Measured before choosing: no DONE row on the real board spells a
+        template, and all 25 of their cited paths resolve to files. So the
+        relaxation defended a case that does not exist, at the cost of one that
+        does. A DONE row citing a template is not naming its evidence anyway --
+        a closed ticket has a specific document, not a pattern -- so refusing it
+        is the right answer rather than a tolerated cost.
+        """
+        errors = self._cite("`docs/evidence/<TICKET>_SECURITY_REVIEW.md`")
+        self.assertTrue(any("docs/evidence" in error for error in errors), errors)
 
     def test_an_open_ticket_may_name_a_document_it_will_write(self):
         """Planning work must not require a placeholder file first."""
@@ -681,10 +941,25 @@ class ThisRepository(unittest.TestCase):
         # 30, then 33 when register attribution narrowed to the Required
         # verification column and exposed MIG-002/006/007, then 31 when
         # identifier matching stopped `\b` hiding ADMIN-001 and CONSUMER-001
-        # inside their own receipt filenames. Lower this as debt is paid;
-        # raising it needs an argument.
+        # inside their own receipt filenames, then 50 under HYG-002, then 51 when that
+        # ticket's own binding rule caught ALPHA-001 pointing at a document that
+        # never names it.
+        #
+        # THE ARGUMENT FOR RAISING IT, since the comment above demands one.
+        # HYG-002 replaced a predicate that read English with a table that holds
+        # a ticket id and a path. Nineteen tickets stopped being credited, and
+        # every one of them lost a credit it should never have had: seventeen
+        # were attributed by the `Area | First implementation ticket` table,
+        # which records who BUILT an area, and two by a register cell citing a
+        # different ticket's closure document. No review was undone and no
+        # discipline slipped. The bound went up because the measurement stopped
+        # flattering us, which is the only reason it is ever allowed to.
+        #
+        # Lower this as debt is paid. Raising it again needs its own argument,
+        # in this comment, naming what was disclosed and why it was not a
+        # regression.
         self.assertLessEqual(
-            len(debt), 31, "closure debt may only shrink; lower this bound as it is paid"
+            len(debt), 51, "closure debt may only shrink; lower this bound as it is paid"
         )
         done = int(summary.split("done=")[1].split()[0])
         self.assertGreaterEqual(done, 80, "DONE tickets should not vanish from the board")

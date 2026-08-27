@@ -68,6 +68,65 @@ def row_cells(line: str) -> list[str]:
     return [part.replace("\\|", "|").strip() for part in parts]
 
 
+# HYG-002: TWO LOOPS BELOW USED TO CUT THEIR OWN CELLS.
+#
+# The topology loop and the dispatch loop each predated `row_cells` and each
+# did its own `line.split("|")`. Padding was never the divergence -- both strip
+# -- and neither is a pipe inside a code span. The divergence that matters is
+# `\|`: `row_cells` honours the escape and a naive split does not, so ONE
+# escaped pipe in a Lane cell shifts every later cell left and the row stops
+# looking like a topology row at all. It is then not merely misread; it is
+# invisible, and an invisible row classifies nothing, orders nothing and
+# contradicts nothing. A duplicate lane row declaring a production-qualification
+# SERIAL chain in REVERSE order, hidden behind one `\|`, passed both verifiers
+# green -- the missing-edge check never saw a chain to check.
+#
+# So both loops read their rows the same way every other table on this board is
+# read: split once, here, escapes honoured, columns located by header name
+# rather than by a counted offset.
+TABLE_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
+
+
+def markdown_tables(text: str) -> list[tuple[list[str], list[tuple[str, list[str]]]]]:
+    """Split `text` into (header cells, [(line, row cells)]) pairs, one per table.
+
+    A table is a `|`-row whose successor is a separator, the same shape
+    `verify-ticket-closure-receipts.py` reads. Returning the raw line as well
+    keeps the error messages able to quote the row that failed.
+    """
+    lines = text.splitlines()
+    found: list[tuple[list[str], list[tuple[str, list[str]]]]] = []
+    index = 0
+    while index < len(lines):
+        if (
+            lines[index].startswith("|")
+            and index + 1 < len(lines)
+            and TABLE_SEPARATOR.match(lines[index + 1])
+        ):
+            header = row_cells(lines[index])
+            rows: list[tuple[str, list[str]]] = []
+            cursor = index + 2
+            while cursor < len(lines) and lines[cursor].startswith("|"):
+                rows.append((lines[cursor], row_cells(lines[cursor])))
+                cursor += 1
+            found.append((header, rows))
+            index = cursor
+            continue
+        index += 1
+    return found
+
+
+TOPOLOGY_SECTION = re.compile(
+    r"^## Remaining execution topology\n(.*?)(?=^## Wave 0)",
+    flags=re.MULTILINE | re.DOTALL,
+)
+# The topology's columns are located by these names, not by an offset. An
+# offset survives a column being inserted before it and reads the wrong cell.
+TOPOLOGY_LANE_HEADER = "Lane"
+TOPOLOGY_CHAIN_HEADER = "Ticket or ordered chain"
+TOPOLOGY_CLASS_HEADER = "Class"
+
+
 def ticket_row(line: str) -> tuple[str, str, str, str] | None:
     """Read one authoritative ticket row, whatever its cell padding.
 
@@ -337,46 +396,104 @@ def main() -> None:
     for ticket in tickets:
         visit(ticket, [])
 
-    topology_match = re.search(
-        r"^## Remaining execution topology\n(.*?)(?=^## Wave 0)",
-        text,
-        flags=re.MULTILINE | re.DOTALL,
-    )
+    topology_match = TOPOLOGY_SECTION.search(text)
     if topology_match is None:
         errors.append("remaining execution topology section is missing")
         fail(errors)
 
     classified: dict[str, str] = {}
-    for line in topology_match.group(1).splitlines():
-        cells = [cell.strip() for cell in line.split("|")]
-        if len(cells) < 6 or cells[3] not in EXECUTION_CLASSES:
-            continue
-        execution_class = cells[3]
-        row_tickets = TICKET_ID.findall(cells[2])
-        if not row_tickets:
-            errors.append(f"topology row has no tickets: {line}")
-            continue
-        if execution_class == "PARALLEL" and len(row_tickets) != 1:
+    for header, rows in markdown_tables(topology_match.group(1)):
+        # A table in this section that is not a lane table is a parse failure,
+        # not a table to walk past. Skipping one would take every row in it out
+        # of classification silently, which is the same absence-looks-like-
+        # success shape item (b) below is about. (HYG-002)
+        if header[:1] != [TOPOLOGY_LANE_HEADER] or not {
+            TOPOLOGY_CHAIN_HEADER,
+            TOPOLOGY_CLASS_HEADER,
+        } <= set(header):
             errors.append(
-                "PARALLEL topology rows must contain one standalone ticket: " + cells[2]
+                "topology section holds a table headed "
+                f"{' | '.join(header) or '<empty>'}, which is not a lane table; "
+                f"a lane table declares {TOPOLOGY_LANE_HEADER!r}, "
+                f"{TOPOLOGY_CHAIN_HEADER!r} and {TOPOLOGY_CLASS_HEADER!r}, and a "
+                "table this loop cannot read classifies nothing while every gate "
+                "stays green"
             )
-        if execution_class == "BATCH" and len(row_tickets) < 2:
-            errors.append(f"BATCH topology row must contain at least two tickets: {cells[2]}")
-        if execution_class == "SERIAL":
-            for predecessor, successor in zip(row_tickets, row_tickets[1:]):
-                if successor in tickets and predecessor not in tickets[successor][1]:
-                    errors.append(
-                        f"SERIAL chain {predecessor} -> {successor} lacks a direct "
-                        f"dependency edge on {successor}"
-                    )
-        for ticket in row_tickets:
-            if ticket in classified:
+            continue
+        chain_index = header.index(TOPOLOGY_CHAIN_HEADER)
+        class_index = header.index(TOPOLOGY_CLASS_HEADER)
+        for line, cells in rows:
+            if len(cells) != len(header):
                 errors.append(
-                    f"ticket {ticket} is classified more than once "
-                    f"({classified[ticket]} and {execution_class})"
+                    f"topology row has {len(cells)} cells, not the {len(header)} "
+                    f"its table declares: {line}"
                 )
-            else:
-                classified[ticket] = execution_class
+                continue
+            execution_class = cells[class_index]
+            if execution_class not in EXECUTION_CLASSES:
+                # ITEM (b). This branch used to be a bare `continue`, and in
+                # isolation that was backstopped: a lone corrupted class on a
+                # remaining ticket still fails the missing-classification check
+                # below. What is NOT backstopped is a class cell holding a
+                # ticket STATUS. The lane tables legitimately overload this
+                # column -- a closed lane states `DONE` rather than a class --
+                # so a status here is only correct when the lane is closed.
+                # Add a second lane row for an open ticket reading `PENDING`
+                # and it is skipped, the real row still supplies a class, the
+                # missing-classification check is satisfied, and the ticket now
+                # carries two contradictory execution classes with both
+                # verifiers silent. A skip is only safe where it cannot hide a
+                # second opinion.
+                if execution_class not in TICKET_STATUSES:
+                    errors.append(
+                        f"topology row has class cell {execution_class!r}, which is "
+                        "neither an execution class nor a ticket status: " + line
+                    )
+                    continue
+                open_here = sorted(
+                    ticket
+                    for ticket in TICKET_ID.findall(cells[chain_index])
+                    if tickets.get(ticket, ("", []))[0] in REMAINING_STATUSES
+                )
+                if open_here:
+                    errors.append(
+                        f"topology row states the ticket status {execution_class!r} "
+                        "where an execution class belongs, and "
+                        f"{', '.join(open_here)} is still remaining; a remaining "
+                        "ticket classified by a status is not classified at all, "
+                        "and a second row may then contradict the first without "
+                        "either verifier noticing"
+                    )
+                continue
+            row_tickets = TICKET_ID.findall(cells[chain_index])
+            if not row_tickets:
+                errors.append(f"topology row has no tickets: {line}")
+                continue
+            if execution_class == "PARALLEL" and len(row_tickets) != 1:
+                errors.append(
+                    "PARALLEL topology rows must contain one standalone ticket: "
+                    + cells[chain_index]
+                )
+            if execution_class == "BATCH" and len(row_tickets) < 2:
+                errors.append(
+                    "BATCH topology row must contain at least two tickets: "
+                    + cells[chain_index]
+                )
+            if execution_class == "SERIAL":
+                for predecessor, successor in zip(row_tickets, row_tickets[1:]):
+                    if successor in tickets and predecessor not in tickets[successor][1]:
+                        errors.append(
+                            f"SERIAL chain {predecessor} -> {successor} lacks a "
+                            f"direct dependency edge on {successor}"
+                        )
+            for ticket in row_tickets:
+                if ticket in classified:
+                    errors.append(
+                        f"ticket {ticket} is classified more than once "
+                        f"({classified[ticket]} and {execution_class})"
+                    )
+                else:
+                    classified[ticket] = execution_class
 
     remaining = {
         ticket
@@ -422,7 +539,15 @@ def main() -> None:
     current_slots: dict[int, tuple[str, str]] = {}
     current_ticket_slots: dict[str, int] = {}
     for line in dispatch_rows:
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        # ITEM (a), second half. This split was `line.strip().strip("|").split("|")`.
+        # Its divergence from `row_cells` runs the OTHER way from the topology
+        # loop's: an escaped pipe in the successors cell makes a correct row
+        # read as five cells and be REFUSED, so the failure here was a false
+        # alarm rather than a bypass -- the dispatch table is small enough that
+        # every misread row still lands in `errors`. It is routed through
+        # `row_cells` anyway, because one board has one row grammar, and a
+        # verifier that refuses legal syntax is a verifier people edit around.
+        cells = row_cells(line)
         if len(cells) != 4:
             errors.append(f"malformed current dispatch row: {line}")
             continue

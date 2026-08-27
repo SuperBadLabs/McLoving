@@ -1,0 +1,275 @@
+# HYG-002 security and implementation closure
+
+`HYG-002` replaces the closure gate's inference of a threat-model review from
+English prose with a field that holds data. The gate now reads a two-column
+table — a ticket id and the path to the document recording its review — and both
+cells are matched whole, so neither can contain a sentence.
+
+## What the old predicate was actually reading
+
+The ticket was filed because four successive tightenings of a prose predicate
+were each defeated by the same denial in a new wrapper, and because the function
+itself conceded that a denial phrased without a vetoed word would still pass.
+That is true, and it is not the worst of it.
+
+**Seventeen of the thirty-eight credited reviews came from the table headed
+`| Area | First implementation ticket |`.** That table records which ticket first
+implemented an area. It asserts nothing about a review, and it never claimed to.
+The gate was reading an ownership map as an attestation, and the table was not
+lying — it was being misread.
+
+Two more came from a threat-register verification cell whose only cited document
+is **another ticket's closure evidence**: `DIFF-001`'s names the aggregate
+contract whose own header reads `Status: MIG-006 complete`, and `MIG-005A`'s
+names the migration package belonging to `MIG-007`.
+
+So the defect was never only "the predicate can be fooled by a denial". It was
+that the predicate could be satisfied by structures that assert something else
+entirely, and no denial had to be written for that to happen.
+
+## The design, and why it needs no negation veto
+
+A ticket is attributed a review if and only if it has a row in
+`## Closure attribution` in `docs/threat-model/README.md`:
+
+```
+| Ticket | Evidence |
+|---|---|
+| ADMIN-001 | `docs/evidence/ADMIN-001_SECURITY_REVIEW.md` |
+```
+
+The ticket column is `fullmatch`ed against a ticket id and the evidence column
+against a backticked path under `docs/`. `AAA-001 review has not happened` is no
+longer a denial the gate must detect — it is a cell that is not a ticket id. The
+negation veto, its 70-character window, and all three structural shapes are
+deleted rather than kept alongside the new field, because a second way to be
+credited is a second way to be wrong.
+
+The prose did not go away and should not. The register still explains what was
+examined and what risk remains; it is simply no longer load-bearing, which is the
+only claim this change makes about it.
+
+**Checked both ways, which nothing did before.** An attribution whose evidence
+path does not exist is an error, and so is one naming a ticket that never closed.
+Neither is hypothetical: `docs/evidence/` holds twenty receipts while nineteen
+DONE tickets are credited, and the extra is `DEPLOY-001_SECURITY_REVIEW.md` for a
+ticket that reads `ACTIVE`. Nothing in this file saw that.
+
+## The migration, stated as a disclosure
+
+| | before | after |
+|---|---:|---:|
+| credited with a review | 38 | 19 |
+| closure debt | 31 | 50 |
+
+**Nineteen tickets stopped being credited, and every one lost a credit it should
+never have had.** They move to `THREAT_MODEL_DEBT` with that reason recorded per
+ticket, and `THREAT_MODEL_DEBT_BASELINE` is widened once, deliberately, with the
+argument written beside it. That baseline exists to make entry conspicuous, and
+this is the second time it has widened for this reason — the `MIG-002/006/007`
+block did the same when register attribution was narrowed to the verification
+column, and recorded the same argument: *the ledger widened because the predicate
+got stricter, not because closure discipline slipped.*
+
+The debt bound in `test_the_repository_never_slips_backwards` moves from 31 to
+50 with its argument in the test, as that comment requires. **A ratchet that
+could never widen would have forced the opposite choice** — keep reading the
+ownership table as an attestation, and keep the number at 31.
+
+No ticket's status changed, no receipt was deleted, and no review was undone.
+
+## One correction to the ticket's own text
+
+The row says "the 37 tickets credited today". The gate reports **38**. The
+thirty-eighth is `DEPLOY-004`, and it is thirty-eighth because of `cced27e` —
+this custodian's own previous change, which named `DEPLOY-004` in `TM-050`'s
+Required-verification cell. Verified against `cced27e^`, where
+`threat_model_attribution` returns `None` for it. The spec was accurate when
+written; the work that preceded this ticket moved the number.
+
+## Evidence
+
+**Every check is mutation-proved.** Each one, removed or weakened, turns a named
+test red:
+
+| mutation | test that goes red |
+|---|---|
+| ticket column `fullmatch` → `match` | `test_a_denial_in_the_ticket_column_is_not_a_ticket_id`, `test_a_denial_with_no_vetoed_word_still_fails` |
+| evidence column `fullmatch` → `search` | `test_an_evidence_cell_containing_a_path_is_still_refused` |
+| drop the path-exists check | `test_an_evidence_path_that_does_not_exist_is_refused` |
+| drop the ticket-is-DONE check | `test_an_attribution_for_an_open_ticket_is_refused` |
+| drop the duplicate-row check | `test_a_ticket_attributed_twice_is_refused` |
+| short row skips instead of erroring | `test_a_short_row_is_an_error_not_a_skip` |
+| drop the two-tables check | `test_two_tables_are_refused` |
+
+**One of those mutations initially proved nothing, and that is worth recording.**
+`if statuses.get(ticket) != "DONE":` appears twice in the file, and a
+`replace(old, new, 1)` mutated the wrong one — so the check under test was still
+intact and its test "passed". The mutation harness was wrong, not the gate, but a
+harness that silently tests the wrong line is the same defect class this ticket
+exists to remove. Re-run against a unique anchor, the check is proved.
+
+**The nine recorded bypasses are kept as tests**, no longer as veto cases but as
+the stronger assertion the old design could never make: this English, *wherever*
+it appears, does not attribute a review. One test places a denial immediately
+above and below a valid attribution row and requires the gate to stay green —
+the field is data, and its surroundings are not read at all.
+
+The first cut of that test class fell into the trap it was written to catch:
+every negative passed, because their fixtures had no attribution table and
+`attributes no review` therefore appeared regardless of the denial under test.
+Each negative now supplies a well-formed table crediting a different ticket, so
+the assertion isolates the predicate.
+
+## The parser debt, and three corrections to how the ticket words it
+
+Each of the five was independently reproduced before being fixed, and each fix
+turns a named test red when reverted.
+
+| item | verdict | correction |
+|---|---|---|
+| (a) two inline pipe splits | closed | padding and code-span pipes do **not** diverge from `row_cells`; only the escaped pipe does. The dispatch half was a false alarm — an escaped pipe there made a legal row be *refused*, not silently passed. Routed through `row_cells` anyway: one grammar per board. |
+| (b) topology skips an unknown class | closed | in isolation it is backstopped by the missing-classification check. The reachable case is a class cell holding **a ticket status matching the row's ticket**, which bought two contradictory execution classes for one ticket in silence. |
+| (c) ownership table's last cell | already closed | the whole prose predicate went with the first commit; nothing reintroduced. |
+| (d) execution class in any view | closed | the ticket says "Batch and Dispatch rows must carry a ticket status" as though both were open. Dispatch was already guarded by `verify-execution-board.py`; only the Batch half was live. Both are guarded here so neither cross-check depends on the other file keeping it. |
+| (e) unbackticked citations | closed, **broader than written** | four spellings bypassed it, three of them *properly backticked*: `./docs/…`, `<docs/…>`, and a trailing space inside the backticks. Confirmed too that the bare-path rule in the board verifier fires only when the path **resolves**, so it catches real files and stays silent on fabricated ones — backwards for this purpose, and unable to backstop (e). |
+
+**The exploit for (a) and (d) was re-run end to end against the fixed
+verifiers**, not just unit-tested. The Batch ledger's `W0-A` reading `SERIAL`
+is now named by line. A reversed production-qualification chain hidden behind an
+escaped pipe is now read and refused; stated precisely, the simplified variant
+re-run here does not reproduce the *fully green* state on `main` — the original
+exploit needed three restated `PARALLEL` rows to satisfy the backstop — but it
+does show the fixed verifier reading a row `main`'s parser cannot see.
+
+**One judgement was reversed after measuring.** Broadening the citation scan
+past delimiters truncates a template `docs/evidence/<TICKET>_SECURITY_REVIEW.md`
+to the real directory `docs/evidence`, and the first cut relaxed the predicate
+from `is_file` to `exists` to admit it. Measured: no `DONE` row on the board
+spells a template, and all 25 of their cited paths resolve to files. The
+relaxation defended a case that does not exist, at the cost of one that does —
+every citation of a directory where a document was meant. `is_file` stands, and
+a `DONE` row citing a template is refused, which is the right answer: a closed
+ticket has a document, not a pattern.
+
+Test suites go 44 → 49 and 63 → 73.
+
+## Review round 1 — five findings, and the P1 was in my own table
+
+The bot raised five, all real, and the sharpest one exposed the same defect this
+ticket was written about, inside the fix for it.
+
+**P1 — the field witnessed the wrong fact.** An attribution row says *a named
+document records THIS ticket's review*. The first cut checked only that the path
+**resolved**, so a row could point at another ticket's receipt and pass. That is
+precisely why `DIFF-001` and `MIG-005A` were put in the debt ledger rather than
+this table — and the table's own first cut did it anyway: `ALPHA-001` was
+attributed to `docs/ALPHA_DEMO.md`, which **never mentions the ticket**. It
+defines the demo; it does not review the ticket. Measured across all twenty rows,
+that was the only one, and it is now in the debt ledger with that reason. Debt
+50 → 51. The evidence document must now name its ticket, reusing the `names()`
+helper the receipt rule already uses.
+
+**Two path-containment findings.** `.` is a legal filename character, so
+`docs/../../.git/config` matches every "looks like a docs path" pattern here and
+then resolves wherever it likes. Both the citation check and the attribution
+field fed user-controlled text straight into a filesystem probe. Both now
+normalise and refuse anything that does not stay under `docs/`.
+
+**One documentation-versus-behaviour finding, which is this ticket's own defect
+one level up.** The parser's comment said the table is read from under
+`## Closure attribution`; the code accepted a table with that header anywhere in
+the file, and `ATTRIBUTION_HEADING` was a constant documenting a rule nothing
+enforced — the same shape as the dead `REGISTER_VERIFICATION_COLUMN` this change
+deleted. The heading is now the rule.
+
+**And fixing that introduced a fresh one, caught by an existing test.** Scoping
+to the heading first took the *last* matching heading and ignored the rest,
+which silently reintroduced the ambiguity the duplicate-table rule exists to
+refuse — one level up, again. `test_two_tables_are_refused` went red for a real
+reason. Duplicate sections are now an error. **That is the argument for negative
+tests asserting a message rather than an exit code**: an exit-code assertion
+would have stayed green through it.
+
+All four new checks are mutation-proved, each turning its own named test red.
+
+## Review round 2 — lexical containment is not containment
+
+One P2, and it is the lesson this repository learned one ticket earlier, in
+`DEPLOY-004`'s ancestor walk, arriving in a different file.
+
+Round 1's containment normalised the cited spelling and refused anything not
+under `docs/`. That settles the spelling and nothing else. **A committed symlink
+at `docs/evidence/AAA-001_SECURITY_REVIEW.md -> ../../outside.md` has no `..` in
+the cited string at all**, passes every spelling test, and is then followed out
+of the tree by `is_file()` and `read_text()`.
+
+Reproduced before fixing: with that symlink in place and an outside document
+naming the ticket, the gate reported `done=1 receipted=1 reviewed=1` and **no
+errors** — evidence living outside the repository, accepted as closure.
+
+Both probes now resolve the candidate and ask the kernel where it lands, with
+both sides resolved because the checkout itself may sit under a symlink. The
+receipt lookup goes through the same rule: its path is constructed, but the file
+at it may be a symlink, and a receipt that is not in the repository is not this
+repository's receipt.
+
+`DEPLOY-004` closed a walk that collapsed `..` lexically before resolving
+symlinks. This closed a containment check that resolved neither. **The recurring
+error is not the syntax; it is treating a path's spelling as a claim about where
+it goes.**
+
+## Review round 3 — one finding declined, and what it earned
+
+Review argued that ten of the nineteen — `AGENT-001/002/003`, `ARCH-001`,
+`CTRL-001`, `IR-001`, `OPS-001/002`, `SEC-002/003` — should take the pre-rule
+**exemption** rather than debt, since they closed before the threat-model Working
+rule existed and are only in scope because the old predicate credited them.
+Otherwise, it argued, every run inflates the debt figure by ten obligations that
+were never owed.
+
+**Declined, on the exemption list's own words.** That list's comment names these
+exact ten and says they *"need no exemption and are **deliberately absent, so
+removing their reference later fails this gate rather than passing silently**."*
+This is that case: the reference did not move, the rule that misread it as
+attribution was corrected. Exempting them now would make the gate pass silently
+on the one condition its author wrote that sentence to catch.
+
+The exemption's criterion does not fit them either. It is pre-rule **and** *"named
+nowhere in the threat model"*, and all ten **are** named. Being named without
+being attributed is the finding, not a technicality.
+
+On the merits, these are the project's most sensitive boundaries — authorization
+and RLS, lease and fencing, agent mTLS, agent containment, secret grants,
+artifact integrity. Recording that none carries a review attribution is true and
+worth knowing. Asserting they owe nothing is the failure this repository is named
+for.
+
+**The objection earned the wording, and got it.** Debt here is reported, never
+failed, and those ten lines should not read as unpaid obligations. Their reason
+string now says what is actually true: no document attributes a review; the
+ticket closed before the rule existed so none was demanded at the time; and it
+was kept out of the exemption deliberately so that losing the reference would
+fail rather than pass — which is what this change made it do.
+
+## Bounded deliberately
+
+Three defects were found while reproducing this ticket's items that are **larger
+than any of them**, and are recorded here rather than fixed, because absorbing
+them would have doubled the change:
+
+- **A receipt can be replaced with a kilobyte of nonsense.** `receipt_defects`
+  tests size ≥ 1000 bytes, that the ticket is named, and that some line starts
+  with `#`. Overwriting the real 52,326-byte `DEP-001` receipt with `# DEP-001`
+  plus 1,080 bytes of filler leaves both gates green. This affects all nineteen
+  receipted tickets.
+- **`DEFERRED` is an unratcheted exit from the board.** It is a valid status, it
+  is not in `REMAINING_STATUSES`, and `CLOSED_TICKETS` pins only `DONE`. Flipping
+  a ticket from `PENDING` to `DEFERRED` and deleting its topology row silently
+  retires it — no receipt owed, no attribution owed, no execution class owed.
+  The whole ratchet architecture protects `DONE` and leaves the open set
+  unguarded. **`HYG-002` could have deleted itself this way.**
+- **Batch-ledger membership is validated by nothing.** A fabricated row naming
+  real tickets with matching statuses passes both verifiers.
+
+Each is reproduced; none is speculative.
