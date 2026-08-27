@@ -87,17 +87,61 @@ keeping: it matched the *expanded* unit names this deployment knows. The unit
 file contains the literal `%n`; only the manager ever sees the expansion. It was
 caught by reading the generated file rather than by reasoning about it.
 
-## Bounded deliberately
+## The second clause: the deployable-runtime gate
 
-- **The deployable-runtime gate is not run against the installed deployment.**
-  `DEPLOY-001`'s acceptance names it, and it lives in
-  `bins/controller/tests/deployable_runtime.rs`, run by CI's `Controller
-  PostgreSQL` job against its own postgres. It is **not** wired to an installed
-  lane here. Worse, it **returns success with no assertions** when
-  `MCLOVING_TEST_DATABASE_URL` is unset — a silent skip inside an acceptance
-  criterion, which is this repository's signature failure. Wiring it to the
-  installed deployment, and making the absent variable a hard failure, is the
-  one part of the acceptance this change does not close.
+The acceptance also says *"and passes the deployable-runtime gate"*. Wiring that
+meant fixing the gate first, because **it returned success with no assertions**
+when `MCLOVING_TEST_DATABASE_URL` was unset:
+
+```rust
+let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+    eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+    return;
+};
+```
+
+An acceptance criterion satisfiable by not running is this repository's signature
+failure, sitting inside `DEPLOY-001`'s own acceptance.
+
+Three changes, and the shape of them matters:
+
+- **`#[ignore]`, not a hard failure alone.** A bare `panic!` would have broken
+  every `cargo test --workspace`, where the gate has no database and is not
+  meant to run. Ignored, a plain run reports `2 ignored` — visible, and not a
+  false pass. Both real invocations (`scripts/test-controller-postgres.sh` and
+  CI's `Controller PostgreSQL` job) now pass `-- --ignored`, so the gate still
+  runs where it always did.
+- **A missing database is now a hard failure** when the gate is invoked
+  explicitly. Verified: `2 failed` where it previously reported success.
+- **An optional `MCLOVING_TEST_RUNTIME_DATABASE_URL`.** The gate derived the
+  runtime URL by string-replacing `postgres://mcloving@`, which only works for
+  the passwordless CI database. A real deployment gives the migration and
+  runtime roles **different passwords** — that split being the very property
+  this gate checks — so one URL cannot derive the other. When supplied it is
+  used; otherwise the historical derivation applies, so CI is unchanged.
+
+The arm then runs it against **this deployment's** database and roles, read from
+the contract systemd starts the controller with — not a database the test
+brought up for itself, which is what made the gate and the install two unrelated
+CI jobs sharing no state.
+
+**The gate spawns the build tree's controller**, because
+`CARGO_BIN_EXE_mcloving-controller` is baked in at compile time. That is
+checkable rather than hand-waved: the installed release was staged from that
+build and digest-verified, so the arm asserts the two are byte-identical before
+running the gate. **That assertion fired on its first run and was right** — a
+later `cargo test --no-run` had rebuilt the controller, leaving the staged
+release out of step with what the gate would spawn. Restaged from the same
+build, both tests pass:
+
+```
+   the gate's controller is byte-identical to the installed one
+test failed_runtime_preflight_does_not_rotate_the_active_api_credential ... ok
+test shipped_controller_uses_split_credentials_and_executes_submissions ... ok
+   deployable-runtime gate passed against the installed deployment's database and roles
+```
+
+## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
   manager, the Quadlet generator, rootless podman — is a refusal by name. None

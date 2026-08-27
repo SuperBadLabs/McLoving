@@ -58,7 +58,7 @@ podman run --rm \
    cargo test --locked -p mcloving-controller-api --test oidc_flow &&
    cargo test --locked -p mcloving-controller-api --test unsupported_spec_gate &&
    cargo test --locked -p mcloving-execution-spine --test real_spine -- --test-threads=1 &&
-   cargo test --locked -p mcloving-controller --test deployable_runtime &&
+   cargo test --locked -p mcloving-controller --test deployable_runtime -- --ignored &&
    cargo test --locked -p mcloving-controller --test diff_001 &&
    cargo test --locked -p mcloving-controller --test capability_vocabulary &&
    cargo build --locked -p mcloving-controller &&

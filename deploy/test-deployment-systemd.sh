@@ -31,11 +31,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_dir=""
 checksums=""
 keep=0
+runtime_gate=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release-dir) release_dir="$2"; shift 2 ;;
     --checksums) checksums="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
+    --runtime-gate) runtime_gate="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -44,12 +46,22 @@ fail() { echo "systemd-arm: $1" >&2; exit 1; }
 step() { echo "== $1"; }
 
 # ---------------------------------------------------------------------------
-step "[1/9] preconditions -- every one refuses, none skips"
+step "[1/10] preconditions -- every one refuses, none skips"
 
 [[ -n "${release_dir}" && -d "${release_dir}" ]] \
   || fail "--release-dir must name a staged release directory"
 [[ -n "${checksums}" && -f "${checksums}" ]] \
   || fail "--checksums must name a sha256sum file for that release"
+# NOT OPTIONAL. DEPLOY-001's acceptance is "brings up the controller and agent
+# AND passes the deployable-runtime gate". Making the gate optional here would
+# leave the arm able to report success on half the sentence -- which is the
+# shape of the very defect the gate itself had.
+[[ -n "${runtime_gate}" && -x "${runtime_gate}" ]] \
+  || fail "--runtime-gate must name the prebuilt deployable-runtime test binary (cargo test --no-run -p mcloving-controller --test deployable_runtime)"
+# ORDERING THAT BIT ONCE: stage the release from the SAME build that produced
+# the gate binary. Building the gate rebuilds the controller in the build tree,
+# so a release staged earlier no longer matches what the gate will spawn -- and
+# step 10 refuses that rather than testing one binary while running another.
 
 account="$(id -un)"
 home_dir="$(getent passwd "$(id -u)" | cut -d: -f6)"
@@ -132,14 +144,14 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 # ---------------------------------------------------------------------------
-step "[2/9] scripted install to the passwd home, WITHOUT --no-systemd"
+step "[2/10] scripted install to the passwd home, WITHOUT --no-systemd"
 
 "${repo_root}/deploy/bin/mcloving-install" --home "${home_dir}" \
   --release-dir "${release_dir}" --checksums "${checksums}"
 echo "   installed into ${libexec_root}"
 
 # ---------------------------------------------------------------------------
-step "[3/9] the manager knows the installed units"
+step "[3/10] the manager knows the installed units"
 
 # `mcloving-install` runs `systemctl --user daemon-reload` only when it is NOT
 # given --no-systemd, so this is the first gate anywhere that the reload
@@ -154,7 +166,7 @@ for unit in "${units[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-step "[4/9] Quadlet generated the postgres unit, and the library's model agrees"
+step "[4/10] Quadlet generated the postgres unit, and the library's model agrees"
 
 # THE POINT OF THIS GATE. `deployment_quadlet_generated_name` MODELS podman's
 # .container -> .service naming in bash, and the other suite tests that model
@@ -174,7 +186,7 @@ modelled="$(deployment_quadlet_generated_name mcloving-postgres.container)"
 echo "   library model agrees with the generator: ${modelled}"
 
 # ---------------------------------------------------------------------------
-step "[5/9] systemd resolved the ordering the units declare"
+step "[5/10] systemd resolved the ordering the units declare"
 
 # Ordering is the thing the other suite most conspicuously cannot prove: it
 # achieves the sequence by writing the steps one after another in bash, so
@@ -194,7 +206,7 @@ agent_after="$(systemctl --user show -p After --value mcloving-agent.service)"
 echo "   agent After=${agent_after}"
 
 # ---------------------------------------------------------------------------
-step "[6/9] the runbook's own enable command must work"
+step "[6/10] the runbook's own enable command must work"
 
 # THE GATE THAT FOUND A SHIPPED DEFECT. `mcloving-install` prints, and
 # docs/operations/DEPLOYMENT_V1.md step 5 documents,
@@ -224,7 +236,7 @@ fi
 echo "   enabled: ${documented[*]}; mcloving-postgres refuses enable (generated), as expected"
 
 # ---------------------------------------------------------------------------
-step "[7/9] contracts, PKI and enrollment"
+step "[7/10] contracts, PKI and enrollment"
 
 config="${config_base}/mcloving"
 pki="${config}/pki"
@@ -297,7 +309,7 @@ echo "   mcloving-env-guard: controller contract satisfied"
   || fail "the agent workspace root already exists before any unit ran; this arm must not create what StateDirectory= is supposed to"
 
 # ---------------------------------------------------------------------------
-step "[8/9] systemd starts the lane, in the order the units declare"
+step "[8/10] systemd starts the lane, in the order the units declare"
 
 # `Notify=healthy` on the quadlet means the generated postgres unit reports
 # started only once `pg_isready` passes, so `After=mcloving-postgres.service`
@@ -355,7 +367,7 @@ echo "   controller and agent held steady across the sampling window"
 echo "   mcloving-health answered through the manager"
 
 # ---------------------------------------------------------------------------
-step "[9/9] service-managed upgrade and rollback"
+step "[9/10] service-managed upgrade and rollback"
 
 # Both scripts `exit 0` immediately under --no-systemd, so everything past the
 # symlink flip -- stop order, restart order, and the health gates between them --
@@ -396,7 +408,44 @@ for unit in mcloving-controller.service mcloving-agent.service; do
 done
 echo "   rollback: current back to ${rolled_back}, both services active"
 
+# ---------------------------------------------------------------------------
+step "[10/10] the deployable-runtime gate, against this installed deployment"
+
+# The other half of the acceptance sentence. The gate spawns a controller whose
+# path `CARGO_BIN_EXE_mcloving-controller` baked in at compile time, so it runs
+# the BUILD TREE's binary rather than the installed one -- which is checkable
+# rather than hand-waved: the installed release was staged from that build and
+# digest-verified, so the two are byte-identical, and this asserts it instead of
+# assuming it.
+installed_controller="${libexec_root}/current/mcloving-controller"
+gate_controller="$(dirname "$(dirname "${runtime_gate}")")/mcloving-controller"
+[[ -x "${installed_controller}" ]] || fail "no installed controller at ${installed_controller}"
+if [[ -x "${gate_controller}" ]]; then
+  [[ "$(sha256sum < "${installed_controller}")" == "$(sha256sum < "${gate_controller}")" ]] \
+    || fail "the controller the gate will spawn is not byte-identical to the installed one; the gate would be testing a different binary than this deployment runs"
+  echo "   the gate's controller is byte-identical to the installed one"
+else
+  echo "   note: could not locate the gate's controller beside ${runtime_gate}; identity unasserted"
+fi
+
+# The DATABASE, ROLES and split credentials are this deployment's, read from the
+# contract systemd starts the controller with -- not a database the test brought
+# up for itself, which is what made this gate and the install two unrelated CI
+# jobs sharing no state.
+migration_url="$(grep -E '^MCLOVING_MIGRATION_DATABASE_URL=' "${config}/controller.env" | cut -d= -f2-)"
+runtime_db_url="$(grep -E '^MCLOVING_DATABASE_URL=' "${config}/controller.env" | cut -d= -f2-)"
+[[ -n "${migration_url}" && -n "${runtime_db_url}" ]] \
+  || fail "could not read both database URLs from ${config}/controller.env"
+[[ "${migration_url}" != "${runtime_db_url}" ]] \
+  || fail "the migration and runtime URLs are identical; the split this gate checks does not exist"
+
+MCLOVING_TEST_DATABASE_URL="${migration_url}" \
+MCLOVING_TEST_RUNTIME_DATABASE_URL="${runtime_db_url}" \
+  "${runtime_gate}" --ignored --test-threads=1 \
+  || fail "the deployable-runtime gate failed against this installed deployment"
+echo "   deployable-runtime gate passed against the installed deployment's database and roles"
+
 echo
 echo "service-managed deployment lane passed: install -> daemon-reload -> quadlet generation ->"
 echo "  documented enable -> ordered start -> stability -> health through the manager ->"
-echo "  service-managed upgrade -> service-managed rollback"
+echo "  service-managed upgrade -> service-managed rollback -> deployable-runtime gate"

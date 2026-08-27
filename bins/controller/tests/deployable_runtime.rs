@@ -25,14 +25,27 @@ stages:
 "#;
 
 #[tokio::test]
+#[ignore = "needs MCLOVING_TEST_DATABASE_URL; run with --ignored"]
 async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
     let _test_guard = DEPLOYABLE_RUNTIME_TEST_LOCK.lock().await;
-    let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
-        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
-        return;
-    };
-    let runtime_url =
-        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1);
+    // NEVER A SILENT SKIP. This returned success with no assertions when the
+    // variable was absent, and DEPLOY-001's acceptance names this gate -- so an
+    // acceptance criterion was satisfiable by not running. The tests are
+    // `#[ignore]`d instead: a plain `cargo test` reports them as ignored, which
+    // is visible, and an explicit invocation that forgets the database fails
+    // here rather than passing quietly.
+    let migration_url = std::env::var("MCLOVING_TEST_DATABASE_URL").expect(
+        "MCLOVING_TEST_DATABASE_URL is unset. This gate is #[ignore]d so it is never \
+         reported as passing when it did not run; invoked explicitly, it needs a database.",
+    );
+    // A real deployment gives the migration and runtime roles DIFFERENT
+    // passwords -- that split is the property this test exists to check -- so a
+    // single URL cannot always derive the other. When the runtime URL is
+    // supplied it is used; otherwise the historical derivation applies, which is
+    // what the trust-auth CI database needs.
+    let runtime_url = std::env::var("MCLOVING_TEST_RUNTIME_DATABASE_URL").unwrap_or_else(|_| {
+        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1)
+    });
     assert_ne!(
         migration_url, runtime_url,
         "test URL must use the expected migration role"
@@ -399,14 +412,27 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
 }
 
 #[tokio::test]
+#[ignore = "needs MCLOVING_TEST_DATABASE_URL; run with --ignored"]
 async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
     let _test_guard = DEPLOYABLE_RUNTIME_TEST_LOCK.lock().await;
-    let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
-        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
-        return;
-    };
-    let runtime_url =
-        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1);
+    // NEVER A SILENT SKIP. This returned success with no assertions when the
+    // variable was absent, and DEPLOY-001's acceptance names this gate -- so an
+    // acceptance criterion was satisfiable by not running. The tests are
+    // `#[ignore]`d instead: a plain `cargo test` reports them as ignored, which
+    // is visible, and an explicit invocation that forgets the database fails
+    // here rather than passing quietly.
+    let migration_url = std::env::var("MCLOVING_TEST_DATABASE_URL").expect(
+        "MCLOVING_TEST_DATABASE_URL is unset. This gate is #[ignore]d so it is never \
+         reported as passing when it did not run; invoked explicitly, it needs a database.",
+    );
+    // A real deployment gives the migration and runtime roles DIFFERENT
+    // passwords -- that split is the property this test exists to check -- so a
+    // single URL cannot always derive the other. When the runtime URL is
+    // supplied it is used; otherwise the historical derivation applies, which is
+    // what the trust-auth CI database needs.
+    let runtime_url = std::env::var("MCLOVING_TEST_RUNTIME_DATABASE_URL").unwrap_or_else(|_| {
+        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1)
+    });
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&migration_url)

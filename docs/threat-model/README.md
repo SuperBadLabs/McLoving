@@ -367,6 +367,7 @@ had never claimed one.
 | AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
+| DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
 | DEPLOY-004 | `docs/evidence/DEPLOY-004_SECURITY_REVIEW.md` |
 | DIFF-002 | `docs/architecture/STATE_POLICY_DIFFERENTIAL_V1.md` |
 | DIFF-003 | `docs/evidence/DIFF-003_SECURITY_REVIEW.md` |
