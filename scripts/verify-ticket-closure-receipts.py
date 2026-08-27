@@ -665,8 +665,14 @@ def cited_documents(repository: Path, text: str) -> list[str]:
 
 def receipt_path(repository: Path, ticket: str) -> Path | None:
     """Return where ``ticket``'s receipt lives, whether or not it is adequate."""
-    conventional = repository / RECEIPT_DIRECTORY / f"{ticket}{RECEIPT_SUFFIX}"
-    if conventional.is_file():
+    # Through the same containment rule as every other document probe: the
+    # conventional path is constructed, but the FILE at it may be a committed
+    # symlink pointing out of the tree, and a receipt that is not in the
+    # repository is not this repository's receipt.
+    conventional = contained_document(
+        repository, f"{RECEIPT_DIRECTORY.as_posix()}/{ticket}{RECEIPT_SUFFIX}"
+    )
+    if conventional is not None and conventional.is_file():
         return conventional
     alternate = ALTERNATE_RECEIPTS.get(ticket)
     if alternate is not None and (repository / alternate[0]).is_file():
@@ -750,7 +756,21 @@ def contained_document(repository: Path, cited: str) -> Path | None:
     normalized = posixpath.normpath(cited)
     if normalized != "docs" and not normalized.startswith("docs/"):
         return None
-    return repository / normalized
+    # LEXICAL CONTAINMENT IS NOT CONTAINMENT, which this repository learned two
+    # tickets ago in DEPLOY-004 and relearned here. Normalising the spelling
+    # settles only the spelling: a committed symlink at
+    # `docs/evidence/AAA-001_SECURITY_REVIEW.md -> ../../outside.md` has no `..`
+    # in the cited string at all, passes the test above, and is then followed
+    # out of the tree by `is_file()` and `read_text()`. Measured: evidence
+    # living outside the repository was accepted, with `receipted=1`.
+    #
+    # So resolve, and ask the kernel where it actually lands. Both sides are
+    # resolved because the checkout itself may sit under a symlink.
+    candidate = (repository / normalized).resolve()
+    root = (repository / "docs").resolve()
+    if candidate != root and not candidate.is_relative_to(root):
+        return None
+    return candidate
 
 
 def closure_attributions(text: str) -> tuple[dict[str, str], list[str]]:
@@ -961,8 +981,8 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
         if document is None:
             errors.append(
                 f"{ticket} is attributed to {evidence}, which leaves docs/ once "
-                "normalised; an evidence path that escapes the documentation "
-                "tree is not evidence"
+                "its spelling is normalised and its links are resolved; an evidence "
+                "path that escapes the documentation tree is not evidence"
             )
         elif not document.is_file():
             errors.append(

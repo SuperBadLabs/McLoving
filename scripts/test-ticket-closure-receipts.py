@@ -482,6 +482,29 @@ class ClosureAttribution(unittest.TestCase):
             errors,
         )
 
+    def test_a_symlinked_evidence_document_cannot_escape_docs(self):
+        """Lexical containment is not containment.
+
+        The cited string has no `..` in it at all. A committed symlink at
+        `docs/evidence/AAA-001_SECURITY_REVIEW.md -> ../../outside.md` passes
+        every spelling test and is then followed out of the tree by `is_file()`
+        and `read_text()`. Measured before the fix: evidence living outside the
+        repository was accepted, with `receipted=1`. This repository learned the
+        same lesson one ticket earlier, in DEPLOY-004's ancestor walk.
+        """
+        with build() as name, synthetic():
+            root = Path(name)
+            outside = root / "outside.md"
+            outside.write_text(
+                "# outside\n\nAAA-001 was reviewed, honestly.\n" + ("x " * 600),
+                encoding="utf-8",
+            )
+            receipt = root / "docs" / "evidence" / "AAA-001_SECURITY_REVIEW.md"
+            receipt.unlink()
+            receipt.symlink_to(Path("..") / ".." / "outside.md")
+            errors, _, _ = check(root)
+        self.assertTrue(any("leaves docs/" in error for error in errors), errors)
+
     def test_a_short_row_is_an_error_not_a_skip(self):
         """An unreadable attribution row and an absent one look identical to the
         ticket each was supposed to credit."""

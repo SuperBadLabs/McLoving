@@ -193,6 +193,32 @@ would have stayed green through it.
 
 All four new checks are mutation-proved, each turning its own named test red.
 
+## Review round 2 — lexical containment is not containment
+
+One P2, and it is the lesson this repository learned one ticket earlier, in
+`DEPLOY-004`'s ancestor walk, arriving in a different file.
+
+Round 1's containment normalised the cited spelling and refused anything not
+under `docs/`. That settles the spelling and nothing else. **A committed symlink
+at `docs/evidence/AAA-001_SECURITY_REVIEW.md -> ../../outside.md` has no `..` in
+the cited string at all**, passes every spelling test, and is then followed out
+of the tree by `is_file()` and `read_text()`.
+
+Reproduced before fixing: with that symlink in place and an outside document
+naming the ticket, the gate reported `done=1 receipted=1 reviewed=1` and **no
+errors** — evidence living outside the repository, accepted as closure.
+
+Both probes now resolve the candidate and ask the kernel where it lands, with
+both sides resolved because the checkout itself may sit under a symlink. The
+receipt lookup goes through the same rule: its path is constructed, but the file
+at it may be a symlink, and a receipt that is not in the repository is not this
+repository's receipt.
+
+`DEPLOY-004` closed a walk that collapsed `..` lexically before resolving
+symlinks. This closed a containment check that resolved neither. **The recurring
+error is not the syntax; it is treating a path's spelling as a claim about where
+it goes.**
+
 ## Bounded deliberately
 
 Three defects were found while reproducing this ticket's items that are **larger
