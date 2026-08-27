@@ -63,7 +63,11 @@ proves nothing if the walk reached nothing. Two fixtures are deliberately not
 gates: `sticky-last-child-absent` is the same defect as the sibling-root gate in
 a different spelling and is covered by that gate's fixture being renamed so its
 absent entry sorts last, and `host-vartmp-squat` exercises the host's real
-`/var/tmp`, which a suite must not depend on the state of. The five P1
+`/var/tmp`, which a suite must not depend on the state of.
+
+The full suite was run end to end three times and passed each time — twice
+before review and once after the bypass fix and the two added gates — at 336 s
+on a measured run, consistent with the ~302 s the previous custodian recorded. The five P1
 findings that stopped the earlier attempts map onto rows 4–8; the two
 acceptance rows are what prove the walk to `/` has not made ordinary
 deployments refuse.
