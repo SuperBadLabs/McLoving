@@ -415,9 +415,14 @@ jobs:
           # parents are judged like any other component of the chain. mkdir
           # honours the runner's umask, which is not ours to assume; this is
           # the one level we own. A refusal naming a path ABOVE this directory
-          # is the runner image's own tree and the refusal is correct -- do not
-          # chmod your way up it, fix the image or move TMPDIR.
+          # is the runner image's own tree, and on a hosted runner you can
+          # neither fix the image nor move to a location with different
+          # ancestors -- so print the chain first. A red job is then one look
+          # rather than one bisect, and the printed modes are what a bug report
+          # against the image would need.
           chmod 755 "${RUNNER_TEMP}/mcloving-smoke"
+          stat -c '%a %u %n' / /home "${HOME}" "$(dirname "${RUNNER_TEMP}")" \
+            "${RUNNER_TEMP}" "${RUNNER_TEMP}/mcloving-smoke" || true
           TMPDIR="${RUNNER_TEMP}/mcloving-smoke" bash deploy/test-deployment.sh
       - name: Upload the preserved smoke-test working directory
         if: failure()

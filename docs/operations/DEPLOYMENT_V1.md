@@ -191,6 +191,19 @@ so two invocations over an unchanged deployment are byte-identical and any
 byte of drift is visible. This is the document a future CUTOVER-001 freeze
 re-reads; producing it grants no cutover authority.
 
+**The home's whole ancestor chain is judged, up to `/`.** Every directory on
+the way must be free of group and other WRITE bits and owned by root or the
+service account. A directory the lane only walks *through* may be
+world-writable when it is sticky — `/tmp` and `/var/tmp` are — but only while
+every entry the walk enters inside it already exists and is owned by root or
+the account, so a managed root that does not exist yet is refused until it is
+created. **A shared-group deploy root is not supported**: a `root:apps 2775`
+parent is refused, because any member of that group can rename the deployment
+aside, and re-moding a directory with other tenants in it is not something an
+installer may do on your behalf. Run the lane AS the service account — the
+expected uid is the invoking one, so `sudo mcloving-install` refuses a tree it
+does not own; `sudo -u <account>` is the documented form.
+
 The `ancestors` section reaches `/` (`DEPLOY-004`), so it now contains
 directories the deployment shares with the rest of the host. A directory the
 lane merely TRAVERSES is recorded by mode, uid and gid alone: no entry-listing
