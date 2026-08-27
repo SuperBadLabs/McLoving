@@ -189,15 +189,40 @@ for _ticket in ("MIG-002", "MIG-006", "MIG-007"):
 # never claimed to -- the gate was reading an ownership map as an attestation.
 # Deleting those rows was never an option either: they are true, and they are
 # the only record of who owns each area.
-for _ticket in (
-    "AGENT-001", "AGENT-002", "AGENT-003", "ARCH-001", "CTRL-001",
-    "INV-001", "INV-002", "INV-003", "INV-004", "IR-001", "MIG-000",
-    "OPS-001", "OPS-002", "SEC-002", "SEC-003", "WIN-001", "WIN-002",
-):
+for _ticket in ("INV-001", "INV-002", "INV-003", "INV-004", "MIG-000",
+                "WIN-001", "WIN-002"):
     THREAT_MODEL_DEBT[_ticket] = (
         "credited before HYG-002 only by the `Area | First implementation "
         "ticket` ownership table, which records which ticket first implemented "
         "an area and asserts nothing about a review having happened"
+    )
+
+# THE TEN THE EXEMPTION COMMENT NAMES, and why they are debt rather than
+# exempt. Review argued they should take the pre-rule exemption instead, since
+# they closed before the Working rule existed and are only here because the old
+# predicate credited them. The exemption's own comment above answers it: these
+# ten "need no exemption and are DELIBERATELY ABSENT, so removing their
+# reference later fails this gate rather than passing silently." That is this
+# case exactly -- the reference did not move, the rule that misread it as
+# attribution was corrected -- and exempting them would make the gate pass
+# silently on the one condition its author wrote that sentence to catch.
+#
+# The exemption's criterion does not fit them either: it is pre-rule AND "named
+# nowhere in the threat model", and all ten ARE named. Being named without being
+# attributed is the whole finding, not a technicality.
+#
+# But the objection earns the wording. Debt here is REPORTED, never failed, and
+# these lines should not read as unpaid obligations. They record that no
+# document attributes a review, and say in the same breath that the era means
+# none was ever demanded.
+for _ticket in ("AGENT-001", "AGENT-002", "AGENT-003", "ARCH-001", "CTRL-001",
+                "IR-001", "OPS-001", "OPS-002", "SEC-002", "SEC-003"):
+    THREAT_MODEL_DEBT[_ticket] = (
+        "no document attributes a review; closed before the threat-model "
+        "Working rule entered the board in abb7c91, so none was demanded at the "
+        "time, and deliberately kept out of the pre-rule exemption so that "
+        "losing this reference fails rather than passes silently -- which is "
+        "what HYG-002 made it do"
     )
 
 # The other two were credited by a register verification cell whose only cited

@@ -219,6 +219,39 @@ symlinks. This closed a containment check that resolved neither. **The recurring
 error is not the syntax; it is treating a path's spelling as a claim about where
 it goes.**
 
+## Review round 3 — one finding declined, and what it earned
+
+Review argued that ten of the nineteen — `AGENT-001/002/003`, `ARCH-001`,
+`CTRL-001`, `IR-001`, `OPS-001/002`, `SEC-002/003` — should take the pre-rule
+**exemption** rather than debt, since they closed before the threat-model Working
+rule existed and are only in scope because the old predicate credited them.
+Otherwise, it argued, every run inflates the debt figure by ten obligations that
+were never owed.
+
+**Declined, on the exemption list's own words.** That list's comment names these
+exact ten and says they *"need no exemption and are **deliberately absent, so
+removing their reference later fails this gate rather than passing silently**."*
+This is that case: the reference did not move, the rule that misread it as
+attribution was corrected. Exempting them now would make the gate pass silently
+on the one condition its author wrote that sentence to catch.
+
+The exemption's criterion does not fit them either. It is pre-rule **and** *"named
+nowhere in the threat model"*, and all ten **are** named. Being named without
+being attributed is the finding, not a technicality.
+
+On the merits, these are the project's most sensitive boundaries — authorization
+and RLS, lease and fencing, agent mTLS, agent containment, secret grants,
+artifact integrity. Recording that none carries a review attribution is true and
+worth knowing. Asserting they owe nothing is the failure this repository is named
+for.
+
+**The objection earned the wording, and got it.** Debt here is reported, never
+failed, and those ten lines should not read as unpaid obligations. Their reason
+string now says what is actually true: no document attributes a review; the
+ticket closed before the rule existed so none was demanded at the time; and it
+was kept out of the exemption deliberately so that losing the reference would
+fail rather than pass — which is what this change made it do.
+
 ## Bounded deliberately
 
 Three defects were found while reproducing this ticket's items that are **larger
