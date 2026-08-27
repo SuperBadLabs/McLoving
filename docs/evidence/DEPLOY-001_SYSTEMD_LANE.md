@@ -236,6 +236,24 @@ for all of them: **narrating instead of refusing** when a claim could not be
 established, and **asking the wrong oracle** — the caller's environment, a
 remembered table, a path's spelling — instead of the one that decides.
 
+## Review round 4 — one, and it closes a validity hole as well as a safety one
+
+**A surviving unit drop-in did not count as an existing deployment.** A lone
+`mcloving-agent.service.d/override.conf` left by a previous run or by an
+operator, and the arm declared the account clean and proceeded.
+
+Two things wrong with that, and the second is the sharper: proceeding over it
+destroys work this script cannot see, **and systemd merges drop-ins** — so an
+unnoticed one changes what the units under test actually do, and the arm would
+have exercised something other than the shipped lane while reporting on the
+shipped lane. Drop-ins now count in the probe, and `--reset` removes the drop-in
+*directories* rather than only `*.service` files, since `rm -f '*.service'`
+leaves `mcloving-agent.service.d/` standing and a drop-in that survives a reset
+is merged into the next run.
+
+Thirteen findings across four rounds, at a declining rate (7, 3, 2, 1), all
+mine, none disputed.
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable

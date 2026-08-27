@@ -110,8 +110,21 @@ echo "   account=${account} home=${home_dir} manager=$(systemctl --user is-syste
 # systemd creates the workspace then failed on a directory from the run before.
 # What makes a deployment present is any of its parts, not the tidiest one.
 state_probe="$(deployment_effective_state_root "${home_dir}")"
+config_probe="$(deployment_effective_config_root "${home_dir}")"
 existing=""
 [[ ! -e "${home_dir}/.local/libexec/mcloving" ]] || existing+="a deployment at ${home_dir}/.local/libexec/mcloving "
+# DROP-INS COUNT, for two reasons and the second is the sharper one. A
+# `mcloving-agent.service.d/override.conf` is part of somebody's deployment, so
+# proceeding over it destroys work this script cannot see. And systemd MERGES
+# drop-ins: an unnoticed one changes what the units under test actually do, so
+# the arm would exercise something other than the shipped lane while reporting
+# on the shipped lane. Units, quadlets and their drop-in directories all count.
+existing_units="$(
+  shopt -s nullglob
+  printf '%s\n' "${config_probe}"/systemd/user/mcloving-* \
+                 "${config_probe}"/containers/systemd/mcloving-* 2>/dev/null | head -1
+)"
+[[ -z "${existing_units}" ]] || existing+="installed units or drop-ins under ${config_probe} "
 [[ ! -e "${state_probe}/mcloving-agent" && ! -e "${state_probe}/mcloving-controller" ]] \
   || existing+="service state under ${state_probe} "
 [[ ! -e "${home_dir}/.config/mcloving" ]] || existing+="contracts at ${home_dir}/.config/mcloving "
@@ -137,9 +150,12 @@ if [[ -n "${existing}" ]]; then
   # installer never wrote to whenever the two disagree, leave the real units in
   # place, and report a reset that had not happened.
   reset_config_base="$(deployment_effective_config_root "${home_dir}")"
-  rm -f "${reset_config_base}"/systemd/user/mcloving-*.service \
-        "${reset_config_base}"/systemd/user/default.target.wants/mcloving-*.service \
-        "${reset_config_base}"/containers/systemd/mcloving-* >/dev/null 2>&1 || true
+  # -rf and a bare mcloving-* glob: `rm -f` on `*.service` leaves the
+  # `mcloving-agent.service.d/` drop-in directories standing, and a drop-in that
+  # survives a reset is merged into the next run's units.
+  rm -rf "${reset_config_base}"/systemd/user/mcloving-* \
+         "${reset_config_base}"/systemd/user/default.target.wants/mcloving-* \
+         "${reset_config_base}"/containers/systemd/mcloving-* >/dev/null 2>&1 || true
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
@@ -186,7 +202,8 @@ teardown() {
     rm -rf "${libexec_root}" "${home_dir}/.config/mcloving" \
       "${state_probe}/mcloving-agent" "${state_probe}/mcloving-controller" \
       >/dev/null 2>&1 || true
-    rm -f "${unit_root}"/mcloving-*.service "${quadlet_root}"/mcloving-* >/dev/null 2>&1 || true
+    rm -rf "${unit_root}"/mcloving-* "${quadlet_root}"/mcloving-* \
+           "${unit_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   else
     echo "   --keep: the deployment under ${home_dir} is left in place, its"
