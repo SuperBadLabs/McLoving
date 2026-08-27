@@ -59,7 +59,29 @@ agent_pid=""
 # exit path having to remember.
 background_pids=()
 
-# Record a backgrounded pid so the EXIT trap can reach it.
+# Record a backgrounded pid so the EXIT trap can reach it. Call this on the
+# line immediately after the spawn. The gap between `cmd &` and this call is
+# a KNOWN residual window: a signal landing in it enters cleanup with the pid
+# unregistered, and for a lock holder that leaves `.transition-lock` held.
+#
+# It is left open deliberately, because the obvious fix is worse than the
+# bug. Masking signals around the spawn-plus-register pair -- `trap ''
+# INT TERM HUP` -- sets SIG_IGN, and ignored dispositions are inherited by
+# children across both fork AND exec. The spawned process would then survive
+# the very kill this registry exists to deliver. Measured: with that mask,
+# both `sleep 60 &` and the `( exec ... && exec sleep 60 ) &` holder shape
+# used below ignored SIGTERM entirely and needed SIGKILL. A registry full of
+# unkillable pids is a worse failure than a narrow window.
+#
+# The correct form defers instead of ignoring -- `trap 'pending=1' TERM`,
+# whose disposition DOES reset to default in the child, so the child stays
+# killable -- but it needs a pending-signal check threaded through every
+# spawn site, which is its own change with its own gates.
+#
+# The two residuals in this file are not equally remote, and should not be
+# read as if they were: this one needs only a mistimed signal, while the
+# post-reap window in release_background_pid needs the pid counter to wrap
+# all of pid_max between two adjacent assignments.
 register_background_pid() {
   background_pids+=("$1")
 }
