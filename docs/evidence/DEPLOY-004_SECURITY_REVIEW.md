@@ -69,7 +69,7 @@ a different spelling and is covered by that gate's fixture being renamed so its
 absent entry sorts last, and `host-vartmp-squat` exercises the host's real
 `/var/tmp`, which a suite must not depend on the state of.
 
-The full suite was run end to end five times and passed each time — twice before
+The full suite was run end to end six times and passed each time — twice before
 review, and once after each of the three rounds of change that followed — at
 336 s on a measured run, consistent with the
 ~302 s the previous custodian recorded.
@@ -156,6 +156,34 @@ symlink's is 0777 and unsettable), no digest, no timestamps: the same
 record-what-you-assert rule the traversal records follow. A gate installs into a
 home whose `.local` is a symlink, hands only the inode to a foreign uid, requires
 the document to move, hands it back, and requires the document to return.
+
+### Round 3 — the record I had just added had the same shape of hole
+
+The bot's next finding was against the fix for its previous one, and it was also
+right. `link_record` witnessed stability by reading the target text twice around
+the `lstat`. A symlink replaced atomically by another symlink with the **same
+target text** but a different owner leaves both `readlink` calls agreeing while
+the pathname now names a different entry — so the record would have emitted the
+removed inode's uid and let the freeze miss exactly the ownership drift the
+record was added to expose.
+
+The witness is now the **inode and the ownership**, not the target text:
+`(st_dev, st_ino, st_uid, st_gid)` compared across the read, retried, and
+reported as `unstable_entry` if it will not hold still. A replacement gets a new
+inode; an in-place `chown` keeps the inode and moves the uid; both are caught.
+
+Measured end to end: an atomic same-target replacement to a foreign uid changes
+`st_ino` (7494292 → 7494295) with the target text unchanged, and the document
+moves. Stated honestly, the *interleaving* the bot describes — a replacement
+landing between the `lstat` and the second `readlink` — is a two-syscall window I
+did not construct deterministically; what is demonstrated is the mechanism the
+fix rests on, which is that the inode changes and the target text does not.
+
+**Twice in this review the same shape recurred: a check whose witness was the
+wrong fact.** The child scan witnessed "the list is non-empty" instead of "every
+child is sound"; this one witnessed "the target text is unchanged" instead of
+"this is still the same entry". Both were written by me, one immediately after
+being taught the lesson by the other.
 
 **The refusal's remedy text was also wrong, and that was the other reviewer's
 top finding.** The message ended "run chmod go-w (or restore ownership) on them

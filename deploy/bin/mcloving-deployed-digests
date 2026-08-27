@@ -964,24 +964,43 @@ def link_record(path: Path) -> dict:
     target is recorded separately by its own resolved path. Owner and target
     only -- a symlink has no meaningful mode (0777, unsettable) and no content
     to digest, and its timestamps move only when the entry is re-created, which
-    is the change the owner and target already show. Read twice around the
-    lstat and refused if it moved, the same shape as every other record here.
+    is the change the owner and target already show.
+
+    THE TARGET TEXT IS NOT A SUFFICIENT WITNESS, which is why the settle below
+    compares the INODE and the ownership as well. A symlink replaced atomically
+    by another symlink with the SAME target text but a different owner leaves
+    both readlink() calls agreeing while the pathname now names a different
+    entry -- so a target-only check would emit the removed inode's uid and let
+    the freeze miss exactly the ownership drift this record exists to expose.
+    A replacement gets a new inode; an in-place chown keeps the inode and moves
+    the uid; both are caught, and a pathname that will not hold still for one
+    read is reported as unstable rather than guessed at.
     """
-    try:
-        before = os.readlink(path)
-        status = os.lstat(path)
-        after = os.readlink(path)
-    except OSError:
-        return {"path": home_relative(path), "kind": "unreadable_symlink"}
-    if before != after:
-        return {"path": home_relative(path), "kind": "unstable_entry"}
-    return {
-        "path": home_relative(path),
-        "kind": "symlink",
-        "uid": status.st_uid,
-        "gid": status.st_gid,
-        "symlink_target": before,
-    }
+    for _ in range(MAX_RECORD_ATTEMPTS):
+        try:
+            before = os.readlink(path)
+            status = os.lstat(path)
+            after = os.readlink(path)
+            settled = os.lstat(path)
+        except OSError:
+            return {"path": home_relative(path), "kind": "unreadable_symlink"}
+        if before != after:
+            continue
+        if (status.st_dev, status.st_ino, status.st_uid, status.st_gid) != (
+            settled.st_dev,
+            settled.st_ino,
+            settled.st_uid,
+            settled.st_gid,
+        ):
+            continue
+        return {
+            "path": home_relative(path),
+            "kind": "symlink",
+            "uid": status.st_uid,
+            "gid": status.st_gid,
+            "symlink_target": before,
+        }
+    return {"path": home_relative(path), "kind": "unstable_entry"}
 
 
 def home_relative(path: Path) -> str:
