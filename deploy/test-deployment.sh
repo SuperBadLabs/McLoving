@@ -2655,6 +2655,415 @@ if missing:
     raise SystemExit(f"ancestor records missing: {sorted(missing)}")
 ANCESTORS
 
+# --------------------------------------------------------------------------
+# DEPLOY-004: THE CHAIN ABOVE THE HOME, AND THE UID IT IS MEASURED AGAINST.
+#
+# The ancestor walk used to stop at the deployment home, so every directory
+# ABOVE it was validated by nothing -- and the one rename that swaps a whole
+# deployment aside happens exactly there. Worse, the expected uid was read
+# from `stat` of the home, so a SUBSTITUTED home became its own trust anchor
+# and every ownership rule below it agreed with itself. These gates hold that
+# class closed by driving require_secure_ancestors over hostile trees planted
+# above a home: a writable parent, a sticky ancestor that still permits a
+# squat, a home reached through symlinks, a foreign-owned link inode, ".."
+# spelled after a symlink, and a home this account does not own.
+#
+# EVERY REFUSAL GATE ASSERTS THAT THE REFUSAL NAMES ITS OWN OFFENDER AND MODE,
+# and that is the load-bearing half. On the unpatched library several of these
+# fixtures do refuse -- for the wholly unrelated reason that /tmp is 1777 --
+# so a gate that only checked "it failed" would have passed against the very
+# defect it exists to catch.
+#
+# require_secure_ancestors is called directly, in a subshell sourcing the
+# INSTALLED library, because a hostile directory cannot be planted above
+# ${workdir} by a real mcloving-install run. The fixtures depend on the
+# `umask 022` set at the top of this file, not on the caller's.
+# --------------------------------------------------------------------------
+d004_root="${workdir}/d004"
+rm -rf "${d004_root}"
+mkdir -p "${d004_root}"
+chmod 0755 "${d004_root}"
+
+# The ordinary deployment, and the acceptance direction the whole block rests
+# on: a walk that now runs all the way to "/" must still accept the private
+# home every other gate here installs into. If this one ever reddens, the
+# chain rule has been made unusable rather than strict.
+d004_baseline="${d004_root}/baseline"
+rm -rf "${d004_baseline}"
+mkdir -p "${d004_baseline}/home/.config/mcloving"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_baseline}/home" \
+    "${d004_baseline}/home/.config/mcloving"
+) > "${workdir}/logs/d004-baseline-accept.log" 2>&1 || {
+  echo "the ancestor walk refused an ordinary private home:" >&2
+  cat "${workdir}/logs/d004-baseline-accept.log" >&2
+  exit 1
+}
+rm -rf "${d004_baseline}"
+
+# An acceptance proves nothing if the walk reached NOTHING, so the chain's own
+# content is asserted directly rather than inferred from a verdict: "/" must
+# be in it (the walk has no stop point any more), the directory HOLDING the
+# home must be in it and classified `traversal` (it is the one a rename swaps
+# the deployment aside from, and it is what the old walk never saw), and the
+# home itself must be classified `guarded` -- its contents are enumerated, so
+# it may never earn the sticky exemption a mere traversal node can.
+d004_chain="${d004_root}/chain"
+rm -rf "${d004_chain}"
+mkdir -p "${d004_chain}/home/.config/mcloving"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  while IFS=' ' read -r d004_kind d004_encoded _; do
+    [[ -n "${d004_kind}" ]] || continue
+    decode_path_item_into d004_decoded "${d004_encoded}"
+    # shellcheck disable=SC2154 # assigned through the nameref above
+    printf '%s %s\n' "${d004_kind}" "${d004_decoded}"
+  done < <(deployment_ancestor_chain "${d004_chain}/home" \
+    "${d004_chain}/home/.config/mcloving")
+) > "${workdir}/logs/d004-chain-content.log" 2>&1
+grep -qx "traversal /" "${workdir}/logs/d004-chain-content.log" || {
+  echo "the ancestor chain never reached \"/\": the walk still stops somewhere:" >&2
+  cat "${workdir}/logs/d004-chain-content.log" >&2
+  exit 1
+}
+grep -qx "traversal ${d004_chain}" "${workdir}/logs/d004-chain-content.log" || {
+  echo "the directory holding the home is missing from the chain, or is not a traversal node:" >&2
+  cat "${workdir}/logs/d004-chain-content.log" >&2
+  exit 1
+}
+grep -qx "guarded ${d004_chain}/home" "${workdir}/logs/d004-chain-content.log" || {
+  echo "the home itself is missing from the chain, or is not guarded:" >&2
+  cat "${workdir}/logs/d004-chain-content.log" >&2
+  exit 1
+}
+rm -rf "${d004_chain}"
+
+# A world-writable directory DIRECTLY ABOVE the home. Nothing inside the home
+# is wrong, which is precisely why a walk that began at the home saw nothing
+# to object to while any local user could rename the home aside wholesale.
+d004_above="${d004_root}/above-home"
+rm -rf "${d004_above}"
+mkdir -p "${d004_above}/exposed/home/.config/mcloving"
+chmod 0777 "${d004_above}/exposed"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_above}/exposed/home" \
+    "${d004_above}/exposed/home/.config/mcloving"
+) > "${workdir}/logs/d004-above-home-writable.log" 2>&1; then
+  echo "the ancestor walk accepted a world-writable directory above the home" >&2
+  exit 1
+fi
+grep -q "${d004_above}/exposed (mode 777)" \
+  "${workdir}/logs/d004-above-home-writable.log" || {
+  echo "the refusal did not name the writable directory above the home and its mode:" >&2
+  cat "${workdir}/logs/d004-above-home-writable.log" >&2
+  exit 1
+}
+chmod 0755 "${d004_above}/exposed"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_above}/exposed/home" \
+    "${d004_above}/exposed/home/.config/mcloving"
+) > "${workdir}/logs/d004-above-home-secured.log" 2>&1 || {
+  echo "the ancestor walk still refused after the directory above the home was secured:" >&2
+  cat "${workdir}/logs/d004-above-home-secured.log" >&2
+  exit 1
+}
+rm -rf "${d004_above}"
+
+# A MANAGED ROOT that is itself 1777. S_ISVTX narrows renaming and unlinking,
+# so it excuses a directory the lane merely walks through -- but it does not
+# restrict CREATING a previously absent entry, and a managed root is a
+# directory whose contents this lane merges. A drop-in another user authored
+# there is arbitrary execution, so the sticky exemption must stop at the
+# guarded boundary and never reach a root.
+d004_sticky_root="${d004_root}/sticky-root"
+rm -rf "${d004_sticky_root}"
+mkdir -p "${d004_sticky_root}/home/.config/systemd/user"
+chmod 1777 "${d004_sticky_root}/home/.config/systemd/user"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_sticky_root}/home" \
+    "${d004_sticky_root}/home/.config/systemd/user"
+) > "${workdir}/logs/d004-sticky-managed-root.log" 2>&1; then
+  echo "the ancestor walk accepted a managed unit root at mode 1777" >&2
+  exit 1
+fi
+grep -q "${d004_sticky_root}/home/.config/systemd/user (mode 1777)" \
+  "${workdir}/logs/d004-sticky-managed-root.log" || {
+  echo "the sticky-root refusal did not name the managed root and its mode:" >&2
+  cat "${workdir}/logs/d004-sticky-managed-root.log" >&2
+  exit 1
+}
+chmod 0755 "${d004_sticky_root}/home/.config/systemd/user"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_sticky_root}/home" \
+    "${d004_sticky_root}/home/.config/systemd/user"
+) > "${workdir}/logs/d004-sticky-managed-root-secured.log" 2>&1 || {
+  echo "the ancestor walk still refused after the managed root was secured:" >&2
+  cat "${workdir}/logs/d004-sticky-managed-root-secured.log" >&2
+  exit 1
+}
+rm -rf "${d004_sticky_root}"
+
+# A home reached through TWO symlinks, with the directory that HOLDS the
+# intermediate link world-writable. With svc -> x/inter/home and
+# inter -> y/real, the directory `x` belongs neither to the origin's chain nor
+# to the final target's, so a walk that follows links to their targets without
+# recording each link's holder leaves the one rename that repoints the whole
+# deployment -- replacing `inter` after validation -- unexamined.
+d004_links="${d004_root}/two-links"
+rm -rf "${d004_links}"
+mkdir -p "${d004_links}/x" "${d004_links}/y/real/home/.config"
+chmod 0777 "${d004_links}/x"
+ln -s "${d004_links}/y/real" "${d004_links}/x/inter"
+ln -s "${d004_links}/x/inter/home" "${d004_links}/svc"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_links}/svc" "${d004_links}/svc/.config"
+) > "${workdir}/logs/d004-two-link-home.log" 2>&1; then
+  echo "the ancestor walk accepted a home whose intermediate symlink sits in a 0777 directory" >&2
+  exit 1
+fi
+grep -q "${d004_links}/x (mode 777)" \
+  "${workdir}/logs/d004-two-link-home.log" || {
+  echo "the two-link refusal did not name the directory holding the intermediate link:" >&2
+  cat "${workdir}/logs/d004-two-link-home.log" >&2
+  exit 1
+}
+chmod 0755 "${d004_links}/x"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_links}/svc" "${d004_links}/svc/.config"
+) > "${workdir}/logs/d004-two-link-home-secured.log" 2>&1 || {
+  echo "the ancestor walk still refused after the link holder was secured:" >&2
+  cat "${workdir}/logs/d004-two-link-home-secured.log" >&2
+  exit 1
+}
+rm -rf "${d004_links}"
+
+# A FOREIGN-OWNED SYMLINK INODE inside a sticky directory that is otherwise
+# exempt. A link's mode carries no information -- always 0777, and unsettable
+# -- so the entry has to be judged by its OWNERSHIP: S_ISVTX grants unlinking
+# to exactly the entry's owner, so whoever owns the link may repoint it.
+#
+# THIS GATE IS ABOUT THE NAMING, NOT THE VERDICT. On a host with
+# fs.protected_symlinks=1 -- the Linux default, and the case here -- the
+# kernel already refuses to FOLLOW a foreign-owned symlink in a world-writable
+# sticky directory, so even the unpatched library fails on this fixture; it
+# just fails with an opaque `stat: cannot statx ...: Permission denied`, which
+# an operator cannot act on and which would equally be produced by a dozen
+# unrelated faults. What is asserted here is the NAMED refusal, so the gate
+# requires the specific `svc (symlink owned by uid ...)` form and would go red
+# on the statx accident.
+d004_linkinode="${d004_root}/link-inode"
+rm -rf "${d004_linkinode}"
+mkdir -p "${d004_linkinode}/sticky/real-home/.config"
+chmod 1777 "${d004_linkinode}/sticky"
+ln -s "${d004_linkinode}/sticky/real-home" "${d004_linkinode}/sticky/svc"
+# `podman unshare chown` writes a REAL foreign uid (the first subuid) without
+# root, the same idiom the foreign-owner gates below use. `-h` is what makes it
+# the LINK's own inode that changes hands rather than its target's, which is
+# the whole distinction this gate exists to measure -- the target stays this
+# account's throughout.
+podman unshare chown -h 1:1 "${d004_linkinode}/sticky/svc"
+d004_link_uid="$(stat -c '%u' "${d004_linkinode}/sticky/svc")"
+[[ "${d004_link_uid}" != "$(id -u)" ]] || {
+  echo "the foreign-link fixture is not foreign-owned; podman unshare chown -h did not take" >&2
+  podman unshare rm -rf "${d004_linkinode}"
+  exit 1
+}
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_linkinode}/sticky/svc" \
+    "${d004_linkinode}/sticky/svc/.config"
+) > "${workdir}/logs/d004-foreign-link-inode.log" 2>&1; then
+  echo "the ancestor walk accepted a home reached through a foreign-owned symlink" >&2
+  podman unshare rm -rf "${d004_linkinode}"
+  exit 1
+fi
+grep -q "${d004_linkinode}/sticky/svc (symlink owned by uid .*, expected uid $(id -u) or root)" \
+  "${workdir}/logs/d004-foreign-link-inode.log" || {
+  echo "the foreign-link refusal did not name the link inode and the uids:" >&2
+  cat "${workdir}/logs/d004-foreign-link-inode.log" >&2
+  podman unshare rm -rf "${d004_linkinode}"
+  exit 1
+}
+# The SAME fixture with only the link inode handed back: the sticky directory
+# is exempt again and the walk accepts, so what the refusal above turns on is
+# the link's owner and not symlinks or sticky directories as such.
+podman unshare chown -h 0:0 "${d004_linkinode}/sticky/svc"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_linkinode}/sticky/svc" \
+    "${d004_linkinode}/sticky/svc/.config"
+) > "${workdir}/logs/d004-own-link-inode.log" 2>&1 || {
+  echo "the ancestor walk refused a symlink this account owns in a sticky directory:" >&2
+  cat "${workdir}/logs/d004-own-link-inode.log" >&2
+  podman unshare rm -rf "${d004_linkinode}"
+  exit 1
+}
+# Anything a foreign uid touched is removed through the same namespace, or the
+# invoking user cannot unlink it and the suite's own cleanup fails on it.
+podman unshare rm -rf "${d004_linkinode}"
+
+# ".." SPELLED AFTER A SYMLINK. `link/..` is the parent of the link's TARGET,
+# which os.path.normpath and abspath both get wrong by collapsing it lexically
+# before anything is resolved. The fixture is built so that the LEXICAL answer
+# is impeccable -- the decoy tree lex/a/home exists and is perfectly secured --
+# while the kernel actually lands in other/home, whose parent is 0777. A walk
+# that normalizes first validates the decoy and accepts.
+d004_dotdot="${d004_root}/dotdot"
+rm -rf "${d004_dotdot}"
+mkdir -p "${d004_dotdot}/lex/a/home/.config" \
+  "${d004_dotdot}/other/elsewhere" "${d004_dotdot}/other/home/.config"
+chmod 0777 "${d004_dotdot}/other"
+ln -s "${d004_dotdot}/other/elsewhere" "${d004_dotdot}/lex/a/link"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_dotdot}/lex/a/link/../home" \
+    "${d004_dotdot}/lex/a/link/../home/.config"
+) > "${workdir}/logs/d004-dotdot-after-symlink.log" 2>&1; then
+  echo "the ancestor walk collapsed \"..\" lexically and validated the decoy tree" >&2
+  exit 1
+fi
+grep -q "${d004_dotdot}/other (mode 777)" \
+  "${workdir}/logs/d004-dotdot-after-symlink.log" || {
+  echo "the \"..\"-after-symlink refusal did not name the directory the kernel actually lands in:" >&2
+  cat "${workdir}/logs/d004-dotdot-after-symlink.log" >&2
+  exit 1
+}
+chmod 0755 "${d004_dotdot}/other"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_dotdot}/lex/a/link/../home" \
+    "${d004_dotdot}/lex/a/link/../home/.config"
+) > "${workdir}/logs/d004-dotdot-after-symlink-secured.log" 2>&1 || {
+  echo "the ancestor walk still refused after the resolved parent was secured:" >&2
+  cat "${workdir}/logs/d004-dotdot-after-symlink-secured.log" >&2
+  exit 1
+}
+rm -rf "${d004_dotdot}"
+
+# An EXTERNAL managed root sharing a sticky ancestor with the home. The home
+# is already there, so the sticky ancestor looks settled from the home's side;
+# but the external unit root has not been created yet, and inside a 1777
+# directory the entry that does not exist is the one another uid may create
+# first and have the deployment built through. The exemption has to be
+# withheld for the ancestor as a whole, and the refusal has to say WHICH
+# absent entry withheld it.
+d004_sibling="${d004_root}/sibling-root"
+rm -rf "${d004_sibling}"
+mkdir -p "${d004_sibling}/shared/svc-home/.config"
+chmod 1777 "${d004_sibling}/shared"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_sibling}/shared/svc-home" \
+    "${d004_sibling}/shared/svc-home/.config" \
+    "${d004_sibling}/shared/external-units"
+) > "${workdir}/logs/d004-sibling-root-sticky.log" 2>&1; then
+  echo "the ancestor walk let a not-yet-created managed root inherit the home's sticky exemption" >&2
+  exit 1
+fi
+grep -q "${d004_sibling}/shared (mode 1777; sticky, but ${d004_sibling}/shared/external-units does not exist yet" \
+  "${workdir}/logs/d004-sibling-root-sticky.log" || {
+  echo "the shared-sticky-ancestor refusal did not name the ancestor and the absent entry:" >&2
+  cat "${workdir}/logs/d004-sibling-root-sticky.log" >&2
+  exit 1
+}
+chmod 0755 "${d004_sibling}/shared"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_sibling}/shared/svc-home" \
+    "${d004_sibling}/shared/svc-home/.config" \
+    "${d004_sibling}/shared/external-units"
+) > "${workdir}/logs/d004-sibling-root-secured.log" 2>&1 || {
+  echo "the ancestor walk still refused after the shared ancestor was secured:" >&2
+  cat "${workdir}/logs/d004-sibling-root-secured.log" >&2
+  exit 1
+}
+rm -rf "${d004_sibling}"
+
+# The sticky exemption DOING ITS JOB -- the second acceptance direction, and
+# the reason the walk to "/" is usable at all: without it every deployment
+# whose path crosses a 1777 directory refuses, which is this entire suite.
+# The 1777 directory is built here rather than borrowed from the real /tmp, so
+# the property holds whatever TMPDIR the run was given.
+d004_stickyok="${d004_root}/sticky-accept"
+rm -rf "${d004_stickyok}"
+mkdir -p "${d004_stickyok}/sticky/home/.config/mcloving"
+chmod 1777 "${d004_stickyok}/sticky"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_stickyok}/sticky/home" \
+    "${d004_stickyok}/sticky/home/.config/mcloving"
+) > "${workdir}/logs/d004-sticky-traversal-accept.log" 2>&1 || {
+  echo "the ancestor walk refused a home under a sticky traversal directory whose entries all exist and are owned here:" >&2
+  cat "${workdir}/logs/d004-sticky-traversal-accept.log" >&2
+  exit 1
+}
+rm -rf "${d004_stickyok}"
+
+# A HOME THIS ACCOUNT DOES NOT OWN -- the substituted-home trust anchor, and
+# the reason the expected uid is pinned to ${EUID} instead of being read from
+# `stat` of the home. Read from the home, every ownership rule below measured
+# the attacker's tree against the attacker's uid and agreed with itself, so an
+# attacker-authored unit passed the very rule whose comment promises to stop
+# it. The unit is then started BY the user manager AS the service account, so
+# the renamed-aside home's 0600 contracts and mTLS key are readable by it.
+d004_foreign="${d004_root}/foreign-home"
+rm -rf "${d004_foreign}"
+mkdir -p "${d004_foreign}"
+podman unshare bash -c \
+  "mkdir -p '${d004_foreign}/home/.config' && chown -R 1:1 '${d004_foreign}/home'"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_foreign}/home" "${d004_foreign}/home/.config"
+) > "${workdir}/logs/d004-foreign-home.log" 2>&1; then
+  echo "the ancestor walk accepted a home owned by a third user" >&2
+  podman unshare rm -rf "${d004_foreign}"
+  exit 1
+fi
+grep -q "${d004_foreign}/home (owned by uid .*, expected uid $(id -u) or root)" \
+  "${workdir}/logs/d004-foreign-home.log" || {
+  echo "the foreign-home refusal did not name the home and the uids:" >&2
+  cat "${workdir}/logs/d004-foreign-home.log" >&2
+  podman unshare rm -rf "${d004_foreign}"
+  exit 1
+}
+podman unshare chown -R 0:0 "${d004_foreign}/home"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_foreign}/home" "${d004_foreign}/home/.config"
+) > "${workdir}/logs/d004-foreign-home-restored.log" 2>&1 || {
+  echo "the ancestor walk still refused after the home's ownership was restored:" >&2
+  cat "${workdir}/logs/d004-foreign-home-restored.log" >&2
+  podman unshare rm -rf "${d004_foreign}"
+  exit 1
+}
+podman unshare rm -rf "${d004_foreign}"
+
+rm -rf "${d004_root}"
+
 # A chmod landing between a record's fstat and its pathname re-check must
 # not survive into the canonical document: the inode is unchanged, so a
 # device+inode re-check alone keeps the stale mode. Driven against the
