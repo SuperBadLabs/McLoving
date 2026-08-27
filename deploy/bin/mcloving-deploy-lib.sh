@@ -219,6 +219,7 @@ require_secure_ancestors() {
     || deploy_fail "cannot derive the deployment ancestor chain"
   offending=""
   local encoded_ancestor encoded_child child child_owner
+  local -a encoded_child_list=()
   while IFS=' ' read -r kind encoded_ancestor encoded_children; do
     [[ -n "${kind}" ]] || continue
     decode_path_item_into ancestor "${encoded_ancestor}"
@@ -272,14 +273,26 @@ require_secure_ancestors() {
     exempt=0
     sticky_note=""
     if [[ "${kind}" == "traversal" ]] && (( (8#${mode} & 8#1000) != 0 )); then
+      # SPLIT IN THE SHELL, not through a pipeline. `printf '%s' | tr ',' '\n'`
+      # emits no trailing newline, so `while read` discards the LAST field --
+      # and where a sticky ancestor has exactly one walked child, which is the
+      # ordinary case, that discarded every child and left the exemption
+      # resting on "the list is non-empty". Measured: a 1777 /var/tmp with a
+      # single absent managed root under it was accepted. `read -a` consumes
+      # the whole line, so there is no last element to lose.
+      encoded_child_list=()
+      IFS=',' read -r -a encoded_child_list <<<"${encoded_children}"
       # An empty child list is NOT an exemption. Every traversal node is a
       # prefix of some path this walk entered, so it always has at least one
       # recorded child; a node that somehow has none is a chain the caller
       # cannot vouch for, and the whole exemption rests on the children.
-      exempt=0
-      [[ -n "${encoded_children}" ]] && exempt=1
-      while IFS= read -r encoded_child; do
-        [[ -n "${encoded_child}" ]] || continue
+      (( ${#encoded_child_list[@]} > 0 )) && exempt=1
+      for encoded_child in ${encoded_child_list[@]+"${encoded_child_list[@]}"}; do
+        if [[ -z "${encoded_child}" ]]; then
+          exempt=0
+          sticky_note="; sticky, but its recorded child list is unreadable"
+          break
+        fi
         decode_path_item_into child "${encoded_child}"
         if [[ ! -e "${child}" && ! -L "${child}" ]]; then
           exempt=0
@@ -293,7 +306,7 @@ require_secure_ancestors() {
           sticky_note="; sticky, but ${child} is owned by uid ${child_owner}, who may unlink and replace it"
           break
         fi
-      done < <(printf '%s' "${encoded_children}" | tr ',' '\n')
+      done
     fi
     if (( (8#${mode} & 8#022) != 0 )) && (( exempt == 0 )); then
       offending+="${ancestor} (mode ${mode}${sticky_note}) "
@@ -308,7 +321,22 @@ require_secure_ancestors() {
     fi
   done <<<"${chain}"
   if [[ -n "${offending}" ]]; then
-    deploy_fail "deployment ancestor(s) group- or world-writable or foreign-owned: ${offending% }-- another local user could rename the protected subtree aside; run chmod go-w (or restore ownership) on them and retry"
+    # THE REMEDY HAS TO MATCH THE CLAUSE THAT FIRED. Until the walk reached
+    # above the home every offender it could name was inside the deployment
+    # and "chmod go-w" was right for all of them. It can now name /, /home,
+    # /tmp and /var/tmp, where chmod go-w is between useless and destructive,
+    # and two of the four clauses are not about mode bits at all. An operator
+    # who follows a remedy that does not apply damages the host and still has
+    # the refusal, which is how a correct gate gets deleted.
+    local account_hint=""
+    if (( expected_uid == 0 )); then
+      # "expected uid 0 or root" reads as a tautology and hides the real
+      # diagnosis: it is the INVOKING account that is wrong, not the tree.
+      # Chowning the tree to root to satisfy it would undo DEPLOY-003's
+      # decision to keep service-account ownership.
+      account_hint=" This command is running as root, so the uid it expects is root's; the deployment tree belongs to the service account. Re-run it AS that account (sudo -u <the tree's owner> ...) rather than chowning the tree to root."
+    fi
+    deploy_fail "deployment ancestor(s) group- or world-writable, foreign-owned, or squattable: ${offending% } -- another local user could rename the protected subtree aside, or substitute what it holds. The remedy differs by clause: \"(mode NNN)\" on a directory this deployment owns wants chmod go-w; \"(mode NNN; sticky, but X ...)\" wants X created or reclaimed first, or the tree moved off that shared directory -- NOT chmod on /tmp or /var/tmp; \"(owned by uid N)\" wants the owner restored; \"(symlink owned by uid N)\" wants chown -h, because chown without -h retargets the link's target and leaves the entry as it was.${account_hint}"
   fi
 }
 

@@ -2975,12 +2975,12 @@ if (
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
   require_secure_ancestors "${d004_sibling}/shared/svc-home" \
     "${d004_sibling}/shared/svc-home/.config" \
-    "${d004_sibling}/shared/external-units"
+    "${d004_sibling}/shared/zz-external-units"
 ) > "${workdir}/logs/d004-sibling-root-sticky.log" 2>&1; then
   echo "the ancestor walk let a not-yet-created managed root inherit the home's sticky exemption" >&2
   exit 1
 fi
-grep -q "${d004_sibling}/shared (mode 1777; sticky, but ${d004_sibling}/shared/external-units does not exist yet" \
+grep -q "${d004_sibling}/shared (mode 1777; sticky, but ${d004_sibling}/shared/zz-external-units does not exist yet" \
   "${workdir}/logs/d004-sibling-root-sticky.log" || {
   echo "the shared-sticky-ancestor refusal did not name the ancestor and the absent entry:" >&2
   cat "${workdir}/logs/d004-sibling-root-sticky.log" >&2
@@ -2992,13 +2992,53 @@ chmod 0755 "${d004_sibling}/shared"
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
   require_secure_ancestors "${d004_sibling}/shared/svc-home" \
     "${d004_sibling}/shared/svc-home/.config" \
-    "${d004_sibling}/shared/external-units"
+    "${d004_sibling}/shared/zz-external-units"
 ) > "${workdir}/logs/d004-sibling-root-secured.log" 2>&1 || {
   echo "the ancestor walk still refused after the shared ancestor was secured:" >&2
   cat "${workdir}/logs/d004-sibling-root-secured.log" >&2
   exit 1
 }
 rm -rf "${d004_sibling}"
+
+# THE DEGENERATE STICKY CASE: a sticky ancestor with exactly ONE walked entry,
+# and that entry absent. This is the shape every real deployment under /tmp
+# has, and it is the one a child scan built on a pipeline silently skips: with
+# no trailing newline the last field is dropped, so a one-element list is
+# checked ZERO times and the exemption collapses to "the list is non-empty".
+# That shipped, briefly, and was caught by review rather than by this suite --
+# the gate above it passed only because its absent root happened to sort first.
+# Both spellings are now covered: absent-and-last (above) and absent-and-only.
+d004_lonechild="${d004_root}/lone-child"
+rm -rf "${d004_lonechild}"
+mkdir -p "${d004_lonechild}/home/.config" "${d004_lonechild}/sticky"
+chmod 1777 "${d004_lonechild}/sticky"
+if (
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_lonechild}/home" \
+    "${d004_lonechild}/sticky/squat-me"
+) > "${workdir}/logs/d004-lone-child-squat.log" 2>&1; then
+  echo "a sticky ancestor whose only walked entry does not exist was exempted; its child list was never examined" >&2
+  exit 1
+fi
+grep -q "${d004_lonechild}/sticky (mode 1777; sticky, but ${d004_lonechild}/sticky/squat-me does not exist yet" \
+  "${workdir}/logs/d004-lone-child-squat.log" || {
+  echo "the lone-child squat refusal did not name the ancestor and the absent entry:" >&2
+  cat "${workdir}/logs/d004-lone-child-squat.log" >&2
+  exit 1
+}
+mkdir -p "${d004_lonechild}/sticky/squat-me"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  require_secure_ancestors "${d004_lonechild}/home" \
+    "${d004_lonechild}/sticky/squat-me"
+) > "${workdir}/logs/d004-lone-child-created.log" 2>&1 || {
+  echo "the ancestor walk still refused after the entry was created by this account:" >&2
+  cat "${workdir}/logs/d004-lone-child-created.log" >&2
+  exit 1
+}
+rm -rf "${d004_lonechild}"
 
 # The sticky exemption DOING ITS JOB -- the second acceptance direction, and
 # the reason the walk to "/" is usable at all: without it every deployment
