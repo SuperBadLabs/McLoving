@@ -64,23 +64,36 @@ register_background_pid() {
   background_pids+=("$1")
 }
 
-# Kill, reap, and FORGET one registered pid. Deregistering BEFORE the kill
-# is what makes the trap's later drain safe: the trap can then never signal
-# a pid this function already reaped, and so can never hit an unrelated
-# process that inherited the number. Call sites keep using this where the
-# process must be gone before the next gate runs -- a transition lock has
-# to be released at that point, not at exit -- which leaves the drain as
-# purely the abort path.
+# Kill, reap, and only THEN forget one registered pid. The order is the
+# point: an entry stays registered for as long as its process might still
+# be alive, so that a signal landing mid-release still leaves the drain
+# able to reach it. Deregistering first would reopen, inside this very
+# function, the failure the registry exists to close -- a live lock holder
+# that the trap can no longer see -- across a `kill` and a `wait`.
+#
+# The residual risk runs the other way: after the reap, the trap could
+# re-signal a pid the kernel has since handed to someone else. It cannot
+# matter here. bash reaps a killed child asynchronously on SIGCHLD, so the
+# pid is typically released before the explicit `wait` even returns
+# (measured: gone from /proc within 50ms), which means this window is real
+# rather than theoretical -- but landing in it requires the pid counter to
+# wrap all of pid_max between two adjacent assignments. Weigh that against
+# the alternative, where the leak is not a race at all but the certain
+# outcome of any abort inside the window.
+#
+# Call sites keep using this where the process must be gone before the next
+# gate runs -- a transition lock has to be released at that point, not at
+# exit -- which leaves the drain as purely the abort path.
 release_background_pid() {
   local pid="$1"
   local kept=()
   local entry
+  kill "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" 2>/dev/null || true
   for entry in "${background_pids[@]}"; do
     [[ "${entry}" == "${pid}" ]] || kept+=("${entry}")
   done
   background_pids=("${kept[@]}")
-  kill "${pid}" >/dev/null 2>&1 || true
-  wait "${pid}" 2>/dev/null || true
 }
 
 # Drain whatever is still registered. Shared by the EXIT trap and by the
