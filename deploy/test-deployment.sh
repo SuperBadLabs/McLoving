@@ -50,6 +50,21 @@ agent_pid=""
 
 cleanup() {
   local status=$?
+  # Deaf to further signals from here down. ${status} is captured first,
+  # because `trap` would overwrite $?.
+  #
+  # Teardown is a sequence, and until this line a signal arriving mid-sequence
+  # abandoned the rest of it: a second Ctrl-C landing between the agent's reap
+  # and the controller's kill left the controller running, which is the leak
+  # this whole change exists to close, reintroduced through the very trap that
+  # closes it. The window is only as wide as one `wait` -- ~100ms, since both
+  # services exit on SIGTERM in about that -- but double-tapping Ctrl-C at an
+  # unresponsive-looking run is exactly what an impatient operator does, and
+  # the signal traps above are what made that window reachable at all.
+  #
+  # Ignored rather than reset to default: SIG_IGN cannot terminate the shell,
+  # whereas the default disposition can. SIGKILL still ends this, as ever.
+  trap '' INT TERM HUP
   local preserved
   if [[ -n "${agent_pid}" ]]; then
     kill "${agent_pid}" >/dev/null 2>&1 || true
@@ -1545,7 +1560,7 @@ run_with_env() { # ENV_FILE COMMAND...
 #
 # `run_with_env ... &` forks twice: once for the job, and again for the
 # function's own `( ... )`. ${!} therefore names the outer bash wrapper, not
-# the service that the inner fork exec's. Killing that wrapper -- which is
+# the service that the inner fork execs. Killing that wrapper -- which is
 # all the EXIT trap could ever do -- left the controller and the agent
 # running, reparented to init, against a ${workdir} the success path had
 # already deleted. Every clean pass leaked a pair.
