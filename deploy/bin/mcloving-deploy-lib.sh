@@ -191,44 +191,120 @@ deploy_notice() {
 # manage. The diagnostic names every offending ancestor and its mode so one
 # operator action fixes the tree.
 #
-# The chain is derived by deployment_ancestor_chain below -- lexical AND
-# physical, never an enumerated list: enumeration is how this class of gap
-# has already happened three times, and following a symlinked ancestor to
-# its target while never walking the target's own parents made it four.
-# Directories that do not exist yet are skipped -- mkdir -p under the
-# caller's umask decides those.
+# The chain is derived by deployment_ancestor_chain below -- resolved
+# component by component, never an enumerated list: enumeration is how this
+# class of gap has already happened three times, following a symlinked
+# ancestor to its target while never walking the target's own parents made it
+# four, and stopping the walk at the home itself made it five (DEPLOY-004).
+# The chain now reaches "/", and each node arrives CLASSIFIED as one this lane
+# merely traverses or one whose contents it enumerates, because only the first
+# kind can ever be excused for being sticky.
+#
+# Directories that do not exist yet are skipped by the mode and ownership
+# rules -- mkdir -p under the caller's umask decides those -- but they are NOT
+# invisible: an absent entry inside a sticky ancestor withholds that
+# ancestor's exemption, since it is the entry another uid may create first.
 require_secure_ancestors() {
-  local home_dir="${1%/}" ancestor mode_owner mode owner home_owner offending chain
+  local home_dir="${1%/}" kind ancestor encoded_children mode_owner mode owner
+  local expected_uid link_owner offending chain exempt sticky_note
   shift
+  # THE EXPECTED UID IS THIS ACCOUNT'S, NOT THE HOME'S (DEPLOY-004). Reading it
+  # from stat of the home made a substituted home its own trust anchor: every
+  # ownership rule below then measured the attacker's tree against the
+  # attacker's uid and agreed with itself. ${EUID} is the uid the user manager
+  # runs these units as, which is the uid the whole tree must belong to, and it
+  # is the pin require_secret_files has always used for the same reason.
+  expected_uid="${EUID}"
   chain="$(deployment_ancestor_chain "${home_dir}" "$@")" \
     || deploy_fail "cannot derive the deployment ancestor chain"
-  home_owner="$(stat -Lc '%u' "${home_dir}")" \
-    || deploy_fail "cannot stat deployment home ${home_dir}"
   offending=""
-  local encoded_ancestor
-  while IFS= read -r encoded_ancestor; do
-    [[ -n "${encoded_ancestor}" ]] || continue
+  local encoded_ancestor encoded_child child child_owner
+  while IFS=' ' read -r kind encoded_ancestor encoded_children; do
+    [[ -n "${kind}" ]] || continue
     decode_path_item_into ancestor "${encoded_ancestor}"
+    [[ -n "${ancestor}" ]] || continue
+    if [[ "${kind}" == "link" ]]; then
+      # A symlink's own inode, judged WITHOUT -L. Its mode carries no
+      # information (always 0777, and unsettable), but its ownership decides
+      # who may replace it wherever the holding directory permits unlinking --
+      # which a sticky directory grants to precisely the entry's owner.
+      link_owner="$(stat -c '%u' "${ancestor}")" \
+        || deploy_fail "cannot stat deployment path component ${ancestor}"
+      if [[ "${link_owner}" != "0" && "${link_owner}" != "${expected_uid}" ]]; then
+        offending+="${ancestor} (symlink owned by uid ${link_owner}, expected uid ${expected_uid} or root) "
+      fi
+      continue
+    fi
     # -d and stat -L follow a symlinked ancestor deliberately: the directory
     # the services traverse is the target, and a writable target permits the
     # same rename regardless of how it is reached. The target's own parents
     # arrive through the physical half of the chain, and following the link
     # means the OWNERSHIP judged below is the target's too.
-    [[ -n "${ancestor}" && -d "${ancestor}" ]] || continue
+    [[ -d "${ancestor}" ]] || continue
     mode_owner="$(stat -Lc '%a %u' "${ancestor}")" \
       || deploy_fail "cannot stat deployment ancestor ${ancestor}"
     mode="${mode_owner%% *}"
     owner="${mode_owner##* }"
-    if (( (8#${mode} & 8#022) != 0 )); then
-      offending+="${ancestor} (mode ${mode}) "
+    # THE STICKY EXEMPTION, and the three ways it has to be withheld.
+    #
+    # S_ISVTX narrows renaming and unlinking to root, the directory's owner,
+    # and the ENTRY'S own owner, so a 1777 directory does not permit the
+    # protected subtree to be renamed aside. Without some form of this the walk
+    # to "/" refuses every deployment whose path crosses /tmp, which includes
+    # the entire smoke suite.
+    #
+    # But S_ISVTX does NOT restrict CREATING a previously absent entry, and
+    # that is the whole attack wherever the lane merges what it finds. So:
+    #
+    #   only a `traversal` node -- never the home, never a managed root, never
+    #   anything at or below one. Drop-ins are merged, so a managed root at
+    #   1777 is an attacker-authored unit away from arbitrary execution, and a
+    #   root that merely SHARES a sticky ancestor with the home must not
+    #   inherit the home's exemption.
+    #
+    #   only when every entry this walk enters inside it ALREADY EXISTS.
+    #   An absent one is the squat: another uid creates it first and the tree
+    #   is built through their directory.
+    #
+    #   only when every one of those entries is owned by root or this account,
+    #   judged by lstat. A foreign-owned entry -- a symlink most of all -- is
+    #   one its owner may unlink and re-create under exactly these rules.
+    exempt=0
+    sticky_note=""
+    if [[ "${kind}" == "traversal" ]] && (( (8#${mode} & 8#1000) != 0 )); then
+      # An empty child list is NOT an exemption. Every traversal node is a
+      # prefix of some path this walk entered, so it always has at least one
+      # recorded child; a node that somehow has none is a chain the caller
+      # cannot vouch for, and the whole exemption rests on the children.
+      exempt=0
+      [[ -n "${encoded_children}" ]] && exempt=1
+      while IFS= read -r encoded_child; do
+        [[ -n "${encoded_child}" ]] || continue
+        decode_path_item_into child "${encoded_child}"
+        if [[ ! -e "${child}" && ! -L "${child}" ]]; then
+          exempt=0
+          sticky_note="; sticky, but ${child} does not exist yet and any user may create it first"
+          break
+        fi
+        child_owner="$(stat -c '%u' "${child}")" \
+          || deploy_fail "cannot stat deployment path component ${child}"
+        if [[ "${child_owner}" != "0" && "${child_owner}" != "${expected_uid}" ]]; then
+          exempt=0
+          sticky_note="; sticky, but ${child} is owned by uid ${child_owner}, who may unlink and replace it"
+          break
+        fi
+      done < <(printf '%s' "${encoded_children}" | tr ',' '\n')
     fi
-    # Ownership is judged independently of mode: a chain component owned by
-    # a third user is unsafe at ANY mode, because its owner can chmod it
-    # writable at will and then rename children exactly as a writable
-    # ancestor permits. Only root and the home's owning uid may hold a link
-    # of the chain.
-    if [[ "${owner}" != "0" && "${owner}" != "${home_owner}" ]]; then
-      offending+="${ancestor} (owned by uid ${owner}, expected uid ${home_owner} or root) "
+    if (( (8#${mode} & 8#022) != 0 )) && (( exempt == 0 )); then
+      offending+="${ancestor} (mode ${mode}${sticky_note}) "
+    fi
+    # Ownership is judged independently of mode, and is never exempted: a chain
+    # component owned by a third user is unsafe at ANY mode, because its owner
+    # can chmod it writable -- or drop its sticky bit -- at will and then
+    # rename children exactly as a writable ancestor permits. Only root and
+    # this account may hold a link of the chain.
+    if [[ "${owner}" != "0" && "${owner}" != "${expected_uid}" ]]; then
+      offending+="${ancestor} (owned by uid ${owner}, expected uid ${expected_uid} or root) "
     fi
   done <<<"${chain}"
   if [[ -n "${offending}" ]]; then
@@ -248,11 +324,13 @@ require_secure_ancestors() {
 # caller's job via require_secure_ancestors, which accepts file paths as
 # roots (the final component resolves like any other).
 require_secure_files() {
-  local home_dir="${1%/}" home_owner
+  # HOME_DIR is accepted for call-site symmetry with require_secure_ancestors
+  # and is deliberately not consulted: the expected uid is this account's, not
+  # whatever a substituted home happens to be owned by (DEPLOY-004).
+  # shellcheck disable=SC2034  # documented above; the parameter is the contract
+  local home_dir="${1%/}"
   shift
-  home_owner="$(stat -Lc '%u' "${home_dir}")" \
-    || deploy_fail "cannot stat deployment home ${home_dir}"
-  require_secret_files "${home_owner}" "$@"
+  require_secret_files "${EUID}" "$@"
 }
 
 # require_secret_files EXPECTED_UID FILE...
@@ -405,16 +483,19 @@ deployment_contract_path_variables() {
 # require_integrity_files HOME FILE...
 #
 # The trust-input file rule for the install and transition walks: readable,
-# no group/other WRITE bit, owned by root or the home's owner. Unit files,
+# no group/other WRITE bit, owned by root or THIS ACCOUNT. It used to say "the
+# home's owner", read by stat of the home -- so a substituted home supplied the
+# very uid this rule then approved, which is how the one rule whose comment
+# promises to stop an attacker-authored unit passed one (DEPLOY-004). Unit files,
 # drop-ins, and retained release binaries are execution vectors --
 # ExecStart lives in the units, and the binaries are what it starts -- but
 # are legitimately world-READABLE, unlike contracts; a writable or foreign
 # one lets another local user control what the next restart executes.
 require_integrity_files() {
-  local home_dir="${1%/}" home_owner file mode_owner mode owner offending
+  # shellcheck disable=SC2034  # HOME_DIR is the call-site contract, not an anchor
+  local home_dir="${1%/}" file mode_owner mode owner offending
+  local home_owner="${EUID}"
   shift
-  home_owner="$(stat -Lc '%u' "${home_dir}")" \
-    || deploy_fail "cannot stat deployment home ${home_dir}"
   offending=""
   for file in "$@"; do
     [[ -e "${file}" ]] || continue
@@ -2186,92 +2267,111 @@ deployment_unit_declared_roots() {
   done < <(deployment_unit_assignment_lines "${source_files[@]}")
 }
 
-# deployment_ancestor_chain HOME ROOT... -> every security-relevant ancestor
-# directory of the managed roots, one absolute path per line, sorted. The
-# single derivation consumed by BOTH the installer's refusal walk and the
+# deployment_ancestor_chain HOME ROOT... -> the classified path structure the
+# lane's mode and ownership rules are applied to, one record per line, sorted.
+# The single derivation consumed by BOTH the installer's refusal walk and the
 # deployed-digests inventory, so the two cannot drift apart.
 #
-# Each root contributes chains for every spelling a path has. The LEXICAL
-# parent chain up to HOME covers the components an operator sees -- any of
-# which may itself be a symlink, checked and recorded through its target.
-# The PHYSICAL side is derived COMPONENT BY COMPONENT: every time resolution
-# crosses a symlink, the resolved target's own parent chain joins the set,
-# recursively, because the target may contain further links. A single
-# realpath of the whole root keeps only the FINAL chain: with
-# .local -> /srv/a/user-local and user-local/libexec -> /opt/mcloving/libexec,
-# it walks /opt/mcloving and never /srv/a -- and a writable /srv/a lets
-# another user replace user-local wholesale. The ancestor set is the union
-# of every directory encountered in any traversal.
+# THREE RECORD KINDS. Every path is base64 so arbitrary bytes survive the
+# transport, the convention shared by every internal multi-path protocol.
 #
-# Stop points: a chain inside the (resolved) home stops at the home
-# directory, whose own parents are the platform's -- the boundary the
-# installer has always drawn. A chain that leaves the home has no such
-# anchor and is walked to "/" inclusive. That deliberately refuses a
-# deployment routed through a sticky world-writable directory such as /tmp:
-# the sticky bit only narrows who may rename, and any attacker-owned
-# component inside such a chain defeats it entirely. A looping or dangling
-# link on the way to a root is refused by name rather than resolved around,
-# with resolution bounded like the kernel bounds ELOOP.
+#   guarded   <path>              the home, a managed root, or anything at or
+#                                 below one -- a directory whose CONTENTS this
+#                                 lane enumerates. Judged with no exemption.
+#   traversal <path> <child,...>  a strict ancestor: a directory the lane only
+#                                 walks THROUGH. The children listed are the
+#                                 entries this walk enters inside it, and they
+#                                 are what makes the sticky exemption decidable
+#                                 rather than assumed.
+#   link      <path>              a symlink component. Its own inode is named
+#                                 so the caller judges the ENTRY, not the
+#                                 target: S_ISVTX narrows unlinking to the
+#                                 entry's owner, so who owns the link decides
+#                                 who may repoint it.
+#
+# This program says only what the walk touched and how each node relates to the
+# deployment. Every mode and ownership judgement lives in the caller, which is
+# the only place that knows the uid the deployment runs as.
+#
+# THE WALK REACHES "/" AND HAS NO STOP POINT (DEPLOY-004). It used to stop at
+# the home for any path inside it, so nothing above the home was validated by
+# anything; and because every ownership rule derived its expected uid from stat
+# of the home, a substituted home became its OWN trust anchor and an
+# attacker-authored unit passed require_integrity_files, the rule whose own
+# comment promises to stop exactly that. Treat home substitution as credential
+# compromise rather than arbitrary execution: the attacker's unit is run BY the
+# user manager AS the service account, so the renamed-aside home's 0600
+# contracts and mTLS key are readable by it.
+#
+# RESOLUTION IS COMPONENT BY COMPONENT IN FILESYSTEM ORDER, for the home itself
+# as much as for every root. Three consequences, none of them optional:
+#
+#   ".." is consumed only after the prefix ahead of it has been resolved,
+#   because "link/.." is the parent of the link's TARGET. os.path.abspath and
+#   os.path.normpath collapse it lexically first, which walked a decoy tree --
+#   .../dir/link/../home validated .../dir/home while the kernel used
+#   .../elsewhere/home, and the writable directory actually enclosing the home
+#   never entered the chain.
+#
+#   the directory HOLDING each intermediate symlink joins the set, not only the
+#   origin's chain and the final target's: with svc -> /x/inter/home and
+#   inter -> /y/real, /x belongs to neither, and whoever may write /x replaces
+#   inter after validation.
+#
+#   a root that does not exist yet is still recorded, appended lexically under
+#   the resolved prefix that mkdir -p will create it in. A component that does
+#   not exist yet is precisely the one another user may create first.
+#
+# A looping or dangling link on the way to a root is refused by name rather
+# than resolved around, with resolution bounded like the kernel bounds ELOOP.
 deployment_ancestor_chain() {
   deployment_python - "$@" <<'CHAIN'
 import base64
 import os
 import sys
 
-# Anchored to the invoking directory FIRST, links resolved later: the two
-# are distinct steps, and skipping the first anchored the component walk at
-# "/" for a relative --home, so relative-home/.local was inspected as
-# /relative-home/.local -- a tree that does not exist -- and none of the
-# real deployment's links were ever seen. abspath is purely lexical
-# (cwd-join plus normpath); every symlink still goes through the recorded
-# component walk below.
-home = os.path.abspath(sys.argv[1])
-roots = [os.path.abspath(root) for root in sys.argv[2:]]
-try:
-    resolved_home = os.path.realpath(home, strict=True)
-except OSError as error:
-    raise SystemExit(f"deployment home {home} does not resolve: {error}")
-
 MAX_LINK_TRAVERSALS = 40
 
-found = set()
+nodes = set()
+links = set()
+children = {}
 
 
-def ascend(path, stop):
-    current = os.path.normpath(path)
-    while True:
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        found.add(parent)
-        if parent == stop or parent == "/":
-            break
-        current = parent
-
-
-def chain_of(resolved):
-    inside_home = resolved == resolved_home or resolved.startswith(
-        resolved_home + os.sep
-    )
-    ascend(resolved, resolved_home if inside_home else "/")
+def cwd_join(path):
+    # A cwd-join WITHOUT normpath. os.path.abspath() would collapse "a/link/.."
+    # to "a" before anything is resolved; every "." and ".." below is consumed
+    # in filesystem order by resolve_recording instead.
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.getcwd(), path)
 
 
 def resolve_recording(origin, path, budget):
-    """Resolve ``path`` component by component.
-
-    Missing trailing components are appended lexically (mkdir -p will create
-    them under the resolved prefix). Each symlink component is resolved
-    recursively -- its target may contain further links -- and the resolved
-    target's parent chain joins the ancestor set. A dangling link is refused
-    by name; a loop exhausts the shared traversal budget and is refused by
-    name too.
-    """
+    """Resolve ``path`` component by component, the way the kernel walks it."""
     resolved = "/"
-    for component in [c for c in os.path.normpath(path).split(os.sep) if c]:
+    nodes.add(resolved)
+    for component in path.split(os.sep):
+        if not component or component == ".":
+            continue
+        if component == "..":
+            resolved = os.path.dirname(resolved)
+            nodes.add(resolved)
+            continue
         candidate = os.path.join(resolved, component)
+        # The entry is recorded against the directory that holds it whether or
+        # not it exists: a sticky directory may be exempted from the mode rule
+        # only if every entry this walk enters inside it is already there and
+        # already owned by the deployment, and an absent entry is one anybody
+        # may create.
+        children.setdefault(resolved, set()).add(candidate)
         if not os.path.islink(candidate):
+            nodes.add(candidate)
             resolved = candidate
             continue
+        # A link is NOT added as a node: its target is reached by the recursive
+        # resolution below and judged there, on its own path, while the link
+        # itself is judged as an inode rather than through itself.
+        links.add(candidate)
         if budget[0] <= 0:
             raise SystemExit(
                 f"deployment path {origin} exceeds the symlink resolution bound at {candidate}"
@@ -2285,31 +2385,51 @@ def resolve_recording(origin, path, budget):
             raise SystemExit(
                 f"deployment path {origin} crosses a dangling symlink at {candidate}"
             )
-        chain_of(target_resolved)
         resolved = target_resolved
     return resolved
 
 
-for root in roots:
-    ascend(root, home)
-    resolved_root = resolve_recording(root, root, [MAX_LINK_TRAVERSALS])
-    chain_of(resolved_root)
-    # The root NODE itself joins the set, not only its parents: a leaf
-    # managed root -- helpers, releases -- relaxed to group/world-writable
-    # after installation is otherwise invisible to every consumer of this
-    # chain, and a writable helpers directory is a helper substitution
-    # waiting for the next transition. Consumers skip nodes that are not
-    # directories (files are judged by their own classes) and follow a
-    # symlinked node to its target, consistent with the ancestor rules;
-    # where a root may never legitimately BE a symlink -- retained release
-    # directories -- the round-11 lstat refusals still fire first in their
-    # own paths.
-    found.add(resolved_root)
+def at_or_below(path, anchor):
+    return path == anchor or path.startswith(anchor.rstrip(os.sep) + os.sep)
 
-for path in sorted(found):
-    # One item, one line, whatever bytes the path carries: the transport
-    # convention shared by every internal multi-path protocol.
-    print(base64.b64encode(os.fsencode(path)).decode("ascii"))
+
+home = cwd_join(sys.argv[1])
+# The home is walked as a root, not held aside as a stop value. It was the one
+# path the component walk never saw, which is how its own ancestors escaped.
+resolved_home = resolve_recording(home, home, [MAX_LINK_TRAVERSALS])
+# A refusal PRESERVED, not inherited by accident. The previous walk resolved
+# the home with realpath(strict=True) and refused a home that was not there;
+# dropping strict resolution in favour of the component walk would have
+# dropped that refusal too, silently, and the installer validates before it
+# mkdir -p's. Nothing downstream now depends on the home existing -- the
+# missing-child rule already withholds a sticky parent's exemption for exactly
+# the squat this would open -- so this is behaviour kept deliberately rather
+# than a load-bearing check.
+if not os.path.exists(resolved_home):
+    raise SystemExit(f"deployment home {home} does not resolve: {resolved_home} does not exist")
+anchors = [resolved_home]
+for root in sys.argv[2:]:
+    # The root NODE itself is an anchor, not only its parents: a leaf managed
+    # root -- helpers, releases -- relaxed to group- or world-writable after
+    # installation is otherwise invisible to every consumer of this chain, and
+    # a writable helpers directory is a helper substitution waiting for the
+    # next transition.
+    anchors.append(resolve_recording(root, cwd_join(root), [MAX_LINK_TRAVERSALS]))
+
+
+def b64(text):
+    return base64.b64encode(os.fsencode(text)).decode("ascii")
+
+
+guarded = {
+    path for path in nodes if any(at_or_below(path, anchor) for anchor in anchors)
+}
+for path in sorted(guarded):
+    print(f"guarded {b64(path)}")
+for path in sorted(nodes - guarded):
+    print(f"traversal {b64(path)} {','.join(b64(c) for c in sorted(children.get(path, ())))}")
+for path in sorted(links):
+    print(f"link {b64(path)}")
 CHAIN
 }
 
