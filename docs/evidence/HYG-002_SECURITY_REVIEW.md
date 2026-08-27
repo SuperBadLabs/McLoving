@@ -121,6 +121,39 @@ every negative passed, because their fixtures had no attribution table and
 Each negative now supplies a well-formed table crediting a different ticket, so
 the assertion isolates the predicate.
 
+## The parser debt, and three corrections to how the ticket words it
+
+Each of the five was independently reproduced before being fixed, and each fix
+turns a named test red when reverted.
+
+| item | verdict | correction |
+|---|---|---|
+| (a) two inline pipe splits | closed | padding and code-span pipes do **not** diverge from `row_cells`; only the escaped pipe does. The dispatch half was a false alarm — an escaped pipe there made a legal row be *refused*, not silently passed. Routed through `row_cells` anyway: one grammar per board. |
+| (b) topology skips an unknown class | closed | in isolation it is backstopped by the missing-classification check. The reachable case is a class cell holding **a ticket status matching the row's ticket**, which bought two contradictory execution classes for one ticket in silence. |
+| (c) ownership table's last cell | already closed | the whole prose predicate went with the first commit; nothing reintroduced. |
+| (d) execution class in any view | closed | the ticket says "Batch and Dispatch rows must carry a ticket status" as though both were open. Dispatch was already guarded by `verify-execution-board.py`; only the Batch half was live. Both are guarded here so neither cross-check depends on the other file keeping it. |
+| (e) unbackticked citations | closed, **broader than written** | four spellings bypassed it, three of them *properly backticked*: `./docs/…`, `<docs/…>`, and a trailing space inside the backticks. Confirmed too that the bare-path rule in the board verifier fires only when the path **resolves**, so it catches real files and stays silent on fabricated ones — backwards for this purpose, and unable to backstop (e). |
+
+**The exploit for (a) and (d) was re-run end to end against the fixed
+verifiers**, not just unit-tested. The Batch ledger's `W0-A` reading `SERIAL`
+is now named by line. A reversed production-qualification chain hidden behind an
+escaped pipe is now read and refused; stated precisely, the simplified variant
+re-run here does not reproduce the *fully green* state on `main` — the original
+exploit needed three restated `PARALLEL` rows to satisfy the backstop — but it
+does show the fixed verifier reading a row `main`'s parser cannot see.
+
+**One judgement was reversed after measuring.** Broadening the citation scan
+past delimiters truncates a template `docs/evidence/<TICKET>_SECURITY_REVIEW.md`
+to the real directory `docs/evidence`, and the first cut relaxed the predicate
+from `is_file` to `exists` to admit it. Measured: no `DONE` row on the board
+spells a template, and all 25 of their cited paths resolve to files. The
+relaxation defended a case that does not exist, at the cost of one that does —
+every citation of a directory where a document was meant. `is_file` stands, and
+a `DONE` row citing a template is refused, which is the right answer: a closed
+ticket has a document, not a pattern.
+
+Test suites go 44 → 49 and 63 → 73.
+
 ## Bounded deliberately
 
 Three defects were found while reproducing this ticket's items that are **larger
