@@ -31,12 +31,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_dir=""
 checksums=""
 keep=0
+reset=0
 runtime_gate=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release-dir) release_dir="$2"; shift 2 ;;
     --checksums) checksums="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
+    --reset) reset=1; shift ;;
     --runtime-gate) runtime_gate="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -91,13 +93,44 @@ podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -qx true \
 
 echo "   account=${account} home=${home_dir} manager=$(systemctl --user is-system-running 2>&1) podman=$(podman --version | awk '{print $3}')"
 
-# START FROM NOTHING, and say so when there was something. A surviving data
-# volume carries a password from a previous run and would fail db-init for a
-# reason that has nothing to do with the code under test.
-if podman volume exists mcloving-postgres-data 2>/dev/null; then
-  echo "   removing a data volume left by an earlier run (its password predates this one)"
+# THIS SCRIPT IS DESTRUCTIVE AND CANNOT TELL WHOSE DEPLOYMENT IT IS LOOKING AT.
+# Every precondition above passes just as well on a real McLoving service
+# account as on a disposable one -- and the teardown removes the deployment tree
+# and force-removes the `mcloving-postgres-data` volume, which on a production
+# account is somebody's database. So an existing deployment is a REFUSAL, and
+# destroying one is something the caller has to ask for by name.
+#
+# It also has to start from nothing to be meaningful: a surviving data volume
+# carries the password baked in at initdb, and this run generates a fresh one,
+# so db-init would fail for a reason that has nothing to do with the code under
+# test. Measured, after it happened.
+# THE STATE TREE COUNTS AS A DEPLOYMENT. A first cut probed only the libexec
+# root and the volume, so after a failed run had left `StateDirectory=` trees
+# behind, --reset saw "nothing to clean", left them, and step 6's assertion that
+# systemd creates the workspace then failed on a directory from the run before.
+# What makes a deployment present is any of its parts, not the tidiest one.
+state_probe="$(deployment_effective_state_root "${home_dir}")"
+existing=""
+[[ ! -e "${home_dir}/.local/libexec/mcloving" ]] || existing+="a deployment at ${home_dir}/.local/libexec/mcloving "
+[[ ! -e "${state_probe}/mcloving-agent" && ! -e "${state_probe}/mcloving-controller" ]] \
+  || existing+="service state under ${state_probe} "
+[[ ! -e "${home_dir}/.config/mcloving" ]] || existing+="contracts at ${home_dir}/.config/mcloving "
+podman volume exists mcloving-postgres-data 2>/dev/null && existing+="the mcloving-postgres-data volume "
+if [[ -n "${existing}" ]]; then
+  if (( reset == 0 )); then
+    fail "refusing to run: ${existing}already exists, and this script would destroy it. Nothing here can tell a disposable test account from a real one. Run it on an account with no deployment, or pass --reset to say you know what is on this one"
+  fi
+  echo "   --reset: removing ${existing% }"
+  systemctl --user disable --now mcloving-db-init mcloving-controller mcloving-agent >/dev/null 2>&1 || true
+  podman rm -f mcloving-postgres >/dev/null 2>&1 || true
   podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
-  rm -rf "${scratch}" >/dev/null 2>&1 || true
+  rm -rf "${home_dir}/.local/libexec/mcloving" "${state_probe}/mcloving-agent" \
+         "${state_probe}/mcloving-controller" "${home_dir}/.config/mcloving" \
+         >/dev/null 2>&1 || true
+  rm -f "${home_dir}"/.config/systemd/user/mcloving-*.service \
+        "${home_dir}"/.config/systemd/user/default.target.wants/mcloving-*.service \
+        "${home_dir}"/.config/containers/systemd/mcloving-* >/dev/null 2>&1 || true
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -126,7 +159,9 @@ teardown() {
   # for user mcloving". Measured, after it happened.
   podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
   if (( keep == 0 )); then
-    rm -rf "${libexec_root}" "${config_base}/mcloving" >/dev/null 2>&1 || true
+    rm -rf "${libexec_root}" "${home_dir}/.config/mcloving" \
+      "${state_probe}/mcloving-agent" "${state_probe}/mcloving-controller" \
+      >/dev/null 2>&1 || true
     rm -f "${unit_root}"/mcloving-*.service "${quadlet_root}"/mcloving-* >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   else
@@ -206,39 +241,14 @@ agent_after="$(systemctl --user show -p After --value mcloving-agent.service)"
 echo "   agent After=${agent_after}"
 
 # ---------------------------------------------------------------------------
-step "[6/10] the runbook's own enable command must work"
+step "[6/10] contracts, PKI and enrollment"
 
-# THE GATE THAT FOUND A SHIPPED DEFECT. `mcloving-install` prints, and
-# docs/operations/DEPLOYMENT_V1.md step 5 documents,
-#   systemctl --user enable --now mcloving-postgres mcloving-db-init ...
-# and that command FAILS: `mcloving-postgres.service` is generated by Quadlet
-# and systemd refuses to enable a generated unit --
-#   "Unit .../generator/mcloving-postgres.service is transient or generated."
-# Quadlet honours the quadlet's own `[Install] WantedBy=default.target`, so the
-# generated unit needs starting, not enabling. Nothing could have found this
-# without running systemctl, which is the entire argument for this arm.
-#
-# So the documented sequence is asserted here, as a command, rather than
-# trusted as prose.
-documented=(mcloving-db-init mcloving-controller mcloving-agent)
-systemctl --user enable "${documented[@]}" \
-  || fail "the documented enable command failed for ${documented[*]}"
-for unit in "${documented[@]}"; do
-  enabled="$(systemctl --user is-enabled "${unit}.service" 2>&1 || true)"
-  [[ "${enabled}" == "enabled" ]] \
-    || fail "${unit}.service reports is-enabled=${enabled} after the documented enable"
-done
-# And the generated one must NOT be enablable -- pinning the reason the runbook
-# had to change, so a future edit cannot quietly put it back.
-if systemctl --user enable mcloving-postgres >/dev/null 2>&1; then
-  fail "systemd accepted 'enable mcloving-postgres'; the runbook's original wording would then have been correct and this gate is now wrong"
-fi
-echo "   enabled: ${documented[*]}; mcloving-postgres refuses enable (generated), as expected"
-
-# ---------------------------------------------------------------------------
-step "[7/10] contracts, PKI and enrollment"
-
-config="${config_base}/mcloving"
+# NOT ${config_base}/mcloving. `mcloving-install` writes contracts and PKI to
+# the LITERAL %h/.config/mcloving and uses the manager's effective XDG base only
+# for units and quadlets; on an account with an absolute XDG_CONFIG_HOME those
+# are different directories, and reading the contracts from the XDG one would
+# find nothing.
+config="${home_dir}/.config/mcloving"
 pki="${config}/pki"
 organization_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 project_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
@@ -305,23 +315,59 @@ echo "   mcloving-env-guard: controller contract satisfied"
 # what StateDirectory= creates for the real units" -- a hand-made stand-in for
 # a systemd feature, which is precisely the coupling this arm exists to replace
 # with the real thing. Step 8 asserts systemd created it, and that we did not.
-[[ ! -e "${home_dir}/.local/state/mcloving-agent/workspace" ]] \
+state_base="$(deployment_effective_state_root "${home_dir}")"
+[[ ! -e "${state_base}/mcloving-agent/workspace" ]] \
   || fail "the agent workspace root already exists before any unit ran; this arm must not create what StateDirectory= is supposed to"
 
 # ---------------------------------------------------------------------------
-step "[8/10] systemd starts the lane, in the order the units declare"
+step "[7/10] the runbook's own enable command must work"
+
+# THE GATE THAT FOUND A SHIPPED DEFECT. `mcloving-install` prints, and
+# docs/operations/DEPLOYMENT_V1.md step 5 documents,
+#   systemctl --user enable --now mcloving-postgres mcloving-db-init ...
+# and that command FAILS: `mcloving-postgres.service` is generated by Quadlet
+# and systemd refuses to enable a generated unit --
+#   "Unit .../generator/mcloving-postgres.service is transient or generated."
+# Quadlet honours the quadlet's own `[Install] WantedBy=default.target`, so the
+# generated unit needs starting, not enabling. Nothing could have found this
+# without running systemctl, which is the entire argument for this arm.
+#
+# So the documented sequence is asserted here, as a command, rather than
+# trusted as prose -- AND IN THE DOCUMENTED ORDER. `--now` starts the units, and
+# the runbook puts the contracts and the PKI before this step for exactly that
+# reason: run it earlier and `mcloving-env-guard` refuses at ExecStartPre,
+# correctly, on placeholders nobody has replaced yet. A first cut of this arm
+# ran the enable before step 6 and failed that way.
+documented=(mcloving-db-init mcloving-controller mcloving-agent)
+# `--now` is part of the documented command and part of what it has to prove:
+# enabling and starting are different operations and the runbook asks for both.
+# Running plain `enable` here and starting the units separately later would have
+# left the documented sequence unexercised while claiming to be its gate.
+systemctl --user enable --now "${documented[@]}" \
+  || fail "the documented enable --now command failed for ${documented[*]}"
+systemctl --user start mcloving-postgres.service \
+  || fail "the documented start of the generated postgres unit failed"
+for unit in "${documented[@]}"; do
+  enabled="$(systemctl --user is-enabled "${unit}.service" 2>&1 || true)"
+  [[ "${enabled}" == "enabled" ]] \
+    || fail "${unit}.service reports is-enabled=${enabled} after the documented enable"
+done
+# And the generated one must NOT be enablable -- pinning the reason the runbook
+# had to change, so a future edit cannot quietly put it back.
+if systemctl --user enable mcloving-postgres >/dev/null 2>&1; then
+  fail "systemd accepted 'enable mcloving-postgres'; the runbook's original wording would then have been correct and this gate is now wrong"
+fi
+echo "   enabled: ${documented[*]}; mcloving-postgres refuses enable (generated), as expected"
+
+# ---------------------------------------------------------------------------
+step "[8/10] the lane the documented command started, as the manager reports it"
 
 # `Notify=healthy` on the quadlet means the generated postgres unit reports
 # started only once `pg_isready` passes, so `After=mcloving-postgres.service`
 # genuinely means "after PostgreSQL is healthy" and no wait loop belongs here.
-systemctl --user start mcloving-postgres.service \
-  || fail "systemd could not start the generated postgres unit"
-systemctl --user start mcloving-db-init.service \
-  || fail "systemd could not start mcloving-db-init.service"
-systemctl --user start mcloving-controller.service \
-  || fail "systemd could not start mcloving-controller.service"
-systemctl --user start mcloving-agent.service \
-  || fail "systemd could not start mcloving-agent.service"
+# Nothing is started here: the documented `enable --now` in step 7 did it, which
+# is the point of running the documented command rather than a convenient one.
+# This step only reads back what the manager made of it.
 
 for unit in mcloving-postgres.service mcloving-controller.service mcloving-agent.service; do
   active="$(systemctl --user show -p ActiveState --value "${unit}")"
@@ -339,7 +385,11 @@ echo "   mcloving-db-init.service ${db_init}"
 # systemd created the agent's state tree, not this script. The other suite
 # mkdir -p's this path to stand in for StateDirectory=; here the real directive
 # is what made it, at the mode the directive specifies.
-workspace="${home_dir}/.local/state/mcloving-agent/workspace"
+# From the manager's effective state root, which is what the installer rendered
+# into the contract and what StateDirectory= therefore creates. Hard-coding
+# ~/.local/state would inspect a path the services never used on an account with
+# a custom XDG_STATE_HOME -- and pass, having looked at nothing.
+workspace="${state_base}/mcloving-agent/workspace"
 [[ -d "${workspace}" ]] \
   || fail "StateDirectory= did not create ${workspace}; the agent's guard passed on something this arm cannot account for"
 mode="$(stat -c '%a' "${workspace}")"

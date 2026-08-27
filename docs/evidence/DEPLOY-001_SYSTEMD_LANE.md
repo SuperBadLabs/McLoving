@@ -141,6 +141,53 @@ test shipped_controller_uses_split_credentials_and_executes_submissions ... ok
    deployable-runtime gate passed against the installed deployment's database and roles
 ```
 
+## Review round 1 — seven findings, two of them P1
+
+Every one was real. Two are worth stating in full because they were mine and
+they were the dangerous kind.
+
+**P1 — the arm could destroy a production deployment.** Every precondition it
+checks passes just as well on a real McLoving service account as on a disposable
+one, and its teardown force-removes the `mcloving-postgres-data` volume and the
+deployment tree. It could not tell the two apart and did not ask. **An existing
+deployment is now a refusal**, and destroying one has to be requested by name
+with `--reset`. Verified in both directions: the libexec tree alone refuses, and
+the volume alone refuses.
+
+The probe for "is there a deployment here" was itself wrong at first, and the
+correction is the interesting part: it looked only at the libexec root and the
+volume, so a failed run that had left `StateDirectory=` trees behind was judged
+"nothing to clean" — and the next run's assertion that *systemd* creates the
+workspace then failed on a directory from the run before. **What makes a
+deployment present is any of its parts, not the tidiest one.**
+
+**P1 — a stray `rm -rf "${scratch}"` before `scratch` existed.** Under `set -u`
+that exits immediately after deleting the volume and *before the teardown trap
+is installed*. It came from a patch that matched the wrong one of two identical
+lines — the third time that same mistake appeared in this shift, after the
+mutation harness and the `statuses.get(ticket) != "DONE"` anchor. **A textual
+patch against a non-unique anchor is not a patch; it is a coin flip.**
+
+The five P2s, each fixed:
+
+- **The gate ran `enable`, not the documented `enable --now`.** The runbook asks
+  for both operations and starting is the half that can fail. Fixing it exposed
+  an ordering error of my own: `--now` starts the units, so it has to come after
+  the contracts and PKI — which is exactly where the runbook puts it. The arm
+  now follows the documented order because the documented order is what it is
+  testing.
+- **Contracts read from the wrong root.** `mcloving-install` writes contracts and
+  PKI to the literal `%h/.config/mcloving` and uses the manager's effective XDG
+  base only for units and quadlets. On an account with an absolute
+  `XDG_CONFIG_HOME` those differ, and the arm would have read contracts from a
+  directory the installer never wrote to.
+- **The workspace assertion inspected `~/.local/state` directly**, so on an
+  account with a custom `XDG_STATE_HOME` it would have checked a path the
+  services never used — and passed, having looked at nothing.
+- **The board contradicted itself**: the row read `DONE` while its own closure
+  text still said the ticket stays `ACTIVE`, and the prose under the dispatch
+  table still had `DEPLOY-001` holding the slot and blocking `DEPLOY-003`.
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
