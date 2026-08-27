@@ -33,9 +33,11 @@ state**, which is in the table because it had a hole of its own and the gates
 that catch it exist only because review found it. Each scenario builds a
 fixture, calls `require_secure_ancestors`, and checks **both** the verdict and
 that a refusal **names its own offender**. That second half is not decoration:
-several fixtures refuse on the unpatched library for a completely unrelated
-reason (`/tmp (mode 1777)`, or an opaque `cannot statx`), and a gate that only
-asserted "it failed" would have recorded those as passes.
+**six of the twelve refuse on `96ef05f` for a wholly unrelated reason** — five
+naming a 1777 directory (`/tmp` or `/var/tmp`), one dying on an opaque
+`stat: cannot statx ... Permission denied` — and three more are outright
+accepted. A gate that only asserted "it failed" would have recorded those six as
+passes.
 
 | Scenario | expected | this branch | origin/main 96ef05f | 9cda125 (attempt 1) | f457fcc (attempt 2) | this branch, pre-review |
 |---|---|---|---|---|---|---|
