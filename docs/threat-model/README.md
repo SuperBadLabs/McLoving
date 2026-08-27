@@ -374,6 +374,7 @@ had never claimed one.
 | DISC-001 | `docs/evidence/DISC-001_SECURITY_REVIEW.md` |
 | EXT-001 | `docs/evidence/EXT-001_SECURITY_REVIEW.md` |
 | EXT-002 | `docs/evidence/EXT-002_SECURITY_REVIEW.md` |
+| HYG-002 | `docs/evidence/HYG-002_SECURITY_REVIEW.md` |
 | IDP-001 | `docs/evidence/IDP-001_SECURITY_REVIEW.md` |
 | INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |

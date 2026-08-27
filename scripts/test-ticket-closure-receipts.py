@@ -81,6 +81,22 @@ THREAT_MODEL = """\
 
 RECEIPT = "# AAA-001 security review\n\n" + ("AAA-001 reviewed the boundary. " * 60)
 
+# HYG-002: the two redundant views whose third column is NOT overloaded. The
+# base fixture carries only a Lane table, and a Lane table is the one place an
+# execution class legitimately sits there -- so the bypass could not be written
+# against the fixture at all until these existed.
+BATCH_LEDGER = (
+    "\n## Batch ledger\n\n"
+    "| Batch | Tickets | Status | Outcome |\n|---|---|---|---|\n"
+    "| W0-A | AAA-001 | DONE | closed with a receipt |\n"
+)
+DISPATCH_QUEUE = (
+    "\n## Current dispatch\n\n"
+    "| Slot | Current ticket | Status | Dependency-critical successors |\n"
+    "|---:|---|---|---|\n"
+    "| 1 | `BBB-001` | PENDING | — |\n"
+)
+
 
 def build(board: str = BOARD, threat_model: str = THREAT_MODEL) -> TemporaryDirectory:
     """Materialise a synthetic repository that passes, ready to be broken."""
@@ -600,6 +616,57 @@ class RedundantViews(unittest.TestCase):
             errors, _, _ = check(Path(name))
         self.assertTrue(any("neither a status nor an execution class" in e for e in errors), errors)
 
+    # --- HYG-002: an execution class was accepted in ANY view's third column ---
+
+    def _errors_for(self, board: str) -> list[str]:
+        with build(board=board) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        return errors
+
+    def test_a_batch_row_may_not_state_an_execution_class(self):
+        """The half that was live end-to-end.
+
+        Rewriting the real board's Batch ledger row `W0-A` from `DONE` to
+        `SERIAL` passed BOTH verifiers: the class was accepted, the status
+        comparison was skipped, and the batch stopped asserting anything about
+        the ticket it names while still looking exactly like a claim.
+        """
+        errors = self._errors_for(
+            BOARD + BATCH_LEDGER.replace("| DONE |", "| SERIAL |")
+        )
+        self.assertTrue(
+            any("an execution class; only Lane rows overload" in e for e in errors),
+            errors,
+        )
+
+    def test_a_dispatch_row_may_not_state_an_execution_class(self):
+        """The half the ticket describes as unguarded, which is not quite right.
+
+        `verify-execution-board.py` already rejects a dispatch slot whose status
+        is not a ticket status. It is guarded here as well so that neither
+        cross-check depends on the other file continuing to carry it.
+        """
+        errors = self._errors_for(
+            BOARD + DISPATCH_QUEUE.replace("| PENDING |", "| SERIAL |")
+        )
+        self.assertTrue(
+            any("an execution class; only Lane rows overload" in e for e in errors),
+            errors,
+        )
+
+    def test_a_correct_batch_row_passes(self):
+        self.assertEqual(self._errors_for(BOARD + BATCH_LEDGER), [])
+
+    def test_a_lane_row_may_still_state_an_execution_class(self):
+        """The overload is real for Lane rows; the fix must not remove it.
+
+        Without this, tightening the rule to "the third column is always a
+        status" would pass every other test in this class and break every open
+        lane on the real board.
+        """
+        errors = self._errors_for(BOARD)
+        self.assertEqual([e for e in errors if "only Lane rows overload" in e], [])
+
 
 class CitedEvidence(unittest.TestCase):
     def test_a_closed_ticket_citing_a_missing_document_fails(self):
@@ -621,6 +688,70 @@ class CitedEvidence(unittest.TestCase):
         ) as name, synthetic():
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])
+
+    # --- HYG-002: the check read only backticked paths ---
+    #
+    # Four bypasses were demonstrated against the real board, and only ONE is
+    # the undelimited case the ticket describes. The other three are properly
+    # backticked and read as ordinary citations, which is why "require
+    # backticks" was never the fix: backticks are how a citation should be
+    # written, not what makes text a citation.
+
+    MISSING = "docs/architecture/DOES_NOT_EXIST.md"
+
+    def _cite(self, spelling: str) -> list[str]:
+        with build(
+            board=BOARD.replace(
+                "Closed with a receipt and an attributed review",
+                f"Closure: {spelling}",
+            )
+        ) as name, synthetic():
+            errors, _, _ = check(Path(name))
+        return errors
+
+    def _fabricated(self, spelling: str) -> None:
+        errors = self._cite(spelling)
+        self.assertTrue(
+            any("which does not exist" in error for error in errors), errors
+        )
+
+    def test_an_unbackticked_missing_document_fails(self):
+        """The one the ticket names. The bare-path rule in the board verifier
+        cannot backstop it: that rule fires only when the path RESOLVES."""
+        self._fabricated(self.MISSING)
+
+    def test_a_dot_slash_prefixed_missing_document_fails(self):
+        self._fabricated(f"`./{self.MISSING}`")
+
+    def test_an_angle_bracketed_missing_document_fails(self):
+        self._fabricated(f"`<{self.MISSING}>`")
+
+    def test_a_trailing_space_inside_backticks_does_not_hide_a_missing_document(self):
+        """One space between the path and the closing backtick was enough."""
+        self._fabricated(f"`{self.MISSING} `")
+
+    def test_an_unbackticked_real_document_passes(self):
+        """Loosening the scan must not turn every undelimited path into an error."""
+        self.assertEqual(self._cite("docs/evidence/AAA-001_SECURITY_REVIEW.md"), [])
+
+    def test_a_template_path_in_a_done_row_is_refused(self):
+        """Why the check asks `is_file`, not `exists`.
+
+        Scanning undelimited text picks up the leading fragment of a template
+        such as `docs/evidence/<TICKET>_SECURITY_REVIEW.md`, which truncates to
+        the real DIRECTORY `docs/evidence`. Relaxing to `exists` would admit
+        that -- and with it every citation of a directory where a document was
+        meant, which is most of the value of the rule.
+
+        Measured before choosing: no DONE row on the real board spells a
+        template, and all 25 of their cited paths resolve to files. So the
+        relaxation defended a case that does not exist, at the cost of one that
+        does. A DONE row citing a template is not naming its evidence anyway --
+        a closed ticket has a specific document, not a pattern -- so refusing it
+        is the right answer rather than a tolerated cost.
+        """
+        errors = self._cite("`docs/evidence/<TICKET>_SECURITY_REVIEW.md`")
+        self.assertTrue(any("docs/evidence" in error for error in errors), errors)
 
     def test_an_open_ticket_may_name_a_document_it_will_write(self):
         """Planning work must not require a placeholder file first."""

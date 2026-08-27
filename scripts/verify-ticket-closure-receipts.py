@@ -31,6 +31,7 @@ Run with `--strict` to fail on the debt too.
 from __future__ import annotations
 
 import argparse
+import posixpath
 import re
 from collections import Counter
 import sys
@@ -330,7 +331,9 @@ CLOSED_TICKETS = frozenset({
     "DIFF-003",
     "DISC-001", "E2E-001", "E2E-002", "E2E-003", "EXEC-001", "EXEC-002",
     "EXEC-003", "EXEC-004", "EXT-001", "EXT-002", "FOUND-001",
-    "FOUND-002", "HYG-001", "IDP-001", "INPUT-001", "INV-001",
+    # HYG-002 closes itself: the attribution field above and the five parser
+    # fixes are its acceptance, and its own row went DONE in the same change.
+    "FOUND-002", "HYG-001", "HYG-002", "IDP-001", "INPUT-001", "INV-001",
     "INV-002", "INV-003", "INV-004", "IR-001", "IR-002", "IR-003",
     "IR-004", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
@@ -347,7 +350,37 @@ CLOSED_TICKETS = frozenset({
 RECEIPT_MINIMUM_BYTES = 1000
 
 TABLE_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
+# A citation as it is SUPPOSED to be written: the path, inside backticks and
+# nothing else. Fullmatched by the attribution field far below, where the cell
+# IS the path.
 DOC_PATH = re.compile(r"`(docs/[A-Za-z0-9_./-]+)`")
+# HYG-002: WHAT A CITATION IS ALLOWED TO LOOK LIKE, WHICH IS NOT THE SAME THING.
+#
+# `cited_documents` used to search DONE rows with `DOC_PATH`, so a fabricated
+# document was cited safely by any spelling that missed those delimiters. FOUR
+# were demonstrated against this board, and only ONE of them is the sloppy
+# unbackticked case the ticket describes -- the other three are properly
+# backticked and read as perfectly ordinary citations:
+#
+#     Closure: docs/architecture/DOES_NOT_EXIST.md      (no delimiters)
+#     Closure: `./docs/architecture/DOES_NOT_EXIST.md`  (a leading ./)
+#     Closure: `<docs/architecture/DOES_NOT_EXIST.md>`  (angle-bracketed)
+#     Closure: `docs/architecture/DOES_NOT_EXIST.md `   (one trailing space)
+#
+# The bare-path rule in `verify-execution-board.py` cannot be the backstop
+# either, and is in fact backwards for this purpose: it fires only when an
+# unbackticked path RESOLVES, so it catches every real file written without
+# backticks and stays silent on exactly the fabricated ones that matter here.
+#
+# So the shape is read out of the text rather than out of its delimiters: a
+# `docs/` path anywhere in the cell, whatever surrounds it. A leading `./` or
+# `../` is matched outside the capture and dropped; a trailing `.` or `/` is
+# left behind by requiring the match to END on a name character; and `>`, a
+# backtick and a space were never in the class to begin with. Nothing here is
+# anchored to a delimiter, so no spelling of the same claim opts out.
+CITED_DOC_PATH = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:\.{1,2}/)*(docs/[A-Za-z0-9_./-]*[A-Za-z0-9_-])"
+)
 
 
 def read(path: Path) -> str:
@@ -545,6 +578,27 @@ def cross_check_views(text: str, statuses: dict[str, str]) -> list[str]:
                         f"line {number}: the {view} table reads {ticket} as "
                         f"{claimed}, but its ticket row reads {statuses[ticket]}"
                     )
+                elif claimed in EXECUTION_CLASSES and view != LANE_TABLE_HEADER:
+                    # HYG-002. `EXECUTION_CLASSES` was accepted in ANY view's
+                    # third column, and only Lane rows overload that column.
+                    # Rewriting the Batch ledger's `W0-A` status from `DONE` to
+                    # `SERIAL` therefore stopped it cross-checking anything and
+                    # passed both verifiers -- the batch's claim about a closed
+                    # ticket simply evaporated.
+                    #
+                    # WHICH HALF WAS LIVE: only the Batch ledger. A dispatch row
+                    # doing the same is already caught over in
+                    # `verify-execution-board.py`, which rejects a slot whose
+                    # stated status is not a ticket status (`current dispatch
+                    # slot 1 has invalid status 'SERIAL'`). Dispatch is covered
+                    # here anyway, because a cross-check that depends on another
+                    # file's coverage is one refactor away from being neither's.
+                    errors.append(
+                        f"line {number}: the {view} table gives {ticket} a third "
+                        f"column of {claimed!r}, an execution class; only Lane rows "
+                        f"overload that column, so a {view} row that states one "
+                        "cross-checks nothing while still looking like a status"
+                    )
                 elif claimed not in TICKET_STATUSES and claimed not in EXECUTION_CLASSES:
                     errors.append(
                         f"line {number}: the {view} table gives {ticket} a third "
@@ -568,6 +622,10 @@ def cited_documents(repository: Path, text: str) -> list[str]:
     Scoped to `docs/` deliberately: rows also cite code paths they RETIRED,
     such as HYG-001 naming `crates/state-machine` after deleting it, and those
     are history rather than broken links.
+
+    Read with `CITED_DOC_PATH` rather than `DOC_PATH` since HYG-002: backticks
+    are how a citation SHOULD be written, not a condition on being one, and
+    three of the four demonstrated bypasses were backticked.
     """
     errors: list[str] = []
     for header, rows in tables(text):
@@ -576,8 +634,14 @@ def cited_documents(repository: Path, text: str) -> list[str]:
         for number, row in rows:
             if len(row) != TICKET_TABLE_COLUMNS or row[1] != "DONE":
                 continue
-            for path in sorted(set(DOC_PATH.findall(row[3]))):
-                if not (repository / path).is_file():
+            for path in sorted(set(CITED_DOC_PATH.findall(row[3]))):
+                # `exists`, not `is_file`. Widening the scan to undelimited text
+                # also picks up the leading fragment of a TEMPLATE such as
+                # `docs/evidence/<TICKET>_SECURITY_REVIEW.md`, which yields the
+                # real directory `docs/evidence`. A directory that is there is
+                # not a document that is missing, and this check exists to
+                # answer the latter question.
+                if not (repository / posixpath.normpath(path)).is_file():
                     errors.append(
                         f"line {number}: {row[0]} is DONE and cites {path}, which "
                         "does not exist; write it, or stop citing it as evidence"
@@ -651,9 +715,11 @@ ATTRIBUTION_HEADER = ["Ticket", "Evidence"]
 # out rather than approximated by `[A-Z][A-Z0-9-]+`, which admits both a bare
 # `ABC` and the batch id `W0-A` that is not a ticket at all.
 ATTRIBUTION_TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?(?:-[A-Z0-9]+)*")
-# The same spelling `DOC_PATH` uses, but fullmatched rather than searched: the
-# cell IS the path, so a cell that merely CONTAINS one is refused.
-ATTRIBUTION_EVIDENCE = re.compile(r"`(docs/[A-Za-z0-9_./-]+)`")
+# `DOC_PATH` itself, fullmatched rather than searched: the cell IS the path, so
+# a cell that merely CONTAINS one is refused. Deliberately NOT the loosened
+# `CITED_DOC_PATH` -- a citation may be spelled carelessly and still be a
+# citation, but an attribution cell is a field, and a field has one spelling.
+ATTRIBUTION_EVIDENCE = DOC_PATH
 
 
 def closure_attributions(text: str) -> tuple[dict[str, str], list[str]]:
