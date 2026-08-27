@@ -25,36 +25,45 @@ service home chooses.
 
 ## What was measured, and against what
 
-Nine scenarios were run against four library baselines: this branch,
-`origin/main` at `96ef05f` (the shipping vulnerability), and both earlier
-attempts at this fix — `9cda125` (exempted every sticky directory) and `f457fcc`
-(scoped that exemption by a lexical home-prefix test). Each scenario builds a
+Twelve scenarios were run against five library baselines: this branch,
+`origin/main` at `96ef05f` (the shipping vulnerability), both earlier attempts at
+this fix — `9cda125` (exempted every sticky directory) and `f457fcc` (scoped that
+exemption by a lexical home-prefix test) — and **this branch's own pre-review
+state**, which is in the table because it had a hole of its own and the gates
+that catch it exist only because review found it. Each scenario builds a
 fixture, calls `require_secure_ancestors`, and checks **both** the verdict and
 that a refusal **names its own offender**. That second half is not decoration:
 several fixtures refuse on the unpatched library for a completely unrelated
 reason (`/tmp (mode 1777)`, or an opaque `cannot statx`), and a gate that only
 asserted "it failed" would have recorded those as passes.
 
-| Scenario | expected | this branch | origin/main 96ef05f | 9cda125 (attempt 1) | f457fcc (attempt 2) |
-|---|---|---|---|---|---|
-| `baseline-accept` | accept | accept | accept | accept | accept |
-| `sticky-traversal-accept` | accept | accept | accept | accept | accept |
-| `above-home-writable` | refuse | **refuse (named)** | accept | **refuse (named)** | **refuse (named)** |
-| `a-managed-root-sticky` | refuse | **refuse (named)** | **refuse (named)** | accept | **refuse (named)** |
-| `b-two-link-home` | refuse | **refuse (named)** | refuse, wrong reason | accept | **refuse (named)** |
-| `c-foreign-link-inode` | refuse | **refuse (named)** | refuse, wrong reason | refuse, wrong reason | refuse, wrong reason |
-| `d-dotdot-after-symlink` | refuse | **refuse (named)** | accept | accept | accept |
-| `e-sibling-root-under-sticky` | refuse | **refuse (named)** | refuse, wrong reason | accept | accept |
-| `foreign-home` | refuse | **refuse (named)** | accept | refuse, wrong reason | refuse, wrong reason |
+| Scenario | expected | this branch | origin/main 96ef05f | 9cda125 (attempt 1) | f457fcc (attempt 2) | this branch, pre-review |
+|---|---|---|---|---|---|---|
+| `baseline-accept` | accept | accept | accept | accept | accept | accept |
+| `sticky-traversal-accept` | accept | accept | accept | accept | accept | accept |
+| `above-home-writable` | refuse | **refuse (named)** | accept | **refuse (named)** | **refuse (named)** | **refuse (named)** |
+| `a-managed-root-sticky` | refuse | **refuse (named)** | **refuse (named)** | accept | **refuse (named)** | **refuse (named)** |
+| `b-two-link-home` | refuse | **refuse (named)** | refuse, wrong reason | accept | **refuse (named)** | **refuse (named)** |
+| `c-foreign-link-inode` | refuse | **refuse (named)** | refuse, wrong reason | refuse, wrong reason | refuse, wrong reason | **refuse (named)** |
+| `d-dotdot-after-symlink` | refuse | **refuse (named)** | accept | accept | accept | **refuse (named)** |
+| `e-sibling-root-under-sticky` | refuse | **refuse (named)** | refuse, wrong reason | accept | accept | **refuse (named)** |
+| `sticky-single-absent-child` | refuse | **refuse (named)** | refuse, wrong reason | accept | refuse, wrong reason | accept |
+| `sticky-last-child-absent` | refuse | **refuse (named)** | refuse, wrong reason | accept | accept | accept |
+| `host-vartmp-squat` | refuse | **refuse (named)** | refuse, wrong reason | accept | refuse, wrong reason | accept |
+| `foreign-home` | refuse | **refuse (named)** | accept | refuse, wrong reason | refuse, wrong reason | **refuse (named)** |
 
 Every scenario is red on at least one baseline, and this branch is the only
-column in which every refusal names what is wrong with the host. The same nine
-fixtures are carried as gates in `deploy/test-deployment.sh`, together with a
-tenth that asserts the chain's own content — that `/` is present, that the
-directory above the home is present and classified `traversal`, and that the
-home is classified `guarded` — because an acceptance proves nothing if the walk
-reached nothing. Seven of the ten go red against `96ef05f`. The full suite was
-run twice end to end and passed both times, in 336 s on the second run. The five P1
+column in which every refusal names what is wrong with the host.
+
+**Eleven of these are carried as gates in `deploy/test-deployment.sh`**: ten of
+the twelve fixtures, plus one that asserts the chain's own content — that `/` is
+present, that the directory above the home is present and classified
+`traversal`, and that the home is classified `guarded` — because an acceptance
+proves nothing if the walk reached nothing. Two fixtures are deliberately not
+gates: `sticky-last-child-absent` is the same defect as the sibling-root gate in
+a different spelling and is covered by that gate's fixture being renamed so its
+absent entry sorts last, and `host-vartmp-squat` exercises the host's real
+`/var/tmp`, which a suite must not depend on the state of. The five P1
 findings that stopped the earlier attempts map onto rows 4–8; the two
 acceptance rows are what prove the walk to `/` has not made ordinary
 deployments refuse.
@@ -70,6 +79,54 @@ under a shared sticky ancestor — were **accepted by both earlier attempts**.
 `foreign-home` refuses — but it refuses the wrong directory, reporting
 `expected uid 100000` for an ancestor this account owns. The attacker's home had
 already supplied the uid every later comparison was made against.
+
+## What review found, and what it says about the evidence
+
+Two independent reviewers were run over the finished diff, one instructed to
+break the check and one instructed to find where it refuses CORRECT work. **They
+independently found the same real bypass**, and it was mine.
+
+The sticky exemption's child scan was written as
+`while read ... done < <(printf '%s' "${children}" | tr ',' '\n')`. `printf '%s'`
+emits no trailing newline, so `read` returns non-zero on the final unterminated
+field and the loop body never runs for it. Where a sticky ancestor has **exactly
+one** walked entry — which is the ordinary case, and is the shape of every
+deployment under `/tmp` — that discarded every child, and the exemption
+collapsed to "the child list is non-empty". Reproduced against the host's real
+`/var/tmp`: a home plus a single not-yet-created managed root under `1777 root`
+was **accepted**.
+
+Three things failed at once, and the third is the one worth carrying:
+
+1. The pipeline dropped the last element. An ordinary shell bug.
+2. The guard I had added *specifically* to make an empty child list fail closed —
+   `[[ -n "${children}" ]] && exempt=1` — is what made the degenerate case look
+   handled. A fail-closed check written one line above the hole made the hole
+   invisible.
+3. **The evidence matrix was green for a reason unrelated to correctness.** The
+   sibling-root fixture used an absent root named `external-units` and a present
+   one named `svc-home`; children are emitted sorted, `e` sorts before `s`, so
+   the checked child was the absent one and the dropped child was the present
+   one. Rename the absent root to sort last and the identical hostile tree is
+   accepted. The verdict depended on a filename.
+
+That third point is this ticket's own lesson turned back on itself. The whole
+method here was "a refusal is not evidence until you know what it refused" — and
+the acceptance direction needed the same scepticism, which it did not get. The
+child scan now splits in the shell (`IFS=',' read -r -a`), with no pipeline and
+no last element to lose; the sibling-root fixture is renamed so its absent entry
+sorts last; and a further gate covers the degenerate one-child case directly.
+The `this branch, pre-review` column above is that hole, left in the record.
+
+**The refusal's remedy text was also wrong, and that was the other reviewer's
+top finding.** The message ended "run chmod go-w (or restore ownership) on them
+and retry", which was right while every offender it could name was inside the
+deployment. It can now name `/`, `/tmp` and `/var/tmp`, where `chmod go-w` is
+between useless and destructive, and two of the four clauses are not about mode
+bits at all. The remedy is now stated per clause, and when the lane is invoked
+as root — where `expected uid 0 or root` reads as a tautology — the refusal says
+that the invoking account is the problem and that chowning the tree to root
+would undo `DEPLOY-003`'s decision.
 
 ## What changed
 
@@ -160,6 +217,43 @@ traversal ancestor is trusted to the extent that `S_ISVTX` is enforced and that
 the entries the walk enters inside it are owned by root or the service account
 *at validation time*. This is a containing-directory bound, not TOCTOU-freeness
 — the same bound the rest of the lane already carries.
+
+**The symlink-inode rule is deliberately broader than its own justification.**
+It refuses a foreign-owned `link` record anywhere in the chain, while the reason
+it exists — that `S_ISVTX` grants unlink to the entry's owner — only bites where
+the holding directory permits unlinking. A foreign-owned link inside a
+non-writable, non-sticky directory cannot be replaced by its owner, and refusing
+it buys nothing. It is kept broad because the narrow form needs the holder's mode
+at the moment the link is judged, which is a second coupling to get wrong late,
+and because every layout a review could construct that reaches it (a
+`tar --same-owner` restore, a uid migration) leaves the *directories* wrong too
+and so fails on the ownership rule regardless. Narrowing it to links whose holder
+is group- or other-writable is a defensible follow-up, not a defect.
+
+**A traversed ancestor's record is less sensitive than it was.** Chains that
+already left the home walked to `/` before this change, so `/etc` and
+`/etc/systemd` carried a full record including their entry hash; they are now
+stable-facts-only, and a traversed ancestor swapped for a different directory
+with identical mode, uid and gid produces a byte-identical record. This is the
+design's own rule applied consistently — the document asserts about a directory
+it merely walks through exactly what the lane checks about it — and the
+`(st_dev, st_ino)` re-check still fires. The cost is diagnostic: a moved link no
+longer names itself in the document, it only shows up as a change in the
+resolved ancestor paths.
+
+**Running the lane as root is refused, and that is policy rather than an
+accident.** With the anchor pinned to `${EUID}`, `sudo mcloving-install --home
+<service tree>` refuses every path in a tree it does not own.
+`docs/operations/DEPLOYMENT_V1.md` documents `sudo -u <account>` as the form,
+and the refusal now says so rather than printing `expected uid 0 or root`. The
+place this is most likely to be met is `recovery_command`, whose whole purpose
+is to be pasted during an incident.
+
+**A shared-group deploy root is refused and is not supported.** A `root:apps
+2775` parent is rejected on its mode, correctly — any member of that group can
+rename the deployment aside — but re-moding a directory with other tenants is
+not something an installer may do on an operator's behalf. Now stated in
+`docs/operations/DEPLOYMENT_V1.md` rather than left to be discovered.
 
 ## Residual risk
 
