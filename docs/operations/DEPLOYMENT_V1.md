@@ -191,6 +191,19 @@ so two invocations over an unchanged deployment are byte-identical and any
 byte of drift is visible. This is the document a future CUTOVER-001 freeze
 re-reads; producing it grants no cutover authority.
 
+The `ancestors` section reaches `/` (`DEPLOY-004`), so it now contains
+directories the deployment shares with the rest of the host. A directory the
+lane merely TRAVERSES is recorded by mode, uid and gid alone: no entry-listing
+hash, and its size, mtime and ctime take no part in either the record or the
+stability retry. That is what keeps the document byte-identical while unrelated
+processes churn `/tmp` — without it, a shared ancestor's mtime moving between the
+open-time `fstat` and the pathname re-check exhausts all three attempts and
+degrades the record to `kind: unstable_entry`, which fails a freeze exactly as
+loudly as drift in the deployment itself. Directories whose CONTENTS the lane
+enumerates — the home, the managed roots, and external unit load paths such as
+`/etc/systemd/user` — are recorded in full, entry hash included, wherever they
+live.
+
 ## Smoke test
 
 ```sh

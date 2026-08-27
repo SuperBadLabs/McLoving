@@ -86,35 +86,75 @@ availability of the transition itself.
 
 > Every path a deployment transition or service start will read or execute is,
 > at validation time, unwritable by any uid other than root or the service
-> account, along its resolved ancestor chain **up to the deployment home**; and every path that
+> account, along its resolved ancestor chain **to `/`**; and every path that
 > does not yet exist sits in a directory carrying that same property, so it
 > cannot be created either. Where the property cannot be established, the
 > transition refuses; it never proceeds on an unproven path.
+>
+> One class of directory is excused from the *mode* half of that sentence and
+> from nothing else: a directory the lane only walks THROUGH may be group- or
+> world-writable when it carries `S_ISVTX` **and** every entry the walk enters
+> inside it already exists and is owned by root or the service account. That is
+> what makes a deployment under `/tmp` installable without making `/tmp`
+> trusted. No directory whose contents the lane enumerates is ever excused, and
+> the ownership half is never excused for anything.
 
 Every gate in the lane is a case of that one sentence. Stating it once is the
 substantive change this record makes — it was previously derived, separately, in
 dozens of places.
 
-**The stop at the home is a KNOWN GAP, not a boundary.** `deployment_ancestor_chain`
-walks no directory above the deployment home, and every ownership rule in the
-library derives its expected uid from `stat` of the home — so a home sitting under
-a foreign-owned or writable-without-sticky parent can be renamed aside and replaced,
-and the substituted home becomes its own trust anchor. Reproduced with a genuinely
-foreign uid. **Moderate**: a stock `/home` install under root-owned 0755 is not
-exposed; shared-group deploy roots, 0777 container volume roots and `--home` into a
-scratch tree are. **Secrets do NOT stay out of reach where it is exposed, and an
-earlier revision of this record said they did.** An attacker-authored unit with an
-arbitrary `ExecStart` passes `require_integrity_files` against the substituted home,
-and the user manager then runs it AS the service account. From there the original
-renamed-aside home's 0600 contracts and mTLS key are readable, because they are
-owned by exactly that uid. `require_secret_files "${EUID}"` is a check the lane
-performs on itself, not a sandbox: code already executing as the service account is
-not subject to it, and a hostile unit simply omits it. Treat home substitution as
-credential compromise, not merely as arbitrary execution.
-A fix exists on `codex/deploy-004-ancestor-above-home` and is tracked as
-`DEPLOY-004`; it was split out of this change because it produced five P1 review
-findings across two rounds without converging, and the correction-round cap applies
-to it exactly as it applied to `DEPLOY-001`.
+**The stop at the home was a KNOWN GAP and is now closed (`DEPLOY-004`).**
+`deployment_ancestor_chain` used to walk no directory above the deployment home,
+and every ownership rule in the library derived its expected uid from `stat` of
+the home — so a home sitting under a foreign-owned or writable-without-sticky
+parent could be renamed aside and replaced, and the substituted home became its
+own trust anchor. Reproduced with a genuinely foreign uid. **Moderate**: a stock
+`/home` install under root-owned 0755 was not exposed; shared-group deploy roots,
+0777 container volume roots and `--home` into a scratch tree were. **Secrets did
+NOT stay out of reach where it was exposed, and an earlier revision of this record
+said they did.** An attacker-authored unit with an arbitrary `ExecStart` passed
+`require_integrity_files` against the substituted home, and the user manager then
+ran it AS the service account. From there the original renamed-aside home's 0600
+contracts and mTLS key were readable, because they are owned by exactly that uid.
+`require_secret_files "${EUID}"` is a check the lane performs on itself, not a
+sandbox: code already executing as the service account is not subject to it, and a
+hostile unit simply omits it. Home substitution is credential compromise, not
+merely arbitrary execution.
+
+Four things changed, and each of them is one of the five P1 findings that stopped
+the first two attempts at this fix:
+
+- **The walk reaches `/`, for the home as well as for every managed root.** The
+  home used to be held aside as a *stop value* and was the one path the component
+  walk never traversed.
+- **Resolution is component by component in filesystem order**, so `..` is
+  consumed only after the prefix ahead of it is resolved. Collapsing it lexically
+  first — which `os.path.abspath` and `os.path.normpath` both do — validated a
+  decoy tree while the kernel walked another one.
+- **The directory holding each intermediate symlink joins the chain**, and each
+  symlink's own inode is judged by `lstat` rather than through its target. Under
+  `S_ISVTX` the *entry's owner* may unlink and re-create it, so who owns the link
+  decides who may repoint it.
+- **Every chain node arrives classified** as one the lane merely traverses or one
+  whose contents it enumerates, and the sticky exemption can reach only the first
+  kind. `S_ISVTX` restricts renaming and unlinking other people's entries; it does
+  not restrict CREATING one, and drop-ins are merged, so a managed root at 1777 —
+  or a root that merely SHARES a sticky ancestor with the home — is an
+  attacker-authored `.conf` away from arbitrary execution.
+
+**The expected uid is now `${EUID}`, not `stat` of the home.** That is the
+residual the first attempts left open: reading the anchor from the home meant a
+substituted home supplied the very uid the ownership rules then approved, so the
+rules agreed with themselves. `${EUID}` is the uid the user manager runs these
+units as, and it is the pin `require_secret_files` has always used.
+
+**One measured correction to the finding record.** The foreign-owned-symlink case
+is bounded by the kernel on any host with `fs.protected_symlinks=1` (the Linux
+default): following a foreign-owned symlink inside a world-writable sticky
+directory is refused with `EACCES` before the lane's own rules run, so the
+practical effect there is denial of service rather than substitution. The `lstat`
+ownership rule is kept for the hosts that disable that sysctl, and because a named
+refusal is worth more to an operator than an opaque `cannot statx`.
 
 *What the lane does NOT guarantee against adversary A.*
 
