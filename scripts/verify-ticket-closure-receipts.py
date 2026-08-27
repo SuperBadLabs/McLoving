@@ -176,6 +176,43 @@ for _ticket in ("MIG-002", "MIG-006", "MIG-007"):
         "so no row asserts that this ticket's evidence verified the threat"
     )
 
+# HYG-002 disclosed nineteen gaps that the prose predicate had been hiding, and
+# the argument is the same one the MIG-002/006/007 block above makes: the ledger
+# widened because the predicate got stricter, not because closure discipline
+# slipped. It is worth being exact about what was being read, because it is
+# worse than "a loose rule".
+#
+# SEVENTEEN of these were credited by the table headed
+# `| Area | First implementation ticket |`. That table records WHICH TICKET
+# FIRST IMPLEMENTED AN AREA. It asserts nothing whatever about a review, and it
+# never claimed to -- the gate was reading an ownership map as an attestation.
+# Deleting those rows was never an option either: they are true, and they are
+# the only record of who owns each area.
+for _ticket in (
+    "AGENT-001", "AGENT-002", "AGENT-003", "ARCH-001", "CTRL-001",
+    "INV-001", "INV-002", "INV-003", "INV-004", "IR-001", "MIG-000",
+    "OPS-001", "OPS-002", "SEC-002", "SEC-003", "WIN-001", "WIN-002",
+):
+    THREAT_MODEL_DEBT[_ticket] = (
+        "credited before HYG-002 only by the `Area | First implementation "
+        "ticket` ownership table, which records which ticket first implemented "
+        "an area and asserts nothing about a review having happened"
+    )
+
+# The other two were credited by a register verification cell whose only cited
+# document is ANOTHER ticket's closure: DIFF-001's names the aggregate contract
+# whose own header reads `Status: MIG-006 complete`, and MIG-005A's names the
+# migration package belonging to MIG-007. Each ticket has a document that does
+# name it -- `JENKINS_NATIVE_DIFFERENTIAL_V1.md` and `STATE_TRANSFER_V1.md` --
+# and neither is cited by any board row or threat-model structure, so promoting
+# one here would be this gate inventing an attribution rather than reading one.
+for _ticket in ("DIFF-001", "MIG-005A"):
+    THREAT_MODEL_DEBT[_ticket] = (
+        "credited before HYG-002 by a register verification cell whose only "
+        "cited document is another ticket's closure evidence, so no row asserts "
+        "that this ticket's own evidence verified the threat"
+    )
+
 THREAT_MODEL_DEBT["WIN-003"] = (
     "2026-08-04 d854c97; named only in prose at docs/threat-model/README.md, "
     "with no ownership-table row, register row, or closure-review heading"
@@ -218,11 +255,31 @@ RECEIPT_DEBT_BASELINE = frozenset({
     "EXEC-003", "EXEC-004", "HYG-001", "MIG-006", "MIG-007",
     "OUTBOX-001", "SHADOW-001"
 })
+# WIDENED ONCE, DELIBERATELY, BY HYG-002 -- and this paragraph is the argument
+# the ledger's own comment demands before an entry is permitted.
+#
+# The nineteen names below the blank line did not acquire a gap when HYG-002
+# landed; HYG-002 stopped hiding one they already had. Seventeen were credited
+# by a table that records which ticket first implemented an area, and two by a
+# register cell citing another ticket's closure document. Nothing in the threat
+# model asserted a review for any of them, before or after.
+#
+# This is the second time this ledger has widened for this reason -- the
+# MIG-002/006/007 block did the same when register attribution was narrowed to
+# the verification column -- and both times the number got worse because the
+# measurement got honest. A ratchet that could never widen would have forced
+# the opposite choice: keep reading the ownership table as an attestation, and
+# keep the count at 31.
 THREAT_MODEL_DEBT_BASELINE = frozenset({
     "CACHE-001", "CANARY-000", "CI-001",
     "EXEC-001", "EXEC-002", "EXEC-003", "EXEC-004", "HYG-001",
     "MIG-001", "MIG-003", "MIG-004", "MIG-005", "OUTBOX-001", "SCM-001",
-    "MIG-002", "MIG-006", "MIG-007", "SECRET-001", "WIN-003"
+    "MIG-002", "MIG-006", "MIG-007", "SECRET-001", "WIN-003",
+
+    "AGENT-001", "AGENT-002", "AGENT-003", "ARCH-001", "CTRL-001",
+    "DIFF-001", "INV-001", "INV-002", "INV-003", "INV-004", "IR-001",
+    "MIG-000", "MIG-005A", "OPS-001", "OPS-002", "SEC-002", "SEC-003",
+    "WIN-001", "WIN-002",
 })
 
 # The board's 15 tables in 4 row formats. Only the nine whose first header
@@ -565,142 +622,104 @@ def receipt_defects(path: Path, ticket: str) -> list[str]:
     return defects
 
 
-# A veto, not a test. The affirmative structures below decide what counts;
-# this only takes credit away, so it can never make the gate more permissive.
-# It exists because three successive tightenings each got past by the same
-# sentence wearing a different structure -- prose, then a heading, then a
-# heading the ticket led, then a verification cell. Denial is a property of
-# the words, and at some point the words have to be read.
-# Scoped to phrases that negate the REVIEW, not to any negative word. A blanket
-# word list vetoed ordinary test vocabulary -- this column is full of
-# "no-overwrite", "missing-field", "non-broadening", "absent-path" -- so a
-# genuine review could have been refused for describing its own negative
-# cases, which is a gate failing closed on correct work.
-NEGATION = re.compile(
-    r"\b(?:not|never|no|nothing)\b[^.;|]{0,40}\breview"
-    r"|\breview\w*\b[^.;|]{0,40}\b(?:not|never|pending|outstanding|incomplete)\b"
-    r"|\b(?:todo|tbd|unreviewed|outstanding)\b",
-    re.I,
-)
-NEGATION_WINDOW = 70
-
-OWNERSHIP_HEADING = "## Security verification ownership"
-REGISTER_ID = re.compile(r"TM-\d+")
-# `| ID | Scenario | Primary mitigations | Required verification | Owner |
-# Residual risk |`. Only "Required verification" asserts that a ticket's
-# evidence verifies the threat. "Residual risk" names tickets that must STILL
-# happen, which is the opposite claim, and mentions in "Scenario" or "Primary
-# mitigations" are description rather than attribution.
-REGISTER_VERIFICATION_COLUMN = 3
-REGISTER_VERIFICATION_HEADER = "Required verification"
-# The register's complete schema. Matching only "first cell is ID, and
-# `Required verification` appears somewhere" let a two-column tracking table
-# donate an attribution.
-REGISTER_HEADER = [
-    "ID",
-    "Scenario",
-    "Primary mitigations",
-    REGISTER_VERIFICATION_HEADER,
-    "Owner",
-    "Residual risk",
-]
+# THE ATTRIBUTION FIELD, AND WHY IT HOLDS NO SENTENCES.
+#
+# Attribution used to be inferred from English in three structural shapes -- a
+# verification-ownership row, a threat-register verification cell, a
+# closure-review heading the ticket led -- with a negation veto on top. PR #96's
+# review defeated four successive versions of that predicate with the same
+# denial in a new wrapper, and the function's own docstring conceded the rest:
+# a denial phrased without a vetoed word, inside an affirmative structure, would
+# still pass.
+#
+# That argument cannot be won by tightening, because the defect is not in any
+# particular pattern. It is that a field which can hold a sentence can hold a
+# sentence that lies, and no amount of reading decides which. So this field
+# holds no sentences. Two columns, each FULLMATCHED -- a ticket id, and a
+# backticked path under docs/ -- and nothing else fits in either. The old
+# bypass, `AAA-001 review has not happened`, is no longer a denial the gate has
+# to detect; it is simply not a ticket id. There is nothing to veto because
+# there is nowhere to write it. (HYG-002)
+#
+# The prose did not go away and should not: the register above still explains
+# what was reviewed and what residual risk remains. It is no longer LOAD-BEARING,
+# which is the only claim this change makes about it.
+ATTRIBUTION_HEADING = "## Closure attribution"
+ATTRIBUTION_HEADER = ["Ticket", "Evidence"]
+# Anchored with fullmatch at both call sites below. A ticket id is the whole
+# cell or the row is refused; `MIG-005A` and `W0-A` are why the shape is spelled
+# out rather than approximated by `[A-Z][A-Z0-9-]+`, which admits both a bare
+# `ABC` and the batch id `W0-A` that is not a ticket at all.
+ATTRIBUTION_TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+[A-Z]?(?:-[A-Z0-9]+)*")
+# The same spelling `DOC_PATH` uses, but fullmatched rather than searched: the
+# cell IS the path, so a cell that merely CONTAINS one is refused.
+ATTRIBUTION_EVIDENCE = re.compile(r"`(docs/[A-Za-z0-9_./-]+)`")
 
 
-def threat_model_attribution(text: str, ticket: str) -> str | None:
-    """Return where the threat model AFFIRMATIVELY attributes a review.
+def closure_attributions(text: str) -> tuple[dict[str, str], list[str]]:
+    """Read the closure-attribution table -> {ticket: evidence path}, defects.
 
-    Three shapes count, and nothing else: a row in the verification-ownership
-    table whose ticket column names it, a row in the threat register, or a
-    closure-review heading the ticket leads.
+    Parsed ONCE per run rather than re-scanned per ticket. The old predicate was
+    called for every DONE ticket and re-read the whole threat model each time;
+    parsing once is what makes the both-ways checks in verify() affordable.
 
-    Two weaker rules were tried and both could be satisfied by a sentence
-    saying the review had not happened. A bare substring search credited
-    `TODO: <TICKET> has not been reviewed yet`. Requiring merely a table row
-    or a heading credited `## TODO: <TICKET> has not been reviewed yet`, which
-    is the same claim in a structure. Accepting any register row credited
-    `| TM-999 | <TICKET> review has not happened | ... |`. Placement is not
-    meaning; what makes an attribution affirmative is that the field exists
-    only to record a review.
-
-    KNOWN LIMITATION, stated because the alternative is pretending otherwise.
-    This reads English prose, and four successive tightenings were each got
-    past by the same denial in a new wrapper. Structure plus a negation veto
-    is a good heuristic and not a decision procedure: a denial phrased without
-    a vetoed word, inside an affirmative structure, would still pass. The
-    durable fix is a machine-readable attribution field in the threat model --
-    one column that holds a ticket id and nothing else -- so the gate reads
-    data instead of parsing sentences. That is a threat-model change, not a
-    gate change, and it is filed as `HYG-002`.
+    NOTHING HERE SKIPS. A row this function cannot read is an error, never a
+    silent omission, because an unreadable attribution row and an absent one
+    look identical to the ticket each was supposed to credit -- which is this
+    repository's signature failure and the reason the gate exists.
     """
-    pattern = names(ticket)
-    heading = re.compile(
-        rf"^#{{2,3}} {re.escape(ticket)}(?![{TICKET_CHARACTER}]).*\breviews?$", re.I
-    )
-
-    lines = text.splitlines()
-    ownership_start: int | None = None
-    ownership_end = len(lines)
-    for number, line in enumerate(lines):
-        if line.startswith(OWNERSHIP_HEADING):
-            ownership_start = number
-        elif ownership_start is not None and number > ownership_start:
-            if line.startswith("## "):
-                ownership_end = number
-                break
-
-    # A `TM-nnn` first cell is not proof of the threat register: any other
-    # table could carry one, and a malformed row shifts the column this branch
-    # indexes. Membership is taken from the table whose header actually is the
-    # register's, so a four-column tracking table cannot donate an attribution.
-    register_rows: dict[int, int] = {}
-    ownership_rows: set[int] = set()
-    for header, rows in tables(text):
-        if header == REGISTER_HEADER:
-            # Take the column from the header rather than assuming its
-            # position. A fixed index survives a column reorder and then reads
-            # the wrong cell, so a mitigation mention would satisfy closure
-            # while the real verification cell said nothing.
-            column = header.index(REGISTER_VERIFICATION_HEADER)
-            for number, _ in rows:
-                register_rows[number] = column
-        elif header[:1] == ["Area"]:
-            ownership_rows.update(number for number, _ in rows)
-
-    def denied(window: str) -> bool:
-        return NEGATION.search(window) is not None
-
-    for number, line in enumerate(lines, start=1):
-        if heading.match(line):
-            if denied(line):
-                continue
-            return f"closure-review heading at line {number}"
-        if not line.startswith("|") or not pattern.search(line):
-            continue
-        row = cells(line)
-        if not row:
-            continue
-        within_ownership = number in ownership_rows and (
-            ownership_start is not None
-            and ownership_start < number - 1 < ownership_end
+    attributions: dict[str, str] = {}
+    errors: list[str] = []
+    matching = [rows for header, rows in tables(text) if header == ATTRIBUTION_HEADER]
+    if not matching:
+        errors.append(
+            f"{THREAT_MODEL} has no closure-attribution table; the gate reads "
+            f"attribution from a table headed `{' | '.join(ATTRIBUTION_HEADER)}` "
+            f"under `{ATTRIBUTION_HEADING}`, and its absence attributes nothing "
+            "rather than everything"
         )
-        if within_ownership and len(row) >= 2 and pattern.search(row[-1]):
-            if denied(row[-1]):
-                continue
-            return f"verification-ownership row at line {number}"
-        if number in register_rows and REGISTER_ID.fullmatch(row[0]):
-            column = register_rows[number]
-            cell = row[column] if len(row) > column else ""
-            found = pattern.search(cell)
-            if found is not None:
-                window = cell[
-                    max(0, found.start() - NEGATION_WINDOW) :
-                    found.end() + NEGATION_WINDOW
-                ]
-                if denied(window):
-                    continue
-                return f"threat-register verification column at line {number}"
+        return attributions, errors
+    if len(matching) > 1:
+        # Two tables with this header is ambiguous, and the ambiguity is
+        # exploitable: a second table appended below could attribute a review
+        # the first never claimed, and whichever the gate read first would win.
+        errors.append(
+            f"{THREAT_MODEL} has {len(matching)} closure-attribution tables; "
+            "exactly one may exist, or which of them attributes a review is "
+            "decided by document order rather than by anyone"
+        )
+        return attributions, errors
+    for number, row in matching[0]:
+        if len(row) != len(ATTRIBUTION_HEADER):
+            errors.append(
+                f"line {number}: the closure-attribution row has {len(row)} "
+                f"cells, not the {len(ATTRIBUTION_HEADER)} the table declares"
+            )
             continue
-    return None
+        ticket, evidence = row[0], row[1]
+        if not ATTRIBUTION_TICKET.fullmatch(ticket):
+            errors.append(
+                f"line {number}: {ticket!r} is not a ticket id. The ticket "
+                "column holds an id and nothing else -- no prose, no "
+                "qualification, and so no denial"
+            )
+            continue
+        match = ATTRIBUTION_EVIDENCE.fullmatch(evidence)
+        if match is None:
+            errors.append(
+                f"line {number}: {ticket}'s evidence cell {evidence!r} is not a "
+                "backticked path under docs/. The evidence column holds a path "
+                "and nothing else"
+            )
+            continue
+        if ticket in attributions:
+            errors.append(
+                f"line {number}: {ticket} is attributed twice; two rows for one "
+                "ticket means two evidence paths, and nothing decides between them"
+            )
+            continue
+        attributions[ticket] = match.group(1)
+    return attributions, errors
 
 
 def check_ledger(
@@ -796,11 +815,28 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
             continue
         receipted.add(ticket)
 
-    reviewed = {
-        ticket
-        for ticket in done
-        if threat_model_attribution(threat_model, ticket) is not None
-    }
+    attributions, attribution_errors = closure_attributions(threat_model)
+    errors += attribution_errors
+    # BOTH WAYS. The old predicate only ever asked "is this DONE ticket
+    # attributed?", so an attribution could name a path that had been deleted,
+    # or a ticket that was never closed, and nothing noticed. Neither rot is
+    # hypothetical here: `docs/evidence/` already holds a receipt for
+    # `DEPLOY-001`, which reads ACTIVE, and no check in this file sees it.
+    for ticket, evidence in sorted(attributions.items()):
+        if not (repository / evidence).is_file():
+            errors.append(
+                f"{ticket} is attributed to {evidence}, which does not exist; "
+                "an attribution pointing at nothing is worse than none, because "
+                "it reads as evidence"
+            )
+        if statuses.get(ticket) != "DONE":
+            errors.append(
+                f"{ticket} carries a closure attribution but reads "
+                f"{statuses.get(ticket, '<no row>')}, not DONE; closure "
+                "attribution records a review that closed a ticket, so an entry "
+                "for one that is open is either premature or stale"
+            )
+    reviewed = {ticket for ticket in done if ticket in attributions}
 
     errors += check_ledger(
         "receipt",
@@ -837,8 +873,8 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
                 )
         if ticket not in reviewed and ticket not in THREAT_MODEL_EXEMPT:
             message = (
-                f"{ticket} is DONE but {THREAT_MODEL} attributes no review to it "
-                "in a table row or a heading"
+                f"{ticket} is DONE but {THREAT_MODEL} attributes no review to "
+                "it in the closure-attribution table"
             )
             if ticket in THREAT_MODEL_DEBT:
                 debt.append(f"{message} [{THREAT_MODEL_DEBT[ticket]}]")
