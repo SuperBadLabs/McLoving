@@ -131,14 +131,24 @@ if [[ -n "${existing}" ]]; then
   rm -rf "${home_dir}/.local/libexec/mcloving" "${state_probe}/mcloving-agent" \
          "${state_probe}/mcloving-controller" "${home_dir}/.config/mcloving" \
          >/dev/null 2>&1 || true
-  rm -f "${home_dir}"/.config/systemd/user/mcloving-*.service \
-        "${home_dir}"/.config/systemd/user/default.target.wants/mcloving-*.service \
-        "${home_dir}"/.config/containers/systemd/mcloving-* >/dev/null 2>&1 || true
+  # FROM THE MANAGER'S CONFIG BASE, not the invoking shell's. `mcloving-install`
+  # writes units and quadlets under `deployment_effective_config_root`, which
+  # asks the running manager; a hard-coded ~/.config would clean a directory the
+  # installer never wrote to whenever the two disagree, leave the real units in
+  # place, and report a reset that had not happened.
+  reset_config_base="$(deployment_effective_config_root "${home_dir}")"
+  rm -f "${reset_config_base}"/systemd/user/mcloving-*.service \
+        "${reset_config_base}"/systemd/user/default.target.wants/mcloving-*.service \
+        "${reset_config_base}"/containers/systemd/mcloving-* >/dev/null 2>&1 || true
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
 # ---------------------------------------------------------------------------
-config_base="$(deployment_config_root "${home_dir}")"
+# The MANAGER's configuration base, which is what mcloving-install writes units
+# and quadlets under. `deployment_config_root` answers from the invoking shell's
+# environment instead, and the two differ whenever the manager carries its own
+# absolute XDG_CONFIG_HOME -- so cleanup would miss the real units entirely.
+config_base="$(deployment_effective_config_root "${home_dir}")"
 unit_root="${config_base}/systemd/user"
 quadlet_root="${config_base}/containers/systemd"
 libexec_root="${home_dir}/.local/libexec/mcloving"
@@ -161,20 +171,27 @@ teardown() {
   # lost when a stray `rm -rf "${scratch}"` was deleted from the preconditions,
   # where it never belonged; this is where it does.
   rm -rf "${scratch}" >/dev/null 2>&1 || true
-  # THE VOLUME TOO. Removing the container and leaving the volume makes the
-  # NEXT run fail in a way that looks like a lane defect and is not: the
-  # cluster keeps the password baked in at initdb, this arm generates a fresh
-  # one per run, and db-init then fails with "password authentication failed
-  # for user mcloving". Measured, after it happened.
-  podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
   if (( keep == 0 )); then
+    # THE VOLUME TOO, and only here. Removing the container and leaving the
+    # volume makes the NEXT run fail in a way that looks like a lane defect and
+    # is not: the cluster keeps the password baked in at initdb, this arm
+    # generates a fresh one per run, and db-init then fails with "password
+    # authentication failed for user mcloving". Measured, after it happened.
+    #
+    # But it sat OUTSIDE this branch and so ran on --keep too, wiping the
+    # database of a deployment the same teardown then announced it had left in
+    # place. A deployment kept for inspection without its data is not the thing
+    # anyone asked to keep, and the message made it worse by saying otherwise.
+    podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
     rm -rf "${libexec_root}" "${home_dir}/.config/mcloving" \
       "${state_probe}/mcloving-agent" "${state_probe}/mcloving-controller" \
       >/dev/null 2>&1 || true
     rm -f "${unit_root}"/mcloving-*.service "${quadlet_root}"/mcloving-* >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   else
-    echo "   --keep: the deployment under ${home_dir} was left in place"
+    echo "   --keep: the deployment under ${home_dir} is left in place, its"
+    echo "           mcloving-postgres-data volume intact, services stopped."
+    echo "           The next run needs --reset, which will destroy all of it."
   fi
   # Honest about what teardown cannot promise: a container the manager started
   # may outlive a SIGKILL of this script, and saying so beats implying otherwise.

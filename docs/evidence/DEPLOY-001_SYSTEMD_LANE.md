@@ -212,6 +212,30 @@ refuse, not narrate.** Two of the ten were narration — *"identity unasserted"*
 and a probe that judged a half-present deployment absent — and both would have
 produced a green run that proved less than it appeared to.
 
+## Review round 3 — two more, and one of them was a lie
+
+- **`--keep` destroyed the database it said it was keeping.** The volume removal
+  sat outside the `keep` branch, so every `--keep` run wiped
+  `mcloving-postgres-data` and then printed *"the deployment under … was left in
+  place"*. A deployment kept for inspection without its data is not the thing
+  anyone asked to keep, and the message made it worse by saying otherwise. The
+  removal is inside the branch now, and the message says exactly what survives
+  and what the next run will do to it.
+- **Cleanup roots came from the invoking shell's XDG, not the manager's.**
+  `mcloving-install` writes units and quadlets under
+  `deployment_effective_config_root`, which asks the running manager;
+  `deployment_config_root` answers from the caller's environment. Where the two
+  disagree, `--reset` would clean a directory the installer never wrote to,
+  leave the real units in place, and report a reset that had not happened. This
+  is the third instance of the same mistake on this branch, after the contract
+  root and the state root: **when the installer asks the manager, the test must
+  ask the manager too.**
+
+Twelve findings across three rounds, all mine, none disputed. Two shapes account
+for all of them: **narrating instead of refusing** when a claim could not be
+established, and **asking the wrong oracle** — the caller's environment, a
+remembered table, a path's spelling — instead of the one that decides.
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
