@@ -48,3 +48,28 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "deny"
+
+# The hashing crates are optimized in dev/test builds. Everything else --
+# dependencies and our own crates alike -- stays at opt-level 0, so builds stay
+# fast and debuggable.
+#
+# Measured, not assumed. The source-acquirer suite sha256s git's ENTIRE runtime
+# closure on every acquisition, and this workspace had no [profile] section at
+# all, so sha2 ran unoptimized: the suite spent its time in an unoptimized hash.
+# It was 99.6% of the Foundation gate's wall clock (27m17s of 27m24s).
+#
+#   no profile          691.4s
+#   sha2 + sha1 only     45.8s   <- this
+#   ALL deps at opt-2    47.0s
+#
+# The scope is deliberately narrow. Optimizing every dependency bought nothing
+# further -- the whole win is sha2 -- and it made every OTHER CI job rebuild its
+# full dependency graph optimized: measured on a real run, the Deployment lane
+# went 910s -> 1723s, Controller PostgreSQL 165s -> 718s, and the gate's wall
+# clock got WORSE, 27m24s -> 28m43s, even though the targeted suite improved 5x.
+# A two-line change with the right scope beats the same change with a broad one.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.sha1]
+opt-level = 3

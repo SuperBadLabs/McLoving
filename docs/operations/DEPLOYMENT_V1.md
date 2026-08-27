@@ -272,5 +272,56 @@ Named honestly; none of these are hidden behind defaults:
   committed to (by hash) in the digest re-read.
 - **Single organization/project bootstrap.** Additional projects are
   operator actions via `mcloving-identity-admin`, not this lane.
+- **systemd sandboxing directives are NOT available to this lane, and fail
+  OPEN if added.** Measured on systemd 255 under `systemctl --user`: thirteen
+  directives are enforced, **thirteen are accepted and silently ignored while
+  the unit still starts and reports success**, and three fail closed. The silent
+  thirteen fall into FOUR classes with DIFFERENT causes and different
+  remediations -- do not treat them as one:
+
+  *Class 1, nine mount-namespace directives:* `ProtectSystem=`, `ProtectHome=`,
+  `ReadOnlyPaths=`, `InaccessiblePaths=`, `BindReadOnlyPaths=`, `PrivateTmp=`,
+  `ProtectKernelTunables=`, `ProtectControlGroups=`, and `ProtectProc=`.
+
+  *Class 2, one network-namespace directive:* `PrivateNetwork=`. It is NOT a
+  mount-namespace case and must not be remediated as one: `systemd.exec(5)`
+  defines it as creating a new network namespace, and the probe recorded a
+  different journal message -- *"PrivateNetwork=yes is configured, but the
+  kernel does not support or we lack privileges for network namespace,
+  proceeding without"* -- against the mount case's *"Failed to set up
+  namespace"*. A mount-namespace fix would leave this one still failing open.
+
+  *Class 3, one BPF directive:* `IPAddressDeny=`, which this build cannot
+  enforce: note `-BPF_FRAMEWORK` in `systemctl --version`.
+
+  Every one of the nine in class 1 needs a mount namespace: systemd's executor forks
+  `(sd-userns)`, Ubuntu's AppArmor `unprivileged_userns` profile denies it
+  `CAP_SYS_ADMIN`, `unshare(CLONE_NEWNS)` returns `EPERM`, and systemd logs
+  *"Failed to set up namespace, assuming containerized execution and ignoring"*
+  **at debug level only** before starting the unit anyway. Observed:
+  `ProtectHome=tmpfs` left a home fully readable including
+  `.ssh/authorized_keys`, and a `ReadOnlyPaths=` target was overwritten.
+  **`systemd-analyze --user security` is not evidence** — it reported
+  `✓ ProtectSystem=` and `✓ PrivateTmp=` for that same run, because it scores
+  declared configuration rather than achieved state, exactly as
+  `systemd-analyze --user unit-paths` recomputes from the caller's environment
+  instead of reporting the manager's own list. The units shipped here declare
+  only directives that work (`UnsetEnvironment=`, `Environment=PATH=`,
+  `StateDirectoryMode=`, `UMask=`, `NoNewPrivileges=`). **Do not add a
+  filesystem hardening directive to this lane without a runtime proof that it
+  is in effect**; the model is `require_shadow_apparmor_enforcement()` in
+  `crates/external-connector/src/standalone.rs`, which reads
+  `/proc/self/attr/current` and refuses to run unconfined.
+
+  *Class 4, two cgroup directives:* `IOReadBandwidthMax=` and `AllowedCPUs=`.
+  (`IOWriteBandwidthMax=` shares the missing `io` controller and will behave the
+  same way, but it was NOT probed, so it is deliberately outside the measured
+  denominator of thirteen rather than assumed into it.) These fail for an unrelated reason -- the user manager is
+  delegated only the `cpu`, `memory` and `pids` controllers, so `io` and
+  `cpuset` are simply absent. **A user-namespace fix would not make these
+  work**, which is why they are listed apart: the remediation is a root-side
+  change to controller delegation, not an AppArmor or sysctl change. The
+  delegated three do work, so `MemoryMax=`, `TasksMax=` and `CPUQuota=` are
+  real bounds here.
 - **Agent probe is start-time only while the service runs.** Runtime agent
   health is journal-level; the full session probe requires a service stop.

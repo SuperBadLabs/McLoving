@@ -276,6 +276,8 @@ jobs:
           bash -n scripts/verify-boundary-runtime.sh
           python3 scripts/test-execution-board.py
           python3 scripts/verify-execution-board.py
+          python3 scripts/test-ticket-closure-receipts.py
+          python3 scripts/verify-ticket-closure-receipts.py
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15
           test -s docs/architecture/CHARTER.md
           test -s docs/ALPHA_DEMO.md
