@@ -122,6 +122,10 @@ if [[ -n "${existing}" ]]; then
   fi
   echo "   --reset: removing ${existing% }"
   systemctl --user disable --now mcloving-db-init mcloving-controller mcloving-agent >/dev/null 2>&1 || true
+  # The generated unit is not in that list -- it cannot be disabled -- and while
+  # it runs it holds the volume open, so removing the volume underneath it is at
+  # best a race. Stop it by name.
+  systemctl --user stop mcloving-postgres.service >/dev/null 2>&1 || true
   podman rm -f mcloving-postgres >/dev/null 2>&1 || true
   podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
   rm -rf "${home_dir}/.local/libexec/mcloving" "${state_probe}/mcloving-agent" \
@@ -152,6 +156,11 @@ teardown() {
   systemctl --user disable mcloving-agent.service mcloving-controller.service \
     mcloving-db-init.service >/dev/null 2>&1 || true
   podman rm -f mcloving-postgres >/dev/null 2>&1 || true
+  # The scratch tree holds a SECOND full copy of the release -- four large
+  # binaries -- staged for the upgrade, and is removed on every path. It was
+  # lost when a stray `rm -rf "${scratch}"` was deleted from the preconditions,
+  # where it never belonged; this is where it does.
+  rm -rf "${scratch}" >/dev/null 2>&1 || true
   # THE VOLUME TOO. Removing the container and leaving the volume makes the
   # NEXT run fail in a way that looks like a lane defect and is not: the
   # cluster keeps the password baked in at initdb, this arm generates a fresh
@@ -475,7 +484,11 @@ if [[ -x "${gate_controller}" ]]; then
     || fail "the controller the gate will spawn is not byte-identical to the installed one; the gate would be testing a different binary than this deployment runs"
   echo "   the gate's controller is byte-identical to the installed one"
 else
-  echo "   note: could not locate the gate's controller beside ${runtime_gate}; identity unasserted"
+  # NOT A NOTE. Printing "identity unasserted" and carrying on is the shape of
+  # defect this whole ticket is about: the gate would run, report success, and
+  # nobody would know which controller it had exercised. If the identity cannot
+  # be established, the claim cannot be made.
+  fail "cannot locate the controller beside ${runtime_gate}, so the binary the gate spawns cannot be compared with the installed one; pass the test binary where cargo built it"
 fi
 
 # The DATABASE, ROLES and split credentials are this deployment's, read from the

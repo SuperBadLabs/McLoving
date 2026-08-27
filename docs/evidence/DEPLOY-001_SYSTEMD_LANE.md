@@ -188,6 +188,30 @@ The five P2s, each fixed:
   text still said the ticket stays `ACTIVE`, and the prose under the dispatch
   table still had `DEPLOY-001` holding the slot and blocking `DEPLOY-003`.
 
+## Review round 2 — three more, all the same family
+
+- **`--reset` stopped three units and not the fourth.** The generated postgres
+  unit cannot be *disabled*, so it was not in the list — and while it runs it
+  holds the data volume open, making the volume removal underneath it a race at
+  best. Stopped by name now.
+- **An unverifiable gate identity printed a note and carried on.** If
+  `--runtime-gate` named a relocated binary, the controller beside it could not
+  be found, and the arm said *"identity unasserted"* and ran the gate anyway.
+  That is this ticket's own defect in miniature: the gate would report success
+  and nobody would know which controller it exercised. **It is a refusal now**,
+  verified against a deliberately relocated binary.
+- **The scratch tree was never removed.** It holds a second full copy of the
+  release — measured at **596 MB per run** — and the teardown lost its cleanup
+  when a stray `rm -rf "${scratch}"` was deleted from the preconditions, where
+  it never belonged. Restored to the teardown, where it does. Six leaked trees
+  from earlier runs were reclaimed.
+
+Three rounds, ten findings, every one of them mine. The pattern across all ten
+is worth more than the list: **a check that cannot establish its claim must
+refuse, not narrate.** Two of the ten were narration — *"identity unasserted"*,
+and a probe that judged a half-present deployment absent — and both would have
+produced a green run that proved less than it appeared to.
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
