@@ -209,6 +209,23 @@ submits one pipeline through `mcloving-cli`, requires terminal
 byte-determinism, exercises upgrade/rollback symlink discipline, and tears
 everything down.
 
+The teardown covers the interrupted run as well as the finished one. The
+controller and the agent are killed and reaped by the exit trap, and
+`SIGINT`, `SIGTERM`, and `SIGHUP` are converted into an exit so that trap
+is reached -- Ctrl-C leaves nothing behind. `SIGKILL` is the one exception,
+because it cannot be trapped: `kill -9` of the suite strands the controller
+and the agent, still running against a throwaway home the run may already
+have deleted, and leaves its postgres container and volume behind too. The
+services are orphans (parent PID 1) named by their install path, so list
+them and clear them by PID rather than by pattern:
+
+```sh
+ps -eo pid,ppid,args |
+  awk '/mcloving-smoke.*mcloving-(controller|agent)/ && !/awk/ {print}'
+podman ps -a  --format '{{.Names}}' | grep mcloving-smoke
+podman volume ls --format '{{.Name}}' | grep mcloving-smoke
+```
+
 ## Limitations
 
 Named honestly; none of these are hidden behind defaults:

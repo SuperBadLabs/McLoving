@@ -96,6 +96,21 @@ drain_background_pids() {
 
 cleanup() {
   local status=$?
+  # Deaf to further signals from here down. ${status} is captured first,
+  # because `trap` would overwrite $?.
+  #
+  # Teardown is a sequence, and until this line a signal arriving mid-sequence
+  # abandoned the rest of it: a second Ctrl-C landing between the agent's reap
+  # and the controller's kill left the controller running, which is the leak
+  # this whole change exists to close, reintroduced through the very trap that
+  # closes it. The window is only as wide as one `wait` -- ~100ms, since both
+  # services exit on SIGTERM in about that -- but double-tapping Ctrl-C at an
+  # unresponsive-looking run is exactly what an impatient operator does, and
+  # the signal traps above are what made that window reachable at all.
+  #
+  # Ignored rather than reset to default: SIG_IGN cannot terminate the shell,
+  # whereas the default disposition can. SIGKILL still ends this, as ever.
+  trap '' INT TERM HUP
   local preserved
   if [[ -n "${agent_pid}" ]]; then
     kill "${agent_pid}" >/dev/null 2>&1 || true
@@ -146,6 +161,20 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT
+# An EXIT trap alone is not reached when the shell is signalled: bash runs it
+# on a normal or `exit`-ed end, but a SIGINT terminates the script without it,
+# and the services spawned above then outlive the run. Ctrl-C is the ordinary
+# way an operator abandons a run, so that path leaked as reliably as the
+# success path did. Converting each signal into an `exit` funnels it through
+# the one cleanup already written, with the 128+signo status that says which
+# signal ended the run -- and, being non-zero, preserves ${workdir} and its
+# diagnostics exactly as any other abnormal end does.
+#
+# SIGKILL cannot be trapped; a `kill -9` of the suite still strands its
+# services, and no in-process discipline can change that.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # `local` outside a function aborts under `set -e`, and the helpers put their
 # service logic in a top-level `case` block where that is easy to do by
@@ -1608,6 +1637,70 @@ run_with_env() { # ENV_FILE COMMAND...
   )
 }
 
+# spawn_with_env ENV_FILE COMMAND... -- the background-only twin of
+# run_with_env, for the long-lived services. INVOKE ONLY AS A BACKGROUND JOB.
+#
+# `run_with_env ... &` forks twice: once for the job, and again for the
+# function's own `( ... )`. ${!} therefore names the outer bash wrapper, not
+# the service that the inner fork execs. Killing that wrapper -- which is
+# all the EXIT trap could ever do -- left the controller and the agent
+# running, reparented to init, against a ${workdir} the success path had
+# already deleted. Every clean pass leaked a pair.
+#
+# Exec'ing in the job's own fork makes ${!} the service itself, the same
+# single-process discipline the transition-lock holders below rely on.
+#
+# The BASHPID/$$ comparison is the invocation guard: the two differ only
+# inside a subshell, so a foreground call is caught here rather than by
+# `exec` silently replacing the running suite.
+spawn_with_env() { # ENV_FILE COMMAND...
+  local env_file="$1"
+  shift
+  if [[ "${BASHPID}" == "$$" ]]; then
+    echo "spawn_with_env must be invoked as a background job (&): $*" >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${env_file}"
+  set +a
+  exec "$@"
+}
+
+# require_service_pid PID LABEL -- assert ${!} named the service, not a shell.
+#
+# The spawn discipline above is subtle enough to be undone by an edit that
+# reads as a simplification, and the regression is silent in the worst way:
+# the trap still kills what it was told to kill, `wait` still returns, and
+# the run still reports success -- while the service outlives it, reparented
+# to init, against a ${workdir} the success path then deletes. That is how a
+# pair leaked from every clean pass for two days without one run going red.
+# An unasserted invariant is indistinguishable from a broken one, so assert
+# it: a wrapper reports `bash` here, the service reports its own name.
+#
+# The poll covers the window between the fork and its `exec`, which is one
+# sourced environment file wide; a service that dies inside that window is
+# reported as the failure it is rather than as a wrapper.
+require_service_pid() { # PID LABEL
+  local pid="$1" label="$2" comm=""
+  for _ in $(seq 1 100); do
+    comm="$(cat "/proc/${pid}/comm" 2>/dev/null || true)"
+    [[ "${comm}" == mcloving-* ]] && return 0
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    echo "${label} pid ${pid} is '${comm}', not the service itself: the spawn" \
+      "is wrapping it in a shell, so the exit trap would kill the wrapper and" \
+      "leak the service to init. Spawn it with spawn_with_env, not" \
+      "run_with_env." >&2
+  else
+    echo "${label} pid ${pid} exited immediately; its log:" >&2
+    cat "${workdir}/logs/${label}.log" >&2 || true
+  fi
+  exit 1
+}
+
 derived_argv() { # OUT_ARRAY_NAME JSON_FILE JQ_PATH
   # shellcheck disable=SC2034 # assigned through the nameref
   local -n out_ref="$1"
@@ -1858,9 +1951,10 @@ derived_argv controller_pre "${workdir}/controller.derived.json" '.exec_start_pr
 run_with_env "${controller_env}" "${controller_pre[@]}"
 controller_argv=()
 derived_argv controller_argv "${workdir}/controller.derived.json" '.exec_start'
-run_with_env "${controller_env}" "${controller_argv[@]}" \
+spawn_with_env "${controller_env}" "${controller_argv[@]}" \
   > "${workdir}/logs/controller.log" 2>&1 &
 controller_pid=$!
+require_service_pid "${controller_pid}" controller
 controller_post=()
 derived_argv controller_post "${workdir}/controller.derived.json" '.exec_start_post[0]'
 run_with_env "${controller_env}" "${controller_post[@]}"
@@ -1876,9 +1970,10 @@ derived_argv agent_probe "${workdir}/agent.derived.json" '.exec_start_pre[1]'
 run_with_env "${agent_env}" "${agent_probe[@]}" | tee "${workdir}/logs/agent-probe.log"
 agent_argv=()
 derived_argv agent_argv "${workdir}/agent.derived.json" '.exec_start'
-run_with_env "${agent_env}" "${agent_argv[@]}" \
+spawn_with_env "${agent_env}" "${agent_argv[@]}" \
   > "${workdir}/logs/agent.log" 2>&1 &
 agent_pid=$!
+require_service_pid "${agent_pid}" agent
 
 echo "== [7/9] submit one build through the CLI and require terminal success"
 marker="deployment-smoke-ran-${suffix}"
