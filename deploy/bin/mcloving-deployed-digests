@@ -11,7 +11,13 @@
 #   ancestors         mode and owner of every directory on the lexical AND
 #                     physical chain down to each walked tree; a relaxed or
 #                     re-owned ancestor lets another local user rename a
-#                     protected subtree aside wholesale
+#                     protected subtree aside wholesale. The chain reaches
+#                     "/", so it crosses directories the whole machine writes
+#                     to: a node this lane merely TRAVERSES carries mode and
+#                     ownership only, because its listing, size and timestamps
+#                     answer to every unrelated process on the host and a
+#                     document that moved with them could not be re-read
+#                     twice for the same bytes (DEPLOY-004)
 #   releases/*        sha256 + size of every staged binary set (all records
 #                     carry mode, uid, and gid)
 #   current/previous  active and rollback release symlink targets
@@ -70,7 +76,7 @@ acquire_transition_lock_shared "${home_dir}/.local/libexec/mcloving"
 xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
 unit_root="${xdg_config_base}/systemd/user"
 quadlet_root="${xdg_config_base}/containers/systemd"
-ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
+ancestor_chain="$(deployment_ancestor_chain "${home_dir}" \
   "${home_dir}/.local/libexec/mcloving/releases" \
   "${home_dir}/.local/libexec/mcloving/helpers" \
   "${unit_root}" \
@@ -80,7 +86,18 @@ ancestor_dirs="$(deployment_ancestor_chain "${home_dir}" \
   echo "mcloving-deployed-digests: cannot derive the deployment ancestor chain" >&2
   exit 1
 }
-export MCLOVING_ANCESTOR_DIRS="${ancestor_dirs}"
+# CLASSIFIED RECORDS, HANDED ACROSS UNPARSED (DEPLOY-004). The chain no
+# longer carries bare paths: each line is `guarded <b64>`, `traversal <b64>
+# <b64child,...>`, or `link <b64>`, and the payload's own parser splits them
+# into the set the document records and the subset it may only assert stable
+# facts about. Splitting here instead would put the same parser in two
+# languages -- and collect_chain below re-derives chains at walk time, where
+# only the payload can reach them, so the shell's copy could never be the
+# single one. The variable keeps its name because that name IS the wire
+# contract: the deployed-digests gates drive the payload directly with a
+# chain they derived themselves, and a rename would leave them feeding an
+# unread variable while the document silently lost every ancestor.
+export MCLOVING_ANCESTOR_DIRS="${ancestor_chain}"
 # Nested symlinks are discovered only while walking, so their target chains
 # are derived at that point -- through the same shared library function,
 # which the document builder invokes by path.
@@ -305,7 +322,36 @@ MAX_RECORD_ATTEMPTS = 3
 LISTING_UNSTABLE: set = set()
 
 
-def file_record(path: Path, root: Path) -> dict:
+def file_record(path: Path, root: Path, stable_only: bool = False) -> dict:
+    # ``stable_only`` marks a TRAVERSED ancestor: a directory this lane walks
+    # through and never enumerates (DEPLOY-004). The walk reaches "/", so the
+    # set holds /tmp and / -- directories the whole machine writes to -- and
+    # two mechanisms then break at once, both of them fatal to the
+    # byte-determinism gate and neither of them a fix for the other:
+    #
+    #   the entry-set digest changes whenever ANY unrelated process creates or
+    #   removes a file in /tmp, so two invocations seconds apart disagree;
+    #
+    #   the pathname re-check below compares size, mtime, and ctime, and all
+    #   three of a DIRECTORY's move for exactly the same unrelated writes. With
+    #   no backoff, sustained churn burns every one of MAX_RECORD_ATTEMPTS and
+    #   the record degrades to "unstable_entry" -- which fails the gate just as
+    #   loudly as a disagreeing hash, and is how the previous attempt at this
+    #   passed a single-mechanism fix off as done.
+    #
+    # So a stable-only record asserts only what the lane actually claims about
+    # a directory it walks through -- mode and ownership, the two facts that
+    # decide whether a third party can rename the subtree aside -- and the
+    # re-check drops the volatile triple. Identity (st_dev, st_ino) and the
+    # symlink target stay: those are substitution signals, not churn.
+    #
+    # The flag is a PARAMETER because classification comes from the chain and
+    # from nothing else. Deriving it from the existing out-of-root test
+    # (relative_to raising ValueError) would be a different question wearing
+    # the same clothes: /etc/systemd/user is outside the home AND is a managed
+    # root whose contents are precisely what this lane guards, so that shortcut
+    # would stop hashing the one external listing that must never move quietly.
+    #
     # Every fact in a record comes from one non-blocking descriptor, and the
     # link target is checked on both sides of the read.
     #
@@ -342,6 +388,35 @@ def file_record(path: Path, root: Path) -> dict:
             status.st_ino,
             status.st_size,
             status.st_mode,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+
+    def rechecked(status: os.stat_result) -> tuple:
+        # What the closing pathname re-check compares: the facts the record
+        # actually asserts, and nothing that moves on its own.
+        asserted = (
+            stat.S_IMODE(status.st_mode),
+            status.st_uid,
+            status.st_gid,
+        )
+        if stable_only:
+            # A traversed ancestor stops here. A directory's size, mtime, and
+            # ctime all move when any unrelated process creates or unlinks an
+            # entry inside it, and a stable-only record asserts none of the
+            # three -- so keeping them in the decision would spend every
+            # attempt on somebody else's write and collapse the record to
+            # "unstable_entry", reporting instability about a claim the
+            # document never made (DEPLOY-004).
+            return asserted
+        # Content metadata too: a write landing after the post-read fstat
+        # leaves device, inode, mode, and owner untouched while the pathname
+        # already holds different bytes -- returning the old digest beside them
+        # would hand a cutover re-read a record that describes nothing on disk.
+        # Size and both timestamps against the recorded snapshot; retry
+        # re-reads the new bytes.
+        return asserted + (
+            status.st_size,
             status.st_mtime_ns,
             status.st_ctime_ns,
         )
@@ -405,7 +480,7 @@ def file_record(path: Path, root: Path) -> dict:
                     "uid": status.st_uid,
                     "gid": status.st_gid,
                 }
-                if stat.S_ISDIR(status.st_mode):
+                if stat.S_ISDIR(status.st_mode) and not stable_only:
                     # The entry-set digest gives a directory record listing
                     # identity of its own: an entry added or renamed changes
                     # this hash even when every surviving child record is
@@ -413,6 +488,13 @@ def file_record(path: Path, root: Path) -> dict:
                     # that moved. Read through the already-classified
                     # descriptor; the final pathname re-check (mtime/ctime)
                     # retries the record if the listing changes under it.
+                    #
+                    # Withheld for a traversed ancestor: this lane never
+                    # enumerates /tmp, so hashing its listing would commit the
+                    # document to a fact it does not assert and cannot hold
+                    # still -- drift reported for every unrelated process on
+                    # the machine, and no drift reported that the mode and
+                    # owner above do not already carry.
                     try:
                         listing = sorted(os.listdir(descriptor))
                     except OSError:
@@ -473,27 +555,9 @@ def file_record(path: Path, root: Path) -> dict:
         # all; regular files only compared their own two fstats. Revalidate
         # the identity-relevant metadata against what the pathname resolves
         # to NOW, and retry on change like every other instability here.
-        if (
-            stat.S_IMODE(current.st_mode),
-            current.st_uid,
-            current.st_gid,
-            # Content metadata too: a write landing after the post-read
-            # fstat leaves device, inode, mode, and owner untouched while
-            # the pathname already holds different bytes -- returning the
-            # old digest beside them would hand a cutover re-read a record
-            # that describes nothing on disk. Size and both timestamps
-            # against the recorded snapshot; retry re-reads the new bytes.
-            current.st_size,
-            current.st_mtime_ns,
-            current.st_ctime_ns,
-        ) != (
-            stat.S_IMODE(recorded.st_mode),
-            recorded.st_uid,
-            recorded.st_gid,
-            recorded.st_size,
-            recorded.st_mtime_ns,
-            recorded.st_ctime_ns,
-        ):
+        # `rechecked` decides which metadata that is, because a traversed
+        # ancestor asserts strictly less than a file does.
+        if rechecked(current) != rechecked(recorded):
             continue
         after = link_target()
         if after == before:
@@ -686,8 +750,79 @@ system_dropin_entries = [
 # document to one bad in-tree link would deny CUTOVER-001 its re-read
 # precisely while drift is present. Root ancestors keep their named,
 # fail-closed refusal: nothing behind a broken root chain is recordable.
-chain_directories = set(decode_path_items(ancestors_supplied))
+chain_directories: set = set()
+# The strict ancestors this lane only walks THROUGH, which since the walk
+# reaches "/" include shared directories -- /tmp, / itself -- whose contents
+# belong to the whole machine (DEPLOY-004). Held apart because the document
+# may assert far less about them; see file_record's stable_only.
+traversed_ancestors: set = set()
+# Guarded wins over traversal wherever a path is BOTH, and it is: one
+# derivation's strict ancestor is another's anchor -- /etc/systemd/user is a
+# managed root in the main chain and a mere parent in the chain derived for a
+# drop-in file beneath it. Recording the union without this precedence would
+# make the document's fidelity depend on which chain happened to arrive last.
+guarded_directories: set = set()
 unresolvable_links = []
+
+
+def absorb_chain(text: str) -> None:
+    """Split one classified chain into what the document records.
+
+    Three record kinds arrive from deployment_ancestor_chain, and only two
+    of them are directory nodes:
+
+      guarded   <path>            enumerate its contents; assert everything.
+      traversal <path> <child,..> walked through only; stable facts only.
+      link      <path>            NOT a directory. The library judges a
+                                  symlink component's own inode by ownership,
+                                  which is the only question its mode can
+                                  answer; there is no directory record to
+                                  make for it, and following it here would
+                                  record the target twice under a name the
+                                  walk already reached physically.
+
+    The children column is the sticky exemption's evidence and is consumed
+    by the installer's refusal walk alone -- this document judges no mode, so
+    it drops the column rather than record entries it never looked at.
+    """
+    guarded_tokens = []
+    traversal_tokens = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        fields = line.split(" ")
+        kind = fields[0]
+        if kind == "guarded":
+            guarded_tokens.append(fields[1])
+        elif kind == "traversal":
+            traversal_tokens.append(fields[1])
+        elif kind == "link":
+            continue
+        else:
+            # NOT a silent skip. A kind this document does not know is a
+            # library that grew a class of node while its consumer went on
+            # recording the old ones -- coverage lost with nothing to show for
+            # it, which is the failure this project is named for. Refuse, and
+            # make whoever adds the kind decide what the inventory owes it.
+            raise SystemExit(
+                f"deployed-digests: unknown ancestor-chain record kind {kind!r}; "
+                "the chain grew a node class this inventory does not record"
+            )
+    # Decoded through the one shared base64 helper, in a batch per kind: the
+    # transport is the same one-item-per-line convention everywhere else in
+    # this document, so a path carrying arbitrary bytes survives it here too.
+    guarded_paths = decode_path_items("\n".join(guarded_tokens))
+    traversal_paths = decode_path_items("\n".join(traversal_tokens))
+    chain_directories.update(guarded_paths)
+    chain_directories.update(traversal_paths)
+    guarded_directories.update(guarded_paths)
+    traversed_ancestors.difference_update(guarded_paths)
+    traversed_ancestors.update(
+        path for path in traversal_paths if path not in guarded_directories
+    )
+
+
+absorb_chain(ancestors_supplied)
 
 
 def collect_chain(path: Path) -> bool:
@@ -704,7 +839,7 @@ def collect_chain(path: Path) -> bool:
     )
     if derived.returncode != 0:
         return False
-    chain_directories.update(decode_path_items(derived.stdout))
+    absorb_chain(derived.stdout)
     return True
 
 
@@ -834,7 +969,13 @@ document = {
         for variable_name, relative_value in relative_configured
     ],
     "ancestors": [
-        file_record(Path(path), home)
+        # Classification comes from the chain and only from the chain: a node
+        # this lane merely walks through is recorded in stable-facts-only mode,
+        # everything at or below the home or a managed root is recorded whole.
+        # Judging it here by any local property of the path -- whether it sits
+        # inside the home, say -- would put /etc/systemd/user on the wrong side
+        # (DEPLOY-004).
+        file_record(Path(path), home, stable_only=path in traversed_ancestors)
         for path in sorted(chain_directories)
     ]
     + [
