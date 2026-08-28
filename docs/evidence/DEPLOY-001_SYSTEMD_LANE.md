@@ -353,11 +353,61 @@ The second case also confirms the ordering that matters: the refusal fires while
 `database_possibly_weakened` is still `1`, so teardown destroys a volume whose
 row-level security may be off rather than preserving it.
 
-**What was not re-run:** the full ten-step lane. The transcript in this document
-was produced by the previous revision of step 10; this change only adds
-assertions after the point that transcript reached, and the block was exercised
-directly as above. Saying which evidence is fresh and which is inherited is the
-same discipline the rest of this document is about.
+**And then the full lane WAS re-run, against the script as shipped.** An earlier
+revision of this paragraph said the ten-step run had not been repeated and that
+the transcript above was inherited. That is no longer true and the caveat is
+removed rather than left standing: the complete arm was run again as the
+`mcloving` account after every change on this branch, exit `0`, and step 10
+printed
+
+```
+   deployable-runtime gate passed against the installed deployment's database and roles (2 tests executed)
+```
+
+— the new count assertion firing on the passing path, not only against stubs.
+The release digests came out `932de69ff63e -> a1eeefbc0b19 -> 932de69ff63e`,
+identical to the transcript above, which is the check that the binaries under
+test are the ones this document already cites rather than a fresh build that
+happens to work.
+
+## Reproducing this run
+
+Recorded because it was missing, and its absence is the same defect as the rest
+of this document: a run nobody can repeat is an anecdote. Everything below was
+executed, not reconstructed from memory.
+
+```bash
+# ONE BUILD TREE for both, or step 10 refuses -- it asserts the controller the
+# gate spawns is byte-identical to the installed one, and that assertion has
+# fired for real when a later rebuild moved the tree out of step.
+cargo build -p mcloving-controller -p mcloving-agent -p mcloving-cli
+cargo test --no-run -p mcloving-controller --test deployable_runtime
+
+# mcloving-identity-admin is a BINARY OF THE mcloving-controller PACKAGE, not a
+# crate of its own: `cargo build -p mcloving-identity-admin` fails with
+# "did not match any packages" and, because that aborts the whole invocation,
+# builds none of the other three either. A copy step after it then stages
+# whatever the tree already held.
+rel=/tmp/mcloving-d001-release; rm -rf "$rel"; mkdir -p "$rel"; chmod 0755 "$rel"
+for b in mcloving-agent mcloving-cli mcloving-controller mcloving-identity-admin; do
+  cp "target/debug/$b" "$rel/$b"
+done
+( cd "$rel" && sha256sum mcloving-* > checksums.sha256 )
+
+# AS the account, with a real user manager. `sudo -u` alone does not set HOME,
+# and the arm refuses when HOME disagrees with the passwd home.
+sudo -u mcloving env HOME=/home/mcloving XDG_RUNTIME_DIR=/run/user/1001 \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  bash deploy/test-deployment-systemd.sh \
+    --release-dir "$rel" --checksums "$rel/checksums.sha256" \
+    --runtime-gate target/debug/deps/deployable_runtime-<hash>
+```
+
+The staged release must be readable and traversable by `mcloving`; `/tmp` at
+0755 works and a path under a private home does not. Teardown leaves
+`~/.local/share/containers` — podman's image cache, ~284MB — on purpose, so a
+re-run does not re-pull postgres.
 
 ## Round 9 — self-found: the widened default-deny rule was unratcheted
 
