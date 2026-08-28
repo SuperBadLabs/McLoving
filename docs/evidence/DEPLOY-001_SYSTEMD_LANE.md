@@ -27,7 +27,10 @@ home **without `--no-systemd`** and lets the manager do its job:
 | `mcloving-health --unit` through the manager | ~3% of gates reach a real manager query; the write path, none |
 | service-managed upgrade **and** rollback | nothing — both scripts `exit 0` before reaching it |
 
-Measured result, on this host, as the dedicated `mcloving` account:
+Measured result, on this host, as the dedicated `mcloving` account. This is the
+single ten-step run that also exercised the deployable-runtime gate — an earlier
+revision's run (`ddd1f7bae2da -> ee80521177e7`) proved the lane before the gate
+was wired, and citing it here would have quoted the weaker of the two:
 
 ```
 mcloving-postgres.service   active/running   (generated)
@@ -37,8 +40,9 @@ mcloving-db-init.service    active/exited
 StateDirectory= created /home/mcloving/.local/state/mcloving-agent/workspace at 700, unaided
 controller and agent held steady across the sampling window
 mcloving-health[controller]: public API answers on 127.0.0.1:8080
-upgrade:  releases/ddd1f7bae2da -> releases/ee80521177e7   (both services active)
-rollback: releases/ee80521177e7 -> releases/ddd1f7bae2da   (both services active)
+upgrade:  releases/932de69ff63e -> releases/a1eeefbc0b19   (both services active)
+rollback: releases/a1eeefbc0b19 -> releases/932de69ff63e   (both services active)
+deployable-runtime gate passed against the installed deployment (2 tests executed)
 ```
 
 ## Two shipped defects, both only findable by running systemd
