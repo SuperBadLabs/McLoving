@@ -359,11 +359,58 @@ assertions after the point that transcript reached, and the block was exercised
 directly as above. Saying which evidence is fresh and which is inherited is the
 same discipline the rest of this document is about.
 
-Seventeen findings across eight rounds (7, 3, 2, 1, 1, 1, 1, 1). The eighth is
-the first I found rather than received, and it is the same class as the first
-seven — narrating instead of refusing — which is the argument for merging rather
-than continuing to circle: the class is understood and the remaining instances
-are being found faster than they are being introduced.
+## Round 9 — self-found: the widened default-deny rule was unratcheted
+
+Also unraised by any reviewer, and the more serious of the two. Admitting
+`PODMAN_SYSTEMD_UNIT=%n` **widens a default-deny allowlist** — the rule whose own
+message explains that an unenumerated loader hook executes code as the service
+account before the program's first instruction. The allowance is written
+correctly, pinned to the specifier by VALUE so it cannot designate another unit.
+
+**Nothing tested that narrowness.** Relaxing it to `${entry%%=*} != PODMAN_SYSTEMD_UNIT`
+would have broken no test. The sibling `PATH` pin — the same rule, the same
+by-value reasoning — carries about 130 lines of gating in
+`deploy/test-deployment.sh`, so this was a gap against the repository's own
+established practice, in my own diff.
+
+Gate `(5)` now pins it, and is proved both ways rather than asserted:
+
+| library under test | gate |
+| --- | --- |
+| as shipped | passes: `%n` accepted; `mcloving-postgres.service`, `attacker.service`, `/srv/writable` and the empty value each refused **by name** |
+| pin relaxed to a name match | **red** — "ACCEPTED `PODMAN_SYSTEMD_UNIT=mcloving-postgres.service`, so the allowance is matching the variable name rather than the `%n` specifier" |
+| allowance deleted | **red** — the accept case fails, which is the Quadlet lane becoming unupgradable again |
+
+The third row is also built into the gate itself, so the accept case cannot
+silently stop testing the allowance.
+
+**One mutation proved nothing, and is recorded rather than quietly fixed.** The
+first attempt at the name-match mutant used `sed 's|…||…|'` on a pattern
+containing `||` — the delimiter appeared inside the expression, sed failed, the
+"mutant" was an empty file, and the gate went red with
+`require_unit_environment_allowed: command not found`. **Red for the wrong reason
+is not a passing mutation test.** A `cmp` guard that only asked whether the file
+had changed accepted it. The mutant is now built in Python with the pin matched
+exactly once, the line count held constant, and the function's presence asserted
+in the output. This is the second time in two tickets that a mutation harness
+mutated something other than what it claimed.
+
+Eighteen findings across nine rounds (7, 3, 2, 1, 1, 1, 1, 1, 1) — sixteen
+received, and the last two found by looking rather than by being told.
+
+**On the correction-round cap, honestly.** Nine rounds is past the point where
+this repository's own rule says to merge what is sound and open a design ticket,
+and the rate has been flat at one for five rounds rather than declining. Two
+things argue for finishing here instead. The findings stopped being about the
+lane after round 3 — rounds 4 through 9 are documentation, teardown hygiene and
+test ratchets around a core that has not changed since the first review. And the
+last two are of *different* classes from the first sixteen: round 8 is a vacuous
+success, round 9 an unratcheted security widening. That is what a search
+broadening looks like once the original class is exhausted, not a tar pit.
+
+What would change the reading is a round 10 that finds the LANE wrong — the
+units, the ordering, the upgrade path. That would say the core was never
+understood, and it is the thing to watch for rather than the round count.
 
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every

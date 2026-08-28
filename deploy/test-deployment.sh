@@ -6216,6 +6216,72 @@ grep -q "set variable(s) this deployment does not recognise: PATH" \
   exit 1
 }
 rm -f "${reset_dropin_dir}/path.conf"
+# (5) THE QUADLET ALLOWANCE IS PINNED TO THE SPECIFIER, and this gate is what
+# keeps it pinned. `PODMAN_SYSTEMD_UNIT=%n` had to be admitted -- podman stamps
+# it on every generated unit, and without it `mcloving-upgrade` could not
+# upgrade the Quadlet lane at all -- but admitting the NAME would let any
+# drop-in name any unit. `%n` is systemd's "this unit's own name", expanded at
+# load time, so the pinned value cannot designate another unit however the file
+# is edited. Nothing tested that narrowness when the allowance landed: relaxing
+# it to `${entry%%=*} != PODMAN_SYSTEMD_UNIT` would have broken no test, which
+# is the same unratcheted-widening shape the closure gates exist to refuse.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  quadlet_env="${workdir}/quadlet-env"
+  rm -rf "${quadlet_env}"; mkdir -p "${quadlet_env}"
+
+  printf '[Service]\nEnvironment=PODMAN_SYSTEMD_UNIT=%%n\n' \
+    > "${quadlet_env}/accepted.service"
+  # NESTED SUBSHELL, because deploy_fail EXITS rather than returning: called
+  # directly, its exit would tear down this gate instead of being caught.
+  ( require_unit_environment_allowed "${quadlet_env}/accepted.service" ) \
+    > "${quadlet_env}/accepted.log" 2>&1 || {
+    echo "the rule refused Environment=PODMAN_SYSTEMD_UNIT=%n, which podman stamps on every generated unit; the Quadlet lane cannot be upgraded with this refusal in place:" >&2
+    cat "${quadlet_env}/accepted.log" >&2
+    exit 1
+  }
+
+  # Every other value falls through to default-deny, INCLUDING an expanded unit
+  # name -- which is the spelling a first attempt at this allowance matched, and
+  # which could never have fired because the unit file holds `%n` and only the
+  # manager ever sees the expansion.
+  for rejected_value in "mcloving-postgres.service" "attacker.service" "/srv/writable" ""; do
+    printf '[Service]\nEnvironment=PODMAN_SYSTEMD_UNIT=%s\n' "${rejected_value}" \
+      > "${quadlet_env}/rejected.service"
+    if ( require_unit_environment_allowed "${quadlet_env}/rejected.service" ) \
+      > "${quadlet_env}/rejected.log" 2>&1; then
+      echo "the rule ACCEPTED Environment=PODMAN_SYSTEMD_UNIT=${rejected_value}, so the allowance is matching the variable name rather than the %n specifier" >&2
+      exit 1
+    fi
+    grep -q "set variable(s) this deployment does not recognise: PODMAN_SYSTEMD_UNIT" \
+      "${quadlet_env}/rejected.log" || {
+      echo "PODMAN_SYSTEMD_UNIT=${rejected_value} was refused, but not BY NAME:" >&2
+      cat "${quadlet_env}/rejected.log" >&2
+      exit 1
+    }
+  done
+
+  # AND THE ACCEPT CASE MUST BE SENSITIVE TO THE ALLOWANCE EXISTING, or it
+  # proves nothing: without this, a gate that accepts `%n` would keep passing
+  # if the allowance were deleted and some later rule admitted it by accident.
+  # The library is copied and the one line removed, exactly as the PATH gate
+  # reconstructs its pre-fix helper rather than fetching it out of git.
+  unpinned_lib="${quadlet_env}/lib-without-allowance.sh"
+  grep -v '^      \[\[ "\${entry}" != "PODMAN_SYSTEMD_UNIT=%n" \]\] || continue$' \
+    "${repo_root}/deploy/bin/mcloving-deploy-lib.sh" > "${unpinned_lib}"
+  [[ "$(wc -l < "${unpinned_lib}")" -eq "$(( $(wc -l < "${repo_root}/deploy/bin/mcloving-deploy-lib.sh") - 1 ))" ]] || {
+    echo "the allowance-removal reconstruction did not remove exactly one line; this gate's sensitivity proof is not proving anything" >&2
+    exit 1
+  }
+  if ( source "${unpinned_lib}"
+       require_unit_environment_allowed "${quadlet_env}/accepted.service" ) \
+     > "${quadlet_env}/sensitivity.log" 2>&1; then
+    echo "the accept case still passed with the %n allowance removed from the library, so it does not test the allowance" >&2
+    exit 1
+  fi
+  rm -rf "${quadlet_env}"
+)
 # THE PARSE FAILURE IS A VERDICT, which is the other half of the same
 # escalation. A contract of valid assignments, then a line without "=", then
 # PATH=/srv/writable: systemd complains about the bad line and loads the
