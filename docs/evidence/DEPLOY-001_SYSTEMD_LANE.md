@@ -333,9 +333,27 @@ replacement's own success condition is the next thing to distrust.
 
 Step 10 now counts what executed and refuses `< 2`. `>= 2` rather than matching
 the two test names: a rename still proves two behaviours, while a deletion, an
-un-ignored test or a bad filter drops the count and is refused. Perturbed both
-ways before being believed — `0 passed` and `1 passed` refuse, `2 passed`
-accepts.
+un-ignored test or a bad filter drops the count and is refused.
+
+Perturbed before being believed, and against the block as shipped rather than a
+retyping of it — the lines from `database_possibly_weakened=1` to the success
+`echo` were extracted verbatim into a harness and driven three ways:
+
+| gate under test | result |
+| --- | --- |
+| the real binary, filtered to zero tests (exit `0`) | refused by name, exit 1 |
+| a gate that exits `101` | refused as failed, exit 1 |
+| a gate reporting `2 passed` | accepted, flag cleared, `(2 tests executed)` |
+
+The second case also confirms the ordering that matters: the refusal fires while
+`database_possibly_weakened` is still `1`, so teardown destroys a volume whose
+row-level security may be off rather than preserving it.
+
+**What was not re-run:** the full ten-step lane. The transcript in this document
+was produced by the previous revision of step 10; this change only adds
+assertions after the point that transcript reached, and the block was exercised
+directly as above. Saying which evidence is fresh and which is inherited is the
+same discipline the rest of this document is about.
 
 Seventeen findings across eight rounds (7, 3, 2, 1, 1, 1, 1, 1). The eighth is
 the first I found rather than received, and it is the same class as the first
