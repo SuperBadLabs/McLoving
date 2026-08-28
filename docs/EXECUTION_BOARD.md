@@ -23,9 +23,11 @@ Jenkins authority. `CANARY-000` is complete: exact reviewed head
 protected-main commit `c6a238ae9acdc997d14850d1752cecd54feec8b9`, whose
 Foundation run `32080011592` and Windows run `32080011587` passed. `EXT-002` is
 complete, merged as `03a1f5d` through PR #72; the qualification lane has
-advanced to `CASE-001`, and `DEPLOY-001` holds the active implementation slot:
-its threat-model and evidence receipts now exist, but no gate exercises the
-systemd write path its acceptance names, so it is not closed.
+advanced to `CASE-001`, and `DEPLOY-001` **closed on 2026-08-27**: the systemd
+write path its acceptance names is now exercised end to end by
+`deploy/test-deployment-systemd.sh`, and the deployable-runtime gate passes
+against an installed deployment. `DEPLOY-003` holds the active implementation
+slot.
 `CANARY-001` remains the production ceremony, and any production effect still requires a separate fresh
 one-action owner authorization and every pre-action gate.
 
@@ -1020,32 +1022,29 @@ the lane's trust boundary (`TM-050`,
 `docs/architecture/DEPLOYMENT_TRUST_BOUNDARY_V1.md`) and bounds the surface
 against it. `DEPLOY-001` did not close when it merged: the Working rule
 requiring a threat-model review for every affected boundary was unmet, and no
-evidence receipt existed, so the board correctly held it `ACTIVE`. Both receipts
-now exist -- `TM-050` and
-`docs/evidence/DEPLOY-001_SECURITY_REVIEW.md` -- and it still does not close,
-for a second and independent reason found in the same review: **no gate
-exercises the systemd write path.** Install, upgrade and rollback all pass
-`--no-systemd`, and postgres starts from a quadlet-derived command rather than
-from systemd, so unit generation, enablement, ordering and service-managed
-upgrade/rollback are unproven and the row's clean-host acceptance is unmet. It
-is measured CLOSABLE -- a linger-enabled dedicated account on a stock runner
-installs, enables and starts a real unit and reports `active`, needing no change
-to `require_systemd_home` -- with rootless podman under that account the one
-open item. Reviewing `DEPLOY-001` measured a containment gap on its own
-lane and produced `SEC-005`: the agent spawns every submitted step as its own
-service user with no transition and no sandbox, so a submitted pipeline can
-read the deployment credentials and the agent's mTLS private key. `SEC-005` is
-therefore a dependency of `CANARY-001`, `CUTOVER-001`, and `REL-002`, not an
-unattached parallel lane. The `EXEC-004` premise did not survive review:
-renewal always ran during steps, and the wedge was a shared-agent-identity
-session-epoch war. `PERF-001` is no longer gated on that disproven defect,
-but it is gated on `SEC-005`: containment changes how every workload process
-is launched, so envelopes measured before it would describe an executor that
-no longer exists. `REL-003` is gated on `SEC-005` for the matching reason —
-a ceremony held first would sign a pre-containment agent. The
-current Mario inventory still has zero eligible production canaries, and any
-real one-action effect requires separate fresh owner authorization after
-`CASE-001` and `CANARY-002` are complete.
+evidence receipt existed, so the board correctly held it `ACTIVE`. Those
+receipts were written -- `TM-050` and
+`docs/evidence/DEPLOY-001_SECURITY_REVIEW.md` -- and it still did not close, for
+a second and independent reason found in the same review: **no gate exercised the
+systemd write path.** Install, upgrade and rollback all passed `--no-systemd`,
+and postgres started from a quadlet-derived command rather than from systemd, so
+unit generation, enablement, ordering and service-managed upgrade/rollback were
+unproven and the row's clean-host acceptance was unmet.
+
+**It closed on 2026-08-27.** `deploy/test-deployment-systemd.sh` installs to a
+dedicated lingering service account's passwd home without `--no-systemd` and
+asserts what the manager did: `daemon-reload`, Quadlet generating
+`mcloving-postgres.service`, `Requires=`/`After=` read back from the manager,
+`StateDirectory=` creating the agent workspace unaided, the stability window
+against real units, health through the manager, and a service-managed upgrade
+and rollback. The acceptance's second clause is met too: the deployable-runtime
+gate runs against that installed deployment's database and roles -- after being
+fixed, because it returned success with no assertions when
+`MCLOVING_TEST_DATABASE_URL` was unset. Evidence
+`docs/evidence/DEPLOY-001_SYSTEMD_LANE.md`. Running it found three shipped
+defects: the runbook's own `enable` step failed on a Quadlet-generated unit,
+`mcloving-upgrade` refused `Environment=PODMAN_SYSTEMD_UNIT=%n` and so could not
+upgrade the lane it is written for, and the gate's silent skip above.
 
 | Slot | Current ticket | Status | Dependency-critical successors |
 |---:|---|---|---|

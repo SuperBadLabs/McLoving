@@ -292,6 +292,26 @@ Fifteen findings across six rounds (7, 3, 2, 1, 1, 1). Every one mine, none
 disputed, and the last three are all the same sentence: **a claim you have not
 checked is not a claim, it is a caption.**
 
+## Review round 7 — the same claim in three places, and I fixed one
+
+The row read `DONE` while **two further board sections** still said
+`DEPLOY-001` held the active slot with its systemd acceptance unproven. Round 1
+had raised this and I fixed the one block I was shown; the intro at line 26 and
+the dispatch narrative at 1021 survived.
+
+**The board gate cannot catch it**, and that is the part worth keeping.
+`verify-execution-board.py` reads the *status column*; the contradiction lived in
+prose. A green board gate does not mean the board agrees with itself — the same
+shape as `HYG-002`'s finding that a green closure gate does not mean a row points
+at its evidence.
+
+Both sections now say what happened. The habit that would have caught it the
+first time is the one this repository's own packs list four times and I have now
+demonstrated twice in one shift: **after fixing a claim, grep for the claim, not
+for the line you edited.**
+
+Sixteen findings across seven rounds (7, 3, 2, 1, 1, 1, 1).
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
