@@ -3634,6 +3634,24 @@ require_unit_environment_allowed() {
       # the attack -- so the pinned spelling is what passes here and every
       # other PATH falls through to the default-deny refusal below.
       [[ "${entry}" != "PATH=${MCLOVING_TRUSTED_PATH}" ]] || continue
+      # QUADLET'S OWN BOOKKEEPING, matched by VALUE for the same reason PATH is.
+      # podman stamps `Environment=PODMAN_SYSTEMD_UNIT=%n` onto every unit its
+      # generator produces, so this rule refused the generated postgres unit and
+      # `mcloving-upgrade` could not upgrade the very lane it is written for.
+      # Measured on a real service-managed deployment; the --no-systemd suite
+      # never reads a generated unit and so never saw it.
+      #
+      # THE ALLOWED SPELLING IS THE SPECIFIER, NOT A UNIT NAME. `%n` is
+      # systemd's "this unit's own name", expanded at load time, so the value
+      # cannot designate another unit however the file is edited -- which is a
+      # tighter bound than matching a list of names this deployment knows, and
+      # is why the literal is pinned rather than the variable. A first attempt
+      # here matched the EXPANDED names and could never have fired: the unit
+      # file holds `%n`, and only the manager ever sees the expansion.
+      #
+      # podman reads this to learn which unit owns a container; it is not an
+      # interpreter or loader hook.
+      [[ "${entry}" != "PODMAN_SYSTEMD_UNIT=%n" ]] || continue
       [[ "${entry%%=*}" != MCLOVING_* ]] || continue
       [[ -z "${allowed["${entry%%=*}"]:-}" ]] || continue
       offending+="${entry%%=*} "

@@ -373,7 +373,11 @@ jobs:
       - name: Run contained OIDC protocol and session tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-api --test oidc_flow
       - name: Run shipped-controller credential rollout and rollback tests
-        run: cargo +1.97.1 test --locked -p mcloving-controller --test deployable_runtime
+        # `-- --ignored` because the gate is now #[ignore]d: it used to return
+        # success with no assertions when MCLOVING_TEST_DATABASE_URL was unset,
+        # and DEPLOY-001's acceptance names it, so an acceptance criterion was
+        # satisfiable by not running. Without this flag it would not run here.
+        run: cargo +1.97.1 test --locked -p mcloving-controller --test deployable_runtime -- --ignored
 
   recovery-drill:
     name: Backup and restore

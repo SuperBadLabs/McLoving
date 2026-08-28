@@ -1,0 +1,695 @@
+#!/usr/bin/env bash
+# The service-managed arm of the deployment lane.
+#
+# WHY THIS IS A SEPARATE SCRIPT. `deploy/test-deployment.sh` passes
+# `--no-systemd` at every one of its 184 install, upgrade and rollback sites,
+# and that is not a flag it chooses -- `require_systemd_home` compares `--home`
+# against the passwd database, and the suite installs into `mktemp -d` trees, so
+# the flag is forced. Everything systemd would do is instead re-derived in bash:
+# `mcloving-unit-command` parses the units and the suite runs their `ExecStart`
+# itself. That proves the install, contract, digest and rollback MECHANICS. It
+# proves nothing about the lane the units describe, because systemd never
+# generates, enables, orders or starts anything in any gate.
+#
+# `DEPLOY-001`'s acceptance is "a scripted install on a clean host brings up the
+# controller and agent", for a lane its own row defines as "systemd units or
+# podman quadlets". Closing it on derived-command evidence is the substitution
+# the board's receipt rules exist to prevent, which is why the ticket was
+# reverted to ACTIVE. This arm is the missing half.
+#
+# WHAT IT REQUIRES, AND WHY IT REFUSES RATHER THAN SKIPS. It needs a real
+# service account: its own passwd home, a running `systemd --user` manager,
+# lingering enabled, and working rootless podman. Every one of those is checked
+# below and every failure is a refusal by name. A skip here would be worse than
+# no arm at all -- the deployable-runtime gate this ticket also names returns
+# success when `MCLOVING_TEST_DATABASE_URL` is unset, and a silent skip inside
+# an acceptance criterion is exactly the failure this repository is named for.
+set -euo pipefail
+umask 022
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+release_dir=""
+checksums=""
+keep=0
+reset=0
+# Set while the deployable-runtime gate is running, because that gate
+# deliberately weakens the database and only restores it AFTER its assertion.
+database_possibly_weakened=0
+runtime_gate=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --release-dir) release_dir="$2"; shift 2 ;;
+    --checksums) checksums="$2"; shift 2 ;;
+    --keep) keep=1; shift ;;
+    --reset) reset=1; shift ;;
+    --runtime-gate) runtime_gate="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+fail() { echo "systemd-arm: $1" >&2; exit 1; }
+step() { echo "== $1"; }
+
+# ---------------------------------------------------------------------------
+step "[1/10] preconditions -- every one refuses, none skips"
+
+[[ -n "${release_dir}" && -d "${release_dir}" ]] \
+  || fail "--release-dir must name a staged release directory"
+[[ -n "${checksums}" && -f "${checksums}" ]] \
+  || fail "--checksums must name a sha256sum file for that release"
+# NOT OPTIONAL. DEPLOY-001's acceptance is "brings up the controller and agent
+# AND passes the deployable-runtime gate". Making the gate optional here would
+# leave the arm able to report success on half the sentence -- which is the
+# shape of the very defect the gate itself had.
+[[ -n "${runtime_gate}" && -x "${runtime_gate}" ]] \
+  || fail "--runtime-gate must name the prebuilt deployable-runtime test binary (cargo test --no-run -p mcloving-controller --test deployable_runtime)"
+# ORDERING THAT BIT ONCE: stage the release from the SAME build that produced
+# the gate binary. Building the gate rebuilds the controller in the build tree,
+# so a release staged earlier no longer matches what the gate will spawn -- and
+# step 10 refuses that rather than testing one binary while running another.
+
+account="$(id -un)"
+home_dir="$(getent passwd "$(id -u)" | cut -d: -f6)"
+[[ -n "${home_dir}" ]] || fail "this account has no passwd home; the lane resolves %h there"
+[[ "${HOME}" == "${home_dir}" ]] \
+  || fail "HOME (${HOME}) is not this account's passwd home (${home_dir}); systemd expands %h to the passwd home, so a mismatched HOME would install one tree and manage another"
+
+# The one thing that makes this arm different from the other suite: the install
+# must be able to run WITHOUT --no-systemd, and that is exactly the condition
+# require_systemd_home enforces.
+# shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+require_systemd_home "${home_dir}" 0 \
+  || fail "the deployment home is not this account's passwd home"
+
+[[ "$(loginctl show-user "$(id -u)" --property=Linger 2>/dev/null)" == "Linger=yes" ]] \
+  || fail "lingering is not enabled for ${account}; without it the user manager stops at logout and a service-managed deployment is not what the runbook describes"
+
+systemctl --user show -p UnitPath >/dev/null 2>&1 \
+  || fail "no reachable systemd --user manager for ${account}; this arm exists to exercise the manager and cannot stand in for it"
+
+[[ -x /usr/lib/systemd/user-generators/podman-user-generator ]] \
+  || fail "podman's Quadlet generator is absent; the postgres quadlet cannot become a unit without it"
+
+podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -qx true \
+  || fail "rootless podman is not working for ${account}; the quadlet runs the database as this account"
+
+echo "   account=${account} home=${home_dir} manager=$(systemctl --user is-system-running 2>&1) podman=$(podman --version | awk '{print $3}')"
+
+# THIS SCRIPT IS DESTRUCTIVE AND CANNOT TELL WHOSE DEPLOYMENT IT IS LOOKING AT.
+# Every precondition above passes just as well on a real McLoving service
+# account as on a disposable one -- and the teardown removes the deployment tree
+# and force-removes the `mcloving-postgres-data` volume, which on a production
+# account is somebody's database. So an existing deployment is a REFUSAL, and
+# destroying one is something the caller has to ask for by name.
+#
+# It also has to start from nothing to be meaningful: a surviving data volume
+# carries the password baked in at initdb, and this run generates a fresh one,
+# so db-init would fail for a reason that has nothing to do with the code under
+# test. Measured, after it happened.
+# THE STATE TREE COUNTS AS A DEPLOYMENT. A first cut probed only the libexec
+# root and the volume, so after a failed run had left `StateDirectory=` trees
+# behind, --reset saw "nothing to clean", left them, and step 6's assertion that
+# systemd creates the workspace then failed on a directory from the run before.
+# What makes a deployment present is any of its parts, not the tidiest one.
+state_probe="$(deployment_effective_state_root "${home_dir}")"
+config_probe="$(deployment_effective_config_root "${home_dir}")"
+existing=""
+[[ ! -e "${home_dir}/.local/libexec/mcloving" ]] || existing+="a deployment at ${home_dir}/.local/libexec/mcloving "
+# DROP-INS COUNT, for two reasons and the second is the sharper one. A
+# `mcloving-agent.service.d/override.conf` is part of somebody's deployment, so
+# proceeding over it destroys work this script cannot see. And systemd MERGES
+# drop-ins: an unnoticed one changes what the units under test actually do, so
+# the arm would exercise something other than the shipped lane while reporting
+# on the shipped lane. Units, quadlets and their drop-in directories all count.
+# EVERY EFFECTIVE LOAD PATH, ASKED OF THE MANAGER -- not the two roots this
+# script happens to know. systemd merges a drop-in from any directory on its
+# search path, and `~/.config/systemd/user.control/mcloving-agent.service.d/`
+# is one of them: an override there is invisible to a two-root probe, survives
+# into the run, and the arm then exercises a CUSTOMISED unit while reporting on
+# the shipped lane. `deployment_manager_unit_path` returns the manager's own
+# ordered UnitPath, which is the same oracle round 34 made authoritative for
+# what systemd reads; modelling the list here would be the "wrong oracle"
+# mistake this file has already made three times.
+unit_probe_roots=()
+declare -A seen_probe_root=()
+while IFS= read -r encoded_root; do
+  [[ -n "${encoded_root}" ]] || continue
+  decode_path_item_into decoded_probe_root "${encoded_root}"
+  [[ -z "${seen_probe_root["${decoded_probe_root}"]:-}" ]] || continue
+  seen_probe_root["${decoded_probe_root}"]=1
+  unit_probe_roots+=("${decoded_probe_root}")
+done < <(deployment_manager_unit_path "${home_dir}")
+# The Quadlet SOURCE directory is not a unit load path -- systemd never reads
+# `.container` files, the generator does -- so it is named rather than asked
+# for, as is the installed-unit root in case the manager declines to answer.
+for extra_probe_root in "${config_probe}/systemd/user" "${config_probe}/containers/systemd"; do
+  [[ -z "${seen_probe_root["${extra_probe_root}"]:-}" ]] || continue
+  seen_probe_root["${extra_probe_root}"]=1
+  unit_probe_roots+=("${extra_probe_root}")
+done
+
+# WHAT IS OURS TO REMOVE, AND WHAT IS NOT. A stale unit under the home is part
+# of a deployment --reset may destroy. One on a SYSTEM path is not this
+# script's to delete at all -- and it would still be merged into the units
+# under test, so it cannot be ignored either. That is a refusal even with
+# --reset, which is the honest answer: this host cannot host a clean-host gate
+# until somebody with the authority to remove it does.
+# THREE KINDS OF ROOT, and the middle one is why this is not a one-line test.
+# Under the home: a deployment --reset may destroy. Under the manager's RUNTIME
+# root: systemd's own scratch -- `/run/user/<uid>/systemd/generator` holds the
+# unit Quadlet generates from our own `.container`, so treating it as a foreign
+# install would hard-refuse a host whose only fault is an interrupted run, and
+# refuse it in a way --reset could not clear. Removing the quadlet and
+# reloading is what clears those, which --reset already does. Anywhere else is
+# a system path this account must not delete in.
+runtime_probe_root="$(deployment_runtime_root "${home_dir}")"
+foreign_units=""
+for probe_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
+  [[ -d "${probe_root}" ]] || continue
+  probe_hit="$(shopt -s nullglob; printf '%s\n' "${probe_root}"/mcloving-* | head -1)"
+  [[ -n "${probe_hit}" ]] || continue
+  if [[ "${probe_root}" == "${home_dir}/"* ]] \
+    || { [[ -n "${runtime_probe_root}" ]] && [[ "${probe_root}" == "${runtime_probe_root}/"* ]]; }; then
+    existing+="installed units or drop-ins at ${probe_hit} "
+  else
+    foreign_units+="${probe_hit} "
+  fi
+done
+[[ -z "${foreign_units}" ]] || fail "the service manager loads mcloving unit(s) from outside this account's home: ${foreign_units% }-- systemd MERGES those into the units this gate starts, so the run would exercise a customised lane while reporting on the shipped one. They are not this script's to delete, and --reset does not override that; remove them with the authority that installed them, then re-run"
+[[ ! -e "${state_probe}/mcloving-agent" && ! -e "${state_probe}/mcloving-controller" ]] \
+  || existing+="service state under ${state_probe} "
+[[ ! -e "${home_dir}/.config/mcloving" ]] || existing+="contracts at ${home_dir}/.config/mcloving "
+podman volume exists mcloving-postgres-data 2>/dev/null && existing+="the mcloving-postgres-data volume "
+# THE NAMED CONTAINER IS ONE OF THE PARTS TOO, by the rule stated above. The
+# quadlet fixes ContainerName=mcloving-postgres, so a stale container of that
+# name collides with the start in step 8 -- and probing only the volume left a
+# hole with a specific shape: a container surviving WITHOUT its volume made
+# `existing` empty, so --reset ran no cleanup block at all and the run then
+# failed at step 8 for a reason that looks like a lane defect and is not.
+# `--reset` already removes it; what was missing was noticing it was there.
+podman container exists mcloving-postgres 2>/dev/null && existing+="the mcloving-postgres container "
+if [[ -n "${existing}" ]]; then
+  if (( reset == 0 )); then
+    fail "refusing to run: ${existing}already exists, and this script would destroy it. Nothing here can tell a disposable test account from a real one. Run it on an account with no deployment, or pass --reset to say you know what is on this one"
+  fi
+  echo "   --reset: removing ${existing% }"
+  systemctl --user disable --now mcloving-db-init mcloving-controller mcloving-agent >/dev/null 2>&1 || true
+  # The generated unit is not in that list -- it cannot be disabled -- and while
+  # it runs it holds the volume open, so removing the volume underneath it is at
+  # best a race. Stop it by name.
+  systemctl --user stop mcloving-postgres.service >/dev/null 2>&1 || true
+  podman rm -f mcloving-postgres >/dev/null 2>&1 || true
+  podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
+  rm -rf "${home_dir}/.local/libexec/mcloving" "${state_probe}/mcloving-agent" \
+         "${state_probe}/mcloving-controller" "${home_dir}/.config/mcloving" \
+         >/dev/null 2>&1 || true
+  # FROM THE MANAGER'S CONFIG BASE, not the invoking shell's. `mcloving-install`
+  # writes units and quadlets under `deployment_effective_config_root`, which
+  # asks the running manager; a hard-coded ~/.config would clean a directory the
+  # installer never wrote to whenever the two disagree, leave the real units in
+  # place, and report a reset that had not happened.
+  reset_config_base="$(deployment_effective_config_root "${home_dir}")"
+  # -rf and a bare mcloving-* glob: `rm -f` on `*.service` leaves the
+  # `mcloving-agent.service.d/` drop-in directories standing, and a drop-in that
+  # survives a reset is merged into the next run's units.
+  rm -rf "${reset_config_base}"/systemd/user/mcloving-* \
+         "${reset_config_base}"/systemd/user/default.target.wants/mcloving-* \
+         "${reset_config_base}"/containers/systemd/mcloving-* >/dev/null 2>&1 || true
+  # AND EVERY OTHER LOAD PATH THE PROBE LOOKED AT, or --reset refuses a
+  # deployment it then does not remove: the probe now sees `user.control` and
+  # anything else the manager searches, so a reset that cleaned only the two
+  # roots above would report a reset that had not happened and run with the
+  # drop-in still merged. Bounded to paths under the home -- a foreign root is
+  # already a refusal above and is not ours to delete.
+  for reset_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
+    [[ "${reset_root}" == "${home_dir}/"* ]] || continue
+    rm -rf "${reset_root}"/mcloving-* \
+           "${reset_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
+  done
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+fi
+
+# ---------------------------------------------------------------------------
+# The MANAGER's configuration base, which is what mcloving-install writes units
+# and quadlets under. `deployment_config_root` answers from the invoking shell's
+# environment instead, and the two differ whenever the manager carries its own
+# absolute XDG_CONFIG_HOME -- so cleanup would miss the real units entirely.
+config_base="$(deployment_effective_config_root "${home_dir}")"
+unit_root="${config_base}/systemd/user"
+quadlet_root="${config_base}/containers/systemd"
+libexec_root="${home_dir}/.local/libexec/mcloving"
+units=(mcloving-db-init.service mcloving-controller.service mcloving-agent.service)
+generated=(mcloving-postgres.service)
+
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-d001.XXXXXX")"
+
+teardown() {
+  local status=$?
+  trap '' INT TERM HUP
+  step "teardown"
+  systemctl --user stop mcloving-agent.service mcloving-controller.service \
+    mcloving-db-init.service mcloving-postgres.service >/dev/null 2>&1 || true
+  systemctl --user disable mcloving-agent.service mcloving-controller.service \
+    mcloving-db-init.service >/dev/null 2>&1 || true
+  podman rm -f mcloving-postgres >/dev/null 2>&1 || true
+  # The scratch tree holds a SECOND full copy of the release -- four large
+  # binaries -- staged for the upgrade, and is removed on every path. It was
+  # lost when a stray `rm -rf "${scratch}"` was deleted from the preconditions,
+  # where it never belonged; this is where it does.
+  rm -rf "${scratch}" >/dev/null 2>&1 || true
+  if (( keep == 0 )); then
+    # THE VOLUME TOO, and only here. Removing the container and leaving the
+    # volume makes the NEXT run fail in a way that looks like a lane defect and
+    # is not: the cluster keeps the password baked in at initdb, this arm
+    # generates a fresh one per run, and db-init then fails with "password
+    # authentication failed for user mcloving". Measured, after it happened.
+    #
+    # But it sat OUTSIDE this branch and so ran on --keep too, wiping the
+    # database of a deployment the same teardown then announced it had left in
+    # place. A deployment kept for inspection without its data is not the thing
+    # anyone asked to keep, and the message made it worse by saying otherwise.
+    podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
+    # CHECKED, exactly as the --keep branch below checks it. `|| true` cannot
+    # fail loudly, so a refused removal -- the preceding container removal
+    # having failed, say -- left the volume standing while teardown reported
+    # success and deleted the deployment files around it. The next run then
+    # fails on a password baked into a cluster this run generated, which is
+    # documented six lines up as the reason the volume goes at all. Reporting
+    # success while leaving the one thing that breaks the next run is the same
+    # narrating-instead-of-refusing the --keep branch was already corrected for.
+    if podman volume exists mcloving-postgres-data 2>/dev/null; then
+      echo "   !! teardown COULD NOT REMOVE mcloving-postgres-data and it is still" >&2
+      echo "      present. The next run will generate a fresh password against a" >&2
+      echo "      cluster that kept this one's, and fail in db-init looking like a" >&2
+      echo "      lane defect. Remove it:  podman volume rm -f mcloving-postgres-data" >&2
+      (( status != 0 )) || status=1
+    fi
+    rm -rf "${libexec_root}" "${home_dir}/.config/mcloving" \
+      "${state_probe}/mcloving-agent" "${state_probe}/mcloving-controller" \
+      >/dev/null 2>&1 || true
+    rm -rf "${unit_root}"/mcloving-* "${quadlet_root}"/mcloving-* \
+           "${unit_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  elif (( database_possibly_weakened == 1 )); then
+    # --keep asked for the deployment, not for a database whose row-level
+    # security may be switched off. The tree stays; the volume does not.
+    #
+    # AND THE REMOVAL IS CHECKED, not announced. `podman volume rm -f ... || true`
+    # cannot fail loudly -- if the volume is still in use the removal is refused
+    # and the message below would report a deletion that did not happen, which
+    # is the same narrating-instead-of-refusing this whole script keeps being
+    # corrected for, inside the correction for it.
+    podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
+    if podman volume exists mcloving-postgres-data 2>/dev/null; then
+      echo "   !! --keep: mcloving-postgres-data COULD NOT BE REMOVED and is still" >&2
+      echo "      present. The runtime gate failed while it had deliberately" >&2
+      echo "      weakened identity_sessions_tenant_policy and restores it only" >&2
+      echo "      after the assertion that failed, so this volume may carry a" >&2
+      echo "      database with row-level security switched off. Remove it before" >&2
+      echo "      anything starts against it:  podman volume rm -f mcloving-postgres-data" >&2
+      (( status != 0 )) || status=1
+    else
+      echo "   --keep: the deployment under ${home_dir} is left in place, but its"
+      echo "           mcloving-postgres-data volume was removed and verified gone:"
+      echo "           the runtime gate failed while it had deliberately weakened"
+      echo "           identity_sessions_tenant_policy, and restores it only after"
+      echo "           the assertion that failed. Keeping that database would keep"
+      echo "           row-level security switched off."
+    fi
+  else
+    echo "   --keep: the deployment under ${home_dir} is left in place, its"
+    echo "           mcloving-postgres-data volume intact, services stopped."
+    echo "           The next run needs --reset, which will destroy all of it."
+  fi
+  # Honest about what teardown cannot promise: a container the manager started
+  # may outlive a SIGKILL of this script, and saying so beats implying otherwise.
+  echo "   teardown ran (status ${status}); any surviving mcloving-postgres container is reported, not hidden:"
+  podman ps -a --filter name=mcloving-postgres --format '     {{.Names}} {{.Status}}' || true
+  exit "${status}"
+}
+trap teardown EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# ---------------------------------------------------------------------------
+step "[2/10] scripted install to the passwd home, WITHOUT --no-systemd"
+
+"${repo_root}/deploy/bin/mcloving-install" --home "${home_dir}" \
+  --release-dir "${release_dir}" --checksums "${checksums}"
+echo "   installed into ${libexec_root}"
+
+# ---------------------------------------------------------------------------
+step "[3/10] the manager knows the installed units"
+
+# `mcloving-install` runs `systemctl --user daemon-reload` only when it is NOT
+# given --no-systemd, so this is the first gate anywhere that the reload
+# happened at all. Asked of the manager, not of the filesystem: a unit file on
+# disk that the manager has not loaded is precisely the state a missing reload
+# leaves behind, and `ls` cannot tell the two apart.
+for unit in "${units[@]}"; do
+  state="$(systemctl --user show -p LoadState --value "${unit}" 2>/dev/null || true)"
+  [[ "${state}" == "loaded" ]] \
+    || fail "${unit} is ${state:-unknown} to the manager after install; either the unit was not written or daemon-reload did not run"
+  echo "   ${unit} LoadState=${state}"
+done
+
+# ---------------------------------------------------------------------------
+step "[4/10] Quadlet generated the postgres unit, and the library's model agrees"
+
+# THE POINT OF THIS GATE. `deployment_quadlet_generated_name` MODELS podman's
+# .container -> .service naming in bash, and the other suite tests that model
+# against a hard-coded table whose comment says "verified against
+# /usr/libexec/podman/quadlet's actual output" -- verified once, by hand, in a
+# comment. Here the generator actually runs, and the model is checked against
+# what it produced rather than against a remembered example.
+for unit in "${generated[@]}"; do
+  state="$(systemctl --user show -p LoadState --value "${unit}" 2>/dev/null || true)"
+  [[ "${state}" == "loaded" ]] \
+    || fail "${unit} was not generated from ${quadlet_root}/mcloving-postgres.container; Quadlet either did not run or named it something else"
+  echo "   ${unit} LoadState=${state} (generated)"
+done
+modelled="$(deployment_quadlet_generated_name mcloving-postgres.container)"
+[[ "${modelled}" == "mcloving-postgres.service" ]] \
+  || fail "the library models mcloving-postgres.container as ${modelled}, but the generator produced mcloving-postgres.service; the model and the generator disagree"
+echo "   library model agrees with the generator: ${modelled}"
+
+# ---------------------------------------------------------------------------
+step "[5/10] systemd resolved the ordering the units declare"
+
+# Ordering is the thing the other suite most conspicuously cannot prove: it
+# achieves the sequence by writing the steps one after another in bash, so
+# Requires=/After= are asserted by nobody. Read back from the manager.
+requires="$(systemctl --user show -p Requires --value mcloving-controller.service)"
+after="$(systemctl --user show -p After --value mcloving-controller.service)"
+[[ "${requires}" == *"mcloving-db-init.service"* ]] \
+  || fail "the manager does not report mcloving-controller.service requiring mcloving-db-init.service; it reported: ${requires}"
+[[ "${after}" == *"mcloving-postgres.service"* ]] \
+  || fail "the manager does not order mcloving-controller.service after mcloving-postgres.service; it reported: ${after}"
+echo "   controller Requires=${requires}"
+echo "   controller After=${after}"
+
+agent_after="$(systemctl --user show -p After --value mcloving-agent.service)"
+[[ "${agent_after}" == *"mcloving-controller.service"* ]] \
+  || fail "the manager does not order mcloving-agent.service after mcloving-controller.service; it reported: ${agent_after}"
+echo "   agent After=${agent_after}"
+
+# ---------------------------------------------------------------------------
+step "[6/10] contracts, PKI and enrollment"
+
+# NOT ${config_base}/mcloving. `mcloving-install` writes contracts and PKI to
+# the LITERAL %h/.config/mcloving and uses the manager's effective XDG base only
+# for units and quadlets; on an account with an absolute XDG_CONFIG_HOME those
+# are different directories, and reading the contracts from the XDG one would
+# find nothing.
+config="${home_dir}/.config/mcloving"
+pki="${config}/pki"
+organization_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+project_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+superuser_password="d001-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+tenant_password="d001-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+api_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+artifact_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+agent_id="deploy001-agent"
+
+openssl req -new -newkey rsa:2048 -nodes -x509 -days 1 -subj "/CN=mcloving-d001-ca" \
+  -keyout "${pki}/ca-key.pem" -out "${pki}/ca.pem" 2>/dev/null
+printf 'subjectAltName=DNS:controller.internal,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > "${pki}/server.ext"
+openssl req -new -newkey rsa:2048 -nodes -subj "/CN=controller.internal" \
+  -keyout "${pki}/controller-server-key.pem" -out "${pki}/server.csr" 2>/dev/null
+openssl x509 -req -days 1 -in "${pki}/server.csr" -CA "${pki}/ca.pem" -CAkey "${pki}/ca-key.pem" \
+  -CAcreateserial -extfile "${pki}/server.ext" -out "${pki}/controller-server.pem" 2>/dev/null
+printf 'extendedKeyUsage=clientAuth\n' > "${pki}/agent.ext"
+openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${agent_id}" \
+  -keyout "${pki}/agent-key.pem" -out "${pki}/agent.csr" 2>/dev/null
+openssl x509 -req -days 1 -in "${pki}/agent.csr" -CA "${pki}/ca.pem" -CAkey "${pki}/ca-key.pem" \
+  -CAcreateserial -extfile "${pki}/agent.ext" -out "${pki}/agent.pem" 2>/dev/null
+cp "${pki}/ca.pem" "${pki}/agent-ca.pem"
+cp "${pki}/ca.pem" "${pki}/controller-ca.pem"
+
+openssl x509 -in "${pki}/agent.pem" -outform DER -out "${pki}/agent.der" 2>/dev/null
+agent_cert_sha256="$(sha256sum "${pki}/agent.der" | awk '{print $1}')"
+printf '%s %s trusted-linux %s\n' "${agent_cert_sha256}" "${agent_id}" "${organization_id}" \
+  > "${config}/agent-identity-bindings.txt"
+chmod 0600 "${config}/agent-identity-bindings.txt"
+
+# EVERY SHIPPED PORT AND HOST IS KEPT. The other suite rewrites 5432/8080/8443
+# to reserved ports because several of its trees run concurrently; this arm is
+# the real lane on a dedicated account, so the shipped defaults are what get
+# tested -- including that the quadlet's PublishPort and the contracts agree.
+for pair in \
+  "__SET_ME_POSTGRES_SUPERUSER_PASSWORD__|${superuser_password}" \
+  "__SET_ME_TENANT_PASSWORD__|${tenant_password}" \
+  "__SET_ME_API_BEARER_TOKEN_MINIMUM_32_BYTES__|${api_token}" \
+  "__SET_ME_DISTINCT_ARTIFACT_TOKEN_MINIMUM_32_BYTES__|${artifact_token}" \
+  "__SET_ME_ORGANIZATION_UUID__|${organization_id}" \
+  "__SET_ME_ORGANIZATION_SLUG__|d001-org" \
+  "__SET_ME_PROJECT_UUID__|${project_id}" \
+  "__SET_ME_PROJECT_SLUG__|d001-project" \
+  "__SET_ME_AGENT_ID__|${agent_id}"; do
+  sed -i "s|${pair%%|*}|${pair#*|}|g" "${config}"/*.env
+done
+! grep -Eq '__SET_ME_[A-Z0-9_]+__' "${config}"/*.env \
+  || fail "a placeholder survived contract rendering: $(grep -Eho '__SET_ME_[A-Z0-9_]+__' "${config}"/*.env | sort -u | tr '\n' ' ')"
+echo "   contracts rendered, PKI written, ${agent_id} enrolled"
+
+# The guard is the gate the units run at ExecStartPre; ask it now so a contract
+# defect is named here rather than as an opaque unit failure.
+"${libexec_root}/helpers/mcloving-env-guard" controller "${config}/controller.env" >/dev/null \
+  || fail "the controller contract does not satisfy mcloving-env-guard"
+echo "   mcloving-env-guard: controller contract satisfied"
+# THE AGENT'S GUARD CANNOT BE PRE-FLIGHTED, and that is a finding rather than an
+# inconvenience. It requires MCLOVING_AGENT_WORKSPACE_ROOT to already exist, and
+# the only thing that creates it is `StateDirectory=mcloving-agent
+# mcloving-agent/workspace` on the unit, which systemd materialises at 0700
+# BEFORE any Exec* line. So the agent contract is validated by the unit's own
+# ExecStartPre, and asserted below by the unit reaching active.
+#
+# The other suite has to `mkdir -p` that path by hand, with the comment "Mirror
+# what StateDirectory= creates for the real units" -- a hand-made stand-in for
+# a systemd feature, which is precisely the coupling this arm exists to replace
+# with the real thing. Step 8 asserts systemd created it, and that we did not.
+state_base="$(deployment_effective_state_root "${home_dir}")"
+[[ ! -e "${state_base}/mcloving-agent/workspace" ]] \
+  || fail "the agent workspace root already exists before any unit ran; this arm must not create what StateDirectory= is supposed to"
+
+# ---------------------------------------------------------------------------
+step "[7/10] the runbook's own enable command must work"
+
+# THE GATE THAT FOUND A SHIPPED DEFECT. `mcloving-install` prints, and
+# docs/operations/DEPLOYMENT_V1.md step 5 documents,
+#   systemctl --user enable --now mcloving-postgres mcloving-db-init ...
+# and that command FAILS: `mcloving-postgres.service` is generated by Quadlet
+# and systemd refuses to enable a generated unit --
+#   "Unit .../generator/mcloving-postgres.service is transient or generated."
+# Quadlet honours the quadlet's own `[Install] WantedBy=default.target`, so the
+# generated unit needs starting, not enabling. Nothing could have found this
+# without running systemctl, which is the entire argument for this arm.
+#
+# So the documented sequence is asserted here, as a command, rather than
+# trusted as prose -- AND IN THE DOCUMENTED ORDER. `--now` starts the units, and
+# the runbook puts the contracts and the PKI before this step for exactly that
+# reason: run it earlier and `mcloving-env-guard` refuses at ExecStartPre,
+# correctly, on placeholders nobody has replaced yet. A first cut of this arm
+# ran the enable before step 6 and failed that way.
+documented=(mcloving-db-init mcloving-controller mcloving-agent)
+# `--now` is part of the documented command and part of what it has to prove:
+# enabling and starting are different operations and the runbook asks for both.
+# Running plain `enable` here and starting the units separately later would have
+# left the documented sequence unexercised while claiming to be its gate.
+systemctl --user enable --now "${documented[@]}" \
+  || fail "the documented enable --now command failed for ${documented[*]}"
+systemctl --user start mcloving-postgres.service \
+  || fail "the documented start of the generated postgres unit failed"
+for unit in "${documented[@]}"; do
+  enabled="$(systemctl --user is-enabled "${unit}.service" 2>&1 || true)"
+  [[ "${enabled}" == "enabled" ]] \
+    || fail "${unit}.service reports is-enabled=${enabled} after the documented enable"
+done
+# And the generated one must NOT be enablable -- pinning the reason the runbook
+# had to change, so a future edit cannot quietly put it back.
+if systemctl --user enable mcloving-postgres >/dev/null 2>&1; then
+  fail "systemd accepted 'enable mcloving-postgres'; the runbook's original wording would then have been correct and this gate is now wrong"
+fi
+echo "   enabled: ${documented[*]}; mcloving-postgres refuses enable (generated), as expected"
+
+# ---------------------------------------------------------------------------
+step "[8/10] the lane the documented command started, as the manager reports it"
+
+# `Notify=healthy` on the quadlet means the generated postgres unit reports
+# started only once `pg_isready` passes, so `After=mcloving-postgres.service`
+# genuinely means "after PostgreSQL is healthy" and no wait loop belongs here.
+# Nothing is started here: the documented `enable --now` in step 7 did it, which
+# is the point of running the documented command rather than a convenient one.
+# This step only reads back what the manager made of it.
+
+for unit in mcloving-postgres.service mcloving-controller.service mcloving-agent.service; do
+  active="$(systemctl --user show -p ActiveState --value "${unit}")"
+  sub="$(systemctl --user show -p SubState --value "${unit}")"
+  [[ "${active}" == "active" ]] \
+    || fail "${unit} is ${active}/${sub} after start; $(systemctl --user status "${unit}" --no-pager -n 20 2>&1 | tail -20)"
+  echo "   ${unit} ${active}/${sub} MainPID=$(systemctl --user show -p MainPID --value "${unit}")"
+done
+# db-init is Type=oneshot RemainAfterExit=yes: active/exited is its success.
+db_init="$(systemctl --user show -p ActiveState --value mcloving-db-init.service)/$(systemctl --user show -p SubState --value mcloving-db-init.service)"
+[[ "${db_init}" == "active/exited" ]] \
+  || fail "mcloving-db-init.service is ${db_init}, not active/exited"
+echo "   mcloving-db-init.service ${db_init}"
+
+# systemd created the agent's state tree, not this script. The other suite
+# mkdir -p's this path to stand in for StateDirectory=; here the real directive
+# is what made it, at the mode the directive specifies.
+# From the manager's effective state root, which is what the installer rendered
+# into the contract and what StateDirectory= therefore creates. Hard-coding
+# ~/.local/state would inspect a path the services never used on an account with
+# a custom XDG_STATE_HOME -- and pass, having looked at nothing.
+workspace="${state_base}/mcloving-agent/workspace"
+[[ -d "${workspace}" ]] \
+  || fail "StateDirectory= did not create ${workspace}; the agent's guard passed on something this arm cannot account for"
+mode="$(stat -c '%a' "${workspace}")"
+[[ "${mode}" == "700" ]] \
+  || fail "${workspace} is mode ${mode}, not the 0700 StateDirectoryMode= specifies"
+echo "   StateDirectory= created ${workspace} at ${mode}, unaided"
+
+# THE STABILITY WINDOW, against real units for the first time. The library's
+# require_service_stable samples ActiveState/SubState/MainPID/NRestarts to catch
+# a Type=exec unit that execs, exits, and is restarted in a loop by
+# Restart=on-failure -- a shape that looks "active" at any single instant. The
+# other suite skips this entirely under --no-systemd.
+require_service_stable 0 mcloving-controller.service \
+  || fail "mcloving-controller.service did not hold steady"
+require_service_stable 0 mcloving-agent.service \
+  || fail "mcloving-agent.service did not hold steady"
+echo "   controller and agent held steady across the sampling window"
+
+# ExecStartPost=mcloving-health on the controller unit means a controller that
+# never answers fails the UNIT. Ask the manager, from outside, the way a
+# transition does.
+"${libexec_root}/helpers/mcloving-health" controller "${config}/controller.env" \
+  --unit mcloving-controller.service \
+  || fail "mcloving-health could not reach the controller through the manager"
+echo "   mcloving-health answered through the manager"
+
+# ---------------------------------------------------------------------------
+step "[9/10] service-managed upgrade and rollback"
+
+# Both scripts `exit 0` immediately under --no-systemd, so everything past the
+# symlink flip -- stop order, restart order, and the health gates between them --
+# has never executed in any gate. Here they run for real.
+# A SECOND release, because upgrading to the one already installed is refused
+# by name ("release ... is already current; nothing to upgrade") and would prove
+# nothing about the transition. A trailing newline on mcloving-cli changes the
+# release digest without touching a binary any unit starts -- the same device
+# the other suite uses for the same reason.
+release2_dir="${scratch}/release2"
+cp -r "${release_dir}" "${release2_dir}"
+printf '\n' >> "${release2_dir}/mcloving-cli"
+( cd "${release2_dir}" && sha256sum mcloving-controller mcloving-agent \
+    mcloving-cli mcloving-identity-admin > "${scratch}/checksums2.sha256" )
+
+before_release="$(readlink "${libexec_root}/current")"
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${home_dir}" \
+  --release-dir "${release2_dir}" --checksums "${scratch}/checksums2.sha256" \
+  || fail "service-managed upgrade failed"
+after_release="$(readlink "${libexec_root}/current")"
+echo "   upgrade: current ${before_release} -> ${after_release}"
+for unit in mcloving-controller.service mcloving-agent.service; do
+  active="$(systemctl --user show -p ActiveState --value "${unit}")"
+  [[ "${active}" == "active" ]] || fail "${unit} is ${active} after the upgrade"
+done
+echo "   controller and agent active after a service-managed upgrade"
+
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${home_dir}" \
+  || fail "service-managed rollback failed"
+rolled_back="$(readlink "${libexec_root}/current")"
+[[ "${rolled_back}" == "${before_release}" ]] \
+  || fail "rollback left current at ${rolled_back}, not the pre-upgrade ${before_release}"
+[[ "${after_release}" != "${before_release}" ]] \
+  || fail "the upgrade did not change the current release, so the rollback proved nothing"
+for unit in mcloving-controller.service mcloving-agent.service; do
+  active="$(systemctl --user show -p ActiveState --value "${unit}")"
+  [[ "${active}" == "active" ]] || fail "${unit} is ${active} after the rollback"
+done
+echo "   rollback: current back to ${rolled_back}, both services active"
+
+# ---------------------------------------------------------------------------
+step "[10/10] the deployable-runtime gate, against this installed deployment"
+
+# The other half of the acceptance sentence. The gate spawns a controller whose
+# path `CARGO_BIN_EXE_mcloving-controller` baked in at compile time, so it runs
+# the BUILD TREE's binary rather than the installed one -- which is checkable
+# rather than hand-waved: the installed release was staged from that build and
+# digest-verified, so the two are byte-identical, and this asserts it instead of
+# assuming it.
+installed_controller="${libexec_root}/current/mcloving-controller"
+gate_controller="$(dirname "$(dirname "${runtime_gate}")")/mcloving-controller"
+[[ -x "${installed_controller}" ]] || fail "no installed controller at ${installed_controller}"
+if [[ -x "${gate_controller}" ]]; then
+  [[ "$(sha256sum < "${installed_controller}")" == "$(sha256sum < "${gate_controller}")" ]] \
+    || fail "the controller the gate will spawn is not byte-identical to the installed one; the gate would be testing a different binary than this deployment runs"
+  echo "   the gate's controller is byte-identical to the installed one"
+else
+  # NOT A NOTE. Printing "identity unasserted" and carrying on is the shape of
+  # defect this whole ticket is about: the gate would run, report success, and
+  # nobody would know which controller it had exercised. If the identity cannot
+  # be established, the claim cannot be made.
+  fail "cannot locate the controller beside ${runtime_gate}, so the binary the gate spawns cannot be compared with the installed one; pass the test binary where cargo built it"
+fi
+
+# The DATABASE, ROLES and split credentials are this deployment's, read from the
+# contract systemd starts the controller with -- not a database the test brought
+# up for itself, which is what made this gate and the install two unrelated CI
+# jobs sharing no state.
+migration_url="$(grep -E '^MCLOVING_MIGRATION_DATABASE_URL=' "${config}/controller.env" | cut -d= -f2-)"
+runtime_db_url="$(grep -E '^MCLOVING_DATABASE_URL=' "${config}/controller.env" | cut -d= -f2-)"
+[[ -n "${migration_url}" && -n "${runtime_db_url}" ]] \
+  || fail "could not read both database URLs from ${config}/controller.env"
+[[ "${migration_url}" != "${runtime_db_url}" ]] \
+  || fail "the migration and runtime URLs are identical; the split this gate checks does not exist"
+
+# THIS GATE LEAVES THE DATABASE WEAKENED IF IT FAILS.
+# `failed_runtime_preflight_does_not_rotate_the_active_api_credential`
+# deliberately weakens `identity_sessions_tenant_policy` to
+# `USING (true OR ...)`, asserts that startup is REJECTED, and only restores the
+# policy after that assertion. A failed assertion unwinds past the restore, so
+# the policy stays weakened -- and RLS is then effectively off for reads. Under
+# --keep the volume would survive with it, ready for someone to restart.
+#
+# Fixing the test to restore on unwind is the better repair and is not this
+# ticket's file. What this script owes is not to PRESERVE the result: the flag
+# below makes teardown destroy the database on a failed gate even under --keep,
+# and say so. The deployment tree is still kept, so the failure is inspectable.
+database_possibly_weakened=1
+gate_log="${scratch}/runtime-gate.log"
+if MCLOVING_TEST_DATABASE_URL="${migration_url}" \
+   MCLOVING_TEST_RUNTIME_DATABASE_URL="${runtime_db_url}" \
+     "${runtime_gate}" --ignored --test-threads=1 2>&1 | tee "${gate_log}"; then
+  gate_status=0
+else
+  gate_status=1
+fi
+(( gate_status == 0 )) \
+  || fail "the deployable-runtime gate failed against this installed deployment"
+
+# EXIT STATUS IS NOT THE ASSERTION. A Rust test binary that runs NOTHING exits
+# 0: rename the two tests out of `--ignored`, delete one, or mis-filter them and
+# this step would print "gate passed" having checked nothing about the
+# deployment. That is the defect DEPLOY-001 was reverted for -- the gate itself
+# used to return success when MCLOVING_TEST_DATABASE_URL was unset -- so
+# accepting a zero-test run here would rebuild it one level up, inside its own
+# fix. Count what actually ran. `>= 2` rather than the two names: a rename still
+# proves two behaviours, while a deletion, an un-ignored test or a bad filter
+# drops the count and is refused.
+gate_passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "${gate_log}" | tail -1)"
+[[ -n "${gate_passed}" ]] \
+  || fail "the deployable-runtime gate exited 0 but printed no 'test result: ok' summary; it cannot be shown to have run"
+(( gate_passed >= 2 )) \
+  || fail "the deployable-runtime gate exited 0 having run only ${gate_passed} test(s); DEPLOY-001's acceptance needs both shipped_controller_uses_split_credentials_and_executes_submissions and failed_runtime_preflight_does_not_rotate_the_active_api_credential to execute against this deployment"
+database_possibly_weakened=0
+echo "   deployable-runtime gate passed against the installed deployment's database and roles (${gate_passed} tests executed)"
+
+echo
+echo "service-managed deployment lane passed: install -> daemon-reload -> quadlet generation ->"
+echo "  documented enable -> ordered start -> stability -> health through the manager ->"
+echo "  service-managed upgrade -> service-managed rollback -> deployable-runtime gate"
