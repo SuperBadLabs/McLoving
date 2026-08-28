@@ -395,8 +395,28 @@ exactly once, the line count held constant, and the function's presence asserted
 in the output. This is the second time in two tickets that a mutation harness
 mutated something other than what it claimed.
 
-Eighteen findings across nine rounds (7, 3, 2, 1, 1, 1, 1, 1, 1) — sixteen
-received, and the last two found by looking rather than by being told.
+## Round 10 — the probe that judged a deployment by its tidiest part
+
+One finding, received: the existing-state probe checked the `mcloving-postgres-data`
+volume but not the `mcloving-postgres` **container**. The quadlet fixes
+`ContainerName=mcloving-postgres`, so a stale container of that name collides
+with the start in step 8 — and the hole has a specific shape: a container
+surviving *without* its volume left `existing` empty, so `--reset` ran no cleanup
+block at all and the run then failed at step 8 looking like a lane defect.
+
+It is right, and it is right against **this file's own doctrine**, written three
+lines above the gap: *"What makes a deployment present is any of its parts, not
+the tidiest one."* That sentence was added in round 1 after the probe missed the
+state tree; the same principle was then not applied to the container. Stating a
+rule is not applying it.
+
+`--reset` already removed the container; what was missing was noticing it was
+there. Proved both ways as the service account: absent, the probe reaches the end
+rather than aborting under `set -e`; present, it names the container in
+`existing`.
+
+Nineteen findings across ten rounds (7, 3, 2, 1, 1, 1, 1, 1, 1, 1) — seventeen
+received, and two found by looking rather than by being told.
 
 **On the correction-round cap, honestly.** Nine rounds is past the point where
 this repository's own rule says to merge what is sound and open a design ticket,

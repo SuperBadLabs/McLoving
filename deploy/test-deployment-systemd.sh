@@ -132,6 +132,14 @@ existing_units="$(
   || existing+="service state under ${state_probe} "
 [[ ! -e "${home_dir}/.config/mcloving" ]] || existing+="contracts at ${home_dir}/.config/mcloving "
 podman volume exists mcloving-postgres-data 2>/dev/null && existing+="the mcloving-postgres-data volume "
+# THE NAMED CONTAINER IS ONE OF THE PARTS TOO, by the rule stated above. The
+# quadlet fixes ContainerName=mcloving-postgres, so a stale container of that
+# name collides with the start in step 8 -- and probing only the volume left a
+# hole with a specific shape: a container surviving WITHOUT its volume made
+# `existing` empty, so --reset ran no cleanup block at all and the run then
+# failed at step 8 for a reason that looks like a lane defect and is not.
+# `--reset` already removes it; what was missing was noticing it was there.
+podman container exists mcloving-postgres 2>/dev/null && existing+="the mcloving-postgres container "
 if [[ -n "${existing}" ]]; then
   if (( reset == 0 )); then
     fail "refusing to run: ${existing}already exists, and this script would destroy it. Nothing here can tell a disposable test account from a real one. Run it on an account with no deployment, or pass --reset to say you know what is on this one"
