@@ -211,13 +211,29 @@ teardown() {
   elif (( database_possibly_weakened == 1 )); then
     # --keep asked for the deployment, not for a database whose row-level
     # security may be switched off. The tree stays; the volume does not.
+    #
+    # AND THE REMOVAL IS CHECKED, not announced. `podman volume rm -f ... || true`
+    # cannot fail loudly -- if the volume is still in use the removal is refused
+    # and the message below would report a deletion that did not happen, which
+    # is the same narrating-instead-of-refusing this whole script keeps being
+    # corrected for, inside the correction for it.
     podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
-    echo "   --keep: the deployment under ${home_dir} is left in place, but its"
-    echo "           mcloving-postgres-data volume was REMOVED: the runtime gate"
-    echo "           failed while it had deliberately weakened"
-    echo "           identity_sessions_tenant_policy, and restores it only after"
-    echo "           the assertion that failed. Keeping that database would keep"
-    echo "           row-level security switched off."
+    if podman volume exists mcloving-postgres-data 2>/dev/null; then
+      echo "   !! --keep: mcloving-postgres-data COULD NOT BE REMOVED and is still" >&2
+      echo "      present. The runtime gate failed while it had deliberately" >&2
+      echo "      weakened identity_sessions_tenant_policy and restores it only" >&2
+      echo "      after the assertion that failed, so this volume may carry a" >&2
+      echo "      database with row-level security switched off. Remove it before" >&2
+      echo "      anything starts against it:  podman volume rm -f mcloving-postgres-data" >&2
+      (( status != 0 )) || status=1
+    else
+      echo "   --keep: the deployment under ${home_dir} is left in place, but its"
+      echo "           mcloving-postgres-data volume was removed and verified gone:"
+      echo "           the runtime gate failed while it had deliberately weakened"
+      echo "           identity_sessions_tenant_policy, and restores it only after"
+      echo "           the assertion that failed. Keeping that database would keep"
+      echo "           row-level security switched off."
+    fi
   else
     echo "   --keep: the deployment under ${home_dir} is left in place, its"
     echo "           mcloving-postgres-data volume intact, services stopped."

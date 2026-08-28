@@ -274,6 +274,24 @@ not survive a gate that may have switched its RLS off.
 
 Fourteen findings across five rounds (7, 3, 2, 1, 1), all mine, none disputed.
 
+## Review round 6 — the fix for narration was narrating
+
+Round 5's fix removed the volume with `podman volume rm -f … || true` and then
+printed that it had been **REMOVED**. If podman refuses — the volume still in
+use — the message reports a deletion that did not happen. That is the same
+narrating-instead-of-refusing this script has been corrected for five times,
+occurring *inside the correction for it*.
+
+The removal is now verified rather than announced: `podman volume exists` after
+the fact, and if the volume survives, teardown says so on stderr, names the
+command to run, and **raises a zero exit status to non-zero** — because a run
+that leaves a possibly-RLS-disabled database behind has not succeeded, whatever
+the gates said.
+
+Fifteen findings across six rounds (7, 3, 2, 1, 1, 1). Every one mine, none
+disputed, and the last three are all the same sentence: **a claim you have not
+checked is not a claim, it is a caption.**
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
