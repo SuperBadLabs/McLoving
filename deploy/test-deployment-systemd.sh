@@ -578,12 +578,33 @@ runtime_db_url="$(grep -E '^MCLOVING_DATABASE_URL=' "${config}/controller.env" |
 # below makes teardown destroy the database on a failed gate even under --keep,
 # and say so. The deployment tree is still kept, so the failure is inspectable.
 database_possibly_weakened=1
-MCLOVING_TEST_DATABASE_URL="${migration_url}" \
-MCLOVING_TEST_RUNTIME_DATABASE_URL="${runtime_db_url}" \
-  "${runtime_gate}" --ignored --test-threads=1 \
+gate_log="${scratch}/runtime-gate.log"
+if MCLOVING_TEST_DATABASE_URL="${migration_url}" \
+   MCLOVING_TEST_RUNTIME_DATABASE_URL="${runtime_db_url}" \
+     "${runtime_gate}" --ignored --test-threads=1 2>&1 | tee "${gate_log}"; then
+  gate_status=0
+else
+  gate_status=1
+fi
+(( gate_status == 0 )) \
   || fail "the deployable-runtime gate failed against this installed deployment"
+
+# EXIT STATUS IS NOT THE ASSERTION. A Rust test binary that runs NOTHING exits
+# 0: rename the two tests out of `--ignored`, delete one, or mis-filter them and
+# this step would print "gate passed" having checked nothing about the
+# deployment. That is the defect DEPLOY-001 was reverted for -- the gate itself
+# used to return success when MCLOVING_TEST_DATABASE_URL was unset -- so
+# accepting a zero-test run here would rebuild it one level up, inside its own
+# fix. Count what actually ran. `>= 2` rather than the two names: a rename still
+# proves two behaviours, while a deletion, an un-ignored test or a bad filter
+# drops the count and is refused.
+gate_passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "${gate_log}" | tail -1)"
+[[ -n "${gate_passed}" ]] \
+  || fail "the deployable-runtime gate exited 0 but printed no 'test result: ok' summary; it cannot be shown to have run"
+(( gate_passed >= 2 )) \
+  || fail "the deployable-runtime gate exited 0 having run only ${gate_passed} test(s); DEPLOY-001's acceptance needs both shipped_controller_uses_split_credentials_and_executes_submissions and failed_runtime_preflight_does_not_rotate_the_active_api_credential to execute against this deployment"
 database_possibly_weakened=0
-echo "   deployable-runtime gate passed against the installed deployment's database and roles"
+echo "   deployable-runtime gate passed against the installed deployment's database and roles (${gate_passed} tests executed)"
 
 echo
 echo "service-managed deployment lane passed: install -> daemon-reload -> quadlet generation ->"

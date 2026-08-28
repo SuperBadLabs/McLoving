@@ -312,6 +312,37 @@ for the line you edited.**
 
 Sixteen findings across seven rounds (7, 3, 2, 1, 1, 1, 1).
 
+## Round 8 — self-found: the arm accepted a gate that asserted nothing
+
+No reviewer raised this one. Step 10 ran the deployable-runtime gate and judged
+it by **exit status alone**, and a Rust test binary that runs no tests exits `0`.
+Measured against the real binary rather than reasoned about:
+
+    $ deployable_runtime-86802c3e4c9636b7 --ignored --test-threads=1 nonexistent_test_name_xyz
+    running 0 tests
+    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out
+    exit=0
+
+So a rename out of `--ignored`, a deleted test, or a stray filter would have had
+the arm print `deployable-runtime gate passed against the installed deployment`
+having verified nothing about it. **That is the defect this ticket exists to
+remove** — the gate itself used to return success when
+`MCLOVING_TEST_DATABASE_URL` was unset — rebuilt one level up inside its own fix.
+The lesson generalises past this line: when you replace a vacuous check, the
+replacement's own success condition is the next thing to distrust.
+
+Step 10 now counts what executed and refuses `< 2`. `>= 2` rather than matching
+the two test names: a rename still proves two behaviours, while a deletion, an
+un-ignored test or a bad filter drops the count and is refused. Perturbed both
+ways before being believed — `0 passed` and `1 passed` refuse, `2 passed`
+accepts.
+
+Seventeen findings across eight rounds (7, 3, 2, 1, 1, 1, 1, 1). The eighth is
+the first I found rather than received, and it is the same class as the first
+seven — narrating instead of refusing — which is the argument for merging rather
+than continuing to circle: the class is understood and the remaining instances
+are being found faster than they are being introduced.
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable
