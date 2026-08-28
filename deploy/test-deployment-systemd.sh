@@ -122,12 +122,61 @@ existing=""
 # drop-ins: an unnoticed one changes what the units under test actually do, so
 # the arm would exercise something other than the shipped lane while reporting
 # on the shipped lane. Units, quadlets and their drop-in directories all count.
-existing_units="$(
-  shopt -s nullglob
-  printf '%s\n' "${config_probe}"/systemd/user/mcloving-* \
-                 "${config_probe}"/containers/systemd/mcloving-* 2>/dev/null | head -1
-)"
-[[ -z "${existing_units}" ]] || existing+="installed units or drop-ins under ${config_probe} "
+# EVERY EFFECTIVE LOAD PATH, ASKED OF THE MANAGER -- not the two roots this
+# script happens to know. systemd merges a drop-in from any directory on its
+# search path, and `~/.config/systemd/user.control/mcloving-agent.service.d/`
+# is one of them: an override there is invisible to a two-root probe, survives
+# into the run, and the arm then exercises a CUSTOMISED unit while reporting on
+# the shipped lane. `deployment_manager_unit_path` returns the manager's own
+# ordered UnitPath, which is the same oracle round 34 made authoritative for
+# what systemd reads; modelling the list here would be the "wrong oracle"
+# mistake this file has already made three times.
+unit_probe_roots=()
+declare -A seen_probe_root=()
+while IFS= read -r encoded_root; do
+  [[ -n "${encoded_root}" ]] || continue
+  decode_path_item_into decoded_probe_root "${encoded_root}"
+  [[ -z "${seen_probe_root["${decoded_probe_root}"]:-}" ]] || continue
+  seen_probe_root["${decoded_probe_root}"]=1
+  unit_probe_roots+=("${decoded_probe_root}")
+done < <(deployment_manager_unit_path "${home_dir}")
+# The Quadlet SOURCE directory is not a unit load path -- systemd never reads
+# `.container` files, the generator does -- so it is named rather than asked
+# for, as is the installed-unit root in case the manager declines to answer.
+for extra_probe_root in "${config_probe}/systemd/user" "${config_probe}/containers/systemd"; do
+  [[ -z "${seen_probe_root["${extra_probe_root}"]:-}" ]] || continue
+  seen_probe_root["${extra_probe_root}"]=1
+  unit_probe_roots+=("${extra_probe_root}")
+done
+
+# WHAT IS OURS TO REMOVE, AND WHAT IS NOT. A stale unit under the home is part
+# of a deployment --reset may destroy. One on a SYSTEM path is not this
+# script's to delete at all -- and it would still be merged into the units
+# under test, so it cannot be ignored either. That is a refusal even with
+# --reset, which is the honest answer: this host cannot host a clean-host gate
+# until somebody with the authority to remove it does.
+# THREE KINDS OF ROOT, and the middle one is why this is not a one-line test.
+# Under the home: a deployment --reset may destroy. Under the manager's RUNTIME
+# root: systemd's own scratch -- `/run/user/<uid>/systemd/generator` holds the
+# unit Quadlet generates from our own `.container`, so treating it as a foreign
+# install would hard-refuse a host whose only fault is an interrupted run, and
+# refuse it in a way --reset could not clear. Removing the quadlet and
+# reloading is what clears those, which --reset already does. Anywhere else is
+# a system path this account must not delete in.
+runtime_probe_root="$(deployment_runtime_root "${home_dir}")"
+foreign_units=""
+for probe_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
+  [[ -d "${probe_root}" ]] || continue
+  probe_hit="$(shopt -s nullglob; printf '%s\n' "${probe_root}"/mcloving-* | head -1)"
+  [[ -n "${probe_hit}" ]] || continue
+  if [[ "${probe_root}" == "${home_dir}/"* ]] \
+    || { [[ -n "${runtime_probe_root}" ]] && [[ "${probe_root}" == "${runtime_probe_root}/"* ]]; }; then
+    existing+="installed units or drop-ins at ${probe_hit} "
+  else
+    foreign_units+="${probe_hit} "
+  fi
+done
+[[ -z "${foreign_units}" ]] || fail "the service manager loads mcloving unit(s) from outside this account's home: ${foreign_units% }-- systemd MERGES those into the units this gate starts, so the run would exercise a customised lane while reporting on the shipped one. They are not this script's to delete, and --reset does not override that; remove them with the authority that installed them, then re-run"
 [[ ! -e "${state_probe}/mcloving-agent" && ! -e "${state_probe}/mcloving-controller" ]] \
   || existing+="service state under ${state_probe} "
 [[ ! -e "${home_dir}/.config/mcloving" ]] || existing+="contracts at ${home_dir}/.config/mcloving "
@@ -167,6 +216,17 @@ if [[ -n "${existing}" ]]; then
   rm -rf "${reset_config_base}"/systemd/user/mcloving-* \
          "${reset_config_base}"/systemd/user/default.target.wants/mcloving-* \
          "${reset_config_base}"/containers/systemd/mcloving-* >/dev/null 2>&1 || true
+  # AND EVERY OTHER LOAD PATH THE PROBE LOOKED AT, or --reset refuses a
+  # deployment it then does not remove: the probe now sees `user.control` and
+  # anything else the manager searches, so a reset that cleaned only the two
+  # roots above would report a reset that had not happened and run with the
+  # drop-in still merged. Bounded to paths under the home -- a foreign root is
+  # already a refusal above and is not ours to delete.
+  for reset_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
+    [[ "${reset_root}" == "${home_dir}/"* ]] || continue
+    rm -rf "${reset_root}"/mcloving-* \
+           "${reset_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
+  done
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
@@ -210,6 +270,21 @@ teardown() {
     # place. A deployment kept for inspection without its data is not the thing
     # anyone asked to keep, and the message made it worse by saying otherwise.
     podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
+    # CHECKED, exactly as the --keep branch below checks it. `|| true` cannot
+    # fail loudly, so a refused removal -- the preceding container removal
+    # having failed, say -- left the volume standing while teardown reported
+    # success and deleted the deployment files around it. The next run then
+    # fails on a password baked into a cluster this run generated, which is
+    # documented six lines up as the reason the volume goes at all. Reporting
+    # success while leaving the one thing that breaks the next run is the same
+    # narrating-instead-of-refusing the --keep branch was already corrected for.
+    if podman volume exists mcloving-postgres-data 2>/dev/null; then
+      echo "   !! teardown COULD NOT REMOVE mcloving-postgres-data and it is still" >&2
+      echo "      present. The next run will generate a fresh password against a" >&2
+      echo "      cluster that kept this one's, and fail in db-init looking like a" >&2
+      echo "      lane defect. Remove it:  podman volume rm -f mcloving-postgres-data" >&2
+      (( status != 0 )) || status=1
+    fi
     rm -rf "${libexec_root}" "${home_dir}/.config/mcloving" \
       "${state_probe}/mcloving-agent" "${state_probe}/mcloving-controller" \
       >/dev/null 2>&1 || true

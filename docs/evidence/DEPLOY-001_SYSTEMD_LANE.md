@@ -465,8 +465,72 @@ there. Proved both ways as the service account: absent, the probe reaches the en
 rather than aborting under `set -e`; present, it names the container in
 `existing`.
 
-Nineteen findings across ten rounds (7, 3, 2, 1, 1, 1, 1, 1, 1, 1) — seventeen
-received, and two found by looking rather than by being told.
+## Round 11 — the probe checked 2 of the manager's 16 load paths
+
+Two findings, both received, and the first is the most serious thing review
+found in this file.
+
+**The manager reports sixteen unit load paths. The probe checked two.**
+`~/.config/systemd/user.control` is *first* in that list — highest priority — and
+systemd merges a drop-in from any of them. So a `user.control` override was
+invisible to the probe, survived into the run, and the arm exercised a
+**customised** unit while reporting on the shipped lane.
+
+Measured rather than argued, by planting
+`user.control/mcloving-agent.service.d/override.conf` containing
+`Environment=SNEAKY=1` and running both revisions:
+
+| revision | result |
+| --- | --- |
+| previous | **ran the lane through step 8** — started the units, held the stability window and reported health, all against the merged unit. Stopped at step 9, and only by `mcloving-upgrade`'s own default-deny environment rule refusing `SNEAKY` |
+| this one | **refused at step 1**, naming `/home/mcloving/.config/systemd/user.control/mcloving-agent.service.d` |
+| this one, `--reset` | named and removed it, then passed the whole lane, `(2 tests executed)`, drop-in gone |
+
+**The middle row is the finding, not the first.** The gap was masked by a
+PRODUCT guard that fires late and only for one class of drop-in. A drop-in the
+environment rule does not police — `MemoryMax`, `Restart=`, an `ExecStart`
+hardening directive — would have passed all ten steps and reported a clean pass
+on a lane nobody ships. "Something eventually refused it" is not the same as
+"the gate detected it".
+
+The fix asks `deployment_manager_unit_path`, which reports the manager's own
+`UnitPath` — the oracle round 34 already made authoritative for what systemd
+reads. Modelling the list here would have been the wrong-oracle mistake this
+file has now made four times.
+
+**Three classes of root, because two would be wrong.** `UnitPath` also contains
+`/run/user/<uid>/systemd/generator`, where Quadlet writes the unit generated
+from **our own** `.container`, and system roots like `/usr/lib/systemd/user`.
+Treating the generator directory as a foreign install would hard-refuse a host
+whose only fault is an interrupted run, and refuse it in a way `--reset` could
+not clear; treating a system root as ours would have this account deleting units
+it did not install. So: under the home is resettable, under the manager's runtime
+root is cleared by removing the quadlet and reloading (which `--reset` already
+does), and anything else is refused by name and never deleted.
+
+**Second finding: normal teardown could leave the data volume and still report
+success.** `podman volume rm -f … || true` cannot fail loudly, so a refused
+removal left the volume standing while teardown deleted the deployment around it
+and exited `0` — and a surviving volume is documented six lines above as the
+thing that makes the next run fail in `db-init` looking like a lane defect. It is
+now verified and makes teardown non-zero, exactly as the `--keep` branch three
+lines below was already corrected to do. The same fix, twice, in one function,
+because the first correction was applied to the branch that was under review
+rather than to the rule.
+
+**Two false proofs on the way, both recorded.** Proving the old revision failed
+took three attempts. The first ran the previous script from `/tmp`, so
+`repo_root` resolved to `/` and it died on a missing library — red, for nothing.
+The second ran it from inside the tree and it refused, but on `DEPLOY-004`'s
+ancestor rule: `mkdir -p` had created `user.control` at mode 775 under the
+account's umask, and a group-writable ancestor is refused before the probe
+matters. Only with the directory at 0755 does the real behaviour show. **"The old
+version failed" is not evidence that it failed for the reason claimed** — the
+third instance of that today, and the reason `DEPLOY-004`'s evidence table has a
+*refused, for the wrong reason* column instead of a boolean.
+
+Twenty-one findings across eleven rounds (7, 3, 2, 1, 1, 1, 1, 1, 1, 1, 2) —
+nineteen received, two found by looking rather than by being told.
 
 **On the correction-round cap, honestly.** Nine rounds is past the point where
 this repository's own rule says to merge what is sound and open a design ticket,
