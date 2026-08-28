@@ -254,6 +254,26 @@ is merged into the next run.
 Thirteen findings across four rounds, at a declining rate (7, 3, 2, 1), all
 mine, none disputed.
 
+## Review round 5 — a failed gate must not leave a weakened database
+
+`failed_runtime_preflight_does_not_rotate_the_active_api_credential`
+deliberately weakens `identity_sessions_tenant_policy` to `USING (true OR …)`,
+asserts that startup is **rejected**, and restores the policy only *after* that
+assertion. A failed assertion unwinds past the restore, leaving row-level
+security effectively off for reads — and `--keep` would have preserved the
+volume with it, ready for someone to restart.
+
+Verified by reading the test: weaken at line 562, assert, restore at 583.
+
+**Fixing the test to restore on unwind is the better repair and is not this
+ticket's file.** What this script owes is not to *preserve the result*: a flag
+set around the gate makes teardown destroy the database on a failed gate even
+under `--keep`, and say so in as many words. The deployment tree is still kept,
+so the failure stays inspectable — it is the database, specifically, that does
+not survive a gate that may have switched its RLS off.
+
+Fourteen findings across five rounds (7, 3, 2, 1, 1), all mine, none disputed.
+
 ## Bounded deliberately
 - **The arm needs a dedicated account and refuses without one.** Every
   precondition — passwd home, `HOME` agreeing with it, lingering, a reachable

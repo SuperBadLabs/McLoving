@@ -32,6 +32,9 @@ release_dir=""
 checksums=""
 keep=0
 reset=0
+# Set while the deployable-runtime gate is running, because that gate
+# deliberately weakens the database and only restores it AFTER its assertion.
+database_possibly_weakened=0
 runtime_gate=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -205,6 +208,16 @@ teardown() {
     rm -rf "${unit_root}"/mcloving-* "${quadlet_root}"/mcloving-* \
            "${unit_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
+  elif (( database_possibly_weakened == 1 )); then
+    # --keep asked for the deployment, not for a database whose row-level
+    # security may be switched off. The tree stays; the volume does not.
+    podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
+    echo "   --keep: the deployment under ${home_dir} is left in place, but its"
+    echo "           mcloving-postgres-data volume was REMOVED: the runtime gate"
+    echo "           failed while it had deliberately weakened"
+    echo "           identity_sessions_tenant_policy, and restores it only after"
+    echo "           the assertion that failed. Keeping that database would keep"
+    echo "           row-level security switched off."
   else
     echo "   --keep: the deployment under ${home_dir} is left in place, its"
     echo "           mcloving-postgres-data volume intact, services stopped."
@@ -536,10 +549,24 @@ runtime_db_url="$(grep -E '^MCLOVING_DATABASE_URL=' "${config}/controller.env" |
 [[ "${migration_url}" != "${runtime_db_url}" ]] \
   || fail "the migration and runtime URLs are identical; the split this gate checks does not exist"
 
+# THIS GATE LEAVES THE DATABASE WEAKENED IF IT FAILS.
+# `failed_runtime_preflight_does_not_rotate_the_active_api_credential`
+# deliberately weakens `identity_sessions_tenant_policy` to
+# `USING (true OR ...)`, asserts that startup is REJECTED, and only restores the
+# policy after that assertion. A failed assertion unwinds past the restore, so
+# the policy stays weakened -- and RLS is then effectively off for reads. Under
+# --keep the volume would survive with it, ready for someone to restart.
+#
+# Fixing the test to restore on unwind is the better repair and is not this
+# ticket's file. What this script owes is not to PRESERVE the result: the flag
+# below makes teardown destroy the database on a failed gate even under --keep,
+# and say so. The deployment tree is still kept, so the failure is inspectable.
+database_possibly_weakened=1
 MCLOVING_TEST_DATABASE_URL="${migration_url}" \
 MCLOVING_TEST_RUNTIME_DATABASE_URL="${runtime_db_url}" \
   "${runtime_gate}" --ignored --test-threads=1 \
   || fail "the deployable-runtime gate failed against this installed deployment"
+database_possibly_weakened=0
 echo "   deployable-runtime gate passed against the installed deployment's database and roles"
 
 echo
