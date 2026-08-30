@@ -435,10 +435,14 @@ async fn wait_for_leader_exit_and_cleanup(
     #[cfg(target_os = "linux")]
     {
         if let Err(error) = wait_for_unreaped_leader_exit(process_id).await {
-            signal_group(process_group_id, Signal::SIGKILL)?;
+            signal_group(process_group_id, Signal::SIGKILL)
+                .map_err(|kill_error| containment_unverified(process_id, kill_error))?;
             let containment =
                 wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
-            child.wait().await?;
+            child
+                .wait()
+                .await
+                .map_err(|wait_error| containment_unverified(process_id, wait_error.into()))?;
             containment.map_err(|cleanup| containment_unverified(process_id, cleanup))?;
             return Err(containment_unverified(process_id, error));
         }
@@ -447,7 +451,10 @@ async fn wait_for_leader_exit_and_cleanup(
                 .await;
         // Reap only after no descendants remain. Until this wait, the zombie
         // leader keeps its numeric PID/PGID unavailable for reuse.
-        let status = child.wait().await?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|wait_error| containment_unverified(process_id, wait_error.into()))?;
         containment.map_err(|error| containment_unverified(process_id, error))?;
         Ok(status)
     }
@@ -494,16 +501,27 @@ async fn terminate_and_prove_group_empty(
 ) -> Result<std::process::ExitStatus, ExecutionError> {
     #[cfg(target_os = "linux")]
     {
-        signal_group(process_group_id, Signal::SIGTERM)?;
-        sleep(grace).await;
-        if !leader_exited_without_reaping(process_id)?
-            || group_has_members_other_than(process_group_id, process_id)?
-        {
-            signal_group(process_group_id, Signal::SIGKILL)?;
+        // Every failure below leaves the group possibly alive or the leader
+        // possibly unreaped. That is unverified containment: it must never
+        // surface as a plain error a caller could finalize as an ordinary
+        // terminal while processes may still be running.
+        let quiesced: Result<(), ExecutionError> = async {
+            signal_group(process_group_id, Signal::SIGTERM)?;
+            sleep(grace).await;
+            if !leader_exited_without_reaping(process_id)?
+                || group_has_members_other_than(process_group_id, process_id)?
+            {
+                signal_group(process_group_id, Signal::SIGKILL)?;
+            }
+            wait_for_unreaped_leader_exit_bounded(process_id, Duration::from_secs(5)).await
         }
-        wait_for_unreaped_leader_exit_bounded(process_id, Duration::from_secs(5)).await?;
+        .await;
+        quiesced.map_err(|error| containment_unverified(process_id, error))?;
         let containment = wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
-        let status = child.wait().await?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|wait_error| containment_unverified(process_id, wait_error.into()))?;
         containment.map_err(|error| containment_unverified(process_id, error))?;
         Ok(status)
     }
@@ -643,10 +661,8 @@ fn group_has_members_other_than(
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
             Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) =>
+                if proc_stat_read_lost_the_process(&error)
+                    || error.kind() == std::io::ErrorKind::PermissionDenied =>
             {
                 continue;
             }
@@ -660,6 +676,18 @@ fn group_has_members_other_than(
         }
     }
     Ok(false)
+}
+
+/// Whether a `/proc/<pid>/stat` read failed only because that process ceased
+/// to exist. `NotFound` covers the entry vanishing before open; a task that
+/// exits between open and read fails with raw `ESRCH`, which std leaves
+/// uncategorized. Either way the process is not a live group member, and a
+/// scan over all of `/proc` must not let an unrelated process's death read
+/// as unverifiable containment.
+#[cfg(target_os = "linux")]
+fn proc_stat_read_lost_the_process(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(Errno::ESRCH as i32)
 }
 
 #[cfg(target_os = "linux")]
@@ -699,6 +727,26 @@ mod tests {
     use nix::sys::signal::kill;
     use sha2::{Digest, Sha256};
     use tokio::fs;
+
+    #[test]
+    fn proc_scan_tolerates_processes_that_vanish_mid_read() {
+        // ESRCH is what /proc/<pid>/stat returns when the task exits between
+        // open and read; the group scan visits every process on the host, so
+        // an unrelated death must not read as unverifiable containment.
+        assert!(proc_stat_read_lost_the_process(
+            &io::Error::from_raw_os_error(Errno::ESRCH as i32)
+        ));
+        assert!(proc_stat_read_lost_the_process(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "no entry"
+        )));
+        assert!(!proc_stat_read_lost_the_process(
+            &io::Error::from_raw_os_error(Errno::EACCES as i32)
+        ));
+        assert!(!proc_stat_read_lost_the_process(&io::Error::other(
+            "unrelated"
+        )));
+    }
 
     #[test]
     fn proc_stat_distinguishes_live_and_zombie_group_members() {

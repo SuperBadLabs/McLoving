@@ -88,6 +88,14 @@ pub enum AgentError {
     StaleAuthority,
     #[error("agent has an unresolved recovered attempt and will not poll for more work")]
     UnresolvedReconciliation,
+    #[error(
+        "attempt {organization}/{attempt} was parked for reconciliation by its own execution: {cause}"
+    )]
+    ExecutionReconciliationRequired {
+        organization: String,
+        attempt: String,
+        cause: String,
+    },
     #[error("controller returned an invalid work assignment: {0}")]
     InvalidAssignment(String),
     #[error("execution specification is invalid: {0}")]
@@ -252,6 +260,8 @@ pub async fn run_until_stopped(
 ) -> Result<(), AgentError> {
     let _instance = acquire_instance_guard(config)?;
     let mut consecutive_stale_sessions: u32 = 0;
+    let mut last_session_error = String::new();
+    let mut repeated_session_errors: u64 = 0;
     loop {
         if stop.is_cancelled() {
             return Ok(());
@@ -264,8 +274,30 @@ pub async fn run_until_stopped(
                 } else {
                     0
                 };
-                eprintln!("agent session ended; retrying: {error}");
-                if consecutive_stale_sessions >= STALE_SESSION_COLLISION_THRESHOLD {
+                // A parked or partitioned agent hits the same failure every
+                // reconnect; repeating it at full cadence floods the log and
+                // rotates away the one line naming the failure that started
+                // the streak. Duplicates are logged at powers of two.
+                let message = error.to_string();
+                if message == last_session_error {
+                    repeated_session_errors = repeated_session_errors.saturating_add(1);
+                    if repeated_session_errors.is_power_of_two() {
+                        eprintln!(
+                            "agent session ended; retrying: {message} (unchanged for \
+                             {repeated_session_errors} consecutive sessions)"
+                        );
+                    }
+                } else {
+                    last_session_error = message;
+                    repeated_session_errors = 0;
+                    eprintln!("agent session ended; retrying: {error}");
+                }
+                // The changing count keeps this warning from ever reading as
+                // a duplicate, so gate it the same way: a persistent identity
+                // collision must not flood the initial diagnostic away.
+                if consecutive_stale_sessions >= STALE_SESSION_COLLISION_THRESHOLD
+                    && consecutive_stale_sessions.is_power_of_two()
+                {
                     eprintln!(
                         "agent identity collision suspected: {consecutive_stale_sessions} \
                          consecutive stale session epoch rejections for agent {}; a second \
@@ -1002,7 +1034,14 @@ pub(crate) fn process_birth_identity_for(process_id: u32) -> Result<Option<Strin
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
     let stat = match std::fs::read_to_string(format!("/proc/{process_id}/stat")) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A task that exits between open and read fails with raw ESRCH, which
+        // std does not map to NotFound; both mean the process is gone.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
     };
     let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
