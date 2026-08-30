@@ -1088,7 +1088,11 @@ async fn run_assignment(
                         AttemptPhase::ReconciliationRequired,
                         Some(process_id),
                     )?;
-                    return Err(AgentError::UnresolvedReconciliation);
+                    return Err(AgentError::ExecutionReconciliationRequired {
+                        organization: organization.clone(),
+                        attempt: attempt.clone(),
+                        cause: error.to_string(),
+                    });
                 }
                 if requires_processless_reconciliation(&error) {
                     // Containment is proven empty, but the configured root has
@@ -1102,7 +1106,11 @@ async fn run_assignment(
                         AttemptPhase::ReconciliationRequired,
                         None,
                     )?;
-                    return Err(AgentError::UnresolvedReconciliation);
+                    return Err(AgentError::ExecutionReconciliationRequired {
+                        organization: organization.clone(),
+                        attempt: attempt.clone(),
+                        cause: error.to_string(),
+                    });
                 }
                 return finalize_without_process(
                     config,
@@ -1505,8 +1513,16 @@ async fn renew_lease(
                 }),
             ) => result,
         };
+        // A stop request makes any concurrent renewal failure moot: the
+        // attempt is already finalized and the session must not be torn down
+        // over a lease this task was told to release. The failure arms below
+        // re-check because the select above is unbiased and the RPC may have
+        // failed in the same poll that observed the stop.
         let receipt = match renewal {
             Err(_) => {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
                 record_lease_loss(&loss_reason, "renewal_timeout");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
@@ -1514,6 +1530,9 @@ async fn renew_lease(
             }
             Ok(Ok(response)) => response.into_inner(),
             Ok(Err(error)) => {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
                 record_lease_loss(&loss_reason, renewal_status_cause(&error));
                 execution_cancellation.cancel();
                 authority_lost.cancel();
@@ -1523,6 +1542,9 @@ async fn renew_lease(
         match ensure_session(receipt.session_epoch, authority.session_epoch) {
             Ok(()) => {}
             Err(error) => {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
                 record_lease_loss(&loss_reason, "renewal_session_stale");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
@@ -1530,6 +1552,9 @@ async fn renew_lease(
             }
         }
         if !receipt.accepted {
+            if stop.is_cancelled() {
+                return Ok(());
+            }
             record_lease_loss(
                 &loss_reason,
                 renewal_rejection_cause(&receipt.rejection_cause),

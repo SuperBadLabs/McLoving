@@ -435,10 +435,14 @@ async fn wait_for_leader_exit_and_cleanup(
     #[cfg(target_os = "linux")]
     {
         if let Err(error) = wait_for_unreaped_leader_exit(process_id).await {
-            signal_group(process_group_id, Signal::SIGKILL)?;
+            signal_group(process_group_id, Signal::SIGKILL)
+                .map_err(|kill_error| containment_unverified(process_id, kill_error))?;
             let containment =
                 wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
-            child.wait().await?;
+            child
+                .wait()
+                .await
+                .map_err(|wait_error| containment_unverified(process_id, wait_error.into()))?;
             containment.map_err(|cleanup| containment_unverified(process_id, cleanup))?;
             return Err(containment_unverified(process_id, error));
         }
@@ -447,7 +451,10 @@ async fn wait_for_leader_exit_and_cleanup(
                 .await;
         // Reap only after no descendants remain. Until this wait, the zombie
         // leader keeps its numeric PID/PGID unavailable for reuse.
-        let status = child.wait().await?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|wait_error| containment_unverified(process_id, wait_error.into()))?;
         containment.map_err(|error| containment_unverified(process_id, error))?;
         Ok(status)
     }
@@ -494,16 +501,27 @@ async fn terminate_and_prove_group_empty(
 ) -> Result<std::process::ExitStatus, ExecutionError> {
     #[cfg(target_os = "linux")]
     {
-        signal_group(process_group_id, Signal::SIGTERM)?;
-        sleep(grace).await;
-        if !leader_exited_without_reaping(process_id)?
-            || group_has_members_other_than(process_group_id, process_id)?
-        {
-            signal_group(process_group_id, Signal::SIGKILL)?;
+        // Every failure below leaves the group possibly alive or the leader
+        // possibly unreaped. That is unverified containment: it must never
+        // surface as a plain error a caller could finalize as an ordinary
+        // terminal while processes may still be running.
+        let quiesced: Result<(), ExecutionError> = async {
+            signal_group(process_group_id, Signal::SIGTERM)?;
+            sleep(grace).await;
+            if !leader_exited_without_reaping(process_id)?
+                || group_has_members_other_than(process_group_id, process_id)?
+            {
+                signal_group(process_group_id, Signal::SIGKILL)?;
+            }
+            wait_for_unreaped_leader_exit_bounded(process_id, Duration::from_secs(5)).await
         }
-        wait_for_unreaped_leader_exit_bounded(process_id, Duration::from_secs(5)).await?;
+        .await;
+        quiesced.map_err(|error| containment_unverified(process_id, error))?;
         let containment = wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
-        let status = child.wait().await?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|wait_error| containment_unverified(process_id, wait_error.into()))?;
         containment.map_err(|error| containment_unverified(process_id, error))?;
         Ok(status)
     }
