@@ -388,19 +388,22 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir(&current)?;
-                changed_parents.push(
-                    current
-                        .parent()
-                        .ok_or(ExecutionError::InvalidWorkspaceRoot)?
-                        .to_owned(),
-                );
             }
             Err(error) => return Err(error.into()),
         }
+        // The parent is flushed whether this walk created the component or
+        // found one left by a predecessor that failed before its own flush:
+        // existence does not prove a durable entry.
+        changed_parents.push(
+            current
+                .parent()
+                .ok_or(ExecutionError::InvalidWorkspaceRoot)?
+                .to_owned(),
+        );
     }
-    // Each new directory entry is still followed by a parent-directory flush
-    // before the workspace is used; the parents are independent entries with
-    // no ordering requirement among themselves, so they flush as one batch.
+    // Each directory entry on the chain gets a parent-directory flush before
+    // the workspace is used; the parents are independent entries with no
+    // ordering requirement among themselves, so they flush as one batch.
     sync_directories(&changed_parents)?;
 
     let canonical = current.canonicalize()?;

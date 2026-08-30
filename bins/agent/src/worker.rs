@@ -1761,7 +1761,12 @@ async fn publish_or_inline_spool(
         AgentError::InvalidAssignment("log length exceeds platform bounds".to_owned())
     })?;
     let mut content = Vec::with_capacity(expected.saturating_add(1));
-    file.read_to_end(&mut content).await?;
+    // Bounded to one byte past the journaled size: enough to detect growth,
+    // never enough to let an oversized on-disk file dictate the allocation.
+    (&mut file)
+        .take(entry.bytes.saturating_add(1))
+        .read_to_end(&mut content)
+        .await?;
     if content.len() != expected || <[u8; 32]>::from(Sha256::digest(&content)) != entry.digest {
         return Err(AgentError::InvalidAssignment(
             "durable log spool metadata does not match its content".to_owned(),
@@ -1937,14 +1942,36 @@ async fn reclaim_spool_entries(
     // died with it, its own removal is named in a surviving ancestor's entry
     // list, and an interrupted reclaim is idempotently re-completed by
     // startup reclaim before these descriptors retire.
+    // The per-organization anchors are flushed unconditionally: a reclaim
+    // resumed after an interrupted predecessor finds the paths already
+    // absent and would otherwise collect no changed parent, retiring the
+    // descriptors while the predecessor's unflushed removals could still
+    // be lost to power failure.
+    for anchor_relative in [
+        workspace
+            .components()
+            .next()
+            .map(|component| PathBuf::from(component.as_os_str())),
+        workspace
+            .components()
+            .next()
+            .map(|component| PathBuf::from(AGENT_RESULT_DIRECTORY).join(component.as_os_str())),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        changed.push(config.workspace_root.join(anchor_relative));
+    }
     changed.sort();
     changed.dedup();
-    changed.retain(|directory| directory.is_dir());
-    tokio::task::spawn_blocking(move || sync_directories(&changed))
-        .await
-        .map_err(|error| {
-            AgentError::InvalidAssignment(format!("durability flush failed: {error}"))
-        })??;
+    tokio::task::spawn_blocking(move || {
+        changed.retain(|directory| directory.is_dir());
+        sync_directories(&changed)
+    })
+    .await
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!("durability flush failed: {error}"))
+    })??;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
         attempt_id,
@@ -2457,10 +2484,15 @@ async fn create_result_directory(
         let parent = directory.clone();
         directory.push(component);
         match fs::create_dir(&directory).await {
-            Ok(()) => changed_parents.push(parent),
+            Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
+        // The parent is flushed whether this walk created the component or
+        // found it: a component left by a predecessor that failed before its
+        // own barrier has no durable entry, and treating existence as
+        // durability would let this attempt's final barrier skip it.
+        changed_parents.push(parent);
         let metadata = fs::symlink_metadata(&directory).await?;
         if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
             return Err(AgentError::InvalidAssignment(
