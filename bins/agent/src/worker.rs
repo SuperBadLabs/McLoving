@@ -200,14 +200,30 @@ struct AuthorityRpcControl<'a> {
     lease_window: Duration,
 }
 
+/// What one work poll did, so the caller can tell an idle pass from one that
+/// moved the queue. The poll interval paces *asking* for work; it must not
+/// also pace *doing* it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PollOutcome {
+    /// The controller offered nothing.
+    Idle,
+    /// An assignment was executed, or terminally refused. Either way the queue
+    /// moved and the next unit may already be claimable.
+    Progressed,
+    /// The assignment was declined without terminalizing it. The controller
+    /// re-offers it until the lease lapses, so asking again immediately would
+    /// spin on the same offer.
+    Declined,
+}
+
 pub(super) async fn poll_and_run_one(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
     stop: CancellationToken,
-) -> Result<(), AgentError> {
+) -> Result<PollOutcome, AgentError> {
     let offer = tokio::select! {
-        () = stop.cancelled() => return Ok(()),
+        () = stop.cancelled() => return Ok(PollOutcome::Idle),
         response = poll_rpc(
             Duration::from_secs(u64::from(config.lease_seconds)),
             client.poll_work(WorkPoll {
@@ -220,20 +236,22 @@ pub(super) async fn poll_and_run_one(
     };
     ensure_session(offer.session_epoch, session_epoch)?;
     let Some(assignment) = offer.assignment else {
-        return Ok(());
+        return Ok(PollOutcome::Idle);
     };
     match validate_assignment(config, session_epoch, assignment)? {
         AssignmentDisposition::Runnable(assignment) => {
-            run_assignment(config, client, session_epoch, *assignment, stop).await
+            run_assignment(config, client, session_epoch, *assignment, stop).await?;
+            Ok(PollOutcome::Progressed)
         }
         AssignmentDisposition::ForAnotherRuntime(reason) => {
             // Decline without terminalizing. The lease lapses, the controller
             // requeues, and an agent with the matching runtime claims it.
             eprintln!("declining_assignment: {reason}");
-            Ok(())
+            Ok(PollOutcome::Declined)
         }
         AssignmentDisposition::Unsupported(refusal) => {
-            refuse_unsupported_assignment(config, client, session_epoch, refusal, stop).await
+            refuse_unsupported_assignment(config, client, session_epoch, refusal, stop).await?;
+            Ok(PollOutcome::Progressed)
         }
     }
 }

@@ -329,7 +329,21 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
     let mut work_tick = interval(config.poll_interval);
     work_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     work_tick.tick().await;
+    // The poll interval paces how often an idle agent ASKS for work. It must
+    // not also pace how fast work is DONE: with one assignment handled per
+    // tick, a queue of ready units drains at one unit per interval, so every
+    // unit after the first waits a full period for no reason. `drain` carries
+    // "the last pass moved the queue" into the next iteration, which skips the
+    // wait. Measured on mario at the shipped 500 ms default: 496 ms per stage
+    // before, bounded by the executing work after.
+    let mut drain = false;
     loop {
+        // Ready immediately while draining; otherwise the ordinary poll tick.
+        let work_ready = async {
+            if !drain {
+                work_tick.tick().await;
+            }
+        };
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             _ = reconciliation_tick.tick() => {
@@ -341,13 +355,16 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
                 ).await?;
                 worker::reclaim_terminal_spools(config).await?;
             }
-            _ = work_tick.tick() => {
-                worker::poll_and_run_one(
+            () = work_ready => {
+                // Only executed or terminally refused work justifies asking
+                // again at once. A declined assignment stays offered until its
+                // lease lapses, so draining on it would spin on one offer.
+                drain = worker::poll_and_run_one(
                     config,
                     &mut client,
                     receipt.session_epoch,
                     stop.clone(),
-                ).await?;
+                ).await? == worker::PollOutcome::Progressed;
             }
         }
     }
