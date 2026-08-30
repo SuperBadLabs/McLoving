@@ -336,7 +336,12 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
     // "the last pass moved the queue" into the next iteration, which skips the
     // wait. Measured on mario at the shipped 500 ms default: 496 ms per stage
     // before, bounded by the executing work after.
-    let mut drain = false;
+    //
+    // Starting true keeps the session's first poll immediate: the tick
+    // consumed above is the interval's zero-delay first fire, and waiting out
+    // a full period before ever asking would delay a session's first
+    // assignment by one interval.
+    let mut drain = true;
     loop {
         // Ready immediately while draining; otherwise the ordinary poll tick.
         let work_ready = async {
