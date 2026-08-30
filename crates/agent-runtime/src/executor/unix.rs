@@ -734,14 +734,14 @@ mod tests {
         // open and read; the group scan visits every process on the host, so
         // an unrelated death must not read as unverifiable containment.
         assert!(proc_stat_read_lost_the_process(
-            &io::Error::from_raw_os_error(3)
+            &io::Error::from_raw_os_error(Errno::ESRCH as i32)
         ));
         assert!(proc_stat_read_lost_the_process(&io::Error::new(
             io::ErrorKind::NotFound,
             "no entry"
         )));
         assert!(!proc_stat_read_lost_the_process(
-            &io::Error::from_raw_os_error(13)
+            &io::Error::from_raw_os_error(Errno::EACCES as i32)
         ));
         assert!(!proc_stat_read_lost_the_process(&io::Error::other(
             "unrelated"
