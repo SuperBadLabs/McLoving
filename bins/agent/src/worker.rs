@@ -1964,9 +1964,32 @@ async fn reclaim_spool_entries(
     }
     changed.sort();
     changed.dedup();
+    let flush_root = config.workspace_root.to_owned();
     tokio::task::spawn_blocking(move || {
-        changed.retain(|directory| directory.is_dir());
-        sync_directories(&changed)
+        let mut boundaries = Vec::with_capacity(changed.len());
+        for directory in changed {
+            // A queued boundary that no longer exists — an anchor whose entry
+            // a predecessor or this pass removed — falls back to its nearest
+            // surviving ancestor inside the workspace root, so the removal's
+            // parent entry is flushed rather than silently dropped.
+            let mut candidate = directory.as_path();
+            loop {
+                if candidate.is_dir() {
+                    boundaries.push(candidate.to_owned());
+                    break;
+                }
+                if candidate == flush_root {
+                    break;
+                }
+                match candidate.parent() {
+                    Some(parent) if parent.starts_with(&flush_root) => candidate = parent,
+                    _ => break,
+                }
+            }
+        }
+        boundaries.sort();
+        boundaries.dedup();
+        sync_directories(&boundaries)
     })
     .await
     .map_err(|error| {
