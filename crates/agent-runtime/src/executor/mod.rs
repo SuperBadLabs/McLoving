@@ -366,6 +366,7 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
     }
 
     let mut current = root.clone();
+    let mut changed_parents = Vec::new();
     let components: Vec<_> = relative.components().collect();
     for (index, component) in components.iter().enumerate() {
         let Component::Normal(name) = component else {
@@ -387,14 +388,23 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir(&current)?;
-                let parent = current
-                    .parent()
-                    .ok_or(ExecutionError::InvalidWorkspaceRoot)?;
-                sync_directory(parent)?;
             }
             Err(error) => return Err(error.into()),
         }
+        // The parent is flushed whether this walk created the component or
+        // found one left by a predecessor that failed before its own flush:
+        // existence does not prove a durable entry.
+        changed_parents.push(
+            current
+                .parent()
+                .ok_or(ExecutionError::InvalidWorkspaceRoot)?
+                .to_owned(),
+        );
     }
+    // Each directory entry on the chain gets a parent-directory flush before
+    // the workspace is used; the parents are independent entries with no
+    // ordering requirement among themselves, so they flush as one batch.
+    sync_directories(&changed_parents)?;
 
     let canonical = current.canonicalize()?;
     if !canonical.starts_with(&root) {
@@ -418,6 +428,48 @@ pub fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     {
         false
     }
+}
+
+/// Flushes independent durability boundaries — plain files and directory
+/// entries — concurrently, returning only when every one is durable.
+///
+/// The entries in one batch have no ordering requirement among themselves:
+/// every caller's actual requirement is a barrier, everything here durable
+/// before the caller commits (or acknowledges) a journal record that
+/// references it, and that barrier is this function's return. On a
+/// journaling filesystem the overlapping flushes coalesce into shared
+/// filesystem-journal commits, so a batch costs roughly one flush rather
+/// than one per entry serialized.
+pub fn sync_boundaries(files: &[&std::fs::File], directories: &[PathBuf]) -> io::Result<()> {
+    if files.len() + directories.len() <= 1 {
+        for file in files {
+            file.sync_all()?;
+        }
+        for directory in directories {
+            sync_directory(directory)?;
+        }
+        return Ok(());
+    }
+    std::thread::scope(|scope| {
+        let mut flushes = Vec::with_capacity(files.len() + directories.len());
+        for file in files {
+            flushes.push(scope.spawn(move || file.sync_all()));
+        }
+        for directory in directories {
+            flushes.push(scope.spawn(move || sync_directory(directory)));
+        }
+        for flush in flushes {
+            flush
+                .join()
+                .map_err(|_| io::Error::other("durability flush thread panicked"))??;
+        }
+        Ok(())
+    })
+}
+
+/// Flushes independent directory entries as one concurrent batch.
+pub fn sync_directories(directories: &[PathBuf]) -> io::Result<()> {
+    sync_boundaries(&[], directories)
 }
 
 /// Flushes the directory durability boundary used by executor-owned spools.
