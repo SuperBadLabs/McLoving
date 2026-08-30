@@ -1300,7 +1300,7 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
     );
 
     assert!(
-        !store
+        store
             .accept_offer_in_session(
                 organization_id,
                 claim.attempt_id,
@@ -1311,6 +1311,7 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             )
             .await
             .expect("reject stale acceptance")
+            .is_none()
     );
     assert!(
         store
@@ -1338,6 +1339,7 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             )
             .await
             .expect("accept under current session")
+            .is_some()
     );
     assert!(
         !store
@@ -1854,6 +1856,134 @@ async fn outbox_reaper_bounds_retention_and_respects_tenancy() {
             protected_count: 0,
         }
     );
+}
+
+/// The accept receipt's lease state is what lets an agent that negotiated
+/// accept-carries-lease-state-v1 skip the serialized post-accept renewal: a
+/// cancellation committed before acceptance must be visible in the accepting
+/// transaction itself, and an uncancelled accept must not claim one.
+#[tokio::test]
+async fn accepting_an_offer_reports_a_committed_cancellation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("accept-lease-state-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                7,
+                0,
+                &["work-delivery-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("open session")
+    );
+    let mut claims = Vec::new();
+    for (index, node_key) in ["uncancelled", "cancelled"].into_iter().enumerate() {
+        let admission = store
+            .admit_test_build(&NewBuild {
+                organization_id,
+                project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
+                idempotency_key: format!("accept-lease-state-{node_key}"),
+                pipeline_digest: [0xa5 + index as u8; 32],
+                node_key: node_key.into(),
+                required_capabilities: vec!["linux".into()],
+                required_trust_pool: "trusted".into(),
+                priority: 0,
+                execution_spec: json!({}),
+            })
+            .await
+            .expect("admit work");
+        let claim = store
+            .claim_next_in_session(
+                &ClaimRequest {
+                    organization_id,
+                    scheduler_id: "accept-lease-state".into(),
+                    agent_id: agent_id.clone(),
+                    capabilities: vec!["linux".into()],
+                    trust_pool: "trusted".into(),
+                    lease_seconds: 30,
+                    fairness_seed: 0,
+                },
+                7,
+            )
+            .await
+            .expect("claim work")
+            .expect("work is available");
+        claims.push((admission.build_id, claim));
+        let accepted = store
+            .accept_offer_in_session(
+                organization_id,
+                claims[index].1.attempt_id,
+                claims[index].1.fence,
+                claims[index].1.restore_epoch,
+                &agent_id,
+                7,
+            )
+            .await
+            .expect("accept offered work")
+            .expect("acceptance is live");
+        assert!(
+            !accepted.cancellation_requested,
+            "no cancellation was requested for {node_key} yet"
+        );
+    }
+    let (cancelled_build, cancelled_claim) = &claims[1];
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, *cancelled_build)
+            .await
+            .expect("request cancellation")
+    );
+    // Acceptance replay is idempotent, and the replay must now see the
+    // committed cancellation while the untouched build still reports none.
+    let replay = store
+        .accept_offer_in_session(
+            organization_id,
+            cancelled_claim.attempt_id,
+            cancelled_claim.fence,
+            cancelled_claim.restore_epoch,
+            &agent_id,
+            7,
+        )
+        .await
+        .expect("replay acceptance")
+        .expect("replay is idempotent");
+    assert!(
+        replay.cancellation_requested,
+        "the committed cancellation is visible in the accepting transaction"
+    );
+    let untouched = store
+        .accept_offer_in_session(
+            organization_id,
+            claims[0].1.attempt_id,
+            claims[0].1.fence,
+            claims[0].1.restore_epoch,
+            &agent_id,
+            7,
+        )
+        .await
+        .expect("replay uncancelled acceptance")
+        .expect("uncancelled replay is idempotent");
+    assert!(!untouched.cancellation_requested);
 }
 
 #[tokio::test]
@@ -8529,6 +8659,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             )
             .await
             .expect("accept protected work")
+            .is_some()
     );
     assert!(
         store

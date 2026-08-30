@@ -197,6 +197,21 @@ message WorkCompletion {
   WorkAuthority authority = 1;
   WorkOutcome outcome = 2;
   bytes summary_json = 3;
+  // Complete single-chunk log streams delivered with the terminal publication
+  // instead of through their own PublishLog round trips. Only sent when
+  // inline-terminal-logs-v1 was negotiated: a controller without the feature
+  // ignores this field entirely and the logs would silently never be
+  // published, so the agent must fall back to PublishLog for such a peer.
+  repeated InlineLogChunk inline_log_chunks = 4;
+}
+
+// One whole log stream small enough for a single chunk, carried inside
+// WorkCompletion. Field meanings match WorkLogChunk; the authority is the
+// completion's own.
+message InlineLogChunk {
+  uint64 sequence = 1;
+  string stream = 2;
+  bytes content = 3;
 }
 
 enum WorkOutcome {
@@ -213,4 +228,11 @@ message WorkReceipt {
   // override a non-succeeded terminal at the publishing row lock, and the
   // agent must journal what landed, not what it asked for.
   WorkOutcome published_outcome = 3;
+  // Set by AcceptWork: whether a cancellation of this attempt's build or node
+  // had committed as of the accepting transaction. An agent that negotiated
+  // accept-carries-lease-state-v1 reads this instead of issuing a separate
+  // RenewWorkLease round trip between accept and start; a controller without
+  // the feature leaves it default-false, which is why the agent must not
+  // trust it unless the feature was negotiated.
+  bool cancellation_requested = 4;
 }

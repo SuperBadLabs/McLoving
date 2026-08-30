@@ -17,9 +17,10 @@ use mcloving_agent_protocol::wire::{
     WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
-    ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, ProtocolRange,
-    RECOVERED_DISCHARGE_FEATURE, RECOVERED_FINALIZATION_LEASE_SECONDS,
-    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
+    ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
+    INLINE_TERMINAL_LOGS_FEATURE, ProtocolRange, RECOVERED_DISCHARGE_FEATURE,
+    RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_COMPLETION_SUBSTITUTION_FEATURE,
+    WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
@@ -657,6 +658,11 @@ struct ControllerAgentService {
     drop_start_response_once: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
     reject_renewal_window: Arc<RenewalRejectionWindow>,
+    /// Test-only fault injection: refuse every PublishLog call so a gate can
+    /// prove a build's logs rode WorkCompletion.inline_log_chunks instead of
+    /// silently falling back to the serialized round trips.
+    #[cfg(debug_assertions)]
+    refuse_publish_log: bool,
 }
 
 /// Test-only fault injection: refuse the renewals numbered `after + 1` through
@@ -736,6 +742,8 @@ impl AgentControl for ControllerAgentService {
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
             WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
             RECOVERED_DISCHARGE_FEATURE.to_owned(),
+            ACCEPT_LEASE_STATE_FEATURE.to_owned(),
+            INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -1110,9 +1118,13 @@ impl AgentControl for ControllerAgentService {
             .map_err(internal_store_error)?;
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
-            accepted,
+            accepted: accepted.is_some(),
             // Not a terminal publication, so there is no published outcome.
             published_outcome: WorkOutcome::Unspecified as i32,
+            // Inert for an agent that never negotiated
+            // accept-carries-lease-state-v1, so it is filled unconditionally
+            // instead of paying a per-accept feature lookup.
+            cancellation_requested: accepted.is_some_and(|offer| offer.cancellation_requested),
         }))
     }
 
@@ -1148,6 +1160,8 @@ impl AgentControl for ControllerAgentService {
             accepted,
             // Not a terminal publication, so there is no published outcome.
             published_outcome: WorkOutcome::Unspecified as i32,
+            // Only AcceptWork receipts carry lease state.
+            cancellation_requested: false,
         }))
     }
 
@@ -1292,6 +1306,12 @@ impl AgentControl for ControllerAgentService {
         &self,
         request: Request<WorkLogChunk>,
     ) -> Result<Response<WorkReceipt>, Status> {
+        #[cfg(debug_assertions)]
+        if self.refuse_publish_log {
+            return Err(Status::unimplemented(
+                "test-only injected PublishLog refusal",
+            ));
+        }
         let identity = self.identities.authenticate(&request)?.clone();
         let request = request.into_inner();
         let authority = request
@@ -1331,6 +1351,8 @@ impl AgentControl for ControllerAgentService {
             accepted,
             // Not a terminal publication, so there is no published outcome.
             published_outcome: WorkOutcome::Unspecified as i32,
+            // Only AcceptWork receipts carry lease state.
+            cancellation_requested: false,
         }))
     }
 
@@ -1359,6 +1381,56 @@ impl AgentControl for ControllerAgentService {
                 return Err(Status::invalid_argument("work outcome must be explicit"));
             }
         };
+        // Log streams delivered with the completion instead of through their
+        // own PublishLog round trips. Each chunk is bounded and appended
+        // exactly as a PublishLog call would be — same authority, same store
+        // path, same idempotent dedupe — so this needs no feature lookup: an
+        // agent only sends the field once inline-terminal-logs-v1 was
+        // negotiated, and processing it is indistinguishable from the
+        // serialized form. A refused append refuses the completion the same
+        // way a refused PublishLog would have stopped the agent before it
+        // completed.
+        if request.inline_log_chunks.len() > 2 {
+            return Err(Status::invalid_argument(
+                "at most one inline chunk per log stream",
+            ));
+        }
+        for chunk in &request.inline_log_chunks {
+            if !matches!(chunk.stream.as_str(), "stdout" | "stderr")
+                || chunk.content.len() > 1_048_576
+            {
+                return Err(Status::invalid_argument(
+                    "log stream or one-MiB chunk bound is invalid",
+                ));
+            }
+            let sequence = i64::try_from(chunk.sequence)
+                .map_err(|_| Status::invalid_argument("log sequence is out of range"))?;
+            let appended = self
+                .store
+                .append_log_in_session(
+                    &NewLogChunk {
+                        organization_id: context.organization_id,
+                        attempt_id: context.attempt_id,
+                        fence: context.fence,
+                        restore_epoch: context.restore_epoch,
+                        agent_id: &authority.agent_id,
+                        sequence,
+                        stream: &chunk.stream,
+                        content: &chunk.content,
+                    },
+                    authority.session_epoch,
+                )
+                .await
+                .map_err(internal_store_error)?;
+            if !appended {
+                return Ok(Response::new(WorkReceipt {
+                    session_epoch: authority.session_epoch,
+                    accepted: false,
+                    published_outcome: WorkOutcome::Unspecified as i32,
+                    cancellation_requested: false,
+                }));
+            }
+        }
         // A non-succeeded terminal must not outrank a cancellation that
         // committed while the agent was deciding. The agent reads cancellation
         // from an earlier lease receipt, so that decision can be stale by the
@@ -1420,6 +1492,8 @@ impl AgentControl for ControllerAgentService {
                 Some(TerminalOutcome::Aborted) => WorkOutcome::Aborted as i32,
                 None => WorkOutcome::Unspecified as i32,
             },
+            // Only AcceptWork receipts carry lease state.
+            cancellation_requested: false,
         }))
     }
 }
@@ -1654,6 +1728,8 @@ async fn run_agent_control_server(
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
         #[cfg(debug_assertions)]
         reject_renewal_window: Arc::new(RenewalRejectionWindow::from_environment()),
+        #[cfg(debug_assertions)]
+        refuse_publish_log: std::env::var_os("MCLOVING_TEST_REFUSE_PUBLISH_LOG").is_some(),
     };
     Server::builder()
         .tls_config(tls)

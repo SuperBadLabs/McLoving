@@ -133,6 +133,15 @@ initial bounded recovery lease.
 Acceptance and initial lease RPCs are bounded by the configured lease window;
 `StartWork` must complete inside the exact initial lease-minus-one-second
 budget. Renewal configuration must leave that same one-second safety margin.
+When `accept-carries-lease-state-v1` is negotiated, the accept receipt itself
+carries the cancellation state read under the accepting transaction's row
+lock and the serialized initial lease RPC is skipped entirely: the claim-time
+lease keeps its window minus the offer-to-accept latency, and the periodic
+renewal task re-arms it on its ordinary cadence, which the
+renewal-inside-the-lease-window invariant above already guarantees reaches
+the server in time. A peer without the feature keeps the explicit initial
+renewal, because the receipt field is default-false noise from such a
+controller.
 If renewal, session, or fence authority is lost, in-flight log and terminal
 publication are interrupted rather than being allowed to complete under stale
 authority.
@@ -238,6 +247,14 @@ discharge a parked reconciliation).
   attempt may retain at most 64 MiB of logs across at most 66 chunks and a
   64 KiB result. Both the agent and controller independently reject excess
   chunk cardinality.
+- When `inline-terminal-logs-v1` is negotiated, a stream that fits one chunk
+  is verified identically and then carried in the terminal publication's
+  `inline_log_chunks` instead of its own `PublishLog` round trip; the
+  controller appends each inline chunk through the same bounded, redacting,
+  idempotent store path before finalizing. Larger streams, recovery replay,
+  and peers without the feature keep the streaming pass — a controller that
+  never negotiated it would silently ignore the field, so the agent must not
+  inline for such a peer.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, the agent immediately deletes the controller-owned log
   and result spools and atomically retires their journal descriptors. A crash

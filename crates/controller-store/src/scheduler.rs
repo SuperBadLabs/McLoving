@@ -35,6 +35,15 @@ pub struct ClaimedAttempt {
     pub agent_id: String,
 }
 
+/// Lease state observed under the accepting transaction's row lock, so the
+/// accept receipt can answer what the immediate post-accept renewal used to:
+/// whether a cancellation had already committed for this attempt's build or
+/// node when acceptance was recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AcceptedOffer {
+    pub cancellation_requested: bool,
+}
+
 /// Outcome of one fenced lease-renewal request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LeaseRenewalDisposition {
@@ -271,15 +280,17 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
-        self.accept_offer_with_session(
-            organization_id,
-            attempt_id,
-            fence,
-            restore_epoch,
-            agent_id,
-            None,
-        )
-        .await
+        Ok(self
+            .accept_offer_with_session(
+                organization_id,
+                attempt_id,
+                fence,
+                restore_epoch,
+                agent_id,
+                None,
+            )
+            .await?
+            .is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -291,7 +302,7 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
         session_epoch: u64,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<AcceptedOffer>, StoreError> {
         self.accept_offer_with_session(
             organization_id,
             attempt_id,
@@ -312,21 +323,25 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
         session_epoch: Option<u64>,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<AcceptedOffer>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
         {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
         }
         acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
-        let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-            "SELECT n.id, n.build_id, a.status
+        let accepted = sqlx::query_as::<_, (Uuid, Uuid, String, bool)>(
+            "SELECT n.id, n.build_id, a.status,
+                    b.cancellation_requested_at IS NOT NULL
+                    OR n.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
@@ -346,9 +361,14 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, status)) = accepted else {
+        let Some((node_id, build_id, status, cancellation_requested)) = accepted else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
+        };
+        // An attempt already routed into cancellation is a requested
+        // cancellation even before the build or node stamp is visible here.
+        let accepted_offer = AcceptedOffer {
+            cancellation_requested: cancellation_requested || status == "cancelling",
         };
         if let Err(error) =
             crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
@@ -356,14 +376,14 @@ impl Store {
             tx.rollback().await?;
             return match error {
                 StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
-                    Ok(false)
+                    Ok(None)
                 }
                 other => Err(other),
             };
         }
         if status != "offered" {
             tx.commit().await?;
-            return Ok(true);
+            return Ok(Some(accepted_offer));
         }
         sqlx::query(
             "UPDATE attempts SET status = 'accepted'
@@ -396,7 +416,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(accepted_offer))
     }
 
     /// Renews one exact live lease and returns its cancellation state.

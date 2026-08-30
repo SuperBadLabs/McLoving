@@ -39,6 +39,26 @@ pub const CURRENT_SESSION_EPOCH_METADATA: &str = "mcloving-current-session-epoch
 /// would record the outcome it requested, so the controller must not substitute
 /// for such a peer during a rolling upgrade.
 pub const WORK_COMPLETION_SUBSTITUTION_FEATURE: &str = "work-completion-substitution-v1";
+/// The peer's `AcceptWork` receipt carries `cancellation_requested` read
+/// under the accepting transaction's row lock.
+///
+/// An agent that negotiated this skips the serialized `RenewWorkLease` round
+/// trip between accept and start entirely: the claim-time lease keeps its
+/// window minus the offer-to-accept latency, and the periodic renewal task
+/// re-arms it on its ordinary cadence. A controller without the feature
+/// leaves the field default-false, so the agent must keep the explicit
+/// renewal for such a peer or it would spawn work whose cancellation it
+/// never observed.
+pub const ACCEPT_LEASE_STATE_FEATURE: &str = "accept-carries-lease-state-v1";
+/// The peer processes `WorkCompletion.inline_log_chunks`.
+///
+/// A controller without this feature ignores the unknown field, so an agent
+/// that inlined its log streams anyway would report a terminal whose logs
+/// were silently never published. The agent must therefore publish through
+/// `PublishLog` unless this feature was negotiated; the controller side
+/// accepts inline chunks unconditionally because they carry exactly the
+/// authority and bounds of a `PublishLog` call.
+pub const INLINE_TERMINAL_LOGS_FEATURE: &str = "inline-terminal-logs-v1";
 /// The peer understands `CancellationDisposition::DISCHARGE_RECOVERED`.
 ///
 /// A peer without it rejects the unknown enum value as an unsupported
