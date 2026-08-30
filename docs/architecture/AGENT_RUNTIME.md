@@ -135,13 +135,16 @@ Acceptance and initial lease RPCs are bounded by the configured lease window;
 budget. Renewal configuration must leave that same one-second safety margin.
 When `accept-carries-lease-state-v1` is negotiated, the accept receipt itself
 carries the cancellation state read under the accepting transaction's row
-lock and the serialized initial lease RPC is skipped entirely: the claim-time
-lease keeps its window minus the offer-to-accept latency, and the periodic
-renewal task re-arms it on its ordinary cadence, which the
-renewal-inside-the-lease-window invariant above already guarantees reaches
-the server in time. A peer without the feature keeps the explicit initial
-renewal, because the receipt field is default-false noise from such a
-controller.
+lock and the serialized initial lease RPC is ordinarily skipped: the
+claim-time lease keeps its window minus the offer-to-accept latency, and the
+periodic renewal task re-arms it on its ordinary cadence. That skip is gated
+on freshness — if acceptance consumed so much of the claim window that the
+periodic cadence could no longer re-arm before the worst-case expiry
+(measured from before the poll was sent, minus the one-second safety
+margin), the agent falls back to the serialized renewal before any spawn, so
+a workload never starts on a lease the reaper may already be fencing. A peer
+without the feature keeps the explicit initial renewal unconditionally,
+because the receipt field is default-false noise from such a controller.
 If renewal, session, or fence authority is lost, in-flight log and terminal
 publication are interrupted rather than being allowed to complete under stale
 authority.

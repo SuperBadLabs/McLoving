@@ -42,13 +42,16 @@ pub const WORK_COMPLETION_SUBSTITUTION_FEATURE: &str = "work-completion-substitu
 /// The peer's `AcceptWork` receipt carries `cancellation_requested` read
 /// under the accepting transaction's row lock.
 ///
-/// An agent that negotiated this skips the serialized `RenewWorkLease` round
-/// trip between accept and start entirely: the claim-time lease keeps its
-/// window minus the offer-to-accept latency, and the periodic renewal task
-/// re-arms it on its ordinary cadence. A controller without the feature
-/// leaves the field default-false, so the agent must keep the explicit
-/// renewal for such a peer or it would spawn work whose cancellation it
-/// never observed.
+/// An agent that negotiated this ordinarily skips the serialized
+/// `RenewWorkLease` round trip between accept and start: the claim-time
+/// lease keeps its window minus the offer-to-accept latency, and the
+/// periodic renewal task re-arms it on its ordinary cadence. The skip is
+/// gated on lease freshness — an acceptance that consumed too much of the
+/// claim window for that cadence to re-arm in time falls back to the
+/// serialized renewal before anything spawns. A controller without the
+/// feature leaves the field default-false, so the agent must keep the
+/// explicit renewal for such a peer or it would spawn work whose
+/// cancellation it never observed.
 pub const ACCEPT_LEASE_STATE_FEATURE: &str = "accept-carries-lease-state-v1";
 /// The peer processes `WorkCompletion.inline_log_chunks`.
 ///
