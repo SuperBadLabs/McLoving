@@ -292,7 +292,12 @@ pub async fn run_until_stopped(
                     repeated_session_errors = 0;
                     eprintln!("agent session ended; retrying: {error}");
                 }
-                if consecutive_stale_sessions >= STALE_SESSION_COLLISION_THRESHOLD {
+                // The changing count keeps this warning from ever reading as
+                // a duplicate, so gate it the same way: a persistent identity
+                // collision must not flood the initial diagnostic away.
+                if consecutive_stale_sessions >= STALE_SESSION_COLLISION_THRESHOLD
+                    && consecutive_stale_sessions.is_power_of_two()
+                {
                     eprintln!(
                         "agent identity collision suspected: {consecutive_stale_sessions} \
                          consecutive stale session epoch rejections for agent {}; a second \
