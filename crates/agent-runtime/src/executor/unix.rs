@@ -661,10 +661,8 @@ fn group_has_members_other_than(
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
             Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) =>
+                if proc_stat_read_lost_the_process(&error)
+                    || error.kind() == std::io::ErrorKind::PermissionDenied =>
             {
                 continue;
             }
@@ -678,6 +676,18 @@ fn group_has_members_other_than(
         }
     }
     Ok(false)
+}
+
+/// Whether a `/proc/<pid>/stat` read failed only because that process ceased
+/// to exist. `NotFound` covers the entry vanishing before open; a task that
+/// exits between open and read fails with raw `ESRCH`, which std leaves
+/// uncategorized. Either way the process is not a live group member, and a
+/// scan over all of `/proc` must not let an unrelated process's death read
+/// as unverifiable containment.
+#[cfg(target_os = "linux")]
+fn proc_stat_read_lost_the_process(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(Errno::ESRCH as i32)
 }
 
 #[cfg(target_os = "linux")]
@@ -717,6 +727,26 @@ mod tests {
     use nix::sys::signal::kill;
     use sha2::{Digest, Sha256};
     use tokio::fs;
+
+    #[test]
+    fn proc_scan_tolerates_processes_that_vanish_mid_read() {
+        // ESRCH is what /proc/<pid>/stat returns when the task exits between
+        // open and read; the group scan visits every process on the host, so
+        // an unrelated death must not read as unverifiable containment.
+        assert!(proc_stat_read_lost_the_process(
+            &io::Error::from_raw_os_error(3)
+        ));
+        assert!(proc_stat_read_lost_the_process(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "no entry"
+        )));
+        assert!(!proc_stat_read_lost_the_process(
+            &io::Error::from_raw_os_error(13)
+        ));
+        assert!(!proc_stat_read_lost_the_process(&io::Error::other(
+            "unrelated"
+        )));
+    }
 
     #[test]
     fn proc_stat_distinguishes_live_and_zombie_group_members() {

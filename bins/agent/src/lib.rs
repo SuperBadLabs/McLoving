@@ -997,7 +997,14 @@ pub(crate) fn process_birth_identity_for(process_id: u32) -> Result<Option<Strin
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
     let stat = match std::fs::read_to_string(format!("/proc/{process_id}/stat")) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A task that exits between open and read fails with raw ESRCH, which
+        // std does not map to NotFound; both mean the process is gone.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
     };
     let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
