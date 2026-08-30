@@ -654,6 +654,7 @@ async fn disable_revokes_approval_grant_delivery_effect_and_retry_authority() {
             )
             .await
             .expect("accept pre-fence offer")
+            .is_some()
     );
     assert!(matches!(
         store

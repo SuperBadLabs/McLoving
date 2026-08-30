@@ -13,8 +13,8 @@ use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
     CancellationCompletion, CancellationDisposition, CancellationOutcome, CredentialBinding,
-    CredentialRequest, WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal,
-    WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
+    CredentialRequest, InlineLogChunk, WorkAssignment, WorkAuthority, WorkCompletion,
+    WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-use crate::{AgentConfig, AgentError, process_birth_identity_for};
+use crate::{AgentConfig, AgentError, SessionFeatures, process_birth_identity_for};
 
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
 const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 66;
@@ -220,8 +220,14 @@ pub(super) async fn poll_and_run_one(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
+    features: SessionFeatures,
     stop: CancellationToken,
 ) -> Result<PollOutcome, AgentError> {
+    // Taken before the poll is sent: the controller stamps the claim lease
+    // inside the poll transaction, so the true expiry is never earlier than
+    // this instant plus the lease window. The folded accept path uses it to
+    // bound the first background renewal.
+    let claimed_no_later_than = tokio::time::Instant::now();
     let offer = tokio::select! {
         () = stop.cancelled() => return Ok(PollOutcome::Idle),
         response = poll_rpc(
@@ -240,7 +246,16 @@ pub(super) async fn poll_and_run_one(
     };
     match validate_assignment(config, session_epoch, assignment)? {
         AssignmentDisposition::Runnable(assignment) => {
-            run_assignment(config, client, session_epoch, *assignment, stop).await?;
+            run_assignment(
+                config,
+                client,
+                session_epoch,
+                features,
+                claimed_no_later_than,
+                *assignment,
+                stop,
+            )
+            .await?;
             Ok(PollOutcome::Progressed)
         }
         AssignmentDisposition::ForAnotherRuntime(reason) => {
@@ -250,7 +265,16 @@ pub(super) async fn poll_and_run_one(
             Ok(PollOutcome::Declined)
         }
         AssignmentDisposition::Unsupported(refusal) => {
-            refuse_unsupported_assignment(config, client, session_epoch, refusal, stop).await?;
+            refuse_unsupported_assignment(
+                config,
+                client,
+                session_epoch,
+                features,
+                claimed_no_later_than,
+                refusal,
+                stop,
+            )
+            .await?;
             Ok(PollOutcome::Progressed)
         }
     }
@@ -444,6 +468,10 @@ async fn replay_finalization(
                         authority: Some(authority.clone()),
                         outcome: outcome as i32,
                         summary_json: summary,
+                        // Replay re-publishes through PublishLog: the chunks
+                        // may exceed one apiece, and the streamed path is the
+                        // recovery invariant being replayed.
+                        inline_log_chunks: Vec::new(),
                     }),
                 )
                 .await?,
@@ -714,10 +742,13 @@ fn supported_process_spec(execution_spec_json: &[u8]) -> Result<ProcessSpec, Str
 /// attempt as failed with a named reason. Without this, a validate-escaping
 /// spec is refused, rescheduled, and refused again while the build reports
 /// `running` forever.
+#[allow(clippy::too_many_arguments)]
 async fn refuse_unsupported_assignment(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
+    features: SessionFeatures,
+    claimed_no_later_than: tokio::time::Instant,
     refusal: UnsupportedAssignment,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -731,23 +762,37 @@ async fn refuse_unsupported_assignment(
         workspace: refusal.workspace.clone(),
     })?;
     let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
-    require_work_receipt(
-        lease_window_rpc(lease_window, client.accept_work(refusal.authority.clone())).await?,
-        session_epoch,
-    )?;
+    let receipt =
+        lease_window_rpc(lease_window, client.accept_work(refusal.authority.clone())).await?;
+    let accept_cancellation = receipt.cancellation_requested;
+    require_work_receipt(receipt, session_epoch)?;
     let lease_started_at = tokio::time::Instant::now();
-    let lease = lease_deadline_rpc(
-        lease_started_at + lease_rpc_budget(lease_window),
-        client.renew_work_lease(WorkLeaseRenewal {
-            authority: Some(refusal.authority.clone()),
-            lease_seconds: config.lease_seconds,
-        }),
-    )
-    .await?;
-    ensure_session(lease.session_epoch, session_epoch)?;
-    if !lease.accepted {
-        return Err(AgentError::StaleAuthority);
-    }
+    // Folded exactly like the runnable path: the accept receipt answers the
+    // serialized renewal's questions when accept-carries-lease-state-v1 was
+    // negotiated, and the periodic renewal task covers the lease from here.
+    let cancellation_requested = if features.accept_lease_state
+        && !accept_consumed_claim_lease(
+            claimed_no_later_than,
+            lease_window,
+            lease_started_at,
+            config.lease_renewal_interval,
+        ) {
+        accept_cancellation
+    } else {
+        let lease = lease_deadline_rpc(
+            lease_started_at + lease_rpc_budget(lease_window),
+            client.renew_work_lease(WorkLeaseRenewal {
+                authority: Some(refusal.authority.clone()),
+                lease_seconds: config.lease_seconds,
+            }),
+        )
+        .await?;
+        ensure_session(lease.session_epoch, session_epoch)?;
+        if !lease.accepted {
+            return Err(AgentError::StaleAuthority);
+        }
+        lease.cancellation_requested
+    };
     let lease_stop = CancellationToken::new();
     // No process will ever spawn for this refusal, so execution cancellation
     // starts already-cancelled exactly like the pre-spawn cancellation path.
@@ -771,11 +816,11 @@ async fn refuse_unsupported_assignment(
             loss_reason: Arc::new(OnceLock::new()),
         },
     ));
-    // Cancellation can already have committed before this immediate renewal
-    // answered. The normal assignment path publishes that as aborted, and a
-    // cancelled build must not be reported as an execution-spec failure
-    // instead, so the refusal yields to it.
-    let (outcome, reason) = if lease.cancellation_requested {
+    // Cancellation can already have committed before acceptance was recorded.
+    // The normal assignment path publishes that as aborted, and a cancelled
+    // build must not be reported as an execution-spec failure instead, so the
+    // refusal yields to it.
+    let (outcome, reason) = if cancellation_requested {
         (
             WorkOutcome::Aborted,
             "cancelled_before_process_spawn".to_owned(),
@@ -818,10 +863,13 @@ fn parse_uuid(name: &str, value: &str) -> Result<Uuid, AgentError> {
         .map_err(|_| AgentError::InvalidAssignment(format!("{name} is not a UUID")))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_assignment(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
+    features: SessionFeatures,
+    claimed_no_later_than: tokio::time::Instant,
     assignment: ValidatedAssignment,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -839,28 +887,48 @@ async fn run_assignment(
     })?;
 
     let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
-    require_work_receipt(
-        lease_window_rpc(
-            lease_window,
-            client.accept_work(assignment.authority.clone()),
-        )
-        .await?,
-        session_epoch,
-    )?;
-    let lease_started_at = tokio::time::Instant::now();
-    let lease = lease_deadline_rpc(
-        lease_started_at + lease_rpc_budget(lease_window),
-        client.renew_work_lease(WorkLeaseRenewal {
-            authority: Some(assignment.authority.clone()),
-            lease_seconds: config.lease_seconds,
-        }),
+    let receipt = lease_window_rpc(
+        lease_window,
+        client.accept_work(assignment.authority.clone()),
     )
     .await?;
-    ensure_session(lease.session_epoch, session_epoch)?;
-    if !lease.accepted {
-        return Err(AgentError::StaleAuthority);
-    }
-    if lease.cancellation_requested {
+    let accept_cancellation = receipt.cancellation_requested;
+    require_work_receipt(receipt, session_epoch)?;
+    let lease_started_at = tokio::time::Instant::now();
+    // With accept-carries-lease-state-v1 the accept receipt already answers
+    // what the serialized renewal below existed to ask — live authority and
+    // committed cancellation, read under the accepting transaction's row
+    // lock — so no renewal happens here at all. The claim-time lease keeps
+    // its window minus the offer-to-accept latency, the periodic renewal
+    // task re-arms it on its ordinary cadence (the configuration invariant
+    // that the renewal interval sits well inside the lease window covers
+    // that gap), and the fence keeps the pathological remainder correct.
+    // Without the feature the receipt's field is default-false noise from an
+    // older controller, so the explicit round trip stays.
+    let cancellation_requested = if features.accept_lease_state
+        && !accept_consumed_claim_lease(
+            claimed_no_later_than,
+            lease_window,
+            lease_started_at,
+            config.lease_renewal_interval,
+        ) {
+        accept_cancellation
+    } else {
+        let lease = lease_deadline_rpc(
+            lease_started_at + lease_rpc_budget(lease_window),
+            client.renew_work_lease(WorkLeaseRenewal {
+                authority: Some(assignment.authority.clone()),
+                lease_seconds: config.lease_seconds,
+            }),
+        )
+        .await?;
+        ensure_session(lease.session_epoch, session_epoch)?;
+        if !lease.accepted {
+            return Err(AgentError::StaleAuthority);
+        }
+        lease.cancellation_requested
+    };
+    if cancellation_requested {
         let lease_stop = CancellationToken::new();
         let execution_cancellation = CancellationToken::new();
         execution_cancellation.cancel();
@@ -1179,20 +1247,23 @@ async fn run_assignment(
                 lease_window,
             },
         };
-        let next_sequence = publish_spool(
+        let mut inline_chunks = features.inline_terminal_logs.then(Vec::new);
+        let next_sequence = publish_or_inline_spool(
             &mut publication,
             "stdout",
             &config.workspace_root,
             &outcome.stdout,
             0,
+            inline_chunks.as_mut(),
         )
         .await?;
-        publish_spool(
+        publish_or_inline_spool(
             &mut publication,
             "stderr",
             &config.workspace_root,
             &outcome.stderr,
             next_sequence,
+            inline_chunks.as_mut(),
         )
         .await?;
         let summary = serde_json::to_vec(&json!({
@@ -1206,6 +1277,7 @@ async fn run_assignment(
                 authority: Some(assignment.authority.clone()),
                 outcome: terminal as i32,
                 summary_json: summary,
+                inline_log_chunks: inline_chunks.unwrap_or_default(),
             }),
         )
         .await?;
@@ -1550,6 +1622,25 @@ async fn renew_lease(
     }
 }
 
+/// Whether the accepting handshake consumed enough of the claim lease that
+/// the periodic renewal cadence can no longer be trusted to re-arm it before
+/// the worst-case expiry: the claim instant — taken before the poll RPC was
+/// sent, so the estimate errs early — plus the lease window, minus the
+/// codebase's one-second safety margin. In that near-expiry case the folded
+/// accept path falls back to the serialized pre-feature renewal so a
+/// workload never spawns on a lease the reaper may already be fencing; a
+/// background renewal scheduled early instead would still race the reaper
+/// while the process runs.
+fn accept_consumed_claim_lease(
+    claimed_no_later_than: tokio::time::Instant,
+    lease_window: Duration,
+    accepted_at: tokio::time::Instant,
+    renewal_interval: Duration,
+) -> bool {
+    claimed_no_later_than + lease_window.saturating_sub(Duration::from_secs(1))
+        < accepted_at + renewal_interval
+}
+
 pub(super) fn lease_rpc_budget(lease_window: Duration) -> Duration {
     lease_window.saturating_sub(Duration::from_secs(1))
 }
@@ -1602,6 +1693,64 @@ async fn authority_rpc<T>(
                 .map_err(AgentError::from)
         },
     }
+}
+
+/// Publishes one spooled log stream, riding the terminal publication when it
+/// can: a stream that fits a single chunk is verified exactly like the
+/// streamed form and then carried in `WorkCompletion.inline_log_chunks`
+/// (`inline` is `Some` only when inline-terminal-logs-v1 was negotiated),
+/// sparing its `PublishLog` round trip. Anything larger — or any stream when
+/// the peer never negotiated the feature — goes through `publish_spool`
+/// unchanged. Returns the next unused sequence either way, so mixed streams
+/// number identically to the fully streamed form.
+async fn publish_or_inline_spool(
+    publication: &mut PublicationContext<'_>,
+    stream: &str,
+    workspace_root: &Path,
+    entry: &SpoolEntry,
+    first_sequence: u64,
+    inline: Option<&mut Vec<InlineLogChunk>>,
+) -> Result<u64, AgentError> {
+    let single_chunk = entry.bytes <= MAX_LOG_CHUNK_BYTES as u64;
+    let Some(chunks) = inline.filter(|_| single_chunk) else {
+        return publish_spool(publication, stream, workspace_root, entry, first_sequence).await;
+    };
+    if entry.bytes > MAX_ATTEMPT_OUTPUT_BYTES {
+        return Err(AgentError::InvalidAssignment(
+            "durable log spool exceeds the per-attempt quota".to_owned(),
+        ));
+    }
+    if first_sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
+        return Err(AgentError::InvalidAssignment(
+            "log chunk count exceeds the per-attempt quota".to_owned(),
+        ));
+    }
+    let path = workspace_root.join(&entry.relative_path);
+    verify_spool_file(&path, entry, "log").await?;
+    let mut file = fs::File::open(path).await?;
+    let expected = usize::try_from(entry.bytes).map_err(|_| {
+        AgentError::InvalidAssignment("log length exceeds platform bounds".to_owned())
+    })?;
+    let mut content = vec![0_u8; expected];
+    file.read_exact(&mut content).await.map_err(|_| {
+        AgentError::InvalidAssignment(
+            "durable log spool became shorter after verification".to_owned(),
+        )
+    })?;
+    let mut growth_probe = [0_u8; 1];
+    if file.read(&mut growth_probe).await? != 0 {
+        return Err(AgentError::InvalidAssignment(
+            "durable log spool grew after verification".to_owned(),
+        ));
+    }
+    chunks.push(InlineLogChunk {
+        sequence: first_sequence,
+        stream: stream.to_owned(),
+        content,
+    });
+    first_sequence
+        .checked_add(1)
+        .ok_or_else(|| AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned()))
 }
 
 async fn publish_spool(
@@ -2389,6 +2538,8 @@ async fn finalize_without_process(
                     "reason": reason,
                     "result_sha256": hex(&result.digest),
                 }))?,
+                // A processless completion journals no log spools.
+                inline_log_chunks: Vec::new(),
             }),
         )
         .await?,
@@ -2543,6 +2694,50 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn prompt_acceptance_keeps_the_folded_accept_renewal_free() {
+        let claimed = tokio::time::Instant::now();
+        let accepted = claimed + Duration::from_millis(70);
+        assert!(!accept_consumed_claim_lease(
+            claimed,
+            Duration::from_secs(30),
+            accepted,
+            Duration::from_secs(5),
+        ));
+    }
+
+    #[tokio::test]
+    async fn near_expiry_acceptance_falls_back_to_the_serialized_renewal() {
+        // The reviewed hazard: accept_work succeeded 29 s into a 30 s claim
+        // lease. The periodic cadence cannot re-arm before the worst-case
+        // expiry, so the fold must not spawn on the residual lease.
+        let claimed = tokio::time::Instant::now();
+        let accepted = claimed + Duration::from_secs(29);
+        assert!(accept_consumed_claim_lease(
+            claimed,
+            Duration::from_secs(30),
+            accepted,
+            Duration::from_secs(5),
+        ));
+        // Exactly at the boundary the cadence still makes it: renewal at
+        // accepted+5s meets a worst-case expiry of claimed+29s only when it
+        // is strictly later, so a 24s-old acceptance is still foldable.
+        assert!(!accept_consumed_claim_lease(
+            claimed,
+            Duration::from_secs(30),
+            claimed + Duration::from_secs(24),
+            Duration::from_secs(5),
+        ));
+        // A window inside the one-second margin never folds; saturation
+        // instead of underflow.
+        assert!(accept_consumed_claim_lease(
+            claimed,
+            Duration::from_millis(500),
+            claimed,
+            Duration::from_secs(5),
+        ));
+    }
 
     fn config() -> AgentConfig {
         AgentConfig {
