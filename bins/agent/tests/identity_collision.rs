@@ -26,9 +26,6 @@ use tokio::process::{Child, Command};
 use uuid::Uuid;
 
 const TOKEN: &str = "mcloving-identity-collision-test-token";
-const COLD_START_AGENT: &str = "exec003-coldstart-agent";
-const DISCHARGE_AGENT: &str = "exec003-discharge-agent";
-const COLLISION_AGENT: &str = "exec003-collision-agent";
 const PIPELINE: &str = r#"
 version: 1
 name: identity-gates
@@ -78,11 +75,22 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
         .await
         .expect("create test project");
 
+    // agent_sessions is keyed by agent_id across the whole database, so fixed
+    // ids leak session epochs from one run into the next (the seeded epoch-7
+    // floor below would collide with the epoch 8 a previous run left behind).
+    let cold_start_agent_id = format!("exec003-coldstart-agent-{}", Uuid::new_v4());
+    let discharge_agent_id = format!("exec003-discharge-agent-{}", Uuid::new_v4());
+    let collision_agent_id = format!("exec003-collision-agent-{}", Uuid::new_v4());
+
     let directory = tempfile::tempdir().expect("test root");
     let tls = create_mtls(
         directory.path(),
         organization_id,
-        &[COLD_START_AGENT, DISCHARGE_AGENT, COLLISION_AGENT],
+        &[
+            cold_start_agent_id.as_str(),
+            discharge_agent_id.as_str(),
+            collision_agent_id.as_str(),
+        ],
     );
     let api_port = free_port();
     let agent_port = free_port();
@@ -136,7 +144,7 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
     // instead of a stale-epoch retry storm.
     assert!(
         store
-            .open_agent_session(COLD_START_AGENT, "trusted-linux", 7, 0, &[], &[])
+            .open_agent_session(&cold_start_agent_id, "trusted-linux", 7, 0, &[], &[])
             .await
             .expect("seed durable session floor"),
         "seeding the pre-replacement session epoch must succeed"
@@ -145,7 +153,7 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
     std::fs::create_dir(&cold_workspace).expect("create cold-start workspace root");
     let cold_journal = directory.path().join("coldstart-agent.db");
     let mut cold_agent = agent_command(
-        COLD_START_AGENT,
+        &cold_start_agent_id,
         organization_id,
         agent_port,
         &tls,
@@ -161,7 +169,10 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
     let cold_status =
         wait_for_terminal_build(&client, organization_id, project_id, cold_build).await;
     assert_eq!(cold_status.status, "succeeded");
-    assert_eq!(cold_status.lease_owner.as_deref(), Some(COLD_START_AGENT));
+    assert_eq!(
+        cold_status.lease_owner.as_deref(),
+        Some(cold_start_agent_id.as_str())
+    );
     stop(&mut cold_agent).await;
     let cold_log = snapshot(&cold_stderr);
     assert!(
@@ -258,7 +269,7 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
     );
 
     let mut discharge_agent = agent_command(
-        DISCHARGE_AGENT,
+        &discharge_agent_id,
         organization_id,
         agent_port,
         &tls,
@@ -281,7 +292,7 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
     assert_eq!(discharge_status.status, "succeeded");
     assert_eq!(
         discharge_status.lease_owner.as_deref(),
-        Some(DISCHARGE_AGENT),
+        Some(discharge_agent_id.as_str()),
         "the agent must resume polling after the discharge"
     );
     stop(&mut discharge_agent).await;
@@ -310,7 +321,7 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
         std::fs::create_dir(&workspace).expect("create twin workspace root");
         let journal = directory.path().join(format!("{twin}-agent.db"));
         let mut agent = agent_command(
-            COLLISION_AGENT,
+            &collision_agent_id,
             organization_id,
             agent_port,
             &tls,
@@ -326,14 +337,15 @@ async fn identity_collision_is_named_and_recovered_attempts_discharge() {
     }
     wait_for("controller collision diagnostic", 90, || {
         snapshot(&controller_stderr).contains(&format!(
-            "agent identity collision suspected for {COLLISION_AGENT}"
+            "agent identity collision suspected for {collision_agent_id}"
         ))
     })
     .await;
     wait_for("agent collision diagnostic", 90, || {
         twin_logs.iter().any(|log| {
             let log = snapshot(log);
-            log.contains("agent identity collision suspected") && log.contains(COLLISION_AGENT)
+            log.contains("agent identity collision suspected")
+                && log.contains(collision_agent_id.as_str())
         })
     })
     .await;
