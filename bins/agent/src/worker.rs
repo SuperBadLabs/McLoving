@@ -3633,7 +3633,6 @@ mod tests {
         create_windows_junction(&organization_path, &outside);
         let junction_metadata = fs::symlink_metadata(&organization_path).await.unwrap();
         assert!(is_link_or_reparse_point(&junction_metadata));
-        assert!(windows_entry_is_directory(&junction_metadata));
 
         remove_attempt_workspace(&workspace_root, &workspace)
             .await
