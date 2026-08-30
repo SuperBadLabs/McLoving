@@ -28,7 +28,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.migration-package/v1";
 pub const PACKAGE_ID: &str = "mario-corpus-052-disabled-v1";
 pub const PACKAGE_FILE: &str = "migration-package.json";
 pub const MAX_PACKAGE_BYTES: usize = 1_048_576;
-pub const PACKAGE_SHA256: &str = "304f75f7c85f11b4fb15ce11f5cf65e5dc69168e3ef85b03a9b3eabdbb3d4ed9";
+pub const PACKAGE_SHA256: &str = "b8b28b5d3d5f2693220995bc241a6cfc832fc8586025d333342b1af6ef1feba9";
 
 const REQUEST_ID: &str = "mig003-golden";
 const SOURCE_FILE: &str =

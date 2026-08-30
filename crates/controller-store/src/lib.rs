@@ -647,6 +647,19 @@ impl Store {
         &self.pool
     }
 
+    /// Checks whether the runtime database can serve a controller request.
+    ///
+    /// This deliberately performs no tenant-scoped read and exposes no
+    /// database details. It is the narrow dependency check used by the public
+    /// readiness endpoint; startup preflight remains responsible for schema,
+    /// role, and tenant-policy validation.
+    pub async fn readiness_check(&self) -> Result<(), StoreError> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Proves that migration and runtime pools target the same live database,
     /// then verifies the exact RLS-constrained runtime role and its required
     /// privilege envelope before bootstrap rotates credentials.

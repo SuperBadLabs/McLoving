@@ -14,7 +14,8 @@ the controller reaps rows older than a configured horizon (default 168 hours,
 `MCLOVING_OUTBOX_RETENTION_HOURS`), while `audit_events` remains the durable
 tamper-evident record and `build_events` the durable build history. No outbox
 consumer is currently shipped, so unpublished rows are the expected steady
-state and are reported as backlog rather than drained. A future consumer gets
-its own explicit contract and cannot assume unbounded outbox history; rows
+state and are reported as retention-bounded staging rather than a consumer
+backlog. A future consumer gets its own explicit contract and cannot assume
+unbounded outbox history; rows
 with topic `state_transfer.imported` are excluded from reaping in defense of
 the state-transfer receipt completeness fence.

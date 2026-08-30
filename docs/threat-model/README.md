@@ -365,6 +365,7 @@ had never claimed one.
 |---|---|
 | ADMIN-001 | `docs/evidence/ADMIN-001_SECURITY_REVIEW.md` |
 | AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
+| CANARY-000 | `docs/evidence/CANARY-000_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
 | DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
@@ -374,11 +375,17 @@ had never claimed one.
 | DISC-001 | `docs/evidence/DISC-001_SECURITY_REVIEW.md` |
 | EXT-001 | `docs/evidence/EXT-001_SECURITY_REVIEW.md` |
 | EXT-002 | `docs/evidence/EXT-002_SECURITY_REVIEW.md` |
+| EXEC-001 | `docs/evidence/EXEC-001_SECURITY_REVIEW.md` |
+| EXEC-002 | `docs/evidence/EXEC-002_SECURITY_REVIEW.md` |
+| EXEC-003 | `docs/evidence/EXEC-003_SECURITY_REVIEW.md` |
+| EXEC-004 | `docs/evidence/EXEC-004_SECURITY_REVIEW.md` |
+| HYG-001 | `docs/evidence/HYG-001_SECURITY_REVIEW.md` |
 | HYG-002 | `docs/evidence/HYG-002_SECURITY_REVIEW.md` |
 | IDP-001 | `docs/evidence/IDP-001_SECURITY_REVIEW.md` |
 | INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
+| OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |
 | PROV-001 | `docs/evidence/PROV-001_SECURITY_REVIEW.md` |
 | REL-001 | `docs/evidence/REL-001_RELEASE_CEREMONY.md` |
 | SHADOW-001 | `docs/architecture/SHADOW_QUALIFICATION_V1.md` |

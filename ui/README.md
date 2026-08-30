@@ -1,4 +1,6 @@
 # Web UI
 
-The future static web client will use only the documented public API. No Node.js
-runtime will be required in production.
+The controller ships this static web client at `/`. It uses only the documented
+public API and requires no Node.js runtime in production. The HTML, JavaScript,
+and stylesheet are embedded in `mcloving-controller`; `/openapi.json` exposes
+the API contract used by the client.

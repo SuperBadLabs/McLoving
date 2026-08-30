@@ -2,7 +2,7 @@
   "schema": "mcloving.jenkins.differential-aggregate/v1",
   "case": "mario-230-corpus-228-immutable-closure",
   "inputs": [
-    {"name":"corpus_manifest","path":"migration/mario-jenkins-oracle-228/corpus-v1/SHA256SUMS","sha256":"a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2"},
+    {"name":"corpus_manifest","path":"migration/mario-jenkins-oracle-228/corpus-v1/SHA256SUMS","sha256":"cbbeef04379fcc920751dad5ba7b02f78e9850951b45fa0e460d64b0e285b610"},
     {"name":"source_manifest","path":"migration/mario-jenkins-oracle-228/corpus-v1/SOURCE_SHA256SUMS","sha256":"3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06"},
     {"name":"corpus_index","path":"migration/mario-jenkins-oracle-228/corpus-v1/corpus-index.tsv","sha256":"5ecfefafc33b61d5c304a2dc6fbd60ca819882c3294605d92248f86215d51137"},
     {"name":"source_job_map","path":"migration/mario-jenkins-oracle-228/corpus-v1/source-job-map.tsv","sha256":"cc4f25bb2d487751255e124942e596320f8d5ab059b396421044f2085baf398b"},

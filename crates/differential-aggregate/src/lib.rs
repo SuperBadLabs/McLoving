@@ -16,7 +16,7 @@ pub const SCHEMA: &str = "mcloving.jenkins.differential-aggregate/v1";
 pub const CASE: &str = "mario-230-corpus-228-immutable-closure";
 pub const EVIDENCE_FILE: &str = "differential-aggregate.json";
 pub const EVIDENCE_SHA256: &str =
-    "90ef410114812982f7dc98cabafea8215a1f87739023f0636853f77b1f9a77a9";
+    "134f88bf09ee5978f95c49e9adf0f8f530ea6e045c47d0fa7e65b3534ac7d283";
 
 const MAX_EVIDENCE_BYTES: u64 = 32_768;
 const MAX_BOUND_INPUT_BYTES: u64 = 2_097_152;
@@ -375,7 +375,7 @@ fn verify_bound_inputs(
     root: &Path,
 ) -> Result<BTreeMap<String, Vec<u8>>, VerificationError> {
     let expected: BTreeMap<&str, (&str, &str)> = [
-        ("corpus_manifest", ("migration/mario-jenkins-oracle-228/corpus-v1/SHA256SUMS", "a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2")),
+        ("corpus_manifest", ("migration/mario-jenkins-oracle-228/corpus-v1/SHA256SUMS", "cbbeef04379fcc920751dad5ba7b02f78e9850951b45fa0e460d64b0e285b610")),
         ("source_manifest", ("migration/mario-jenkins-oracle-228/corpus-v1/SOURCE_SHA256SUMS", "3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06")),
         ("corpus_index", ("migration/mario-jenkins-oracle-228/corpus-v1/corpus-index.tsv", "5ecfefafc33b61d5c304a2dc6fbd60ca819882c3294605d92248f86215d51137")),
         ("source_job_map", ("migration/mario-jenkins-oracle-228/corpus-v1/source-job-map.tsv", "cc4f25bb2d487751255e124942e596320f8d5ab059b396421044f2085baf398b")),

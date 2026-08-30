@@ -2005,10 +2005,11 @@ const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
 const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
 
 /// Bounds outbox accumulation. No outbox consumer is currently shipped, so
-/// rows are delivery staging that would otherwise grow forever; the durable
-/// records are `build_events` and `audit_events`. Each pass deletes one
-/// bounded batch past the retention horizon and reports any remaining
-/// unpublished backlog.
+/// rows are retention-bounded delivery staging rather than a delivery queue;
+/// the durable records are `build_events` and `audit_events`. Each pass
+/// deletes one bounded batch past the retention horizon. The expected retained
+/// staging count is reported once at startup and after reclamation, rather
+/// than warning every interval about a consumer that does not exist.
 async fn run_outbox_reaper(
     store: Store,
     organization_id: Uuid,
@@ -2016,12 +2017,13 @@ async fn run_outbox_reaper(
 ) -> Result<()> {
     const REAP_BATCH_LIMIT: u32 = 512;
     const REAP_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+    let mut first_pass = true;
     loop {
-        match store
+        let reaped = match store
             .reap_outbox(organization_id, retention_hours, REAP_BATCH_LIMIT)
             .await
         {
-            Ok(0) => {}
+            Ok(0) => 0,
             Ok(reaped) => {
                 eprintln!(
                     "outbox reaper deleted {reaped} rows past the {retention_hours}h retention \
@@ -2030,24 +2032,28 @@ async fn run_outbox_reaper(
                 if reaped == u64::from(REAP_BATCH_LIMIT) {
                     continue;
                 }
+                reaped
             }
             Err(error) => {
                 eprintln!("outbox reap failed: {error}");
                 tokio::time::sleep(REAP_POLL_INTERVAL).await;
                 continue;
             }
-        }
-        match store.outbox_backlog(organization_id).await {
-            Ok(backlog) if backlog.unpublished_count > 0 => {
-                eprintln!(
-                    "outbox backlog: {} unpublished reapable rows of {} total ({} protected \
-                     proof rows are never reaped; no consumer is shipped; reapable rows \
-                     expire after {retention_hours}h)",
-                    backlog.unpublished_count, backlog.total_count, backlog.protected_count
-                );
+        };
+        if first_pass || reaped > 0 {
+            match store.outbox_backlog(organization_id).await {
+                Ok(backlog) if backlog.unpublished_count > 0 => {
+                    eprintln!(
+                        "outbox retention status: {} reapable staging rows of {} total are \
+                         retained for up to {retention_hours}h ({} protected proof rows are \
+                         never reaped; no downstream consumer is configured)",
+                        backlog.unpublished_count, backlog.total_count, backlog.protected_count
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("outbox retention scan failed: {error}"),
             }
-            Ok(_) => {}
-            Err(error) => eprintln!("outbox backlog scan failed: {error}"),
+            first_pass = false;
         }
         tokio::time::sleep(REAP_POLL_INTERVAL).await;
     }

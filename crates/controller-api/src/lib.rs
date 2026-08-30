@@ -400,6 +400,9 @@ pub fn router(state: ApiState) -> Router {
         // therefore fit below this conservative 128 MiB transport ceiling.
         .route_layer(DefaultBodyLimit::max(MAX_DISCOVERY_SCAN_BODY_BYTES));
     static_ui_router()
+        .route("/health", get(readiness))
+        .route("/readyz", get(readiness))
+        .route("/livez", get(liveness))
         .route("/openapi.json", get(openapi))
         .route(
             "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start",
@@ -532,6 +535,28 @@ pub fn router(state: ApiState) -> Router {
             get(explain),
         )
         .with_state(Arc::new(state))
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+async fn liveness() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
+async fn readiness(State(state): State<Arc<ApiState>>) -> Response {
+    match state.store.readiness_check().await {
+        Ok(()) => (StatusCode::OK, Json(HealthResponse { status: "ready" })).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse {
+                status: "not_ready",
+            }),
+        )
+            .into_response(),
+    }
 }
 
 pub fn static_ui_router<S>() -> Router<S>
@@ -972,6 +997,7 @@ fn openapi_document() -> Value {
         },
         "servers": [{"url": "/"}],
         "tags": [
+            {"name": "health"},
             {"name": "authentication"},
             {"name": "pipelines"},
             {"name": "triggers"},
@@ -985,6 +1011,24 @@ fn openapi_document() -> Value {
         ],
         "security": [{"bearer": []}],
         "paths": {
+            "/health": {
+                "get": unauthenticated_api_operation(
+                    "health", "health", "Report controller and database readiness", "200",
+                    Vec::new(), None
+                )
+            },
+            "/readyz": {
+                "get": unauthenticated_api_operation(
+                    "readiness", "health", "Report controller and database readiness", "200",
+                    Vec::new(), None
+                )
+            },
+            "/livez": {
+                "get": unauthenticated_api_operation(
+                    "liveness", "health", "Report that the controller process is serving HTTP", "200",
+                    Vec::new(), None
+                )
+            },
             "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start": {
                 "parameters": [organization.clone(), provider.clone()],
                 "get": unauthenticated_api_operation(
@@ -6942,6 +6986,9 @@ mod tests {
         let document = openapi_document();
         let paths = document["paths"].as_object().expect("paths object");
         let expected = [
+            ("/health", "get"),
+            ("/readyz", "get"),
+            ("/livez", "get"),
             (
                 "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start",
                 "get",

@@ -115,6 +115,50 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
 }
 
 #[tokio::test]
+async fn health_routes_are_unauthenticated_and_readiness_checks_postgres() {
+    let principal = Principal {
+        subject: "service:health-contract".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id: Uuid::new_v4(),
+        project_roles: BTreeMap::new(),
+        service_scopes: BTreeSet::new(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .expect("construct lazy pool");
+    let app = router(
+        ApiState::new(Store::new(pool), TOKEN, principal).expect("construct health API state"),
+    );
+
+    let live = app
+        .clone()
+        .oneshot(Request::get("/livez").body(Body::empty()).unwrap())
+        .await
+        .expect("liveness response");
+    assert_eq!(live.status(), StatusCode::OK);
+    let body = to_bytes(live.into_body(), 1024)
+        .await
+        .expect("liveness body");
+    assert_eq!(body.as_ref(), br#"{"status":"ok"}"#);
+
+    for path in ["/health", "/readyz"] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .expect("readiness response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("readiness body");
+        assert_eq!(body.as_ref(), br#"{"status":"not_ready"}"#);
+    }
+}
+
+#[tokio::test]
 async fn discovery_scan_transport_accepts_the_full_observation_denominator() {
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
