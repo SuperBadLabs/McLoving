@@ -260,10 +260,17 @@ discharge a parked reconciliation).
   inline for such a peer.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, the agent immediately deletes the controller-owned log
-  and result spools and atomically retires their journal descriptors. A crash
+  and result spools and atomically retires their journal descriptors. The
+  deletions are flushed as one batch — the surviving directories whose entry
+  lists changed, taken before the descriptors retire — rather than one fsync
+  per removed entry: a pruned directory's entry change dies with it, the
+  topmost removal is named in a surviving ancestor's entry list, and a crash
   between file deletion and metadata retirement is idempotently completed on
   startup or at periodic reconciliation; terminal attempt history remains
-  durable.
+  durable. Reclaim prunes emptied directories only within the attempt's own
+  subtree: the per-organization anchor directories persist — bounded, one per
+  organization per tree — so successive attempts extend durable entries
+  instead of rebuilding and re-flushing the chain from the root.
 - Terminal result evidence is written beneath the agent-owned
   `.agent-results` root, outside the workload workspace namespace, under a
   cryptographically random path created only after containment has ended. A
@@ -289,8 +296,13 @@ discharge a parked reconciliation).
 - Execution timeouts are validated before process creation and must be between
   one second and seven days. Unbounded `u64` durations never reach platform
   deadline arithmetic.
-- On POSIX systems, every new directory entry is followed by a parent-directory
-  fsync. Win32 exposes directory handles for metadata operations but does not
+- On POSIX systems, every new directory entry is flushed to its parent
+  directory before any journal record references it. Independent entries in
+  one durability barrier — the spool files and their directories before
+  finalization, a result payload and its newly created ancestors' parents —
+  flush concurrently as a single batch, because the barrier, not an ordering
+  among the entries, is the guarantee; pre-existing ancestors whose entry
+  lists did not change are not re-flushed. Win32 exposes directory handles for metadata operations but does not
   provide a least-privilege equivalent of POSIX directory fsync:
   `FlushFileBuffers` requires `GENERIC_WRITE`, which ordinary directory handles
   do not receive. Windows therefore flushes each payload file and the

@@ -20,7 +20,7 @@ use crate::SpoolEntry;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
-    Termination, create_workspace, sync_directory, validate_redactions, write_redacted_output,
+    Termination, create_workspace, sync_boundaries, validate_redactions, write_redacted_output,
 };
 
 /// Executes one process in a new process group.
@@ -236,12 +236,15 @@ where
     restore_agent_spool_permissions(&stdout_control)?;
     restore_agent_spool_permissions(&stderr_control)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
-    stdout_control.sync_all()?;
-    stderr_control.sync_all()?;
     ensure_original_spool_path(&stdout_control, &stdout_path)?;
     ensure_original_spool_path(&stderr_control, &stderr_path)?;
-    sync_directory(&spool)?;
-    sync_directory(&workspace)?;
+    // The barrier the finalization journal record depends on: both spool
+    // files and both directory entries durable before this returns. The four
+    // flushes are independent of one another, so they run as one batch.
+    sync_boundaries(
+        &[&stdout_control, &stderr_control],
+        &[spool.clone(), workspace.clone()],
+    )?;
 
     Ok(ExecutionOutcome {
         termination: termination.0,
