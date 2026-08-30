@@ -642,6 +642,33 @@ impl Store {
     /// and routes the attempt through explicit reconciliation.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Every work poll runs this pass, and in a healthy build nothing is
+        // ever expired — yet the pass used to take the exclusive org
+        // scheduler lock just to find that out, contending with the very
+        // lifecycle transactions it polls on behalf of. Probe first with a
+        // plain snapshot read (no row or advisory locks, so the canonical
+        // lock order is untouched); only a possible candidate pays for the
+        // locked pass. A candidate appearing after the probe is caught by
+        // the next poll's pass, exactly as one appearing after the locked
+        // scan would have been.
+        let candidate_may_exist = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM attempts
+                 WHERE organization_id = $1
+                   AND status IN (
+                       'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+                   )
+                   AND lease_expires_at <= clock_timestamp()
+             )",
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !candidate_may_exist {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         acquire_org_scheduler_lock(&mut tx, organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let expired = sqlx::query(
