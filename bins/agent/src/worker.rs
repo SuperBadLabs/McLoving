@@ -149,6 +149,12 @@ struct LeaseRenewalControl {
     authority_lost: CancellationToken,
     stop: CancellationToken,
     loss_reason: Arc<OnceLock<&'static str>>,
+    /// When the first renewal fires. Ordinarily one interval after the lease
+    /// clock started; the folded accept path caps it by the claim lease's
+    /// worst-case remaining window so an acceptance that consumed most of the
+    /// original lease is re-armed before the reaper can fence and reassign
+    /// the attempt while its workload still runs.
+    first_renewal_at: tokio::time::Instant,
 }
 
 /// Marker for an execution cancelled by the controller's own request; it is
@@ -223,6 +229,11 @@ pub(super) async fn poll_and_run_one(
     features: SessionFeatures,
     stop: CancellationToken,
 ) -> Result<PollOutcome, AgentError> {
+    // Taken before the poll is sent: the controller stamps the claim lease
+    // inside the poll transaction, so the true expiry is never earlier than
+    // this instant plus the lease window. The folded accept path uses it to
+    // bound the first background renewal.
+    let claimed_no_later_than = tokio::time::Instant::now();
     let offer = tokio::select! {
         () = stop.cancelled() => return Ok(PollOutcome::Idle),
         response = poll_rpc(
@@ -241,7 +252,16 @@ pub(super) async fn poll_and_run_one(
     };
     match validate_assignment(config, session_epoch, assignment)? {
         AssignmentDisposition::Runnable(assignment) => {
-            run_assignment(config, client, session_epoch, features, *assignment, stop).await?;
+            run_assignment(
+                config,
+                client,
+                session_epoch,
+                features,
+                claimed_no_later_than,
+                *assignment,
+                stop,
+            )
+            .await?;
             Ok(PollOutcome::Progressed)
         }
         AssignmentDisposition::ForAnotherRuntime(reason) => {
@@ -251,8 +271,16 @@ pub(super) async fn poll_and_run_one(
             Ok(PollOutcome::Declined)
         }
         AssignmentDisposition::Unsupported(refusal) => {
-            refuse_unsupported_assignment(config, client, session_epoch, features, refusal, stop)
-                .await?;
+            refuse_unsupported_assignment(
+                config,
+                client,
+                session_epoch,
+                features,
+                claimed_no_later_than,
+                refusal,
+                stop,
+            )
+            .await?;
             Ok(PollOutcome::Progressed)
         }
     }
@@ -313,6 +341,11 @@ pub(super) async fn recover_finalizations(
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
                 loss_reason: Arc::new(OnceLock::new()),
+                first_renewal_at: first_renewal_deadline(
+                    lease_started_at,
+                    recovery_renewal_interval(config.lease_renewal_interval),
+                    None,
+                ),
             },
         ));
         let replay_result = replay_finalization(
@@ -720,11 +753,13 @@ fn supported_process_spec(execution_spec_json: &[u8]) -> Result<ProcessSpec, Str
 /// attempt as failed with a named reason. Without this, a validate-escaping
 /// spec is refused, rescheduled, and refused again while the build reports
 /// `running` forever.
+#[allow(clippy::too_many_arguments)]
 async fn refuse_unsupported_assignment(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
     features: SessionFeatures,
+    claimed_no_later_than: tokio::time::Instant,
     refusal: UnsupportedAssignment,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -784,6 +819,13 @@ async fn refuse_unsupported_assignment(
             // and nothing reads this back. Its own cell, like every other
             // processless path.
             loss_reason: Arc::new(OnceLock::new()),
+            first_renewal_at: first_renewal_deadline(
+                lease_started_at,
+                config.lease_renewal_interval,
+                features
+                    .accept_lease_state
+                    .then_some((claimed_no_later_than, lease_window)),
+            ),
         },
     ));
     // Cancellation can already have committed before acceptance was recorded.
@@ -833,11 +875,13 @@ fn parse_uuid(name: &str, value: &str) -> Result<Uuid, AgentError> {
         .map_err(|_| AgentError::InvalidAssignment(format!("{name} is not a UUID")))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_assignment(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
     features: SessionFeatures,
+    claimed_no_later_than: tokio::time::Instant,
     assignment: ValidatedAssignment,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -907,6 +951,13 @@ async fn run_assignment(
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
                 loss_reason: Arc::new(OnceLock::new()),
+                first_renewal_at: first_renewal_deadline(
+                    lease_started_at,
+                    config.lease_renewal_interval,
+                    features
+                        .accept_lease_state
+                        .then_some((claimed_no_later_than, lease_window)),
+                ),
             },
         ));
         let completion_result = finalize_without_process(
@@ -950,6 +1001,13 @@ async fn run_assignment(
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
             loss_reason: lease_loss_reason.clone(),
+            first_renewal_at: first_renewal_deadline(
+                lease_started_at,
+                config.lease_renewal_interval,
+                features
+                    .accept_lease_state
+                    .then_some((claimed_no_later_than, lease_window)),
+            ),
         },
     ));
     let process = assignment.process;
@@ -1520,13 +1578,15 @@ async fn renew_lease(
         authority_lost,
         stop,
         loss_reason,
+        first_renewal_at,
     } = control;
     let mut lease_started_at = lease_started_at;
     let mut lease_window = lease_window;
+    let mut next_renewal_at = first_renewal_at;
     loop {
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep_until(lease_started_at + renewal_interval) => {}
+            () = tokio::time::sleep_until(next_renewal_at) => {}
         }
         let deadline = lease_started_at + lease_rpc_budget(lease_window);
         let renewal = tokio::select! {
@@ -1581,6 +1641,27 @@ async fn renew_lease(
         }
         lease_started_at = tokio::time::Instant::now();
         lease_window = Duration::from_secs(u64::from(lease_seconds));
+        next_renewal_at = lease_started_at + renewal_interval;
+    }
+}
+
+/// When the first background renewal must fire. Ordinarily one interval after
+/// the local lease clock starts; the folded accept path additionally bounds it
+/// by the claim lease's worst-case expiry (claim instant plus window, minus
+/// the codebase's one-second safety margin), because acceptance may have
+/// consumed most of that original window and no serialized renewal re-armed
+/// it. An already-thin lease clamps to "now", degrading to an immediate
+/// background renewal exactly when one is needed.
+fn first_renewal_deadline(
+    lease_started_at: tokio::time::Instant,
+    renewal_interval: Duration,
+    claim_lease_floor: Option<(tokio::time::Instant, Duration)>,
+) -> tokio::time::Instant {
+    let periodic = lease_started_at + renewal_interval;
+    match claim_lease_floor {
+        None => periodic,
+        Some((claimed_no_later_than, lease_window)) => periodic
+            .min(claimed_no_later_than + lease_window.saturating_sub(Duration::from_secs(1))),
     }
 }
 
@@ -2637,6 +2718,52 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn first_renewal_waits_one_interval_when_acceptance_was_prompt() {
+        let claimed = tokio::time::Instant::now();
+        let accepted = claimed + Duration::from_millis(70);
+        assert_eq!(
+            first_renewal_deadline(
+                accepted,
+                Duration::from_secs(5),
+                Some((claimed, Duration::from_secs(30))),
+            ),
+            accepted + Duration::from_secs(5),
+        );
+        // Without the folded accept there is no claim floor at all.
+        assert_eq!(
+            first_renewal_deadline(accepted, Duration::from_secs(5), None),
+            accepted + Duration::from_secs(5),
+        );
+    }
+
+    #[tokio::test]
+    async fn first_renewal_beats_a_claim_lease_that_acceptance_nearly_consumed() {
+        // The reviewed hazard: accept_work succeeded 29 s into a 30 s claim
+        // lease. Waiting a full interval would let the reaper fence and
+        // reassign the attempt while its workload still runs; the deadline
+        // must instead land inside the claim window's safety margin.
+        let claimed = tokio::time::Instant::now();
+        let accepted = claimed + Duration::from_secs(29);
+        assert_eq!(
+            first_renewal_deadline(
+                accepted,
+                Duration::from_secs(5),
+                Some((claimed, Duration::from_secs(30))),
+            ),
+            claimed + Duration::from_secs(29),
+        );
+        // A lease already inside the margin degrades to renewing at once
+        // rather than panicking on underflow.
+        assert!(
+            first_renewal_deadline(
+                accepted,
+                Duration::from_secs(5),
+                Some((claimed, Duration::from_millis(500))),
+            ) <= tokio::time::Instant::now(),
+        );
+    }
 
     fn config() -> AgentConfig {
         AgentConfig {

@@ -1395,6 +1395,7 @@ impl AgentControl for ControllerAgentService {
                 "at most one inline chunk per log stream",
             ));
         }
+        let mut inline_streams: Vec<&str> = Vec::with_capacity(2);
         for chunk in &request.inline_log_chunks {
             if !matches!(chunk.stream.as_str(), "stdout" | "stderr")
                 || chunk.content.len() > 1_048_576
@@ -1403,6 +1404,12 @@ impl AgentControl for ControllerAgentService {
                     "log stream or one-MiB chunk bound is invalid",
                 ));
             }
+            if inline_streams.contains(&chunk.stream.as_str()) {
+                return Err(Status::invalid_argument(
+                    "at most one inline chunk per log stream",
+                ));
+            }
+            inline_streams.push(chunk.stream.as_str());
             let sequence = i64::try_from(chunk.sequence)
                 .map_err(|_| Status::invalid_argument("log sequence is out of range"))?;
             let appended = self
