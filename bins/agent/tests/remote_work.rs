@@ -28,6 +28,32 @@ stages:
           args: [-c, "printf 'remote-agent-ran\n'; printf 'remote-agent-stderr\n' >&2"]
           timeout_seconds: 10
 "#;
+const DRAIN_PIPELINE: &str = r#"
+version: 1
+name: drain-gate
+stages:
+  - id: s0
+    name: S0
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "true"]
+          timeout_seconds: 10
+  - id: s1
+    name: S1
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "true"]
+          timeout_seconds: 10
+  - id: s2
+    name: S2
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "true"]
+          timeout_seconds: 10
+"#;
 
 /// Both shipped-binary tests run this catalog update concurrently, and
 /// PostgreSQL surfaces the race as `tuple concurrently updated`; retry until
@@ -710,6 +736,180 @@ async fn unsupported_execution_spec_is_finalized_failed_within_one_lease_term() 
     assert!(
         agent.try_wait().expect("inspect agent").is_none(),
         "the agent session must survive a refused assignment"
+    );
+    stop(&mut agent).await;
+    stop(&mut controller).await;
+}
+
+/// Regression gate for the work-loop drain: the agent's poll interval paces
+/// how often an idle session asks for work, and must not pace how fast queued
+/// work is done. Every other agent test runs at a 10 ms poll, where a ~240 ms
+/// stage body absorbs the tick and the defect is invisible; this one pins the
+/// interval at 8 s so a single waited tick between stages breaks the bound.
+/// The measured defect drained one stage per interval — ~496 ms/stage at the
+/// shipped 500 ms default — because `poll_and_run_one` could not tell the
+/// session loop that its pass had just executed an assignment.
+#[tokio::test]
+async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
+    let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let agent_id = "drain-gate-agent";
+    let controller_binary = std::env::var_os("MCLOVING_CONTROLLER_BINARY")
+        .map(PathBuf::from)
+        .expect("MCLOVING_CONTROLLER_BINARY must name the shipped controller binary");
+    let runtime_url =
+        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1);
+    assert_ne!(migration_url, runtime_url);
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&migration_url)
+        .await
+        .expect("connect migration role");
+    let store = Store::new(pool.clone());
+    store.migrate().await.expect("install schema");
+    enable_runtime_login(&pool).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("drain-org-{organization_id}"),
+            project_id,
+            "drain-gate",
+        )
+        .await
+        .expect("create test project");
+
+    let directory = tempfile::tempdir().expect("test root");
+    let tls = create_mtls(directory.path(), organization_id, agent_id);
+    let api_port = free_port();
+    let agent_port = free_port();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create remote workspace root");
+    let mut controller = Command::new(controller_binary)
+        .env("MCLOVING_MIGRATION_DATABASE_URL", &migration_url)
+        .env("MCLOVING_DATABASE_URL", &runtime_url)
+        .env("MCLOVING_API_TOKEN", TOKEN)
+        .env(
+            "MCLOVING_ARTIFACT_AGENT_TOKEN",
+            "remote-artifact-agent-token-32-bytes",
+        )
+        .env("MCLOVING_LISTEN", format!("127.0.0.1:{api_port}"))
+        .env("MCLOVING_AGENT_LISTEN", format!("127.0.0.1:{agent_port}"))
+        .env("MCLOVING_AGENT_SERVER_CERT_PATH", &tls.server_certificate)
+        .env("MCLOVING_AGENT_SERVER_KEY_PATH", &tls.server_key)
+        .env("MCLOVING_AGENT_CLIENT_CA_PATH", &tls.ca_certificate)
+        .env("MCLOVING_AGENT_IDENTITY_BINDINGS_PATH", &tls.bindings)
+        .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
+        .env("MCLOVING_AGENT_ID", "drain-embedded-disabled")
+        .env("MCLOVING_AGENT_CAPABILITIES", "disabled")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
+        .env("MCLOVING_LEASE_SECONDS", "5")
+        .env("MCLOVING_POLL_MILLISECONDS", "10")
+        .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
+        .env("MCLOVING_TERMINATION_GRACE_MILLISECONDS", "100")
+        .env("MCLOVING_SESSION_EPOCH", "1")
+        .env(
+            "MCLOVING_WORKSPACE_ROOT",
+            directory.path().join("embedded-workspace"),
+        )
+        .env(
+            "MCLOVING_AGENT_JOURNAL",
+            directory.path().join("embedded-agent.db"),
+        )
+        .env(
+            "MCLOVING_OBJECT_ROOT",
+            directory.path().join("embedded-objects"),
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped controller");
+    let client = Client::new(&format!("http://127.0.0.1:{api_port}"), TOKEN);
+    wait_until_listening(&client, organization_id).await;
+
+    let pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
+            organization_id,
+            project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "drain-gate-e2e".to_owned(),
+                source: DRAIN_PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save drain-gate pipeline");
+    let admission = client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
+            "drain-gate-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+
+    let journal = directory.path().join("drain-agent.db");
+    let mut agent = agent_command(
+        agent_id,
+        organization_id,
+        agent_port,
+        &tls,
+        &journal,
+        &workspace,
+    )
+    .env("MCLOVING_AGENT_POLL_MILLISECONDS", "8000")
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent");
+
+    // The interval may lawfully delay how soon the session NOTICES the queued
+    // build, so the clock starts at the first observed activity. From there,
+    // three stages must reach a terminal build without the loop waiting out a
+    // single 8 s tick between them; the pre-fix loop needed one interval per
+    // remaining stage.
+    let activity = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = client
+                .status(organization_id, project_id, admission.build_id)
+                .await
+                .expect("read build status");
+            if status.status != "queued" {
+                break std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the queued build is noticed within bound");
+    let status = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status = client
+                .status(organization_id, project_id, admission.build_id)
+                .await
+                .expect("read build status");
+            if matches!(status.status.as_str(), "succeeded" | "failed" | "aborted") {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("three queued stages complete without draining one per interval");
+    assert_eq!(status.status, "succeeded");
+    let drained_in = activity.elapsed();
+    assert!(
+        drained_in < Duration::from_millis(7500),
+        "queued stages drained at the poll interval instead of at work speed: \
+         three stages took {drained_in:?} against an 8 s interval"
     );
     stop(&mut agent).await;
     stop(&mut controller).await;
