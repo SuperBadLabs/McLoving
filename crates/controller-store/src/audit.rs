@@ -597,15 +597,59 @@ pub(crate) async fn append_audit_record(
     subject: &str,
     payload: Value,
 ) -> Result<AuditEvent, StoreError> {
+    append_audit_record_inner(
+        tx,
+        organization_id,
+        category,
+        actor_subject,
+        action,
+        subject,
+        payload,
+        None,
+    )
+    .await
+}
+
+/// Appends one audit record whose action is a build event, writing the
+/// `build_events` row and its outbox copy in the same final statement as the
+/// audit event and chain-head advance — two round trips for the whole
+/// evidence write instead of seven single-statement ones.
+pub(crate) async fn append_audit_record_for_build_event(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    category: &str,
+    actor_subject: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<AuditEvent, StoreError> {
+    append_audit_record_inner(
+        tx,
+        organization_id,
+        category,
+        actor_subject,
+        kind,
+        &format!("build:{build_id}"),
+        payload,
+        Some(build_id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_audit_record_inner(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    category: &str,
+    actor_subject: &str,
+    action: &str,
+    subject: &str,
+    payload: Value,
+    build_event: Option<Uuid>,
+) -> Result<AuditEvent, StoreError> {
     validate_fields(category, actor_subject, action, subject)?;
-    // PostgreSQL JSONB is the durable payload representation. Round-trip
-    // through that representation before hashing so values such as negative
-    // zero cannot produce a hash that differs from the exported row.
-    let payload = sqlx::query_scalar::<_, Value>("SELECT $1::jsonb")
-        .bind(&payload)
-        .fetch_one(&mut **tx)
-        .await?;
-    let (sequence, previous_hash) = lock_audit_head(tx, organization_id).await?;
+    let (sequence, previous_hash, payload) =
+        seed_lock_head_and_canonicalize(tx, organization_id, &payload).await?;
     let previous_hash = digest_array(&previous_hash)?;
     let event_id = Uuid::new_v4();
     let occurred_at_unix_ms = i64::try_from(
@@ -629,14 +673,50 @@ pub(crate) async fn append_audit_record(
         occurred_at_unix_ms,
         previous_hash,
     )?;
-    sqlx::query(
-        "INSERT INTO audit_events (
-             organization_id, sequence, event_id, category, actor_subject,
-             action, subject, payload, occurred_at_unix_ms,
-             previous_hash, event_hash
+    // One statement performs every remaining write: the audit event, the
+    // chain-head advance, and — for a build event — the `build_events` row
+    // and its outbox copy. The data-modifying CTEs and the outer UPDATE all
+    // touch different tables, so same-statement visibility rules cannot
+    // reorder what the chain records.
+    const APPEND_WRITES: &str = "WITH event AS (
+             INSERT INTO audit_events (
+                 organization_id, sequence, event_id, category, actor_subject,
+                 action, subject, payload, occurred_at_unix_ms,
+                 previous_hash, event_hash
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-    )
+         UPDATE audit_chain_heads
+         SET next_sequence = $2 + 1,
+             last_hash = $11,
+             updated_at = clock_timestamp()
+         WHERE organization_id = $1";
+    const APPEND_WRITES_WITH_BUILD_EVENT: &str = "WITH event AS (
+             INSERT INTO audit_events (
+                 organization_id, sequence, event_id, category, actor_subject,
+                 action, subject, payload, occurred_at_unix_ms,
+                 previous_hash, event_hash
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ),
+         build_event AS (
+             INSERT INTO build_events (organization_id, build_id, kind, payload)
+             VALUES ($1, $12, $6, $8)
+         ),
+         outbox_row AS (
+             INSERT INTO outbox (organization_id, topic, aggregate_id, payload)
+             VALUES ($1, $6, $12, $8)
+         )
+         UPDATE audit_chain_heads
+         SET next_sequence = $2 + 1,
+             last_hash = $11,
+             updated_at = clock_timestamp()
+         WHERE organization_id = $1";
+    let mut writes = sqlx::query(if build_event.is_some() {
+        APPEND_WRITES_WITH_BUILD_EVENT
+    } else {
+        APPEND_WRITES
+    })
     .bind(organization_id)
     .bind(sequence)
     .bind(event_id)
@@ -647,21 +727,11 @@ pub(crate) async fn append_audit_record(
     .bind(&payload)
     .bind(occurred_at_unix_ms)
     .bind(previous_hash.as_slice())
-    .bind(event_hash.as_slice())
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        "UPDATE audit_chain_heads
-         SET next_sequence = $2,
-             last_hash = $3,
-             updated_at = clock_timestamp()
-         WHERE organization_id = $1",
-    )
-    .bind(organization_id)
-    .bind(sequence + 1)
-    .bind(event_hash.as_slice())
-    .execute(&mut **tx)
-    .await?;
+    .bind(event_hash.as_slice());
+    if let Some(build_id) = build_event {
+        writes = writes.bind(build_id);
+    }
+    writes.execute(&mut **tx).await?;
     Ok(AuditEvent {
         sequence,
         event_id,
@@ -674,6 +744,47 @@ pub(crate) async fn append_audit_record(
         previous_hash,
         event_hash,
     })
+}
+
+/// Seeds the organization's chain head, locks it, and canonicalizes the
+/// payload through PostgreSQL's durable JSONB representation (so values such
+/// as negative zero cannot hash differently from the exported row) — one
+/// round trip instead of three.
+async fn seed_lock_head_and_canonicalize(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    payload: &Value,
+) -> Result<(i64, Vec<u8>, Value), StoreError> {
+    const SEED_LOCK_AND_CANONICALIZE: &str = "WITH seed AS (
+             INSERT INTO audit_chain_heads (organization_id)
+             VALUES ($1)
+             ON CONFLICT (organization_id) DO NOTHING
+         )
+         SELECT next_sequence, last_hash, $2::jsonb
+         FROM audit_chain_heads
+         WHERE organization_id = $1
+         FOR UPDATE";
+    if let Some(row) = sqlx::query_as::<_, (i64, Vec<u8>, Value)>(SEED_LOCK_AND_CANONICALIZE)
+        .bind(organization_id)
+        .bind(payload)
+        .fetch_optional(&mut **tx)
+        .await?
+    {
+        return Ok(row);
+    }
+    // The organization's very first audit event: a row the seed CTE inserts is
+    // invisible to its own statement's snapshot, and a seed committed by a
+    // concurrent writer this statement blocked on can be invisible to it as
+    // well. Either way the row durably exists now, so a second execution — a
+    // later statement in this transaction, with a fresh snapshot — sees and
+    // locks it.
+    Ok(
+        sqlx::query_as::<_, (i64, Vec<u8>, Value)>(SEED_LOCK_AND_CANONICALIZE)
+            .bind(organization_id)
+            .bind(payload)
+            .fetch_one(&mut **tx)
+            .await?,
+    )
 }
 
 pub(crate) async fn lock_audit_head(

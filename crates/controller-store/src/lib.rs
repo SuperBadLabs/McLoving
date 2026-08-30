@@ -1413,10 +1413,25 @@ impl Store {
         agent_id: &str,
         trust_pool: &str,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.tenant_transaction(organization_id).await?;
-        acquire_restore_fence_shared(&mut tx).await?;
-        let authorized = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
+        // One statement instead of a five-round-trip transaction, and it runs
+        // on every authority-bearing agent RPC. The single-statement implicit
+        // transaction carries everything the explicit one did, in forced
+        // order: `tenant` applies the transaction-local RLS binding, `fence`
+        // takes the shared restore fence for the statement's duration (its
+        // FROM clause makes it scan `tenant` first), and the authorization
+        // EXISTS is projected only for the row `fence` produces, so both the
+        // binding and the fence precede every row-security check. The fence
+        // releases at statement end, which is its full useful span here: the
+        // read is advisory, and the mutation this RPC goes on to perform
+        // re-fences inside its own transaction.
+        Ok(sqlx::query_scalar::<_, bool>(
+            "WITH tenant AS (
+                 SELECT set_config('mcloving.organization_id', $1::text, true)
+             ),
+             fence AS (
+                 SELECT pg_advisory_xact_lock_shared($7) FROM tenant
+             )
+             SELECT EXISTS(
                  SELECT 1
                  FROM attempts AS a
                  JOIN nodes AS n
@@ -1431,7 +1446,8 @@ impl Store {
                    AND n.required_trust_pool = $6
                    AND m.singleton
                    AND a.restore_epoch = m.restore_epoch
-             )",
+             )
+             FROM fence",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -1439,10 +1455,9 @@ impl Store {
         .bind(restore_epoch)
         .bind(agent_id)
         .bind(trust_pool)
-        .fetch_one(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(authorized)
+        .bind(RESTORE_FENCE_LOCK_KEY)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Authorizes a journaled attempt to enter reconciliation using only its
@@ -6578,13 +6593,18 @@ impl Store {
     pub(crate) async fn tenant_transaction(
         &self,
         organization_id: Uuid,
-    ) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
-            .bind(organization_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        Ok(tx)
+    ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+        // `SET LOCAL` is transaction-scoped exactly like
+        // `set_config(..., true)`, and riding the custom BEGIN statement puts
+        // the tenant binding in the begin round trip instead of its own — one
+        // round trip saved on every tenant transaction. The inlined value is
+        // a hyphenated UUID rendering, so the simple-protocol statement is
+        // injection-safe.
+        self.pool
+            .begin_with(format!(
+                "BEGIN; SET LOCAL \"mcloving.organization_id\" = '{organization_id}';"
+            ))
+            .await
     }
 
     /// Durably records the fenced authorization for an agent to discharge one
@@ -6960,33 +6980,16 @@ async fn append_event_and_outbox_as(
     payload: Value,
 ) -> Result<(), StoreError> {
     validate_audit_actor(actor_subject)?;
-    sqlx::query(
-        "INSERT INTO build_events (organization_id, build_id, kind, payload)
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(organization_id)
-    .bind(build_id)
-    .bind(kind)
-    .bind(&payload)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO outbox (organization_id, topic, aggregate_id, payload)
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(organization_id)
-    .bind(kind)
-    .bind(build_id)
-    .bind(&payload)
-    .execute(&mut **tx)
-    .await?;
-    audit::append_audit_record(
+    // The build event, its outbox copy, the audit event, and the chain-head
+    // advance all commit from the audit module's single final statement — two
+    // round trips for the whole evidence write instead of seven.
+    audit::append_audit_record_for_build_event(
         tx,
         organization_id,
+        build_id,
         audit_category_for_event(kind),
         actor_subject,
         kind,
-        &format!("build:{build_id}"),
         payload,
     )
     .await?;
