@@ -17,9 +17,10 @@ use mcloving_agent_protocol::wire::{
     OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{
-    ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA, OutboundMtlsConfig,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR, RECOVERED_DISCHARGE_FEATURE, TransportError,
-    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE,
+    ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
+    INLINE_TERMINAL_LOGS_FEATURE, OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    RECOVERED_DISCHARGE_FEATURE, TransportError, WORK_COMPLETION_SUBSTITUTION_FEATURE,
+    WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -126,6 +127,33 @@ enum RecoveredCancellation {
 pub struct SessionReceipt {
     pub session_epoch: u64,
     pub active_attempts: usize,
+    pub features: SessionFeatures,
+}
+
+/// Optional wire semantics this session actually negotiated. Each one changes
+/// what the agent may rely on or send, so they are read from the controller's
+/// confirmed feature set — never assumed from the agent's own offer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SessionFeatures {
+    /// `AcceptWork` receipts carry `cancellation_requested`, so the
+    /// serialized post-accept `RenewWorkLease` round trip can be skipped.
+    pub accept_lease_state: bool,
+    /// `WorkCompletion.inline_log_chunks` is processed, so single-chunk log
+    /// streams may ride the completion instead of `PublishLog` round trips.
+    pub inline_terminal_logs: bool,
+}
+
+impl SessionFeatures {
+    fn from_negotiated(features: &[String]) -> Self {
+        Self {
+            accept_lease_state: features
+                .iter()
+                .any(|feature| feature == ACCEPT_LEASE_STATE_FEATURE),
+            inline_terminal_logs: features
+                .iter()
+                .any(|feature| feature == INLINE_TERMINAL_LOGS_FEATURE),
+        }
+    }
 }
 
 struct AgentInstanceGuard {
@@ -368,6 +396,7 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
                     config,
                     &mut client,
                     receipt.session_epoch,
+                    receipt.features,
                     stop.clone(),
                 ).await? == worker::PollOutcome::Progressed;
             }
@@ -422,6 +451,8 @@ async fn open_session(
                     ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
                     WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
                     RECOVERED_DISCHARGE_FEATURE.to_owned(),
+                    ACCEPT_LEASE_STATE_FEATURE.to_owned(),
+                    INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
                 ],
             }),
             trust_pool: config.trust_pool.clone(),
@@ -469,6 +500,7 @@ async fn open_session(
             SessionReceipt {
                 session_epoch,
                 active_attempts,
+                features: SessionFeatures::from_negotiated(&response.features),
             },
         ));
     }

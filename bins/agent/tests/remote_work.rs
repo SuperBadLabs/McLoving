@@ -803,6 +803,10 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
         .env("MCLOVING_AGENT_CLIENT_CA_PATH", &tls.ca_certificate)
         .env("MCLOVING_AGENT_IDENTITY_BINDINGS_PATH", &tls.bindings)
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
+        // Refusing every PublishLog proves this build's log streams ride
+        // WorkCompletion.inline_log_chunks (inline-terminal-logs-v1): any
+        // silent fallback to the serialized round trips fails the build.
+        .env("MCLOVING_TEST_REFUSE_PUBLISH_LOG", "1")
         .env("MCLOVING_AGENT_ID", "drain-embedded-disabled")
         .env("MCLOVING_AGENT_CAPABILITIES", "disabled")
         .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
@@ -910,6 +914,27 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
         drained_in < Duration::from_millis(7500),
         "queued stages drained at the poll interval instead of at work speed: \
          three stages took {drained_in:?} against an 8 s interval"
+    );
+    // Every stream still published exactly one (empty) chunk — through the
+    // completion, since PublishLog was refused above: two per stage.
+    let log_chunks = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM attempt_log_chunks AS l
+         JOIN attempts AS a
+           ON a.organization_id = l.organization_id AND a.id = l.attempt_id
+         JOIN nodes AS n
+           ON n.organization_id = a.organization_id AND n.id = a.node_id
+         WHERE l.organization_id = $1
+           AND n.build_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count published log chunks");
+    assert_eq!(
+        log_chunks, 6,
+        "each of the three stages publishes its two empty streams inline"
     );
     stop(&mut agent).await;
     stop(&mut controller).await;
