@@ -31,7 +31,7 @@ use mcloving_agent_runtime::{AttemptPhase, Journal, JournalError, Reconciliation
 #[cfg(windows)]
 use std::ffi::OsString;
 use thiserror::Error;
-use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -383,56 +383,23 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
         },
     )
     .await?;
-    let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
-    reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    reconciliation_tick.tick().await;
-    let mut work_tick = interval(config.poll_interval);
-    work_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    work_tick.tick().await;
-    // The poll interval paces how often an idle agent ASKS for work. It must
-    // not also pace how fast work is DONE: with one assignment handled per
-    // tick, a queue of ready units drains at one unit per interval, so every
-    // unit after the first waits a full period for no reason. `drain` carries
-    // "the last pass moved the queue" into the next iteration, which skips the
-    // wait. Measured on mario at the shipped 500 ms default: 496 ms per stage
-    // before, bounded by the executing work after.
-    //
-    // Starting true keeps the session's first poll immediate: the tick
-    // consumed above is the interval's zero-delay first fire, and waiting out
-    // a full period before ever asking would delay a session's first
-    // assignment by one interval.
-    let mut drain = true;
+    let mut next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
     loop {
-        // Ready immediately while draining; otherwise the ordinary poll tick.
-        let work_ready = async {
-            if !drain {
-                work_tick.tick().await;
-            }
-        };
-        tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            _ = reconciliation_tick.tick() => {
-                send_reconciliation(
-                    config,
-                    &mut client,
-                    receipt.session_epoch,
-                    stop.clone(),
-                ).await?;
-                worker::reclaim_terminal_spools(config).await?;
-            }
-            () = work_ready => {
-                // Only executed or terminally refused work justifies asking
-                // again at once. A declined assignment stays offered until its
-                // lease lapses, so draining on it would spin on one offer.
-                drain = worker::poll_and_run_one(
-                    config,
-                    &mut client,
-                    receipt.session_epoch,
-                    receipt.features,
-                    stop.clone(),
-                ).await? == worker::PollOutcome::Progressed;
-            }
+        if Instant::now() >= next_reconciliation {
+            send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+            worker::reclaim_terminal_spools(config).await?;
+            next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
         }
+        // PollWork is a bounded server-side event wait. Re-enter it
+        // immediately instead of adding a client-side fixed-interval gap.
+        worker::poll_and_run_one(
+            config,
+            &mut client,
+            receipt.session_epoch,
+            receipt.features,
+            stop.clone(),
+        )
+        .await?;
     }
 }
 

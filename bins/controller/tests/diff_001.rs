@@ -315,13 +315,24 @@ fn count_user_workspace_entries(
     let organization = root.join(organization_id.to_string());
     let attempt = organization.join(attempt_id.to_string());
     let execution = attempt.join(format!("1-{fence}"));
-    assert_only_child_directory(root, &organization);
-    assert_only_child_directory(&organization, &attempt);
-    assert_only_child_directory(&attempt, &execution);
+    // Terminal acknowledgement permits the agent to reclaim the workspace.
+    // With event-driven polling that cleanup can finish before the status read
+    // above observes the terminal build. A fully or partially pruned scaffold
+    // therefore has the same semantic user-entry count as an empty execution.
+    if !assert_only_child_directory_if_present(root, &organization)
+        || !assert_only_child_directory_if_present(&organization, &attempt)
+        || !assert_only_child_directory_if_present(&attempt, &execution)
+    {
+        return 0;
+    }
 
     let mut spool_seen = false;
-    let count = std::fs::read_dir(&execution)
-        .unwrap_or_else(|error| panic!("read execution workspace {}: {error}", execution.display()))
+    let entries = match std::fs::read_dir(&execution) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(error) => panic!("read execution workspace {}: {error}", execution.display()),
+    };
+    let count = entries
         .map(|entry| entry.expect("read execution workspace entry"))
         .map(|entry| {
             let file_type = entry.file_type().expect("read execution entry type");
@@ -338,11 +349,18 @@ fn count_user_workspace_entries(
     count
 }
 
-fn assert_only_child_directory(parent: &Path, expected: &Path) {
-    let children = std::fs::read_dir(parent)
-        .unwrap_or_else(|error| panic!("read workspace parent {}: {error}", parent.display()))
+fn assert_only_child_directory_if_present(parent: &Path, expected: &Path) -> bool {
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => panic!("read workspace parent {}: {error}", parent.display()),
+    };
+    let children = entries
         .map(|entry| entry.expect("read workspace scaffold"))
         .collect::<Vec<_>>();
+    if children.is_empty() {
+        return false;
+    }
     assert_eq!(children.len(), 1, "workspace scaffold is not exact");
     assert_eq!(children[0].path(), expected);
     assert!(
@@ -352,6 +370,7 @@ fn assert_only_child_directory(parent: &Path, expected: &Path) {
             .is_dir(),
         "workspace scaffold must use real directories"
     );
+    true
 }
 
 fn count_descendants_without_following(path: &Path, is_directory: bool) -> usize {

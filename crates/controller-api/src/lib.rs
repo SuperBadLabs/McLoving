@@ -534,6 +534,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/organizations/{organization_id}/scheduler/explain",
             get(explain),
         )
+        .route(
+            "/api/v1/organizations/{organization_id}/performance",
+            get(performance),
+        )
         .with_state(Arc::new(state))
 }
 
@@ -894,6 +898,11 @@ pub struct PipelineStagePlan {
 pub struct ValidationResponse {
     pub valid: bool,
     pub semantic_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PerformanceSnapshot {
+    pub tenant_transactions_started: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1284,7 +1293,7 @@ fn openapi_document() -> Value {
                 )
             },
             "/api/v1/organizations/{organization_id}/scheduler/explain": {
-                "parameters": [organization],
+                "parameters": [organization.clone()],
                 "get": api_operation(
                     "explainScheduling", "scheduler", "Explain scheduler eligibility", "200",
                     vec![
@@ -1292,6 +1301,13 @@ fn openapi_document() -> Value {
                         query_parameter("trust_pool", "string")
                     ],
                     None
+                )
+            },
+            "/api/v1/organizations/{organization_id}/performance": {
+                "parameters": [organization],
+                "get": api_operation(
+                    "getPerformance", "scheduler", "Read process-local scheduler performance counters", "200",
+                    Vec::new(), None
                 )
             }
         },
@@ -5668,6 +5684,24 @@ async fn explain(
     Ok(Json(response))
 }
 
+async fn performance(
+    State(state): State<Arc<ApiState>>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PerformanceSnapshot>, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        None,
+        Action::SchedulerControl,
+    )
+    .await?;
+    Ok(Json(PerformanceSnapshot {
+        tenant_transactions_started: state.store.tenant_transactions_started(organization_id),
+    }))
+}
+
 async fn require_build(
     state: &ApiState,
     organization_id: Uuid,
@@ -6582,6 +6616,17 @@ impl Client {
         self.send(request).await
     }
 
+    pub async fn performance(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<PerformanceSnapshot, ClientError> {
+        self.send(self.inner.get(format!(
+            "{}/api/v1/organizations/{organization_id}/performance",
+            self.base_url
+        )))
+        .await
+    }
+
     async fn send<T: for<'de> Deserialize<'de>>(
         &self,
         request: reqwest::RequestBuilder,
@@ -7146,6 +7191,7 @@ mod tests {
                 "/api/v1/organizations/{organization_id}/scheduler/explain",
                 "get",
             ),
+            ("/api/v1/organizations/{organization_id}/performance", "get"),
         ];
         let mut operation_ids = BTreeSet::new();
         for (path, method) in expected {

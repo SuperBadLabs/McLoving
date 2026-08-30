@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde_json::json;
 use sqlx::Row;
@@ -73,6 +74,41 @@ pub enum WaitReason {
 }
 
 impl Store {
+    /// Returns the bounded delay until the next active lease can expire.
+    ///
+    /// Work-ready notifications can be lost while a listener reconnects, so
+    /// callers retain this authoritative deadline as their fallback wakeup.
+    pub async fn next_lease_expiry_delay(
+        &self,
+        organization_id: Uuid,
+        maximum: Duration,
+    ) -> Result<Duration, StoreError> {
+        let maximum_seconds = maximum.as_secs_f64();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let seconds = sqlx::query_scalar::<_, f64>(
+            "SELECT LEAST(
+                 $2::double precision,
+                 GREATEST(
+                     0::double precision,
+                     COALESCE(
+                         EXTRACT(EPOCH FROM (MIN(lease_expires_at) - clock_timestamp()))::double precision,
+                         $2::double precision
+                     )
+                 )
+             )
+             FROM attempts
+             WHERE organization_id = $1
+               AND status IN ('offered', 'accepted', 'running', 'finalizing', 'cancelling')
+               AND lease_expires_at IS NOT NULL",
+        )
+        .bind(organization_id)
+        .bind(maximum_seconds)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Duration::from_secs_f64(seconds))
+    }
+
     /// Claims at most one compatible node and creates a new fencing epoch.
     ///
     /// The transaction-scoped advisory lock deliberately implements the Wave 1

@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
-    execute_with_spawn_hook,
+    execute_with_spawn_hook, flush_terminal_cleanup, remove_terminal_relative_path,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Journal, JournalError, MAX_ATTEMPT_OUTPUT_BYTES, SpoolEntry,
@@ -316,6 +316,7 @@ pub async fn run_claim(
         fence = database_fence,
     ));
     let mut journal = Journal::open(&config.journal_path)?;
+    reclaim_terminal_evidence(&mut journal, config).await?;
     journal.accept(&Acceptance {
         organization_id: organization.clone(),
         attempt_id: attempt.clone(),
@@ -558,6 +559,7 @@ pub async fn run_claim(
         },
         Some(outcome.process_id),
     )?;
+    reclaim_terminal_evidence(&mut journal, config).await?;
     Ok(RunReceipt {
         build_id: claim.build_id,
         attempt_id: claim.attempt_id,
@@ -567,6 +569,34 @@ pub async fn run_claim(
         stdout_sha256: outcome.stdout.digest,
         stderr_sha256: outcome.stderr.digest,
     })
+}
+
+async fn reclaim_terminal_evidence(
+    journal: &mut Journal,
+    config: &WorkerConfig,
+) -> Result<(), SpineError> {
+    let attempts = journal.terminal_spools()?.attempts;
+    for attempt in attempts {
+        // The attempt root contains the log and result spools. Remove it
+        // first through the same no-follow cleanup used by the remote agent;
+        // the per-entry passes make crash replay harmless when only part of a
+        // prior cleanup completed.
+        let mut changed =
+            remove_terminal_relative_path(&config.workspace_root, &attempt.workspace).await?;
+        for entry in attempt.logs.iter().chain(attempt.result.as_ref()) {
+            changed.extend(
+                remove_terminal_relative_path(&config.workspace_root, &entry.relative_path).await?,
+            );
+        }
+        flush_terminal_cleanup(&config.workspace_root, &attempt.workspace, changed).await?;
+        journal.retire_terminal_spools(
+            &attempt.organization_id,
+            &attempt.attempt_id,
+            attempt.fence_token,
+            attempt.session_epoch,
+        )?;
+    }
+    Ok(())
 }
 
 async fn run_effect_claim(
@@ -1635,7 +1665,10 @@ async fn cancellation_poller(
     cancellation: CancellationToken,
 ) {
     while !cancellation.is_cancelled() {
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            () = cancellation.cancelled() => break,
+            () = tokio::time::sleep(interval) => {}
+        }
         match store
             .renew_attempt_lease(
                 claim.organization_id,
@@ -1743,6 +1776,12 @@ async fn commit_log(
     stream: &str,
     entry: &SpoolEntry,
 ) -> Result<(), SpineError> {
+    // Empty streams are fully represented by the journal descriptor and
+    // terminal result. Publishing a zero-byte controller chunk adds no log
+    // information but costs a complete fenced PostgreSQL transaction.
+    if entry.bytes == 0 {
+        return Ok(());
+    }
     let content = fs::read(config.workspace_root.join(&entry.relative_path)).await?;
     if !store
         .append_log(&NewLogChunk {

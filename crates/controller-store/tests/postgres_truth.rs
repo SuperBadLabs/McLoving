@@ -23,7 +23,7 @@ use mcloving_state_transfer::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgListener, PgPoolOptions};
 use uuid::Uuid;
 
 async fn test_store() -> Option<Store> {
@@ -120,6 +120,61 @@ async fn bind_test_pipeline(
             )))
         }
     }
+}
+
+#[tokio::test]
+async fn queued_work_emits_a_transactional_tenant_wakeup() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "notification-project",
+        )
+        .await
+        .expect("create notification tenant");
+    let mut listener = PgListener::connect_with(store.pool())
+        .await
+        .expect("connect notification listener");
+    listener
+        .listen("mcloving_work_ready_v1")
+        .await
+        .expect("listen for work-ready notifications");
+
+    store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "notification-admission".to_owned(),
+            pipeline_digest: [0x71; 32],
+            node_key: "wake-agent".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted".to_owned(),
+            priority: 0,
+            execution_spec: json!({"version": 1, "steps": []}),
+        })
+        .await
+        .expect("admit notification work");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let notification = listener.recv().await.expect("receive work-ready hint");
+            if notification.payload() == organization_id.to_string() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("tenant work-ready notification is bounded");
 }
 
 #[tokio::test]

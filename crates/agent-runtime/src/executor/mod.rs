@@ -16,10 +16,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{JournalError, SpoolEntry, validate_relative_path};
 
+mod cleanup;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 mod windows;
+
+pub use cleanup::{flush_terminal_cleanup, remove_terminal_relative_path};
 
 #[cfg(unix)]
 use unix::{

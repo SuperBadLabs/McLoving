@@ -11,7 +11,11 @@ use nix::sys::signal::{Signal, killpg};
 #[cfg(target_os = "linux")]
 use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
 use nix::unistd::{Pid, pipe};
+#[cfg(target_os = "linux")]
+use rustix::process::{Pid as RustixPid, PidfdFlags, pidfd_open};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
+use tokio::io::unix::AsyncFd;
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
@@ -609,11 +613,28 @@ async fn wait_for_anchored_descendants_to_exit(
 
 #[cfg(target_os = "linux")]
 async fn wait_for_unreaped_leader_exit(process_id: u32) -> Result<(), ExecutionError> {
+    let raw_process_id = i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
+    let pid = RustixPid::from_raw(raw_process_id).ok_or(ExecutionError::MissingProcessId)?;
+    let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
+        Ok(pidfd) => Some(AsyncFd::new(pidfd)?),
+        // Linux before 5.3 has no pidfd. Keep a compatibility fallback rather
+        // than weakening containment on older supported hosts.
+        Err(rustix::io::Errno::NOSYS) => None,
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
     loop {
         if leader_exited_without_reaping(process_id)? {
             return Ok(());
         }
-        sleep(Duration::from_millis(10)).await;
+        if let Some(pidfd) = &pidfd {
+            // A pidfd becomes readable when the exact process exits and is not
+            // vulnerable to numeric PID reuse. WNOWAIT below still leaves the
+            // zombie unreaped as the process-group anchor.
+            let mut ready = pidfd.readable().await?;
+            ready.clear_ready();
+        } else {
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
