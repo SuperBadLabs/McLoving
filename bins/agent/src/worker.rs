@@ -17,9 +17,11 @@ use mcloving_agent_protocol::wire::{
     WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
+    ExecutionError, ExecutionMode, ExecutionRequest, Termination,
     execute_with_spawn_hook_and_redactions, is_link_or_reparse_point, sync_boundaries,
-    sync_directories,
+};
+use mcloving_agent_runtime::executor::{
+    flush_terminal_cleanup, remove_terminal_relative_path as remove_runtime_terminal_path,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, MAX_ATTEMPT_OUTPUT_BYTES, ProcessIdentity,
@@ -41,6 +43,7 @@ const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
 const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 66;
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+const WORK_POLL_RPC_WINDOW: Duration = Duration::from_secs(25);
 const AGENT_RESULT_DIRECTORY: &str = ".agent-results";
 const WORK_COMPLETION_PROTOCOL: &str = "work";
 const CANCELLATION_COMPLETION_PROTOCOL: &str = "cancellation";
@@ -232,7 +235,7 @@ pub(super) async fn poll_and_run_one(
     let offer = tokio::select! {
         () = stop.cancelled() => return Ok(PollOutcome::Idle),
         response = poll_rpc(
-            Duration::from_secs(u64::from(config.lease_seconds)),
+            WORK_POLL_RPC_WINDOW,
             client.poll_work(WorkPoll {
                 agent_id: config.agent_id.clone(),
                 session_epoch,
@@ -1746,11 +1749,6 @@ async fn publish_or_inline_spool(
             "durable log spool exceeds the per-attempt quota".to_owned(),
         ));
     }
-    if first_sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
-        return Err(AgentError::InvalidAssignment(
-            "log chunk count exceeds the per-attempt quota".to_owned(),
-        ));
-    }
     // One pass reads, sizes, and digests the stream: the bytes that ride the
     // completion are exactly the bytes that were hashed against the journaled
     // descriptor, so a separate verification read would re-check the same
@@ -1770,6 +1768,17 @@ async fn publish_or_inline_spool(
     if content.len() != expected || <[u8; 32]>::from(Sha256::digest(&content)) != entry.digest {
         return Err(AgentError::InvalidAssignment(
             "durable log spool metadata does not match its content".to_owned(),
+        ));
+    }
+    // An empty stream carries no evidence and must consume neither a log row
+    // nor a sequence number. It is still authenticated by the bounded read
+    // above before the terminal publication references its descriptor.
+    if content.is_empty() {
+        return Ok(first_sequence);
+    }
+    if first_sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
+        return Err(AgentError::InvalidAssignment(
+            "log chunk count exceeds the per-attempt quota".to_owned(),
         ));
     }
     chunks.push(InlineLogChunk {
@@ -1799,7 +1808,6 @@ async fn publish_spool(
     let mut file = fs::File::open(path).await?;
     let mut buffer = vec![0_u8; MAX_LOG_CHUNK_BYTES];
     let mut sequence = first_sequence;
-    let mut published = false;
     let mut remaining = entry.bytes;
     while remaining > 0 {
         let read_limit =
@@ -1830,7 +1838,6 @@ async fn publish_spool(
             .await?,
             publication.session_epoch,
         )?;
-        published = true;
         remaining = remaining
             .checked_sub(u64::try_from(bytes).map_err(|_| {
                 AgentError::InvalidAssignment("log length exceeds wire bounds".to_owned())
@@ -1847,29 +1854,6 @@ async fn publish_spool(
         return Err(AgentError::InvalidAssignment(
             "durable log spool grew after verification".to_owned(),
         ));
-    }
-    if !published {
-        if first_sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
-            return Err(AgentError::InvalidAssignment(
-                "log chunk count exceeds the per-attempt quota".to_owned(),
-            ));
-        }
-        require_work_receipt(
-            authority_rpc(
-                publication.control,
-                publication.client.publish_log(WorkLogChunk {
-                    authority: Some(publication.authority.clone()),
-                    sequence: first_sequence,
-                    stream: stream.to_owned(),
-                    content: Vec::new(),
-                }),
-            )
-            .await?,
-            publication.session_epoch,
-        )?;
-        sequence = sequence.checked_add(1).ok_or_else(|| {
-            AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
-        })?;
     }
     Ok(sequence)
 }
@@ -1935,66 +1919,7 @@ async fn reclaim_spool_entries(
     for entry in logs.iter().chain(result) {
         changed.extend(remove_spool_file(&config.workspace_root, entry).await?);
     }
-    // One flush of the surviving directories whose entry lists changed, taken
-    // before the descriptors retire, upholds the existing invariant that a
-    // retired descriptor's spools are durably gone. Ancestors removed along
-    // the way need no flush of their own: a pruned directory's entry change
-    // died with it, its own removal is named in a surviving ancestor's entry
-    // list, and an interrupted reclaim is idempotently re-completed by
-    // startup reclaim before these descriptors retire.
-    // The per-organization anchors are flushed unconditionally: a reclaim
-    // resumed after an interrupted predecessor finds the paths already
-    // absent and would otherwise collect no changed parent, retiring the
-    // descriptors while the predecessor's unflushed removals could still
-    // be lost to power failure.
-    for anchor_relative in [
-        workspace
-            .components()
-            .next()
-            .map(|component| PathBuf::from(component.as_os_str())),
-        workspace
-            .components()
-            .next()
-            .map(|component| PathBuf::from(AGENT_RESULT_DIRECTORY).join(component.as_os_str())),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        changed.push(config.workspace_root.join(anchor_relative));
-    }
-    changed.sort();
-    changed.dedup();
-    let flush_root = config.workspace_root.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let mut boundaries = Vec::with_capacity(changed.len());
-        for directory in changed {
-            // A queued boundary that no longer exists — an anchor whose entry
-            // a predecessor or this pass removed — falls back to its nearest
-            // surviving ancestor inside the workspace root, so the removal's
-            // parent entry is flushed rather than silently dropped.
-            let mut candidate = directory.as_path();
-            loop {
-                if candidate.is_dir() {
-                    boundaries.push(candidate.to_owned());
-                    break;
-                }
-                if candidate == flush_root {
-                    break;
-                }
-                match candidate.parent() {
-                    Some(parent) if parent.starts_with(&flush_root) => candidate = parent,
-                    _ => break,
-                }
-            }
-        }
-        boundaries.sort();
-        boundaries.dedup();
-        sync_directories(&boundaries)
-    })
-    .await
-    .map_err(|error| {
-        AgentError::InvalidAssignment(format!("durability flush failed: {error}"))
-    })??;
+    flush_terminal_cleanup(&config.workspace_root, workspace, changed).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
         attempt_id,
@@ -2045,138 +1970,9 @@ async fn remove_terminal_relative_path(
     workspace_root: &Path,
     relative_path: &Path,
 ) -> Result<Vec<PathBuf>, AgentError> {
-    let root_metadata = match fs::symlink_metadata(workspace_root).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    if !root_metadata.is_dir() || is_link_or_reparse_point(&root_metadata) {
-        return Err(ExecutionError::ReplacedWorkspaceRoot.into());
-    }
-    restore_directory_access(workspace_root, &root_metadata).await?;
-    let workspace_root_guard = WorkspaceRootGuard::open(workspace_root)?;
-    workspace_root_guard.ensure_original(workspace_root)?;
-
-    let path = workspace_root.join(relative_path);
-    let mut changed = Vec::new();
-    let mut current = workspace_root.to_owned();
-    let mut components = relative_path.components().peekable();
-    while let Some(component) = components.next() {
-        workspace_root_guard.ensure_original(workspace_root)?;
-        let Component::Normal(component) = component else {
-            unreachable!("terminal path was validated by its caller");
-        };
-        current.push(component);
-        let is_leaf = components.peek().is_none();
-        match fs::symlink_metadata(&current).await {
-            Ok(metadata)
-                if !is_leaf && metadata.is_dir() && !is_link_or_reparse_point(&metadata) =>
-            {
-                restore_directory_access(&current, &metadata).await?;
-            }
-            Ok(metadata) if !is_leaf => {
-                // An ancestor was replaced. Remove only the replacement entry;
-                // platform-specific unlinking never follows its target.
-                remove_terminal_replacement_entry(&current, &metadata).await?;
-                changed.push(
-                    current
-                        .parent()
-                        .expect("a normalized relative path has a parent")
-                        .to_owned(),
-                );
-                break;
-            }
-            Ok(metadata) if metadata.is_dir() && !is_link_or_reparse_point(&metadata) => {
-                remove_directory_tree_no_follow(&current).await?;
-                changed.push(
-                    current
-                        .parent()
-                        .expect("a normalized relative path has a parent")
-                        .to_owned(),
-                );
-                break;
-            }
-            Ok(metadata) => {
-                // Remove the replacement entry itself, never its target.
-                remove_terminal_replacement_entry(&current, &metadata).await?;
-                changed.push(
-                    current
-                        .parent()
-                        .expect("a normalized relative path has a parent")
-                        .to_owned(),
-                );
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    workspace_root_guard.ensure_original(workspace_root)?;
-    // Pruning stops at the per-organization anchor instead of the workspace
-    // root. Anchors are bounded — one per organization per tree — and keeping
-    // them means the next attempt's creations and result writes extend
-    // existing durable entries instead of rebuilding (and re-flushing) the
-    // whole chain from the root every attempt.
-    let mut anchor = workspace_root.to_owned();
-    let mut components = relative_path.components();
-    if let Some(Component::Normal(first)) = components.next() {
-        anchor.push(first);
-        if first == AGENT_RESULT_DIRECTORY
-            && let Some(Component::Normal(organization)) = components.next()
-        {
-            anchor.push(organization);
-        }
-    }
-    changed.extend(
-        prune_empty_spool_directories(
-            workspace_root,
-            &workspace_root_guard,
-            &anchor,
-            path.parent(),
-        )
-        .await?,
-    );
-    Ok(changed)
-}
-
-async fn remove_terminal_replacement_entry(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        if windows_entry_is_directory(metadata) {
-            // Windows removes directory junctions and directory symlinks with
-            // RemoveDirectory; this deletes the reparse point, not its target.
-            fs::remove_dir(path).await
-        } else {
-            if !is_link_or_reparse_point(metadata) {
-                restore_file_deletion_access(path, metadata).await?;
-            }
-            fs::remove_file(path).await
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        fs::remove_file(path).await
-    }
-}
-
-#[cfg(windows)]
-// Windows `readonly` is a single file attribute; clearing it does not broaden
-// Unix mode bits because this implementation is not compiled on Unix.
-#[allow(clippy::permissions_set_readonly_false)]
-async fn restore_file_deletion_access(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    if metadata.permissions().readonly() {
-        let mut permissions = metadata.permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(path, permissions).await?;
-    }
-    Ok(())
+    remove_runtime_terminal_path(workspace_root, relative_path)
+        .await
+        .map_err(Into::into)
 }
 
 async fn restore_directory_access(
@@ -2194,157 +1990,6 @@ async fn restore_directory_access(
         let _ = (path, metadata);
         Ok(())
     }
-}
-
-async fn remove_directory_tree_no_follow(path: &Path) -> Result<(), std::io::Error> {
-    let root = path.to_owned();
-    tokio::task::spawn_blocking(move || remove_directory_tree_no_follow_sync(&root))
-        .await
-        .map_err(|error| std::io::Error::other(format!("workspace cleanup task failed: {error}")))?
-}
-
-fn remove_directory_tree_no_follow_sync(root: &Path) -> Result<(), std::io::Error> {
-    let mut stack = vec![(root.to_owned(), false)];
-    while let Some((path, expanded)) = stack.pop() {
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if is_link_or_reparse_point(&metadata) {
-            remove_terminal_replacement_entry_sync(&path, &metadata)?;
-            continue;
-        }
-        if !metadata.is_dir() {
-            restore_file_deletion_access_sync(&path, &metadata)?;
-            std::fs::remove_file(&path)?;
-            continue;
-        }
-        if expanded {
-            std::fs::remove_dir(&path)?;
-            continue;
-        }
-
-        restore_directory_access_sync(&path, &metadata)?;
-        stack.push((path.clone(), true));
-        for entry in std::fs::read_dir(&path)? {
-            stack.push((entry?.path(), false));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-// See the async counterpart: this is Windows attribute recovery, not Unix
-// permission widening.
-#[allow(clippy::permissions_set_readonly_false)]
-fn restore_file_deletion_access_sync(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    if metadata.permissions().readonly() {
-        let mut permissions = metadata.permissions();
-        permissions.set_readonly(false);
-        std::fs::set_permissions(path, permissions)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn restore_file_deletion_access_sync(
-    _path: &Path,
-    _metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-fn restore_directory_access_sync(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    #[cfg(unix)]
-    {
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(permissions.mode() | 0o700);
-        std::fs::set_permissions(path, permissions)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, metadata);
-        Ok(())
-    }
-}
-
-fn remove_terminal_replacement_entry_sync(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        if windows_entry_is_directory(metadata) {
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        std::fs::remove_file(path)
-    }
-}
-
-#[cfg(windows)]
-fn windows_entry_is_directory(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-    metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
-}
-
-/// Prunes emptied ancestors upward and returns the surviving directory whose
-/// entry list changed — the point the walk stopped at. Directories removed on
-/// the way up need no flush of their own: their entry changes died with them,
-/// and the survivor's entry list names the topmost removal.
-async fn prune_empty_spool_directories(
-    workspace_root: &Path,
-    workspace_root_guard: &WorkspaceRootGuard,
-    anchor: &Path,
-    start: Option<&Path>,
-) -> Result<Option<PathBuf>, AgentError> {
-    let mut removed_any = false;
-    let mut current = start.map(Path::to_owned);
-    while let Some(directory) = current {
-        workspace_root_guard.ensure_original(workspace_root)?;
-        if directory == workspace_root || directory == anchor {
-            return Ok(removed_any.then(|| directory.clone()));
-        }
-        if !directory.starts_with(workspace_root) {
-            return Err(AgentError::InvalidAssignment(
-                "terminal spool parent escapes the workspace root".to_owned(),
-            ));
-        }
-        let parent = directory.parent().map(Path::to_owned);
-        match fs::remove_dir(&directory).await {
-            Ok(()) => {
-                removed_any = true;
-                current = parent;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                current = parent;
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                return Ok(removed_any.then(|| directory.clone()));
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(None)
 }
 
 async fn verify_spool_file(path: &Path, entry: &SpoolEntry, kind: &str) -> Result<(), AgentError> {
@@ -3988,7 +3633,6 @@ mod tests {
         create_windows_junction(&organization_path, &outside);
         let junction_metadata = fs::symlink_metadata(&organization_path).await.unwrap();
         assert!(is_link_or_reparse_point(&junction_metadata));
-        assert!(windows_entry_is_directory(&junction_metadata));
 
         remove_attempt_workspace(&workspace_root, &workspace)
             .await

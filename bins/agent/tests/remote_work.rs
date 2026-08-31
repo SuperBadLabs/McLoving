@@ -11,7 +11,7 @@ use mcloving_controller_store::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgListener, PgPoolOptions};
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
@@ -114,6 +114,19 @@ async fn admit_bound_test_build(
     input.pipeline_operational_generation = pipeline.operational_generation;
     store.admit_build(&input).await
 }
+
+const TRIVIAL_PIPELINE: &str = r#"
+version: 1
+name: remote-agent-transaction-receipt
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "true"]
+          timeout_seconds: 10
+"#;
 
 #[tokio::test]
 async fn shipped_agent_executes_fenced_work_over_mtls() {
@@ -532,6 +545,98 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     .await
     .expect("count credential delivery events");
     assert_eq!(credential_events, 1);
+
+    let mut progress = PgListener::connect_with(&pool)
+        .await
+        .expect("connect remote transaction receipt listener");
+    progress
+        .listen("mcloving_work_ready_v1")
+        .await
+        .expect("listen for remote transaction receipt progress");
+    let trivial_pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
+            organization_id,
+            project_id,
+            trivial_pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "remote-agent-transaction-receipt".to_owned(),
+                source: TRIVIAL_PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save trivial remote pipeline");
+    // Saved-pipeline setup is not part of the attempt lifecycle budget. Start
+    // the receipt after setup so the counter measures admission through
+    // terminal publication, including every remote-agent round trip.
+    let before_transactions = client
+        .performance(organization_id)
+        .await
+        .expect("read initial remote transaction counter")
+        .tenant_transactions_started;
+    let trivial = client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            trivial_pipeline_id,
+            "remote-agent-transaction-receipt",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit trivial remote work");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for _ in 0..2 {
+            loop {
+                let notification = progress.recv().await.expect("receive remote progress");
+                if notification.payload() == organization_id.to_string() {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("trivial remote work completes without status polling");
+    let trivial_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM builds WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(trivial.build_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read trivial remote terminal status");
+    assert_eq!(trivial_status, "succeeded");
+    assert!(
+        store
+            .build_logs(organization_id, project_id, trivial.build_id)
+            .await
+            .expect("read trivial remote logs")
+            .is_empty(),
+        "empty streams must not cause controller log transactions"
+    );
+    let after_transactions = client
+        .performance(organization_id)
+        .await
+        .expect("read final remote transaction counter")
+        .tenant_transactions_started;
+    let transaction_delta = after_transactions.saturating_sub(before_transactions);
+    eprintln!("trivial_remote_tenant_transactions={transaction_delta}");
+    // The agent immediately arms its next server-side wait after terminal
+    // acknowledgement. A fully armed empty wait has three authoritative
+    // boundaries: claim, expired-lease reconciliation, and next-expiry
+    // calculation. Depending on how far that arm advances before this
+    // observation, the process-wide delta is 22 through 25. The required
+    // pre-claim expired-lease reconciliation accounts for the additional
+    // lifecycle boundary. The pre-armed
+    // PostgreSQL listener makes the settled 25-boundary case deterministic
+    // enough to exercise; it does not add a tenant transaction itself.
+    assert!(
+        transaction_delta <= 25,
+        "trivial remote work regressed above the transaction budget: {transaction_delta}"
+    );
     stop(&mut agent).await;
     assert!(
         !directory_contains(directory.path(), secret.as_bytes()),
@@ -875,10 +980,9 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
     .spawn()
     .expect("start shipped remote agent");
 
-    // The interval may lawfully delay how soon the session NOTICES the queued
-    // build, so the clock starts at the first observed activity. From there,
-    // three stages must reach a terminal build without the loop waiting out a
-    // single 8 s tick between them; the pre-fix loop needed one interval per
+    // The deliberately huge legacy client poll interval must not pace either
+    // initial notice or queue draining. Start the stage-to-stage clock at the
+    // first observed activity; the pre-fix loop needed one interval per
     // remaining stage.
     let activity = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -915,8 +1019,8 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
         "queued stages drained at the poll interval instead of at work speed: \
          three stages took {drained_in:?} against an 8 s interval"
     );
-    // Every stream still published exactly one (empty) chunk — through the
-    // completion, since PublishLog was refused above: two per stage.
+    // Empty streams are no evidence at all: neither the refused PublishLog RPC
+    // nor the negotiated inline completion path may create log rows.
     let log_chunks = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)
          FROM attempt_log_chunks AS l
@@ -933,8 +1037,8 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
     .await
     .expect("count published log chunks");
     assert_eq!(
-        log_chunks, 6,
-        "each of the three stages publishes its two empty streams inline"
+        log_chunks, 0,
+        "empty stage streams must not create log rows"
     );
     stop(&mut agent).await;
     stop(&mut controller).await;

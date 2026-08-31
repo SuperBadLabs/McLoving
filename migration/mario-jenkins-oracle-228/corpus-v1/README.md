@@ -82,3 +82,17 @@ The builder refuses to overwrite an existing index. Verify the sealed bundle:
 scripts/verify-jenkins-corpus.py verify \
   migration/mario-jenkins-oracle-228/corpus-v1
 ```
+
+After intentionally adding reviewed evidence beneath the bundle, extend the
+parent seal with `reseal`. The command first authenticates every path already
+covered by the current manifest, then atomically replaces it with a manifest
+covering every non-manifest file in the complete tree:
+
+```sh
+scripts/verify-jenkins-corpus.py reseal \
+  migration/mario-jenkins-oracle-228/corpus-v1 \
+  README.md
+```
+
+Any changed path must already be present in the old manifest and must be named
+explicitly. Omit the final arguments when only new files were added.

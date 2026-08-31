@@ -2,6 +2,15 @@
 
 Date: 2026-08-25
 
+Status update (2026-08-30): the statements below that the ticket was `ACTIVE`
+and that gate two was unmet describe this review's 2026-08-25 snapshot. The
+later hand-run systemd evidence in `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md`
+gave the original ticket a bounded implementation closure on 2026-08-27. That
+closure is not a claim of CI-reproducible systemd coverage or production
+readiness: the manager-query, complete load-path, and trust-surface residuals
+remain `DEPLOY-003`, and dependent production authority stays blocked behind
+that ticket.
+
 Verdict: PASS for the implementation gate at protected-main commits
 `52b2ecb7641c38c956a2612614b50ea6fb3d344d` (PR #84, the deployment lane) and
 `586230bfb51c30eed268bc7ea31921928f68aaa4` (PR #93, the follow-up closing five
@@ -12,7 +21,8 @@ deferred findings). All fifteen protected checks pass on that second commit
 `Backup and restore`, `Isolated Linux amd64`, `Classify Windows impact`,
 `Windows agent`, and the lane's own new `Deployment lane` job — as they do on the first.
 
-**This receipt does not close `DEPLOY-001`, and the ticket is `ACTIVE`.** It
+**At this review point, this receipt did not close `DEPLOY-001`, and the ticket
+was `ACTIVE`.** It
 records what the lane implements and what it is verified to do — a prerequisite
 for closure, not the whole of it. Two gates stood in the way; one is now met and
 the other is not.
@@ -23,12 +33,13 @@ rule bars an implementation ticket from `DONE` until
 boundary, "including … deployment". That never happened — the threat model's
 last change before this one was `03a1f5d` (`EXT-002`), which predates this
 ticket — and no evidence receipt existed while eighteen other closed boundary
-tickets carried one. **The board was correct to hold `DEPLOY-001` at `ACTIVE`,
+tickets carried one. **The board was correct at this review point to hold
+`DEPLOY-001` at `ACTIVE`,
 and the 2026-08-25 custodian handoff's claim that it was `DONE` was premature on
 those two receipts.** Both are now supplied: `TM-050` records the boundary, and
 this document records closure.
 
-**Gate two, NOT met — why the ticket stays `ACTIVE`.** The row's acceptance is
+**Gate two was NOT met in this snapshot — why the ticket stayed `ACTIVE`.** The row's acceptance is
 "a scripted install on a clean host brings up the controller and agent and passes
 the deployable-runtime gate", for a lane defined as "systemd units or podman
 quadlets". `deploy/test-deployment.sh` passes `--no-systemd` to install, upgrade
@@ -149,7 +160,7 @@ revalidating this lane against the release that actually ships is `DEPLOY-002`.
   `require_systemd_home`: units resolve `%h` at the passwd home and the suite
   installs into `mktemp -d` trees, so it must pass `--no-systemd`; CI runners
   have no user session either.
-  **This is measured to be closable and is not closed.** On a stock
+  **This was measured to be closable and was not closed in this snapshot.** On a stock
   `ubuntu-24.04` runner, `useradd` + `loginctl enable-linger` with both
   `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` set gives a manager that
   answers, runs transient units, reloads, and installs, enables and starts a

@@ -116,6 +116,12 @@ accepted. Offer acceptance itself checks owner, fence, state, and expiry. Wait
 diagnostics run inside tenant context, distinguish an empty queue from a
 concrete capability mismatch, and report the missing capability set.
 
+Queued admission and terminal DAG progress emit transactionally committed,
+tenant-keyed PostgreSQL notifications. Remote polls and the embedded worker
+subscribe before claiming, then wait on those hints or the authoritative next
+lease-expiry deadline. Lost/coalesced notifications therefore cannot grant or
+strand authority, while idle operation no longer repeatedly probes the queue.
+
 ## Identity and tenant boundary
 
 Organizations own projects, identities, builds, nodes, attempts, events, and

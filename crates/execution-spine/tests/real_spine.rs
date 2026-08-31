@@ -265,6 +265,25 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
     .await
     .expect("run through durable agent");
     assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    let terminal_workspace = root.path().join(format!(
+        "{organization_id}/{}/{restore_epoch}-{fence}",
+        claim.attempt_id,
+        restore_epoch = claim.restore_epoch,
+        fence = claim.fence,
+    ));
+    assert!(
+        !terminal_workspace.exists(),
+        "controller-acknowledged workspace must be reclaimed"
+    );
+    assert!(
+        Journal::open(root.path().join("agent.db"))
+            .expect("reopen terminal journal")
+            .terminal_spools()
+            .expect("read terminal replay spools")
+            .attempts
+            .is_empty(),
+        "controller-acknowledged replay metadata must be retired"
+    );
 
     let status = client
         .status(organization_id, project_id, admission.build_id)

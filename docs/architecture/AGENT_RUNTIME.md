@@ -14,6 +14,11 @@ Status: implemented through Wave 2-C
 - Production work polling requires the negotiated `work-delivery-v1` feature;
   an older peer fails compatibility negotiation before either side relies on
   the work-delivery RPC set.
+- Server-side event waiting requires the independently negotiated
+  `work-delivery-long-poll-v1` feature. An upgraded agent retains its configured
+  client-side poll pacing when an older controller omits that feature, avoiding
+  an idle RPC/transaction loop during rolling upgrades. A negotiated peer may
+  re-enter immediately because `PollWork` itself is a bounded wait.
 - Session and certificate epochs increase monotonically. Only the exact current
   session may act; reconnecting with a newer epoch fences the previous session.
 
@@ -259,18 +264,17 @@ discharge a parked reconciliation).
   never negotiated it would silently ignore the field, so the agent must not
   inline for such a peer.
 - Once the controller acknowledges terminal truth and the local terminal
-  transition commits, the agent immediately deletes the controller-owned log
-  and result spools and atomically retires their journal descriptors. The
-  deletions are flushed as one batch — the surviving directories whose entry
-  lists changed, taken before the descriptors retire — rather than one fsync
-  per removed entry: a pruned directory's entry change dies with it, the
-  topmost removal is named in a surviving ancestor's entry list, and a crash
-  between file deletion and metadata retirement is idempotently completed on
-  startup or at periodic reconciliation; terminal attempt history remains
-  durable. Reclaim prunes emptied directories only within the attempt's own
-  subtree: the per-organization anchor directories persist — bounded, one per
-  organization per tree — so successive attempts extend durable entries
-  instead of rebuilding and re-flushing the chain from the root.
+  transition commits, both remote and embedded workers remove the attempt
+  workspace through the same no-follow cleanup, delete controller-owned log
+  and result spools, and atomically retire their journal descriptors. The
+  remote worker flushes the shared cleanup's surviving changed directories as
+  one batch before descriptor retirement: a pruned directory's entry change
+  dies with it and the topmost removal is named in a surviving ancestor. A
+  crash between file deletion and metadata retirement is idempotently
+  completed before later work or at periodic reconciliation; terminal attempt
+  history remains durable. Reclaim prunes only within the attempt subtree and
+  retains bounded per-organization anchors so successive attempts extend
+  durable entries instead of rebuilding and re-flushing from the root.
 - Terminal result evidence is written beneath the agent-owned
   `.agent-results` root, outside the workload workspace namespace, under a
   cryptographically random path created only after containment has ended. A
@@ -359,12 +363,17 @@ without an uncontained-child window. Bare program names are resolved through
 the effective `PATH` before the explicit application path is passed to
 `CreateProcessW`; the workspace is never searched implicitly.
 
-The outbound production service polls and executes tenant-bound fenced work
-over mutual TLS. Acceptance is journaled before acknowledgement; renewal
-failure cancels local execution before authority can be reused. Finalization
+The outbound production service executes tenant-bound fenced work over mutual
+TLS. Work acquisition is a bounded controller-held event wait; after an empty
+response the agent immediately re-enters it, with no client-side polling tick.
+Acceptance is journaled before acknowledgement; renewal failure cancels local
+execution before authority can be reused. Finalization
 authority and complete spool evidence are committed atomically before bounded
 streaming upload, and replay is exact and idempotent after response loss or a
-post-controller-commit crash. On Linux, journal schema v2 binds the process
+post-controller-commit crash. Empty stdout/stderr descriptors remain durable
+locally but do not create information-free controller log chunks. On Linux,
+live child exit is awaited through a pidfd (with a fail-closed compatibility
+fallback), and journal schema v2 binds the process
 group leader to the machine boot ID and `/proc` start ticks; restart
 reconciliation revalidates that non-reusable identity before both TERM and
 KILL. A missing leader is not proof that the process group is empty and remains

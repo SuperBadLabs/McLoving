@@ -1,5 +1,13 @@
 # Mario end-to-end alpha demo
 
+This is the canonical, evidence-producing qualification path. The disposable
+`~/faceoff2` scripts used for rapid operator click-throughs on Mario are a local
+development harness: they may reuse locally built binaries, wipe their
+throwaway database and logs, and do not produce exact-head acceptance evidence.
+Use them for diagnosis only. A release, board closure, or qualification claim
+must use `scripts/mario-alpha-demo.sh` from a clean checkout as documented
+below.
+
 For the working day beginning 2026-08-16, this demo is the only accepted
 measure of McLoving product progress. Migration-ticket throughput, additional
 contained proofs, and unmerged implementation do not substitute for a passing

@@ -27,6 +27,7 @@ tokio = { version = "=1.47.1", features = [
   "net",
   "process",
   "rt-multi-thread",
+  "sync",
   "time",
 ] }
 tokio-stream = { version = "=0.1.19", features = ["net"] }

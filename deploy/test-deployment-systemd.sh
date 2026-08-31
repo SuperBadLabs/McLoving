@@ -201,6 +201,9 @@ if [[ -n "${existing}" ]]; then
   systemctl --user stop mcloving-postgres.service >/dev/null 2>&1 || true
   podman rm -f mcloving-postgres >/dev/null 2>&1 || true
   podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
+  if podman volume exists mcloving-postgres-data 2>/dev/null; then
+    fail "--reset could not remove mcloving-postgres-data; refusing to install fresh contracts over a cluster that retains the previous initdb password"
+  fi
   rm -rf "${home_dir}/.local/libexec/mcloving" "${state_probe}/mcloving-agent" \
          "${state_probe}/mcloving-controller" "${home_dir}/.config/mcloving" \
          >/dev/null 2>&1 || true
@@ -220,14 +223,31 @@ if [[ -n "${existing}" ]]; then
   # deployment it then does not remove: the probe now sees `user.control` and
   # anything else the manager searches, so a reset that cleaned only the two
   # roots above would report a reset that had not happened and run with the
-  # drop-in still merged. Bounded to paths under the home -- a foreign root is
-  # already a refusal above and is not ours to delete.
+  # drop-in still merged. Bounded to paths under the home or this user's
+  # manager runtime root -- a foreign root is already a refusal above and is
+  # not ours to delete. The runtime root matters: `systemd/user.control` there
+  # is classified as resettable by the probe above, and omitting it here made
+  # --reset announce a removal it did not perform.
   for reset_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
-    [[ "${reset_root}" == "${home_dir}/"* ]] || continue
+    if [[ "${reset_root}" != "${home_dir}/"* ]] \
+      && { [[ -z "${runtime_probe_root}" ]] \
+        || [[ "${reset_root}" != "${runtime_probe_root}/"* ]]; }; then
+      continue
+    fi
     rm -rf "${reset_root}"/mcloving-* \
            "${reset_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
   done
   systemctl --user daemon-reload >/dev/null 2>&1 || true
+  for reset_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
+    if [[ "${reset_root}" != "${home_dir}/"* ]] \
+      && { [[ -z "${runtime_probe_root}" ]] \
+        || [[ "${reset_root}" != "${runtime_probe_root}/"* ]]; }; then
+      continue
+    fi
+    reset_hit="$(shopt -s nullglob; printf '%s\n' "${reset_root}"/mcloving-* | head -1)"
+    [[ -z "${reset_hit}" ]] \
+      || fail "--reset left ${reset_hit} in a manager load path; refusing to exercise a customised unit"
+  done
 fi
 
 # ---------------------------------------------------------------------------

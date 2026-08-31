@@ -18,9 +18,9 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
-    INLINE_TERMINAL_LOGS_FEATURE, OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    RECOVERED_DISCHARGE_FEATURE, TransportError, WORK_COMPLETION_SUBSTITUTION_FEATURE,
-    WORK_DELIVERY_FEATURE,
+    INLINE_TERMINAL_LOGS_FEATURE, LONG_POLL_WORK_DELIVERY_FEATURE, OutboundMtlsConfig,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, RECOVERED_DISCHARGE_FEATURE, TransportError,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -31,7 +31,7 @@ use mcloving_agent_runtime::{AttemptPhase, Journal, JournalError, Reconciliation
 #[cfg(windows)]
 use std::ffi::OsString;
 use thiserror::Error;
-use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -143,6 +143,9 @@ pub struct SessionReceipt {
 /// confirmed feature set — never assumed from the agent's own offer.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SessionFeatures {
+    /// `PollWork` waits server-side, so an empty offer can be re-entered
+    /// without a client-side fixed-interval delay.
+    pub long_poll_work_delivery: bool,
     /// `AcceptWork` receipts carry `cancellation_requested`, so the
     /// serialized post-accept `RenewWorkLease` round trip can be skipped.
     pub accept_lease_state: bool,
@@ -154,6 +157,9 @@ pub struct SessionFeatures {
 impl SessionFeatures {
     fn from_negotiated(features: &[String]) -> Self {
         Self {
+            long_poll_work_delivery: features
+                .iter()
+                .any(|feature| feature == LONG_POLL_WORK_DELIVERY_FEATURE),
             accept_lease_state: features
                 .iter()
                 .any(|feature| feature == ACCEPT_LEASE_STATE_FEATURE),
@@ -383,57 +389,58 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
         },
     )
     .await?;
-    let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
-    reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    reconciliation_tick.tick().await;
-    let mut work_tick = interval(config.poll_interval);
-    work_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    work_tick.tick().await;
-    // The poll interval paces how often an idle agent ASKS for work. It must
-    // not also pace how fast work is DONE: with one assignment handled per
-    // tick, a queue of ready units drains at one unit per interval, so every
-    // unit after the first waits a full period for no reason. `drain` carries
-    // "the last pass moved the queue" into the next iteration, which skips the
-    // wait. Measured on mario at the shipped 500 ms default: 496 ms per stage
-    // before, bounded by the executing work after.
-    //
-    // Starting true keeps the session's first poll immediate: the tick
-    // consumed above is the interval's zero-delay first fire, and waiting out
-    // a full period before ever asking would delay a session's first
-    // assignment by one interval.
-    let mut drain = true;
+    let mut next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
     loop {
-        // Ready immediately while draining; otherwise the ordinary poll tick.
-        let work_ready = async {
-            if !drain {
-                work_tick.tick().await;
-            }
-        };
+        if Instant::now() >= next_reconciliation {
+            send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+            worker::reclaim_terminal_spools(config).await?;
+            next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
+        }
+        let outcome = worker::poll_and_run_one(
+            config,
+            &mut client,
+            receipt.session_epoch,
+            receipt.features,
+            stop.clone(),
+        )
+        .await?;
+        // A peer that explicitly negotiated server-side long polling is safe
+        // to re-enter immediately. Previous-release controllers return empty
+        // offers synchronously, so retain configured pacing for idle and
+        // declined passes. Progressed work always drains immediately.
+        pace_next_poll_or_stop(receipt.features, config.poll_interval, outcome, &stop).await?;
+    }
+}
+
+fn legacy_poll_delay(
+    features: SessionFeatures,
+    configured: Duration,
+    outcome: worker::PollOutcome,
+) -> Option<Duration> {
+    (!features.long_poll_work_delivery && outcome != worker::PollOutcome::Progressed)
+        .then_some(configured)
+}
+
+async fn pace_next_poll_or_stop(
+    features: SessionFeatures,
+    configured: Duration,
+    outcome: worker::PollOutcome,
+    stop: &CancellationToken,
+) -> Result<(), AgentError> {
+    // A negotiated long poll needs no client delay, but cancellation can be
+    // what completed that poll. Keep the stop decision independent of legacy
+    // pacing so the session exits instead of immediately polling again with
+    // an already-cancelled token.
+    if stop.is_cancelled() {
+        return Err(AgentError::Stopped);
+    }
+    if let Some(delay) = legacy_poll_delay(features, configured, outcome) {
         tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            _ = reconciliation_tick.tick() => {
-                send_reconciliation(
-                    config,
-                    &mut client,
-                    receipt.session_epoch,
-                    stop.clone(),
-                ).await?;
-                worker::reclaim_terminal_spools(config).await?;
-            }
-            () = work_ready => {
-                // Only executed or terminally refused work justifies asking
-                // again at once. A declined assignment stays offered until its
-                // lease lapses, so draining on it would spin on one offer.
-                drain = worker::poll_and_run_one(
-                    config,
-                    &mut client,
-                    receipt.session_epoch,
-                    receipt.features,
-                    stop.clone(),
-                ).await? == worker::PollOutcome::Progressed;
-            }
+            () = stop.cancelled() => return Err(AgentError::Stopped),
+            () = sleep(delay) => {}
         }
     }
+    Ok(())
 }
 
 async fn publish_recovery_ready_session_receipt<F>(
@@ -480,6 +487,7 @@ async fn open_session(
                     "journal-v1".to_owned(),
                     platform_feature().to_owned(),
                     WORK_DELIVERY_FEATURE.to_owned(),
+                    LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
                     ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
                     WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
                     RECOVERED_DISCHARGE_FEATURE.to_owned(),
@@ -1473,6 +1481,65 @@ mod tests {
             Err(AgentError::UnsupportedProtocol)
         ));
         require_work_delivery_feature(&[WORK_DELIVERY_FEATURE.to_owned()]).unwrap();
+    }
+
+    #[test]
+    fn client_pacing_preserves_legacy_idle_without_delaying_progress() {
+        let configured = Duration::from_millis(17);
+        assert_eq!(
+            legacy_poll_delay(
+                SessionFeatures::default(),
+                configured,
+                worker::PollOutcome::Idle,
+            ),
+            Some(configured)
+        );
+        assert_eq!(
+            legacy_poll_delay(
+                SessionFeatures::default(),
+                configured,
+                worker::PollOutcome::Declined,
+            ),
+            Some(configured)
+        );
+        assert_eq!(
+            legacy_poll_delay(
+                SessionFeatures::default(),
+                configured,
+                worker::PollOutcome::Progressed,
+            ),
+            None
+        );
+
+        let negotiated = SessionFeatures::from_negotiated(&[
+            WORK_DELIVERY_FEATURE.to_owned(),
+            LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
+        ]);
+        assert_eq!(
+            legacy_poll_delay(negotiated, configured, worker::PollOutcome::Idle),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn long_poll_cancellation_exits_without_a_legacy_delay() {
+        let negotiated = SessionFeatures::from_negotiated(&[
+            WORK_DELIVERY_FEATURE.to_owned(),
+            LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
+        ]);
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        assert!(matches!(
+            pace_next_poll_or_stop(
+                negotiated,
+                Duration::from_secs(30),
+                worker::PollOutcome::Idle,
+                &stop,
+            )
+            .await,
+            Err(AgentError::Stopped)
+        ));
     }
 
     #[test]

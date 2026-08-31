@@ -88,6 +88,12 @@ The versioned routes are:
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds/{build}/logs`
 - `POST /api/v1/organizations/{organization}/projects/{project}/builds/{build}/cancel`
 - `GET /api/v1/organizations/{organization}/scheduler/explain?capability=linux`
+- `GET /api/v1/organizations/{organization}/performance`
+
+The performance route requires the service-only scheduler-control scope and
+returns the process-local, tenant-scoped count of controller transaction
+boundaries. It is monotonic for the life of the controller and is intended for
+transaction-amplification profiling, not durable accounting.
 
 Artifact staging uses the public service credential, but immutable artifact
 commit additionally requires `McLoving-Agent-Authorization: Bearer <token>`.

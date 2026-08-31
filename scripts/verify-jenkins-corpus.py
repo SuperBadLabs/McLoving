@@ -77,26 +77,46 @@ def bundle_files(root):
     return sorted(result, key=lambda path: path.relative_to(root).as_posix())
 
 
-def seal(root):
+def manifest_entries(target):
+    expected = {}
+    pattern = re.compile(r"^([0-9a-f]{64})  ([A-Za-z0-9_./+-]+)$")
+    for line in target.read_text().splitlines():
+        match = pattern.fullmatch(line)
+        require(match is not None, f"invalid bundle manifest line: {line}")
+        require(match.group(2) not in expected, f"duplicate bundle manifest entry: {match.group(2)}")
+        expected[match.group(2)] = match.group(1)
+    return expected
+
+
+def seal(root, replace=False, allowed_changes=frozenset()):
     target = root / "SHA256SUMS"
-    require(not target.exists(), "refusing to replace corpus SHA256SUMS")
+    if target.exists():
+        require(replace, "refusing to replace corpus SHA256SUMS")
+        require(target.is_file() and not target.is_symlink(), "invalid corpus SHA256SUMS")
+        # Resealing may add newly committed evidence, but it must never launder
+        # a modification to bytes the existing seal already covered.
+        for relative, expected_digest in manifest_entries(target).items():
+            path = root / relative
+            require(path.is_file() and not path.is_symlink(), f"sealed file missing: {relative}")
+            require(
+                digest(path) == expected_digest or relative in allowed_changes,
+                f"bundle digest mismatch: {relative}",
+            )
     lines = [
         f"{digest(path)}  {path.relative_to(root).as_posix()}\n"
         for path in bundle_files(root)
     ]
-    target.write_text("".join(lines))
+    temporary = root / ".SHA256SUMS.tmp"
+    require(not temporary.exists(), f"refusing to replace temporary manifest: {temporary}")
+    temporary.write_text("".join(lines))
+    temporary.replace(target)
     print(f"corpus-sealed files={len(lines)} manifest-sha256={digest(target)}")
 
 
 def verify_manifest(root):
     target = root / "SHA256SUMS"
     require(target.is_file() and not target.is_symlink(), "missing corpus SHA256SUMS")
-    expected = {}
-    pattern = re.compile(r"^([0-9a-f]{64})  ([A-Za-z0-9_./+-]+)$")
-    for line in target.read_text().splitlines():
-        match = pattern.fullmatch(line)
-        require(match is not None, f"invalid bundle manifest line: {line}")
-        expected[match.group(2)] = match.group(1)
+    expected = manifest_entries(target)
     actual_files = bundle_files(root)
     actual_names = {path.relative_to(root).as_posix() for path in actual_files}
     require(set(expected) == actual_names, "bundle manifest file set mismatch")
@@ -290,11 +310,23 @@ def verify(root):
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in {"seal", "verify"}:
-        raise SystemExit("usage: verify-jenkins-corpus.py seal|verify CORPUS_ROOT")
+    if len(sys.argv) < 3 or sys.argv[1] not in {"seal", "reseal", "verify"}:
+        raise SystemExit(
+            "usage: verify-jenkins-corpus.py seal|verify CORPUS_ROOT\n"
+            "       verify-jenkins-corpus.py reseal CORPUS_ROOT [CHANGED_PATH ...]"
+        )
+    if sys.argv[1] != "reseal" and len(sys.argv) != 3:
+        raise SystemExit("changed paths are accepted only by reseal")
     root = pathlib.Path(sys.argv[2]).resolve()
     if sys.argv[1] == "seal":
         seal(root)
+    elif sys.argv[1] == "reseal":
+        changed = frozenset(sys.argv[3:])
+        require(
+            all(path in manifest_entries(root / "SHA256SUMS") for path in changed),
+            "every changed path must already be covered by the current manifest",
+        )
+        seal(root, replace=True, allowed_changes=changed)
     else:
         verify(root)
 

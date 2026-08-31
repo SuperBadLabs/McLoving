@@ -123,13 +123,6 @@ RECEIPT_DEBT: dict[str, str] = {
     "docs/architecture/SHADOW_QUALIFICATION_V1.md as its closure",
     "ALPHA-001": "2026-08-17 c6a238a; board row names docs/ALPHA_DEMO.md as "
     "its closure, and the threat model carries an ALPHA-001 review section",
-    "CANARY-000": "2026-08-20 03a1f5d; no receipt and no threat-model entry",
-    "EXEC-001": "2026-08-23 77b3d07; product-hardening batch, no receipt",
-    "EXEC-002": "2026-08-23 77b3d07; product-hardening batch, no receipt",
-    "EXEC-003": "2026-08-23 77b3d07; product-hardening batch, no receipt",
-    "EXEC-004": "2026-08-23 77b3d07; product-hardening batch, no receipt",
-    "OUTBOX-001": "2026-08-23 77b3d07; product-hardening batch, no receipt",
-    "HYG-001": "2026-08-23 77b3d07; product-hardening batch, no receipt",
 }
 
 # Closed after the Working rule and named nowhere in the threat model. Four
@@ -152,13 +145,6 @@ THREAT_MODEL_DEBT: dict[str, str] = {
     "ticket, and the verification-ownership table has no entry for it",
     "SECRET-001": "2026-08-13 ccd9b7c; added TM-041 without naming the "
     "ticket, and the verification-ownership table has no entry for it",
-    "CANARY-000": "2026-08-20 03a1f5d; no receipt and no threat-model entry",
-    "EXEC-001": "2026-08-23 77b3d07; product-hardening batch, unreferenced",
-    "EXEC-002": "2026-08-23 77b3d07; product-hardening batch, unreferenced",
-    "EXEC-003": "2026-08-23 77b3d07; product-hardening batch, unreferenced",
-    "EXEC-004": "2026-08-23 77b3d07; product-hardening batch, unreferenced",
-    "OUTBOX-001": "2026-08-23 77b3d07; product-hardening batch, unreferenced",
-    "HYG-001": "2026-08-23 77b3d07; product-hardening batch, unreferenced",
 }
 
 
@@ -288,9 +274,7 @@ THREAT_MODEL_EXEMPT_BASELINE = frozenset({
     "UX-002", "WIN-004"
 })
 RECEIPT_DEBT_BASELINE = frozenset({
-    "ALPHA-001", "CANARY-000", "DIFF-002", "EXEC-001", "EXEC-002",
-    "EXEC-003", "EXEC-004", "HYG-001", "MIG-006", "MIG-007",
-    "OUTBOX-001", "SHADOW-001"
+    "ALPHA-001", "DIFF-002", "MIG-006", "MIG-007", "SHADOW-001"
 })
 # WIDENED ONCE, DELIBERATELY, BY HYG-002 -- and this paragraph is the argument
 # the ledger's own comment demands before an entry is permitted.
@@ -308,9 +292,8 @@ RECEIPT_DEBT_BASELINE = frozenset({
 # the opposite choice: keep reading the ownership table as an attestation, and
 # keep the count at 31.
 THREAT_MODEL_DEBT_BASELINE = frozenset({
-    "CACHE-001", "CANARY-000", "CI-001",
-    "EXEC-001", "EXEC-002", "EXEC-003", "EXEC-004", "HYG-001",
-    "MIG-001", "MIG-003", "MIG-004", "MIG-005", "OUTBOX-001", "SCM-001",
+    "CACHE-001", "CI-001",
+    "MIG-001", "MIG-003", "MIG-004", "MIG-005", "SCM-001",
     "MIG-002", "MIG-006", "MIG-007", "SECRET-001", "WIN-003",
 
     "AGENT-001", "AGENT-002", "AGENT-003", "ARCH-001", "CTRL-001",

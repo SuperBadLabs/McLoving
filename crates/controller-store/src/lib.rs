@@ -1,5 +1,8 @@
 //! PostgreSQL-backed controller truth and transaction boundaries.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -177,6 +180,9 @@ pub const EFFECT_DISPATCH_COMMIT_V32: &str =
 /// A dispatch-committed effect can never be release_pending or abandoned.
 pub const EFFECT_DISPATCH_COMMIT_GUARD_V33: &str =
     include_str!("../migrations/0033_effect_dispatch_commit_guard.sql");
+/// Transactional wake hints for event-driven work acquisition.
+pub const WORK_READY_NOTIFICATIONS_V34: &str =
+    include_str!("../migrations/0034_work_ready_notifications.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -636,15 +642,45 @@ pub enum StoreError {
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,
+    tenant_transactions_started: Arc<Mutex<BTreeMap<Uuid, u64>>>,
 }
 
 impl Store {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            tenant_transactions_started: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Process-local, monotonic observability counter shared by every clone.
+    /// It intentionally counts tenant transaction boundaries rather than SQL
+    /// statements so lifecycle amplification is visible without database
+    /// statistics sampling lag.
+    pub fn tenant_transactions_started(&self, organization_id: Uuid) -> u64 {
+        *self
+            .tenant_transactions_started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&organization_id)
+            .unwrap_or(&0)
+    }
+
+    /// Checks whether the runtime database can serve a controller request.
+    ///
+    /// This deliberately performs no tenant-scoped read and exposes no
+    /// database details. It is the narrow dependency check used by the public
+    /// readiness endpoint; startup preflight remains responsible for schema,
+    /// role, and tenant-policy validation.
+    pub async fn readiness_check(&self) -> Result<(), StoreError> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Proves that migration and runtime pools target the same live database,
@@ -1321,6 +1357,7 @@ impl Store {
         apply_migration(&mut tx, 31, EFFECT_RELEASE_PENDING_V31).await?;
         apply_migration(&mut tx, 32, EFFECT_DISPATCH_COMMIT_V32).await?;
         apply_migration(&mut tx, 33, EFFECT_DISPATCH_COMMIT_GUARD_V33).await?;
+        apply_migration(&mut tx, 34, WORK_READY_NOTIFICATIONS_V34).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1510,6 +1547,28 @@ impl Store {
         )
         .bind(agent_id)
         .bind(session_epoch)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Returns scheduling capabilities and one negotiated feature decision
+    /// from the same exact-session read.
+    pub async fn agent_session_capabilities_and_feature(
+        &self,
+        agent_id: &str,
+        session_epoch: u64,
+        feature: &str,
+    ) -> Result<Option<(Vec<String>, bool)>, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        Ok(sqlx::query_as::<_, (Vec<String>, bool)>(
+            "SELECT capabilities, $3 = ANY(features)
+             FROM agent_sessions
+             WHERE agent_id = $1 AND session_epoch = $2",
+        )
+        .bind(agent_id)
+        .bind(session_epoch)
+        .bind(feature)
         .fetch_optional(&self.pool)
         .await?)
     }
@@ -6594,6 +6653,14 @@ impl Store {
         &self,
         organization_id: Uuid,
     ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+        {
+            let mut transaction_counts = self
+                .tenant_transactions_started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = transaction_counts.entry(organization_id).or_default();
+            *count = count.saturating_add(1);
+        }
         // `SET LOCAL` is transaction-scoped exactly like
         // `set_config(..., true)`, and riding the custom BEGIN statement puts
         // the tenant binding in the begin round trip instead of its own — one

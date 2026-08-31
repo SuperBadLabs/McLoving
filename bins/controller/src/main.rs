@@ -18,9 +18,9 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
-    INLINE_TERMINAL_LOGS_FEATURE, ProtocolRange, RECOVERED_DISCHARGE_FEATURE,
-    RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_COMPLETION_SUBSTITUTION_FEATURE,
-    WORK_DELIVERY_FEATURE, negotiate,
+    INLINE_TERMINAL_LOGS_FEATURE, LONG_POLL_WORK_DELIVERY_FEATURE, ProtocolRange,
+    RECOVERED_DISCHARGE_FEATURE, RECOVERED_FINALIZATION_LEASE_SECONDS,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
@@ -39,8 +39,10 @@ use mcloving_domain::capability::{
 use mcloving_execution_spine::{EffectExecutionPlan, WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use sqlx::postgres::{PgListener, PgPoolOptions};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -80,6 +82,10 @@ fn validate_effect_mapping_configuration(
         (None, None) => Ok(()),
     }
 }
+
+const WORK_READY_CHANNEL: &str = "mcloving_work_ready_v1";
+const WORK_LONG_POLL_MAX: Duration = Duration::from_secs(20);
+const WORK_READY_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -176,10 +182,18 @@ async fn main() -> Result<()> {
         .await
         .context("connect to PostgreSQL runtime role")?;
     let store = Store::new(runtime_pool);
+    let (work_wakeups, _) = broadcast::channel(1_024);
     store
         .preflight_tenant_runtime(&migration_store, worker.organization_id)
         .await
         .context("preflight PostgreSQL runtime tenant access")?;
+    // PostgreSQL discards notifications when nobody is listening. Arm this
+    // connection before the HTTP readiness surface or either worker can run,
+    // closing the startup window that would otherwise defer work until the
+    // bounded fallback deadline.
+    let work_ready_listener = connect_work_ready_listener(store.pool())
+        .await
+        .context("arm PostgreSQL work-ready listener")?;
     let mut state = ApiState::new_durable(store.clone());
     if let Some(catalog) = connector_mapping_catalog {
         state = state
@@ -271,16 +285,22 @@ async fn main() -> Result<()> {
         .await
         .context("serve public API")
     };
-    let agent_server = run_agent_control_server(store.clone(), agent_control);
+    let agent_server = run_agent_control_server(store.clone(), agent_control, work_wakeups.clone());
+    let notification_loop = forward_work_ready_notifications(
+        store.pool().clone(),
+        work_ready_listener,
+        work_wakeups.clone(),
+    );
     tokio::pin!(server);
     tokio::pin!(agent_server);
+    tokio::pin!(notification_loop);
     let outbox_reaper_loop = run_outbox_reaper(
         store.clone(),
         worker.organization_id,
         outbox_retention_hours,
     );
     tokio::pin!(outbox_reaper_loop);
-    let worker_loop = run_embedded_worker(store, worker);
+    let worker_loop = run_embedded_worker(store, worker, work_wakeups);
     tokio::pin!(worker_loop);
     let trigger_retry_loop =
         run_trigger_retry_worker(trigger_retry_state, trigger_retry_organization);
@@ -288,6 +308,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         result = &mut server => result,
         result = &mut agent_server => result,
+        result = &mut notification_loop => result,
         result = &mut worker_loop => result,
         result = &mut trigger_retry_loop => result,
         result = &mut outbox_reaper_loop => result,
@@ -654,6 +675,7 @@ struct ControllerAgentService {
     store: Store,
     identities: Arc<AgentIdentityBindings>,
     session_churn: Arc<SessionEpochChurn>,
+    work_wakeups: broadcast::Sender<Uuid>,
     #[cfg(debug_assertions)]
     drop_start_response_once: Arc<AtomicBool>,
     #[cfg(debug_assertions)]
@@ -739,6 +761,7 @@ impl AgentControl for ControllerAgentService {
             "unix-process-group-v1".to_owned(),
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
+            LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
             WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
             RECOVERED_DISCHARGE_FEATURE.to_owned(),
@@ -1035,64 +1058,70 @@ impl AgentControl for ControllerAgentService {
                 "lease_seconds must be between 5 and 300",
             ));
         }
-        let capabilities = self
+        let (capabilities, long_poll_negotiated) = self
             .store
-            .agent_session_capabilities(&request.agent_id, request.session_epoch)
-            .await
-            .map_err(internal_store_error)?
-            .ok_or_else(|| stale_session_status(&self.session_churn, &request.agent_id))?;
-        self.store
-            .requeue_one_expired(identity.organization_id)
-            .await
-            .map_err(internal_store_error)?;
-        let assignment = if let Some(claim) = self
-            .store
-            .claim_next_in_session(
-                &ClaimRequest {
-                    organization_id: identity.organization_id,
-                    scheduler_id: format!("agent:{}:{}", request.agent_id, request.session_epoch),
-                    agent_id: request.agent_id.clone(),
-                    capabilities,
-                    trust_pool: identity.trust_pool.clone(),
-                    lease_seconds,
-                    fairness_seed: 0,
-                },
+            .agent_session_capabilities_and_feature(
+                &request.agent_id,
                 request.session_epoch,
+                LONG_POLL_WORK_DELIVERY_FEATURE,
             )
             .await
             .map_err(internal_store_error)?
-        {
-            let execution = self
+            .ok_or_else(|| stale_session_status(&self.session_churn, &request.agent_id))?;
+        // Subscribe before the first claim query. PostgreSQL notifications are
+        // hints and may be coalesced, but this ordering prevents the ordinary
+        // check-then-sleep race within one healthy controller process.
+        let mut wakeups = self.work_wakeups.subscribe();
+        // No lease exists while a negotiated request is waiting, so this
+        // budget is independent of the future assignment's lease duration.
+        // A previous-release agent retains its client-side pacing and RPC
+        // deadline, so it must receive an empty offer immediately.
+        let deadline = work_wait_budget(long_poll_negotiated)
+            .map(|budget| tokio::time::Instant::now() + budget);
+        loop {
+            if let Some(assignment) = try_assign_work(
+                &self.store,
+                &identity,
+                &request,
+                lease_seconds,
+                &capabilities,
+            )
+            .await?
+            {
+                return Ok(Response::new(WorkOffer {
+                    session_epoch: request.session_epoch,
+                    assignment: Some(assignment),
+                }));
+            }
+            let Some(deadline) = deadline else {
+                return Ok(Response::new(WorkOffer {
+                    session_epoch: request.session_epoch,
+                    assignment: None,
+                }));
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(Response::new(WorkOffer {
+                    session_epoch: request.session_epoch,
+                    assignment: None,
+                }));
+            }
+            let wait = self
                 .store
-                .attempt_execution_in_session(
-                    claim.organization_id,
-                    claim.attempt_id,
-                    claim.fence,
-                    claim.restore_epoch,
-                    &claim.agent_id,
-                    request.session_epoch,
-                )
+                .next_lease_expiry_delay(identity.organization_id, remaining)
                 .await
-                .map_err(internal_store_error)?
-                .ok_or_else(|| Status::aborted("claimed work lost fenced authority"))?;
-            let execution_spec_json = serde_json::to_vec(&execution.execution_spec)
-                .map_err(|error| Status::internal(format!("serialize execution spec: {error}")))?;
-            Some(WorkAssignment {
-                organization_id: claim.organization_id.to_string(),
-                build_id: claim.build_id.to_string(),
-                node_id: claim.node_id.to_string(),
-                attempt_id: claim.attempt_id.to_string(),
-                fence_token: encode_authority_token(claim.restore_epoch, claim.fence)?,
-                payload_digest: Sha256::digest(&execution_spec_json).to_vec(),
-                execution_spec_json,
-            })
-        } else {
-            None
-        };
-        Ok(Response::new(WorkOffer {
-            session_epoch: request.session_epoch,
-            assignment,
-        }))
+                .map_err(internal_store_error)?;
+            if !wait_for_work_wakeup(&mut wakeups, identity.organization_id, wait).await
+                && wait == remaining
+            {
+                return Ok(Response::new(WorkOffer {
+                    session_epoch: request.session_epoch,
+                    assignment: None,
+                }));
+            }
+            // A work hint or authoritative lease deadline elapsed. Loop to
+            // reconcile and claim without trusting the notification itself.
+        }
     }
 
     async fn accept_work(
@@ -1505,6 +1534,80 @@ impl AgentControl for ControllerAgentService {
     }
 }
 
+async fn try_assign_work(
+    store: &Store,
+    identity: &AgentIdentity,
+    request: &WorkPoll,
+    lease_seconds: i32,
+    capabilities: &[String],
+) -> Result<Option<WorkAssignment>, Status> {
+    let claim_request = ClaimRequest {
+        organization_id: identity.organization_id,
+        scheduler_id: format!("agent:{}:{}", request.agent_id, request.session_epoch),
+        agent_id: request.agent_id.clone(),
+        capabilities: capabilities.to_vec(),
+        trust_pool: identity.trust_pool.clone(),
+        lease_seconds,
+        fairness_seed: 0,
+    };
+    let claim = store
+        .reconcile_expired_and_claim_next_in_session(&claim_request, request.session_epoch)
+        .await
+        .map_err(internal_store_error)?;
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
+    let execution = store
+        .attempt_execution_in_session(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            &claim.agent_id,
+            request.session_epoch,
+        )
+        .await
+        .map_err(internal_store_error)?
+        .ok_or_else(|| Status::aborted("claimed work lost fenced authority"))?;
+    let execution_spec_json = serde_json::to_vec(&execution.execution_spec)
+        .map_err(|error| Status::internal(format!("serialize execution spec: {error}")))?;
+    Ok(Some(WorkAssignment {
+        organization_id: claim.organization_id.to_string(),
+        build_id: claim.build_id.to_string(),
+        node_id: claim.node_id.to_string(),
+        attempt_id: claim.attempt_id.to_string(),
+        fence_token: encode_authority_token(claim.restore_epoch, claim.fence)?,
+        payload_digest: Sha256::digest(&execution_spec_json).to_vec(),
+        execution_spec_json,
+    }))
+}
+
+async fn wait_for_work_wakeup(
+    wakeups: &mut broadcast::Receiver<Uuid>,
+    organization_id: Uuid,
+    maximum: Duration,
+) -> bool {
+    tokio::time::timeout(maximum, async {
+        loop {
+            match wakeups.recv().await {
+                Ok(notified) if notified == organization_id => return true,
+                Ok(_) => {}
+                // Lag means the discarded range may contain this tenant's
+                // only hint. Re-run the authoritative claim query now rather
+                // than sleeping until the fallback deadline.
+                Err(broadcast::error::RecvError::Lagged(_)) => return true,
+                Err(broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn work_wait_budget(long_poll_negotiated: bool) -> Option<Duration> {
+    long_poll_negotiated.then_some(WORK_LONG_POLL_MAX)
+}
+
 #[derive(Clone, Copy)]
 struct WorkContext {
     organization_id: Uuid,
@@ -1714,9 +1817,61 @@ async fn agent_control_environment() -> Result<Option<AgentControlEnvironment>> 
     Ok(Some(environment))
 }
 
+async fn connect_work_ready_listener(pool: &PgPool) -> Result<PgListener> {
+    let mut listener = PgListener::connect_with(pool)
+        .await
+        .context("connect PostgreSQL work-ready listener")?;
+    listener
+        .listen(WORK_READY_CHANNEL)
+        .await
+        .context("listen for PostgreSQL work-ready notifications")?;
+    Ok(listener)
+}
+
+async fn forward_work_ready_notifications(
+    pool: PgPool,
+    mut listener: PgListener,
+    wakeups: broadcast::Sender<Uuid>,
+) -> Result<()> {
+    loop {
+        let notification = match listener.recv().await {
+            Ok(notification) => notification,
+            Err(error) => {
+                eprintln!(
+                    "PostgreSQL work-ready listener disconnected; bounded claim fallbacks remain active: {error}"
+                );
+                loop {
+                    tokio::time::sleep(WORK_READY_RECONNECT_DELAY).await;
+                    match connect_work_ready_listener(&pool).await {
+                        Ok(reconnected) => {
+                            listener = reconnected;
+                            eprintln!("PostgreSQL work-ready listener reconnected");
+                            break;
+                        }
+                        Err(error) => eprintln!(
+                            "PostgreSQL work-ready listener reconnect failed; retrying: {error}"
+                        ),
+                    }
+                }
+                continue;
+            }
+        };
+        let Ok(organization_id) = notification.payload().parse::<Uuid>() else {
+            eprintln!(
+                "ignoring malformed {WORK_READY_CHANNEL} notification payload: {:?}",
+                notification.payload()
+            );
+            continue;
+        };
+        // No receivers is normal when no remote or embedded worker is waiting.
+        let _ = wakeups.send(organization_id);
+    }
+}
+
 async fn run_agent_control_server(
     store: Store,
     environment: Option<AgentControlEnvironment>,
+    work_wakeups: broadcast::Sender<Uuid>,
 ) -> Result<()> {
     let Some(environment) = environment else {
         std::future::pending::<()>().await;
@@ -1731,6 +1886,7 @@ async fn run_agent_control_server(
         store,
         identities: Arc::new(environment.identities),
         session_churn: Arc::new(SessionEpochChurn::default()),
+        work_wakeups,
         #[cfg(debug_assertions)]
         drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
         #[cfg(debug_assertions)]
@@ -1940,29 +2096,33 @@ impl EmbeddedWorker {
     }
 }
 
-async fn run_embedded_worker(store: Store, worker: EmbeddedWorker) -> Result<()> {
+async fn run_embedded_worker(
+    store: Store,
+    worker: EmbeddedWorker,
+    work_wakeups: broadcast::Sender<Uuid>,
+) -> Result<()> {
     loop {
-        if let Err(error) = store.requeue_one_expired(worker.organization_id).await {
-            eprintln!("expired-lease reconciliation failed: {error}");
-        }
         // A disabled embedded worker keeps the expired-lease reconciliation
         // duty above but must never claim work.
         if worker.disabled {
+            if let Err(error) = store.requeue_one_expired(worker.organization_id).await {
+                eprintln!("expired-lease reconciliation failed: {error}");
+            }
             tokio::time::sleep(worker.poll_interval).await;
             continue;
         }
-        match store
-            .claim_next(&ClaimRequest {
-                organization_id: worker.organization_id,
-                scheduler_id: worker.scheduler_id.clone(),
-                agent_id: worker.config.agent_id.clone(),
-                capabilities: worker.capabilities.clone(),
-                trust_pool: worker.trust_pool.clone(),
-                lease_seconds: worker.lease_seconds,
-                fairness_seed: 0,
-            })
-            .await
-        {
+        let mut wakeups = work_wakeups.subscribe();
+        let claim_request = ClaimRequest {
+            organization_id: worker.organization_id,
+            scheduler_id: worker.scheduler_id.clone(),
+            agent_id: worker.config.agent_id.clone(),
+            capabilities: worker.capabilities.clone(),
+            trust_pool: worker.trust_pool.clone(),
+            lease_seconds: worker.lease_seconds,
+            fairness_seed: 0,
+        };
+        let claim = store.reconcile_expired_and_claim_next(&claim_request).await;
+        match claim {
             Ok(Some(claim)) => {
                 if let Err(error) = run_claim(&store, &claim, &worker.config).await {
                     eprintln!(
@@ -1971,10 +2131,25 @@ async fn run_embedded_worker(store: Store, worker: EmbeddedWorker) -> Result<()>
                     );
                 }
             }
-            Ok(None) => tokio::time::sleep(worker.poll_interval).await,
+            Ok(None) => {
+                let maximum = worker.poll_interval.max(WORK_LONG_POLL_MAX);
+                match store
+                    .next_lease_expiry_delay(worker.organization_id, maximum)
+                    .await
+                {
+                    Ok(wait) => {
+                        let _ =
+                            wait_for_work_wakeup(&mut wakeups, worker.organization_id, wait).await;
+                    }
+                    Err(error) => {
+                        eprintln!("lease-deadline lookup failed: {error}");
+                        tokio::time::sleep(worker.poll_interval.max(Duration::from_secs(1))).await;
+                    }
+                }
+            }
             Err(error) => {
                 eprintln!("scheduler claim failed: {error}");
-                tokio::time::sleep(worker.poll_interval).await;
+                tokio::time::sleep(worker.poll_interval.max(Duration::from_secs(1))).await;
             }
         }
     }
@@ -2005,10 +2180,11 @@ const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
 const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
 
 /// Bounds outbox accumulation. No outbox consumer is currently shipped, so
-/// rows are delivery staging that would otherwise grow forever; the durable
-/// records are `build_events` and `audit_events`. Each pass deletes one
-/// bounded batch past the retention horizon and reports any remaining
-/// unpublished backlog.
+/// rows are retention-bounded delivery staging rather than a delivery queue;
+/// the durable records are `build_events` and `audit_events`. Each pass
+/// deletes one bounded batch past the retention horizon. The expected retained
+/// staging count is reported once at startup and after reclamation, rather
+/// than warning every interval about a consumer that does not exist.
 async fn run_outbox_reaper(
     store: Store,
     organization_id: Uuid,
@@ -2016,12 +2192,13 @@ async fn run_outbox_reaper(
 ) -> Result<()> {
     const REAP_BATCH_LIMIT: u32 = 512;
     const REAP_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+    let mut first_pass = true;
     loop {
-        match store
+        let reaped = match store
             .reap_outbox(organization_id, retention_hours, REAP_BATCH_LIMIT)
             .await
         {
-            Ok(0) => {}
+            Ok(0) => 0,
             Ok(reaped) => {
                 eprintln!(
                     "outbox reaper deleted {reaped} rows past the {retention_hours}h retention \
@@ -2030,24 +2207,28 @@ async fn run_outbox_reaper(
                 if reaped == u64::from(REAP_BATCH_LIMIT) {
                     continue;
                 }
+                reaped
             }
             Err(error) => {
                 eprintln!("outbox reap failed: {error}");
                 tokio::time::sleep(REAP_POLL_INTERVAL).await;
                 continue;
             }
-        }
-        match store.outbox_backlog(organization_id).await {
-            Ok(backlog) if backlog.unpublished_count > 0 => {
-                eprintln!(
-                    "outbox backlog: {} unpublished reapable rows of {} total ({} protected \
-                     proof rows are never reaped; no consumer is shipped; reapable rows \
-                     expire after {retention_hours}h)",
-                    backlog.unpublished_count, backlog.total_count, backlog.protected_count
-                );
+        };
+        if first_pass || reaped > 0 {
+            match store.outbox_backlog(organization_id).await {
+                Ok(backlog) if backlog.unpublished_count > 0 => {
+                    eprintln!(
+                        "outbox retention status: {} reapable staging rows of {} total are \
+                         retained for up to {retention_hours}h ({} protected proof rows are \
+                         never reaped; no downstream consumer is configured)",
+                        backlog.unpublished_count, backlog.total_count, backlog.protected_count
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("outbox retention scan failed: {error}"),
             }
-            Ok(_) => {}
-            Err(error) => eprintln!("outbox backlog scan failed: {error}"),
+            first_pass = false;
         }
         tokio::time::sleep(REAP_POLL_INTERVAL).await;
     }
@@ -2162,6 +2343,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_side_work_wait_requires_exact_session_negotiation() {
+        assert_eq!(work_wait_budget(false), None);
+        assert_eq!(work_wait_budget(true), Some(WORK_LONG_POLL_MAX));
+    }
 
     /// A complete, valid OIDC environment whose every URL is HTTPS.
     fn valid_oidc_environment() -> BTreeMap<&'static str, &'static str> {
@@ -2407,6 +2594,35 @@ mod tests {
                 .is_err()
         );
         assert!(validate_effect_mapping_configuration(None, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn work_wakeup_is_tenant_scoped_and_bounded() {
+        let organization_id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let (wakeups, _) = broadcast::channel(4);
+        let mut receiver = wakeups.subscribe();
+        wakeups.send(other).expect("queue unrelated wakeup");
+        wakeups
+            .send(organization_id)
+            .expect("queue matching wakeup");
+        assert!(wait_for_work_wakeup(&mut receiver, organization_id, Duration::from_secs(1)).await);
+
+        let mut receiver = wakeups.subscribe();
+        assert!(
+            !wait_for_work_wakeup(&mut receiver, organization_id, Duration::from_millis(1)).await
+        );
+
+        let (wakeups, _) = broadcast::channel(1);
+        let mut lagged = wakeups.subscribe();
+        wakeups.send(other).expect("queue first wakeup");
+        wakeups
+            .send(organization_id)
+            .expect("overflow receiver with matching wakeup");
+        assert!(
+            wait_for_work_wakeup(&mut lagged, organization_id, Duration::from_secs(1)).await,
+            "a lagged receiver must immediately re-run the authoritative claim query"
+        );
     }
 
     #[test]
