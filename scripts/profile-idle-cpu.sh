@@ -12,12 +12,43 @@ if [[ ! "${seconds}" =~ ^[1-9][0-9]*$ ]]; then
   echo "SECONDS must be a positive integer" >&2
   exit 2
 fi
+controller_pid="$1"
+agent_pid="$2"
+postgres_pid="$3"
+forwarder_pid="$4"
+declare -A seen_pids
 for pid in "$@"; do
   if [[ ! "${pid}" =~ ^[1-9][0-9]*$ || ! -r "/proc/${pid}/stat" ]]; then
     echo "PID is not a readable live process: ${pid}" >&2
     exit 2
   fi
+  if [[ -n "${seen_pids["${pid}"]:-}" ]]; then
+    echo "each profiled stack component must have a distinct PID: ${pid}" >&2
+    exit 2
+  fi
+  seen_pids["${pid}"]=1
 done
+
+process_identity() {
+  local pid="$1"
+  <"/proc/${pid}/comm" tr -d '\n'
+}
+
+require_component() {
+  local role="$1" pid="$2" expected="$3" actual
+  actual="$(process_identity "${pid}")"
+  if [[ ! "${actual}" =~ ${expected} ]]; then
+    echo "${role} PID ${pid} has unexpected process identity: ${actual}" >&2
+    exit 2
+  fi
+}
+
+require_component controller "${controller_pid}" '^mcloving-contro(ller)?$'
+require_component agent "${agent_pid}" '^mcloving-agent$'
+require_component postgres "${postgres_pid}" '^postgres$'
+# The supported deployment port-forwarders are SSH, kubectl, socat, and the
+# container-engine proxy processes used by the local proof topology.
+require_component port-forwarder "${forwarder_pid}" '^(ssh|kubectl|socat|docker-proxy|rootlessport)$'
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n "$(git -C "${repo_root}" status --porcelain)" ]]; then
@@ -57,8 +88,11 @@ echo -e "source_head\t$(git -C "${repo_root}" rev-parse HEAD)"
 echo -e "source_tree\t$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
 echo -e "host\t$(hostname -s)"
 echo -e "sample_seconds\t${seconds}"
-echo -e "pid\tcomm\tcpu_percent"
+echo -e "target_percent\t5"
+echo -e "role\tpid\tcomm\tcpu_percent"
 total_ticks=0
+role_index=0
+roles=(controller agent postgres port-forwarder)
 for pid in "$@"; do
   if [[ "$(read_start_time "${pid}")" != "${start_times["${pid}"]}" ]]; then
     echo "PID identity changed during sample: ${pid}" >&2
@@ -68,14 +102,15 @@ for pid in "$@"; do
   delta=$(( end - starts["${pid}"] ))
   total_ticks=$(( total_ticks + delta ))
   comm="$(<"/proc/${pid}/comm")"
-  awk -v pid="${pid}" -v comm="${comm}" -v ticks="${delta}" \
+  role="${roles[${role_index}]:-extra}"
+  role_index=$(( role_index + 1 ))
+  awk -v role="${role}" -v pid="${pid}" -v comm="${comm}" -v ticks="${delta}" \
     -v hz="${ticks_per_second}" -v elapsed_ns="$(( ended_ns - started_ns ))" \
-    'BEGIN { printf "%s\t%s\t%.3f\n", pid, comm, ticks / hz / (elapsed_ns / 1e9) * 100 }'
+    'BEGIN { printf "%s\t%s\t%s\t%.3f\n", role, pid, comm, ticks / hz / (elapsed_ns / 1e9) * 100 }'
 done
 total_percent="$(awk -v ticks="${total_ticks}" -v hz="${ticks_per_second}" \
   -v elapsed_ns="$(( ended_ns - started_ns ))" \
   'BEGIN { printf "%.3f", ticks / hz / (elapsed_ns / 1e9) * 100 }')"
-echo -e "total\t-\t${total_percent}"
-target="${MCLOVING_IDLE_CPU_TARGET_PERCENT:-5}"
-awk -v total="${total_percent}" -v target="${target}" \
-  'BEGIN { if (total >= target) { printf "idle CPU %.3f%% is not below %.3f%%\n", total, target > "/dev/stderr"; exit 1 } }'
+echo -e "total\t-\t-\t${total_percent}"
+awk -v total="${total_percent}" \
+  'BEGIN { if (total >= 5) { printf "idle CPU %.3f%% is not below 5.000%%\n", total > "/dev/stderr"; exit 1 } }'

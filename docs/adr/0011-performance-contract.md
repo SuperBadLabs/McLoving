@@ -29,8 +29,10 @@ more than 15%. The sample sizes can be overridden with
 
 For an already-running split controller/agent deployment, complete-stack idle
 CPU is measured without process-name ambiguity by passing the exact controller,
-agent, PostgreSQL, and rootless port-forwarder PIDs. Omitting the database or
-forwarder is not a whole-stack receipt:
+agent, PostgreSQL, and rootless port-forwarder PIDs. The profiler rejects
+duplicate PIDs, validates each positional role from its Linux process identity,
+and applies the non-overridable contract threshold of 5%. Omitting the database
+or forwarder is not a whole-stack receipt:
 
 ```bash
 ./scripts/profile-idle-cpu.sh 10 CONTROLLER_PID AGENT_PID POSTGRES_PID PORT_FORWARDER_PID
