@@ -1021,16 +1021,10 @@ fn openapi_document() -> Value {
         "security": [{"bearer": []}],
         "paths": {
             "/health": {
-                "get": unauthenticated_api_operation(
-                    "health", "health", "Report controller and database readiness", "200",
-                    Vec::new(), None
-                )
+                "get": readiness_api_operation("health")
             },
             "/readyz": {
-                "get": unauthenticated_api_operation(
-                    "readiness", "health", "Report controller and database readiness", "200",
-                    Vec::new(), None
-                )
+                "get": readiness_api_operation("readiness")
             },
             "/livez": {
                 "get": unauthenticated_api_operation(
@@ -2035,6 +2029,31 @@ fn unauthenticated_api_operation(
         request_schema,
     );
     operation["security"] = json!([]);
+    operation
+}
+
+fn readiness_api_operation(operation_id: &str) -> Value {
+    let mut operation = unauthenticated_api_operation(
+        operation_id,
+        "health",
+        "Report controller and database readiness",
+        "200",
+        Vec::new(),
+        None,
+    );
+    operation["responses"]["503"] = json!({
+        "description": "PostgreSQL is unavailable and the controller is not ready",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["status"],
+                    "properties": {"status": {"const": "not_ready"}}
+                }
+            }
+        }
+    });
     operation
 }
 
@@ -7219,6 +7238,16 @@ mod tests {
             })
             .sum::<usize>();
         assert_eq!(documented_methods, expected.len());
+
+        for path in ["/health", "/readyz"] {
+            let unavailable = &paths[path]["get"]["responses"]["503"];
+            assert_eq!(
+                unavailable["content"]["application/json"]["schema"]["properties"]["status"]["const"],
+                "not_ready",
+                "{path} must document its database-unavailable response"
+            );
+        }
+        assert!(paths["/livez"]["get"]["responses"]["503"].is_null());
 
         let component_parameters = paths
             ["/api/v1/organizations/{organization_id}/projects/{project_id}/components"]["get"]

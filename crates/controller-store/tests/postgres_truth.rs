@@ -175,6 +175,25 @@ async fn queued_work_emits_a_transactional_tenant_wakeup() {
     })
     .await
     .expect("tenant work-ready notification is bounded");
+
+    sqlx::query("UPDATE nodes SET status = status WHERE organization_id = $1")
+        .bind(organization_id)
+        .execute(store.pool())
+        .await
+        .expect("issue a queued-status no-op update");
+    let duplicate = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            let notification = listener.recv().await.expect("receive work-ready hint");
+            if notification.payload() == organization_id.to_string() {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "a no-op queued-status update must not emit another work-ready hint"
+    );
 }
 
 #[tokio::test]

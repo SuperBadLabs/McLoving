@@ -14,6 +14,11 @@ Status: implemented through Wave 2-C
 - Production work polling requires the negotiated `work-delivery-v1` feature;
   an older peer fails compatibility negotiation before either side relies on
   the work-delivery RPC set.
+- Server-side event waiting requires the independently negotiated
+  `work-delivery-long-poll-v1` feature. An upgraded agent retains its configured
+  client-side poll pacing when an older controller omits that feature, avoiding
+  an idle RPC/transaction loop during rolling upgrades. A negotiated peer may
+  re-enter immediately because `PollWork` itself is a bounded wait.
 - Session and certificate epochs increase monotonically. Only the exact current
   session may act; reconnecting with a newer epoch fences the previous session.
 

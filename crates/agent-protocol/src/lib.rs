@@ -24,6 +24,13 @@ pub mod wire {
 pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 pub const WORK_DELIVERY_FEATURE: &str = "work-delivery-v1";
+/// `PollWork` waits server-side for a work hint or authoritative deadline.
+///
+/// An agent must retain its configured client-side pacing when this feature
+/// is absent: a controller from the previous release returns an empty offer
+/// immediately, so unconditional re-entry would create an idle RPC loop
+/// during rolling upgrades.
+pub const LONG_POLL_WORK_DELIVERY_FEATURE: &str = "work-delivery-long-poll-v1";
 pub const ATTEMPT_CREDENTIALS_FEATURE: &str = "attempt-credentials-v1";
 /// gRPC metadata key on a stale-epoch open-session rejection carrying the
 /// controller's currently stored session epoch. A lagging journal (for

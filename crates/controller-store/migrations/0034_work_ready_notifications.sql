@@ -15,10 +15,19 @@ $$;
 -- keep the existing closed function boundary intact.
 REVOKE ALL ON FUNCTION mcloving_notify_work_ready() FROM PUBLIC;
 
-CREATE TRIGGER nodes_notify_work_ready
-AFTER INSERT OR UPDATE OF status ON nodes
+CREATE TRIGGER nodes_notify_work_ready_after_insert
+AFTER INSERT ON nodes
 FOR EACH ROW
 WHEN (NEW.status = 'queued')
+EXECUTE FUNCTION mcloving_notify_work_ready();
+
+CREATE TRIGGER nodes_notify_work_ready_after_transition
+AFTER UPDATE OF status ON nodes
+FOR EACH ROW
+WHEN (
+    NEW.status = 'queued'
+    AND OLD.status IS DISTINCT FROM NEW.status
+)
 EXECUTE FUNCTION mcloving_notify_work_ready();
 
 -- DAG successors are already stored as queued while their dependencies are

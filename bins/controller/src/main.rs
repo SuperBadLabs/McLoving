@@ -18,9 +18,9 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
-    INLINE_TERMINAL_LOGS_FEATURE, ProtocolRange, RECOVERED_DISCHARGE_FEATURE,
-    RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_COMPLETION_SUBSTITUTION_FEATURE,
-    WORK_DELIVERY_FEATURE, negotiate,
+    INLINE_TERMINAL_LOGS_FEATURE, LONG_POLL_WORK_DELIVERY_FEATURE, ProtocolRange,
+    RECOVERED_DISCHARGE_FEATURE, RECOVERED_FINALIZATION_LEASE_SECONDS,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
     ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
@@ -85,6 +85,7 @@ fn validate_effect_mapping_configuration(
 
 const WORK_READY_CHANNEL: &str = "mcloving_work_ready_v1";
 const WORK_LONG_POLL_MAX: Duration = Duration::from_secs(20);
+const WORK_READY_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -186,6 +187,13 @@ async fn main() -> Result<()> {
         .preflight_tenant_runtime(&migration_store, worker.organization_id)
         .await
         .context("preflight PostgreSQL runtime tenant access")?;
+    // PostgreSQL discards notifications when nobody is listening. Arm this
+    // connection before the HTTP readiness surface or either worker can run,
+    // closing the startup window that would otherwise defer work until the
+    // bounded fallback deadline.
+    let work_ready_listener = connect_work_ready_listener(store.pool())
+        .await
+        .context("arm PostgreSQL work-ready listener")?;
     let mut state = ApiState::new_durable(store.clone());
     if let Some(catalog) = connector_mapping_catalog {
         state = state
@@ -278,8 +286,11 @@ async fn main() -> Result<()> {
         .context("serve public API")
     };
     let agent_server = run_agent_control_server(store.clone(), agent_control, work_wakeups.clone());
-    let notification_loop =
-        forward_work_ready_notifications(store.pool().clone(), work_wakeups.clone());
+    let notification_loop = forward_work_ready_notifications(
+        store.pool().clone(),
+        work_ready_listener,
+        work_wakeups.clone(),
+    );
     tokio::pin!(server);
     tokio::pin!(agent_server);
     tokio::pin!(notification_loop);
@@ -750,6 +761,7 @@ impl AgentControl for ControllerAgentService {
             "unix-process-group-v1".to_owned(),
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
+            LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
             ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
             WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
             RECOVERED_DISCHARGE_FEATURE.to_owned(),
@@ -1577,7 +1589,11 @@ async fn wait_for_work_wakeup(
         loop {
             match wakeups.recv().await {
                 Ok(notified) if notified == organization_id => return true,
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                // Lag means the discarded range may contain this tenant's
+                // only hint. Re-run the authoritative claim query now rather
+                // than sleeping until the fallback deadline.
+                Err(broadcast::error::RecvError::Lagged(_)) => return true,
                 Err(broadcast::error::RecvError::Closed) => return false,
             }
         }
@@ -1795,22 +1811,45 @@ async fn agent_control_environment() -> Result<Option<AgentControlEnvironment>> 
     Ok(Some(environment))
 }
 
-async fn forward_work_ready_notifications(
-    pool: PgPool,
-    wakeups: broadcast::Sender<Uuid>,
-) -> Result<()> {
-    let mut listener = PgListener::connect_with(&pool)
+async fn connect_work_ready_listener(pool: &PgPool) -> Result<PgListener> {
+    let mut listener = PgListener::connect_with(pool)
         .await
         .context("connect PostgreSQL work-ready listener")?;
     listener
         .listen(WORK_READY_CHANNEL)
         .await
         .context("listen for PostgreSQL work-ready notifications")?;
+    Ok(listener)
+}
+
+async fn forward_work_ready_notifications(
+    pool: PgPool,
+    mut listener: PgListener,
+    wakeups: broadcast::Sender<Uuid>,
+) -> Result<()> {
     loop {
-        let notification = listener
-            .recv()
-            .await
-            .context("receive PostgreSQL work-ready notification")?;
+        let notification = match listener.recv().await {
+            Ok(notification) => notification,
+            Err(error) => {
+                eprintln!(
+                    "PostgreSQL work-ready listener disconnected; bounded claim fallbacks remain active: {error}"
+                );
+                loop {
+                    tokio::time::sleep(WORK_READY_RECONNECT_DELAY).await;
+                    match connect_work_ready_listener(&pool).await {
+                        Ok(reconnected) => {
+                            listener = reconnected;
+                            eprintln!("PostgreSQL work-ready listener reconnected");
+                            break;
+                        }
+                        Err(error) => eprintln!(
+                            "PostgreSQL work-ready listener reconnect failed; retrying: {error}"
+                        ),
+                    }
+                }
+                continue;
+            }
+        };
         let Ok(organization_id) = notification.payload().parse::<Uuid>() else {
             eprintln!(
                 "ignoring malformed {WORK_READY_CHANNEL} notification payload: {:?}",
@@ -2567,6 +2606,17 @@ mod tests {
         let mut receiver = wakeups.subscribe();
         assert!(
             !wait_for_work_wakeup(&mut receiver, organization_id, Duration::from_millis(1)).await
+        );
+
+        let (wakeups, _) = broadcast::channel(1);
+        let mut lagged = wakeups.subscribe();
+        wakeups.send(other).expect("queue first wakeup");
+        wakeups
+            .send(organization_id)
+            .expect("overflow receiver with matching wakeup");
+        assert!(
+            wait_for_work_wakeup(&mut lagged, organization_id, Duration::from_secs(1)).await,
+            "a lagged receiver must immediately re-run the authoritative claim query"
         );
     }
 

@@ -18,9 +18,9 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_protocol::{
     ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
-    INLINE_TERMINAL_LOGS_FEATURE, OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    RECOVERED_DISCHARGE_FEATURE, TransportError, WORK_COMPLETION_SUBSTITUTION_FEATURE,
-    WORK_DELIVERY_FEATURE,
+    INLINE_TERMINAL_LOGS_FEATURE, LONG_POLL_WORK_DELIVERY_FEATURE, OutboundMtlsConfig,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, RECOVERED_DISCHARGE_FEATURE, TransportError,
+    WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -143,6 +143,9 @@ pub struct SessionReceipt {
 /// confirmed feature set — never assumed from the agent's own offer.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SessionFeatures {
+    /// `PollWork` waits server-side, so an empty offer can be re-entered
+    /// without a client-side fixed-interval delay.
+    pub long_poll_work_delivery: bool,
     /// `AcceptWork` receipts carry `cancellation_requested`, so the
     /// serialized post-accept `RenewWorkLease` round trip can be skipped.
     pub accept_lease_state: bool,
@@ -154,6 +157,9 @@ pub struct SessionFeatures {
 impl SessionFeatures {
     fn from_negotiated(features: &[String]) -> Self {
         Self {
+            long_poll_work_delivery: features
+                .iter()
+                .any(|feature| feature == LONG_POLL_WORK_DELIVERY_FEATURE),
             accept_lease_state: features
                 .iter()
                 .any(|feature| feature == ACCEPT_LEASE_STATE_FEATURE),
@@ -390,9 +396,7 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
             worker::reclaim_terminal_spools(config).await?;
             next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
         }
-        // PollWork is a bounded server-side event wait. Re-enter it
-        // immediately instead of adding a client-side fixed-interval gap.
-        worker::poll_and_run_one(
+        let _outcome = worker::poll_and_run_one(
             config,
             &mut client,
             receipt.session_epoch,
@@ -400,7 +404,21 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
             stop.clone(),
         )
         .await?;
+        // Only a peer that explicitly negotiated server-side long polling is
+        // safe to re-enter immediately. Previous-release controllers return
+        // empty offers synchronously; retain the configured pacing against
+        // those peers so a rolling upgrade cannot create an idle RPC loop.
+        if let Some(delay) = legacy_poll_delay(receipt.features, config.poll_interval) {
+            tokio::select! {
+                () = stop.cancelled() => return Err(AgentError::Stopped),
+                () = sleep(delay) => {}
+            }
+        }
     }
+}
+
+fn legacy_poll_delay(features: SessionFeatures, configured: Duration) -> Option<Duration> {
+    (!features.long_poll_work_delivery).then_some(configured)
 }
 
 async fn publish_recovery_ready_session_receipt<F>(
@@ -447,6 +465,7 @@ async fn open_session(
                     "journal-v1".to_owned(),
                     platform_feature().to_owned(),
                     WORK_DELIVERY_FEATURE.to_owned(),
+                    LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
                     ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
                     WORK_COMPLETION_SUBSTITUTION_FEATURE.to_owned(),
                     RECOVERED_DISCHARGE_FEATURE.to_owned(),
@@ -1440,6 +1459,21 @@ mod tests {
             Err(AgentError::UnsupportedProtocol)
         ));
         require_work_delivery_feature(&[WORK_DELIVERY_FEATURE.to_owned()]).unwrap();
+    }
+
+    #[test]
+    fn client_pacing_is_removed_only_after_long_poll_negotiation() {
+        let configured = Duration::from_millis(17);
+        assert_eq!(
+            legacy_poll_delay(SessionFeatures::default(), configured),
+            Some(configured)
+        );
+
+        let negotiated = SessionFeatures::from_negotiated(&[
+            WORK_DELIVERY_FEATURE.to_owned(),
+            LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
+        ]);
+        assert_eq!(legacy_poll_delay(negotiated, configured), None);
     }
 
     #[test]
