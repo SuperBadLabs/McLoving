@@ -396,7 +396,7 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
             worker::reclaim_terminal_spools(config).await?;
             next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
         }
-        let _outcome = worker::poll_and_run_one(
+        let outcome = worker::poll_and_run_one(
             config,
             &mut client,
             receipt.session_epoch,
@@ -404,21 +404,27 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
             stop.clone(),
         )
         .await?;
-        // Only a peer that explicitly negotiated server-side long polling is
-        // safe to re-enter immediately. Previous-release controllers return
-        // empty offers synchronously; retain the configured pacing against
-        // those peers so a rolling upgrade cannot create an idle RPC loop.
-        pace_next_poll_or_stop(receipt.features, config.poll_interval, &stop).await?;
+        // A peer that explicitly negotiated server-side long polling is safe
+        // to re-enter immediately. Previous-release controllers return empty
+        // offers synchronously, so retain configured pacing for idle and
+        // declined passes. Progressed work always drains immediately.
+        pace_next_poll_or_stop(receipt.features, config.poll_interval, outcome, &stop).await?;
     }
 }
 
-fn legacy_poll_delay(features: SessionFeatures, configured: Duration) -> Option<Duration> {
-    (!features.long_poll_work_delivery).then_some(configured)
+fn legacy_poll_delay(
+    features: SessionFeatures,
+    configured: Duration,
+    outcome: worker::PollOutcome,
+) -> Option<Duration> {
+    (!features.long_poll_work_delivery && outcome != worker::PollOutcome::Progressed)
+        .then_some(configured)
 }
 
 async fn pace_next_poll_or_stop(
     features: SessionFeatures,
     configured: Duration,
+    outcome: worker::PollOutcome,
     stop: &CancellationToken,
 ) -> Result<(), AgentError> {
     // A negotiated long poll needs no client delay, but cancellation can be
@@ -428,7 +434,7 @@ async fn pace_next_poll_or_stop(
     if stop.is_cancelled() {
         return Err(AgentError::Stopped);
     }
-    if let Some(delay) = legacy_poll_delay(features, configured) {
+    if let Some(delay) = legacy_poll_delay(features, configured, outcome) {
         tokio::select! {
             () = stop.cancelled() => return Err(AgentError::Stopped),
             () = sleep(delay) => {}
@@ -1478,18 +1484,41 @@ mod tests {
     }
 
     #[test]
-    fn client_pacing_is_removed_only_after_long_poll_negotiation() {
+    fn client_pacing_preserves_legacy_idle_without_delaying_progress() {
         let configured = Duration::from_millis(17);
         assert_eq!(
-            legacy_poll_delay(SessionFeatures::default(), configured),
+            legacy_poll_delay(
+                SessionFeatures::default(),
+                configured,
+                worker::PollOutcome::Idle,
+            ),
             Some(configured)
+        );
+        assert_eq!(
+            legacy_poll_delay(
+                SessionFeatures::default(),
+                configured,
+                worker::PollOutcome::Declined,
+            ),
+            Some(configured)
+        );
+        assert_eq!(
+            legacy_poll_delay(
+                SessionFeatures::default(),
+                configured,
+                worker::PollOutcome::Progressed,
+            ),
+            None
         );
 
         let negotiated = SessionFeatures::from_negotiated(&[
             WORK_DELIVERY_FEATURE.to_owned(),
             LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
         ]);
-        assert_eq!(legacy_poll_delay(negotiated, configured), None);
+        assert_eq!(
+            legacy_poll_delay(negotiated, configured, worker::PollOutcome::Idle),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1502,7 +1531,13 @@ mod tests {
         stop.cancel();
 
         assert!(matches!(
-            pace_next_poll_or_stop(negotiated, Duration::from_secs(30), &stop).await,
+            pace_next_poll_or_stop(
+                negotiated,
+                Duration::from_secs(30),
+                worker::PollOutcome::Idle,
+                &stop,
+            )
+            .await,
             Err(AgentError::Stopped)
         ));
     }
