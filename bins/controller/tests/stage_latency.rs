@@ -379,29 +379,35 @@ async fn run_sample(
         )
         .await
         .expect("submit benchmark pipeline");
-    // PostgreSQL coalesces the identical admission notifications into one;
-    // every stage then commits one terminal notification in a separate
-    // transaction. Waiting on notifications avoids measurement-side polling.
-    tokio::time::timeout(Duration::from_secs(120), async {
-        for _ in 0..=stages {
-            loop {
-                let notification = notifications.recv().await.expect("receive progress");
-                if notification.payload() == organization_id.to_string() {
-                    break;
-                }
+    // Notifications are hints, not a progress counter: PostgreSQL may
+    // coalesce them and new scheduler transitions may legitimately add more.
+    // Re-read authoritative status after each tenant hint until this exact
+    // build is terminal, avoiding both a fixed-count assumption and
+    // measurement-side polling.
+    let status = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let notification = notifications.recv().await.expect("receive progress");
+            if notification.payload() != organization_id.to_string() {
+                continue;
+            }
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM builds WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(admission.build_id)
+            .fetch_one(pool)
+            .await
+            .expect("read benchmark status");
+            if matches!(
+                status.as_str(),
+                "succeeded" | "failed" | "aborted" | "cancelled" | "canceled"
+            ) {
+                break status;
             }
         }
     })
     .await
     .expect("benchmark build completes within bound");
-    let status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM builds WHERE organization_id = $1 AND id = $2",
-    )
-    .bind(organization_id)
-    .bind(admission.build_id)
-    .fetch_one(pool)
-    .await
-    .expect("read benchmark terminal status");
     assert_eq!(status, "succeeded");
     let milliseconds = started.elapsed().as_secs_f64() * 1_000.0;
     let after = client
