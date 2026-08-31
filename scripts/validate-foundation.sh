@@ -95,6 +95,8 @@ python3 "${repo_root}/scripts/test-execution-board.py"
 python3 "${repo_root}/scripts/verify-execution-board.py"
 python3 "${repo_root}/scripts/test-ticket-closure-receipts.py"
 python3 "${repo_root}/scripts/verify-ticket-closure-receipts.py"
+python3 "${repo_root}/scripts/test-verify-rust-test-execution.py"
+bash -n "${repo_root}/scripts/run-verified-rust-test.sh"
 bash -n "${repo_root}/scripts/validate-external-shadow-apparmor.sh"
 "${actionlint_dir}/actionlint" "${repo_root}/.github/workflows/"*.yml
 

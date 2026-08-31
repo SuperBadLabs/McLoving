@@ -588,26 +588,33 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         )
         .await
         .expect("submit trivial remote work");
-    tokio::time::timeout(Duration::from_secs(15), async {
-        for _ in 0..2 {
-            loop {
-                let notification = progress.recv().await.expect("receive remote progress");
-                if notification.payload() == organization_id.to_string() {
-                    break;
-                }
+    // A work-ready notification is a wakeup, not a lifecycle event. Admission,
+    // claim, lease release, and terminal publication can all wake this tenant,
+    // and concurrent work may add more. Counting two notifications mistook a
+    // delivery detail for terminal truth and raced with the terminal commit.
+    // Re-read PostgreSQL after every matching wakeup and stop only on durable
+    // terminal truth; this remains event-driven and adds no status polling.
+    let trivial_status = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let notification = progress.recv().await.expect("receive remote progress");
+            if notification.payload() != organization_id.to_string() {
+                continue;
+            }
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM builds WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(trivial.build_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read trivial remote progress status");
+            if matches!(status.as_str(), "succeeded" | "failed" | "aborted") {
+                break status;
             }
         }
     })
     .await
-    .expect("trivial remote work completes without status polling");
-    let trivial_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM builds WHERE organization_id = $1 AND id = $2",
-    )
-    .bind(organization_id)
-    .bind(trivial.build_id)
-    .fetch_one(&pool)
-    .await
-    .expect("read trivial remote terminal status");
+    .expect("trivial remote work reaches durable terminal truth without status polling");
     assert_eq!(trivial_status, "succeeded");
     assert!(
         store
@@ -1071,6 +1078,9 @@ fn agent_command(
 ) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mcloving-agent"));
     command
+        // The harness needs migration authority; the shipped agent must not
+        // inherit direct database authority that it never has in production.
+        .env_remove("MCLOVING_TEST_DATABASE_URL")
         .env("MCLOVING_AGENT_ID", agent_id)
         .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
         .env(

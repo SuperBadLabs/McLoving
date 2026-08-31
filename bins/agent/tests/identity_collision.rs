@@ -477,6 +477,7 @@ fn agent_command(
         .expect("agent identity was generated");
     let mut command = Command::new(env!("CARGO_BIN_EXE_mcloving-agent"));
     command
+        .env_remove("MCLOVING_TEST_DATABASE_URL")
         .env("MCLOVING_AGENT_ID", agent_id)
         .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
         .env(

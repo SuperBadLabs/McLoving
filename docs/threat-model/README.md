@@ -366,6 +366,7 @@ had never claimed one.
 | ADMIN-001 | `docs/evidence/ADMIN-001_SECURITY_REVIEW.md` |
 | AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
 | CANARY-000 | `docs/evidence/CANARY-000_SECURITY_REVIEW.md` |
+| CI-002 | `docs/evidence/CI-002_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
 | DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
