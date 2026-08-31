@@ -194,6 +194,30 @@ async fn queued_work_emits_a_transactional_tenant_wakeup() {
         duplicate.is_err(),
         "a no-op queued-status update must not emit another work-ready hint"
     );
+
+    store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "notification-scheduler".to_owned(),
+            agent_id: "notification-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".to_owned(),
+            lease_seconds: 30,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim notification work")
+        .expect("notification work is claimable");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let notification = listener.recv().await.expect("receive active-lease hint");
+            if notification.payload() == organization_id.to_string() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("a newly active lease wakes reconciliation-only controllers");
 }
 
 #[tokio::test]

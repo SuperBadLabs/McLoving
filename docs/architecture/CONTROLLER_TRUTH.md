@@ -116,11 +116,15 @@ accepted. Offer acceptance itself checks owner, fence, state, and expiry. Wait
 diagnostics run inside tenant context, distinguish an empty queue from a
 concrete capability mismatch, and report the missing capability set.
 
-Queued admission and terminal DAG progress emit transactionally committed,
-tenant-keyed PostgreSQL notifications. Remote polls and the embedded worker
-subscribe before claiming, then wait on those hints or the authoritative next
-lease-expiry deadline. Lost/coalesced notifications therefore cannot grant or
-strand authority, while idle operation no longer repeatedly probes the queue.
+Queued admission, the first transition into an active lease, and terminal DAG
+progress emit transactionally committed, tenant-keyed PostgreSQL notifications.
+Remote polls and both schedulable and disabled embedded-worker profiles
+subscribe before inspecting durable state, then wait on those hints or the
+authoritative next lease-expiry deadline with a 20-second lost-hint ceiling.
+The disabled deployment profile reconciles expired leases without claiming
+work and without retaining a fixed database loop. Lost/coalesced notifications
+therefore cannot grant or strand authority, while idle operation no longer
+repeatedly probes the queue.
 
 ## Identity and tenant boundary
 

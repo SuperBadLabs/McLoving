@@ -2044,7 +2044,6 @@ struct EmbeddedWorker {
     disabled: bool,
     trust_pool: String,
     lease_seconds: i32,
-    poll_interval: Duration,
     config: WorkerConfig,
 }
 
@@ -2069,7 +2068,9 @@ impl EmbeddedWorker {
         };
         let trust_pool = required("MCLOVING_AGENT_TRUST_POOL")?;
         let lease_seconds = parse_positive::<i32>("MCLOVING_LEASE_SECONDS")?;
-        let poll_milliseconds = parse_positive::<u64>("MCLOVING_POLL_MILLISECONDS")?;
+        // Retained as a validated compatibility input. Work acquisition and
+        // reconciliation no longer use it as a fixed wake cadence.
+        let _legacy_poll_milliseconds = parse_positive::<u64>("MCLOVING_POLL_MILLISECONDS")?;
         let cancellation_milliseconds =
             parse_positive::<u64>("MCLOVING_CANCELLATION_POLL_MILLISECONDS")?;
         let termination_grace_milliseconds =
@@ -2081,7 +2082,6 @@ impl EmbeddedWorker {
             disabled,
             trust_pool,
             lease_seconds,
-            poll_interval: Duration::from_millis(poll_milliseconds),
             config: WorkerConfig {
                 agent_id,
                 session_epoch: parse_positive("MCLOVING_SESSION_EPOCH")?,
@@ -2102,16 +2102,34 @@ async fn run_embedded_worker(
     work_wakeups: broadcast::Sender<Uuid>,
 ) -> Result<()> {
     loop {
-        // A disabled embedded worker keeps the expired-lease reconciliation
-        // duty above but must never claim work.
+        // Subscribe before touching durable state. An active lease can be
+        // established by a remote worker while this controller is between
+        // reconciliation and its deadline query; migration 0035 emits a hint
+        // for that transition so the nearest-expiry timer is recomputed.
+        let mut wakeups = work_wakeups.subscribe();
+
+        // A disabled embedded worker keeps the controller-owned expired-lease
+        // reconciliation duty but must never claim work. It follows the same
+        // event/deadline regime as a schedulable worker instead of retaining
+        // the historical fixed-interval database loop.
         if worker.disabled {
             if let Err(error) = store.requeue_one_expired(worker.organization_id).await {
                 eprintln!("expired-lease reconciliation failed: {error}");
             }
-            tokio::time::sleep(worker.poll_interval).await;
+            match store
+                .next_lease_expiry_delay(worker.organization_id, WORK_LONG_POLL_MAX)
+                .await
+            {
+                Ok(wait) => {
+                    let _ = wait_for_work_wakeup(&mut wakeups, worker.organization_id, wait).await;
+                }
+                Err(error) => {
+                    eprintln!("lease-deadline lookup failed: {error}");
+                    tokio::time::sleep(WORK_READY_RECONNECT_DELAY).await;
+                }
+            }
             continue;
         }
-        let mut wakeups = work_wakeups.subscribe();
         let claim_request = ClaimRequest {
             organization_id: worker.organization_id,
             scheduler_id: worker.scheduler_id.clone(),
@@ -2132,9 +2150,8 @@ async fn run_embedded_worker(
                 }
             }
             Ok(None) => {
-                let maximum = worker.poll_interval.max(WORK_LONG_POLL_MAX);
                 match store
-                    .next_lease_expiry_delay(worker.organization_id, maximum)
+                    .next_lease_expiry_delay(worker.organization_id, WORK_LONG_POLL_MAX)
                     .await
                 {
                     Ok(wait) => {
@@ -2143,13 +2160,13 @@ async fn run_embedded_worker(
                     }
                     Err(error) => {
                         eprintln!("lease-deadline lookup failed: {error}");
-                        tokio::time::sleep(worker.poll_interval.max(Duration::from_secs(1))).await;
+                        tokio::time::sleep(WORK_READY_RECONNECT_DELAY).await;
                     }
                 }
             }
             Err(error) => {
                 eprintln!("scheduler claim failed: {error}");
-                tokio::time::sleep(worker.poll_interval.max(Duration::from_secs(1))).await;
+                tokio::time::sleep(WORK_READY_RECONNECT_DELAY).await;
             }
         }
     }

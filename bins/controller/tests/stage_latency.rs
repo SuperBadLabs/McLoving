@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use mcloving_controller_api::{Client, PipelineBuildRequest, PipelineUpsertRequest};
 use mcloving_controller_store::Store;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgListener, PgPoolOptions};
 use tokio::process::{Child, Command};
 use uuid::Uuid;
@@ -70,6 +71,7 @@ async fn stage_delta_latency_and_transaction_receipt() {
         organization_id,
         port,
         root.path(),
+        "platform:linux",
     )
     .await;
     let client = Client::new(&format!("http://127.0.0.1:{port}"), TOKEN)
@@ -124,30 +126,59 @@ async fn stage_delta_latency_and_transaction_receipt() {
     let mut small_samples = Vec::with_capacity(heats);
     let mut large_samples = Vec::with_capacity(heats);
     for heat in 0..heats {
-        small_samples.push(
-            run_sample(
-                &client,
-                &pool,
-                &mut notifications,
-                organization_id,
-                project_id,
-                small,
-                &format!("small-{heat}"),
-            )
-            .await,
-        );
-        large_samples.push(
-            run_sample(
-                &client,
-                &pool,
-                &mut notifications,
-                organization_id,
-                project_id,
-                large,
-                &format!("large-{heat}"),
-            )
-            .await,
-        );
+        // Alternate cell order so a monotonic host drift cannot always favor
+        // the same workload shape in the delta estimator.
+        if heat % 2 == 0 {
+            small_samples.push(
+                run_sample(
+                    &client,
+                    &pool,
+                    &mut notifications,
+                    organization_id,
+                    project_id,
+                    small,
+                    &format!("small-{heat}"),
+                )
+                .await,
+            );
+            large_samples.push(
+                run_sample(
+                    &client,
+                    &pool,
+                    &mut notifications,
+                    organization_id,
+                    project_id,
+                    large,
+                    &format!("large-{heat}"),
+                )
+                .await,
+            );
+        } else {
+            large_samples.push(
+                run_sample(
+                    &client,
+                    &pool,
+                    &mut notifications,
+                    organization_id,
+                    project_id,
+                    large,
+                    &format!("large-{heat}"),
+                )
+                .await,
+            );
+            small_samples.push(
+                run_sample(
+                    &client,
+                    &pool,
+                    &mut notifications,
+                    organization_id,
+                    project_id,
+                    small,
+                    &format!("small-{heat}"),
+                )
+                .await,
+            );
+        }
     }
 
     let small_ms: Vec<f64> = small_samples
@@ -174,44 +205,100 @@ async fn stage_delta_latency_and_transaction_receipt() {
     let estimators_within_15_percent =
         relative_difference(median_ms_per_stage, minimum_ms_per_stage) <= 0.15;
     let latency_target_met = median_ms_per_stage <= LATENCY_TARGET_MS_PER_STAGE;
-    // The shipped embedded profile runs the scheduler and agent worker in
-    // this one process, so its PID sample is their combined idle cost.
-    let idle_cpu_target_met = idle_cpu_percent < IDLE_CPU_TARGET_PERCENT;
+    controller.kill().await.expect("stop benchmark controller");
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "schema": "mcloving.stage-latency.v1",
-            "profile": "release-embedded",
-            "small_stages": small,
-            "large_stages": large,
-            "heats": heats,
-            "idle_sample_seconds": idle_seconds,
-            "controller_idle_cpu_percent": idle_cpu_percent,
-            "combined_idle_cpu_percent": idle_cpu_percent,
-            "idle_cpu_target_percent": IDLE_CPU_TARGET_PERCENT,
-            "idle_cpu_target_met": idle_cpu_target_met,
-            "small_milliseconds": small_ms,
-            "large_milliseconds": large_ms,
-            "small_transactions": small_tx,
-            "large_transactions": large_tx,
-            "median_ms_per_stage": median_ms_per_stage,
-            "minimum_ms_per_stage": minimum_ms_per_stage,
-            "latency_target_ms_per_stage": LATENCY_TARGET_MS_PER_STAGE,
-            "latency_target_met": latency_target_met,
-            "estimators_within_15_percent": estimators_within_15_percent,
-            "median_transactions_per_stage": median_transactions_per_stage,
-            "minimum_transactions_per_stage": minimum_transactions_per_stage,
-        }))
-        .expect("serialize benchmark receipt")
-    );
+    // The split deployment keeps this reconciliation-only controller profile
+    // beside the remote agent. It was the residual fixed-poll path missed by
+    // the original enabled-worker benchmark, so measure it independently at
+    // the same shipped 500 ms compatibility setting.
+    let disabled_root = tempfile::tempdir().expect("disabled benchmark workspace");
+    let disabled_port = unused_port();
+    let mut disabled_controller = start_controller(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        disabled_port,
+        disabled_root.path(),
+        "disabled",
+    )
+    .await;
+    let disabled_client = Client::new(&format!("http://127.0.0.1:{disabled_port}"), TOKEN)
+        .with_artifact_agent_token("benchmark-artifact-agent-token-32-bytes");
+    wait_until_listening(&disabled_client, organization_id).await;
+    let disabled_idle_cpu_percent = sample_process_cpu(
+        &disabled_controller,
+        Duration::from_secs(idle_seconds as u64),
+    )
+    .await
+    .expect("sample disabled controller idle CPU");
+    disabled_controller
+        .kill()
+        .await
+        .expect("stop disabled benchmark controller");
+
+    // Each embedded profile contains its controller and embedded worker in
+    // one process. Both must independently satisfy the process-level target;
+    // scripts/profile-idle-cpu.sh owns the separate complete-stack receipt.
+    let combined_idle_cpu_percent = idle_cpu_percent.max(disabled_idle_cpu_percent);
+    let idle_cpu_target_met = combined_idle_cpu_percent < IDLE_CPU_TARGET_PERCENT;
+
+    let source_head = required_environment("MCLOVING_BENCH_SOURCE_HEAD");
+    let source_tree = required_environment("MCLOVING_BENCH_SOURCE_TREE");
+    let rust_image = required_environment("MCLOVING_BENCH_RUST_IMAGE");
+    let postgres_image = required_environment("MCLOVING_BENCH_POSTGRES_IMAGE");
+    let host = required_environment("MCLOVING_BENCH_HOST");
+    let controller_binary_sha256 = sha256_file(env!("CARGO_BIN_EXE_mcloving-controller"));
+    let receipt = serde_json::to_string_pretty(&json!({
+        "schema": "mcloving.stage-latency.v1",
+        "profile": "release-embedded",
+        "source_head": source_head,
+        "source_tree": source_tree,
+        "controller_binary_sha256": controller_binary_sha256,
+        "rust_image": rust_image,
+        "postgres_image": postgres_image,
+        "host": host,
+        "small_stages": small,
+        "large_stages": large,
+        "heats": heats,
+        "idle_sample_seconds": idle_seconds,
+        "enabled_controller_idle_cpu_percent": idle_cpu_percent,
+        "disabled_controller_idle_cpu_percent": disabled_idle_cpu_percent,
+        "combined_idle_cpu_percent": combined_idle_cpu_percent,
+        "idle_cpu_target_percent": IDLE_CPU_TARGET_PERCENT,
+        "idle_cpu_target_met": idle_cpu_target_met,
+        "small_milliseconds": small_ms,
+        "large_milliseconds": large_ms,
+        "small_transactions": small_tx,
+        "large_transactions": large_tx,
+        "median_ms_per_stage": median_ms_per_stage,
+        "minimum_ms_per_stage": minimum_ms_per_stage,
+        "latency_target_ms_per_stage": LATENCY_TARGET_MS_PER_STAGE,
+        "latency_target_met": latency_target_met,
+        "estimators_within_15_percent": estimators_within_15_percent,
+        "median_transactions_per_stage": median_transactions_per_stage,
+        "minimum_transactions_per_stage": minimum_transactions_per_stage,
+    }))
+    .expect("serialize benchmark receipt");
+    println!("{receipt}");
+    std::fs::write(
+        required_environment("MCLOVING_BENCH_RECEIPT_PATH"),
+        format!("{receipt}\n"),
+    )
+    .expect("write provenance-bound benchmark receipt");
     assert!(
         estimators_within_15_percent,
         "median and minimum latency estimators differ by more than 15%; receipt is inadmissible"
     );
     assert!(latency_target_met, "stage-latency target was not met");
     assert!(idle_cpu_target_met, "combined idle-CPU target was not met");
-    controller.kill().await.expect("stop benchmark controller");
+}
+
+fn unused_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("reserve benchmark port")
+        .local_addr()
+        .expect("read benchmark port")
+        .port()
 }
 
 async fn start_controller(
@@ -220,6 +307,7 @@ async fn start_controller(
     organization_id: Uuid,
     port: u16,
     root: &Path,
+    capabilities: &str,
 ) -> Child {
     Command::new(env!("CARGO_BIN_EXE_mcloving-controller"))
         .env("MCLOVING_MIGRATION_DATABASE_URL", migration_url)
@@ -232,10 +320,12 @@ async fn start_controller(
         .env("MCLOVING_LISTEN", format!("127.0.0.1:{port}"))
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "benchmark-embedded-agent")
-        .env("MCLOVING_AGENT_CAPABILITIES", "platform:linux")
+        .env("MCLOVING_AGENT_CAPABILITIES", capabilities)
         .env("MCLOVING_AGENT_TRUST_POOL", "benchmark-trusted-linux")
         .env("MCLOVING_LEASE_SECONDS", "30")
-        .env("MCLOVING_POLL_MILLISECONDS", "10")
+        // The event-driven worker must meet the contract without lowering the
+        // shipped compatibility default.
+        .env("MCLOVING_POLL_MILLISECONDS", "500")
         .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
         .env("MCLOVING_TERMINATION_GRACE_MILLISECONDS", "100")
         .env("MCLOVING_SESSION_EPOCH", "1")
@@ -390,6 +480,15 @@ fn environment_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn required_environment(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
+}
+
+fn sha256_file(path: &str) -> String {
+    let digest = Sha256::digest(std::fs::read(path).expect("read controller benchmark binary"));
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn median(values: &[f64]) -> f64 {
