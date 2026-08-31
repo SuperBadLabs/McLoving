@@ -283,6 +283,10 @@ excluded_patterns = [
     r"_SHA256$",                # digest strings pinning a path variable's content
 ]
 excluded_literals = {
+    # Compile-time-only provenance inputs consumed by build.rs and embedded in
+    # the binaries. Runtime contract files neither read nor set them.
+    "MCLOVING_BUILD_SOURCE_HEAD": "build-time source commit, not a runtime value or path",
+    "MCLOVING_BUILD_SOURCE_TREE": "build-time source tree, not a runtime value or path",
     "MCLOVING_AGENT_CAPABILITIES": "capability name list",
     "MCLOVING_AGENT_ID": "agent identifier",
     "MCLOVING_AGENT_LISTEN": "socket bind address",
