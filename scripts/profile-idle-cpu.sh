@@ -50,10 +50,24 @@ require_component postgres "${postgres_pid}" '^postgres$'
 # The supported deployment port-forwarders are SSH, kubectl, socat, and the
 # container-engine proxy processes used by the local proof topology.
 require_component port-forwarder "${forwarder_pid}" '^(ssh|kubectl|socat|docker-proxy|rootlessport)$'
-if ! command -v pgrep >/dev/null 2>&1; then
-  echo "pgrep is required to enumerate complete component process trees" >&2
-  exit 2
-fi
+
+list_children() {
+  local parent_pid="$1" stat_path stat tail pid_path
+  for stat_path in /proc/[0-9]*/stat; do
+    if ! stat="$(<"${stat_path}")"; then
+      # A process may legitimately disappear while /proc is enumerated. Its
+      # CPU is accounted through its waiting parent's cumulative child ticks.
+      continue
+    fi
+    tail="${stat##*) }"
+    # shellcheck disable=SC2086
+    set -- ${tail}
+    if [[ "${2}" == "${parent_pid}" ]]; then
+      pid_path="${stat_path#/proc/}"
+      printf '%s\n' "${pid_path%%/*}"
+    fi
+  done
+}
 
 collect_tree() {
   local root_pid="$1" index=0 parent child
@@ -62,7 +76,7 @@ collect_tree() {
     parent="${tree[${index}]}"
     while IFS= read -r child; do
       tree+=("${child}")
-    done < <(pgrep -P "${parent}" 2>/dev/null || true)
+    done < <(list_children "${parent}")
     index=$(( index + 1 ))
   done
   printf '%s\n' "${tree[@]}"
