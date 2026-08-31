@@ -1,8 +1,10 @@
 -- A reconciliation-only controller can be waiting before another worker
 -- establishes a lease.  Wake it when an attempt first becomes active so it
 -- can recompute the authoritative nearest-expiry deadline.  Renewals only
--- move that deadline later; an early timer wake is safe and avoids emitting a
--- notification for every heartbeat.
+-- normally move that deadline later; an early timer wake is safe and avoids
+-- emitting a notification for every heartbeat. A legal renewal can choose a
+-- shorter lease, however, so an earlier replacement deadline must wake
+-- existing waiters.
 CREATE FUNCTION mcloving_notify_active_lease() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -23,6 +25,7 @@ WHEN (
     AND (
         OLD.status NOT IN ('offered', 'accepted', 'running', 'finalizing', 'cancelling')
         OR OLD.lease_expires_at IS NULL
+        OR NEW.lease_expires_at < OLD.lease_expires_at
     )
 )
 EXECUTE FUNCTION mcloving_notify_active_lease();
