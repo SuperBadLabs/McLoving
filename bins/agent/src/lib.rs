@@ -408,17 +408,33 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
         // safe to re-enter immediately. Previous-release controllers return
         // empty offers synchronously; retain the configured pacing against
         // those peers so a rolling upgrade cannot create an idle RPC loop.
-        if let Some(delay) = legacy_poll_delay(receipt.features, config.poll_interval) {
-            tokio::select! {
-                () = stop.cancelled() => return Err(AgentError::Stopped),
-                () = sleep(delay) => {}
-            }
-        }
+        pace_next_poll_or_stop(receipt.features, config.poll_interval, &stop).await?;
     }
 }
 
 fn legacy_poll_delay(features: SessionFeatures, configured: Duration) -> Option<Duration> {
     (!features.long_poll_work_delivery).then_some(configured)
+}
+
+async fn pace_next_poll_or_stop(
+    features: SessionFeatures,
+    configured: Duration,
+    stop: &CancellationToken,
+) -> Result<(), AgentError> {
+    // A negotiated long poll needs no client delay, but cancellation can be
+    // what completed that poll. Keep the stop decision independent of legacy
+    // pacing so the session exits instead of immediately polling again with
+    // an already-cancelled token.
+    if stop.is_cancelled() {
+        return Err(AgentError::Stopped);
+    }
+    if let Some(delay) = legacy_poll_delay(features, configured) {
+        tokio::select! {
+            () = stop.cancelled() => return Err(AgentError::Stopped),
+            () = sleep(delay) => {}
+        }
+    }
+    Ok(())
 }
 
 async fn publish_recovery_ready_session_receipt<F>(
@@ -1474,6 +1490,21 @@ mod tests {
             LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
         ]);
         assert_eq!(legacy_poll_delay(negotiated, configured), None);
+    }
+
+    #[tokio::test]
+    async fn long_poll_cancellation_exits_without_a_legacy_delay() {
+        let negotiated = SessionFeatures::from_negotiated(&[
+            WORK_DELIVERY_FEATURE.to_owned(),
+            LONG_POLL_WORK_DELIVERY_FEATURE.to_owned(),
+        ]);
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        assert!(matches!(
+            pace_next_poll_or_stop(negotiated, Duration::from_secs(30), &stop).await,
+            Err(AgentError::Stopped)
+        ));
     }
 
     #[test]
