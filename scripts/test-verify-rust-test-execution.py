@@ -15,7 +15,8 @@ SCRIPT = Path(__file__).with_name("verify-rust-test-execution.py")
 RUNNER = Path(__file__).with_name("run-verified-rust-test.sh")
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("verify_rust_test_execution", SCRIPT)
-assert SPEC and SPEC.loader
+if SPEC is None or SPEC.loader is None:
+    raise ImportError(f"cannot load Rust test-execution verifier from {SCRIPT}")
 VERIFY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERIFY)
 
