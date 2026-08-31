@@ -117,6 +117,35 @@ if [[ -n "$(git -C "${repo_root}" status --porcelain)" ]]; then
   echo "idle-CPU receipt requires a clean source checkout" >&2
   exit 2
 fi
+expected_controller_binary="${MCLOVING_IDLE_CONTROLLER_BINARY:-${repo_root}/target/release/mcloving-controller}"
+expected_agent_binary="${MCLOVING_IDLE_AGENT_BINARY:-${repo_root}/target/release/mcloving-agent}"
+postgres_image="${MCLOVING_IDLE_POSTGRES_IMAGE:-}"
+for binary in "${expected_controller_binary}" "${expected_agent_binary}"; do
+  if [[ ! -x "${binary}" ]]; then
+    echo "expected sampled release binary is not executable: ${binary}" >&2
+    exit 2
+  fi
+done
+if [[ ! "${postgres_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+  echo "MCLOVING_IDLE_POSTGRES_IMAGE must name a digest-pinned image" >&2
+  exit 2
+fi
+sha256_file() {
+  local file="$1" digest
+  read -r digest _ < <(sha256sum "${file}")
+  printf '%s\n' "${digest}"
+}
+controller_binary_sha256="$(sha256_file "/proc/${controller_pid}/exe")"
+agent_binary_sha256="$(sha256_file "/proc/${agent_pid}/exe")"
+forwarder_binary_sha256="$(sha256_file "/proc/${forwarder_pid}/exe")"
+if [[ "${controller_binary_sha256}" != "$(sha256_file "${expected_controller_binary}")" ]]; then
+  echo "sampled controller binary does not match the source checkout release binary" >&2
+  exit 2
+fi
+if [[ "${agent_binary_sha256}" != "$(sha256_file "${expected_agent_binary}")" ]]; then
+  echo "sampled agent binary does not match the source checkout release binary" >&2
+  exit 2
+fi
 ticks_per_second="$(getconf CLK_TCK)"
 declare -A starts
 declare -A start_times
@@ -161,6 +190,10 @@ done
 echo -e "source_head\t$(git -C "${repo_root}" rev-parse HEAD)"
 echo -e "source_tree\t$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
 echo -e "host\t$(hostname -s)"
+echo -e "controller_binary_sha256\t${controller_binary_sha256}"
+echo -e "agent_binary_sha256\t${agent_binary_sha256}"
+echo -e "postgres_image\t${postgres_image}"
+echo -e "forwarder_binary_sha256\t${forwarder_binary_sha256}"
 echo -e "sample_seconds\t${seconds}"
 echo -e "target_percent\t5"
 echo -e "process_count\t${#profile_pids[@]}"
