@@ -50,6 +50,10 @@ require_component postgres "${postgres_pid}" '^postgres$'
 # The supported deployment port-forwarders are SSH, kubectl, socat, and the
 # container-engine proxy processes used by the local proof topology.
 require_component port-forwarder "${forwarder_pid}" '^(ssh|kubectl|socat|docker-proxy|rootlessport)$'
+if ! command -v pgrep >/dev/null 2>&1; then
+  echo "pgrep is required to enumerate complete component process trees" >&2
+  exit 2
+fi
 
 collect_tree() {
   local root_pid="$1" index=0 parent child
@@ -108,7 +112,11 @@ read_ticks() {
   tail="${stat##*) }"
   # shellcheck disable=SC2086
   set -- ${tail}
-  echo $(( ${12} + ${13} ))
+  # Include cumulative CPU from already reaped children (cutime/cstime) so a
+  # descendant born and reaped entirely inside the sample cannot disappear
+  # between the two process-tree snapshots. Live descendants are enumerated
+  # and counted independently; their CPU is not present in these child fields.
+  echo $(( ${12} + ${13} + ${14} + ${15} ))
 }
 
 read_start_time() {

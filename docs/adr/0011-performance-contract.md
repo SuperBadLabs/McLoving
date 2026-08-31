@@ -32,9 +32,10 @@ CPU is measured without process-name ambiguity by passing the exact controller,
 agent, PostgreSQL, and rootless port-forwarder PIDs. The profiler rejects
 duplicate PIDs, validates each positional role from its Linux process identity,
 recursively includes every descendant under all four process roots, rejects a
-process tree that changes during sampling, and applies the non-overridable
-contract threshold of 5%. Omitting the database or forwarder is not a
-whole-stack receipt:
+process tree that changes during sampling, includes cumulative waited-child CPU
+so a descendant born and reaped inside the window cannot escape accounting,
+and applies the non-overridable contract threshold of 5%. Omitting the database
+or forwarder is not a whole-stack receipt:
 
 ```bash
 ./scripts/profile-idle-cpu.sh 10 CONTROLLER_PID AGENT_PID POSTGRES_PID PORT_FORWARDER_PID
