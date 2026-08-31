@@ -1537,21 +1537,10 @@ async fn try_assign_work(
         lease_seconds,
         fairness_seed: 0,
     };
-    let mut claim = store
-        .claim_next_in_session(&claim_request, request.session_epoch)
+    let claim = store
+        .reconcile_expired_and_claim_next_in_session(&claim_request, request.session_epoch)
         .await
         .map_err(internal_store_error)?;
-    if claim.is_none()
-        && store
-            .requeue_one_expired(identity.organization_id)
-            .await
-            .map_err(internal_store_error)?
-    {
-        claim = store
-            .claim_next_in_session(&claim_request, request.session_epoch)
-            .await
-            .map_err(internal_store_error)?;
-    }
     let Some(claim) = claim else {
         return Ok(None);
     };
@@ -2115,14 +2104,7 @@ async fn run_embedded_worker(
             lease_seconds: worker.lease_seconds,
             fairness_seed: 0,
         };
-        let mut claim = store.claim_next(&claim_request).await;
-        if matches!(claim, Ok(None)) {
-            match store.requeue_one_expired(worker.organization_id).await {
-                Ok(true) => claim = store.claim_next(&claim_request).await,
-                Ok(false) => {}
-                Err(error) => eprintln!("expired-lease reconciliation failed: {error}"),
-            }
-        }
+        let claim = store.reconcile_expired_and_claim_next(&claim_request).await;
         match claim {
             Ok(Some(claim)) => {
                 if let Err(error) = run_claim(&store, &claim, &worker.config).await {

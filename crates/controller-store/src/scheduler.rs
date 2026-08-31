@@ -74,6 +74,30 @@ pub enum WaitReason {
 }
 
 impl Store {
+    /// Reconciles one expired lease before admitting any fresh claim.
+    ///
+    /// Keeping this ordering behind the store boundary prevents callers from
+    /// accidentally starving crash recovery while a tenant has a continuous
+    /// backlog of otherwise claimable work.
+    pub async fn reconcile_expired_and_claim_next(
+        &self,
+        request: &ClaimRequest,
+    ) -> Result<Option<ClaimedAttempt>, StoreError> {
+        self.requeue_one_expired(request.organization_id).await?;
+        self.claim_next(request).await
+    }
+
+    /// Session-fenced production variant of
+    /// [`Self::reconcile_expired_and_claim_next`].
+    pub async fn reconcile_expired_and_claim_next_in_session(
+        &self,
+        request: &ClaimRequest,
+        session_epoch: u64,
+    ) -> Result<Option<ClaimedAttempt>, StoreError> {
+        self.requeue_one_expired(request.organization_id).await?;
+        self.claim_next_in_session(request, session_epoch).await
+    }
+
     /// Returns the bounded delay until the next active lease can expire.
     ///
     /// Work-ready notifications can be lost while a listener reconnects, so

@@ -4444,14 +4444,25 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
     .execute(store.pool())
     .await
     .expect("expire lease under test");
-    assert!(
-        store
-            .requeue_one_expired(organization_id)
-            .await
-            .expect("requeue expired accepted attempt")
-    );
-    let second = store
-        .claim_next(&ClaimRequest {
+    let backlog = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "continuous-backlog".into(),
+            pipeline_digest: [3; 32],
+            node_key: "later-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit fresh work behind the expired lease");
+    let first_after_expiry = store
+        .reconcile_expired_and_claim_next(&ClaimRequest {
             organization_id,
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
@@ -4461,8 +4472,42 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             fairness_seed: 1,
         })
         .await
-        .expect("second claim")
-        .expect("claim exists");
+        .expect("reconcile then claim")
+        .expect("one claim exists after reconciliation");
+    let expired_state = sqlx::query_as::<_, (String, i64)>(
+        "SELECT status, fence
+         FROM attempts
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read expired attempt after the combined operation");
+    assert!(
+        matches!(expired_state.0.as_str(), "queued" | "offered"),
+        "expired work must be reconciled before any fresh claim, got {}",
+        expired_state.0
+    );
+    let second = if first_after_expiry.attempt_id == admission.attempt_id {
+        first_after_expiry
+    } else {
+        assert_eq!(first_after_expiry.attempt_id, backlog.attempt_id);
+        assert_eq!(expired_state, ("queued".to_owned(), first.fence));
+        store
+            .reconcile_expired_and_claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-c".into(),
+                agent_id: "agent-c".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim reconciled work")
+            .expect("the reconciled attempt remains claimable")
+    };
     assert_eq!(first.attempt_id, second.attempt_id);
     assert_eq!(first.fence + 1, second.fence);
     assert!(

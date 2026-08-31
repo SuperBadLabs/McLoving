@@ -628,11 +628,13 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     // acknowledgement. A fully armed empty wait has three authoritative
     // boundaries: claim, expired-lease reconciliation, and next-expiry
     // calculation. Depending on how far that arm advances before this
-    // observation, the process-wide delta is 21 through 24. The pre-armed
-    // PostgreSQL listener makes the settled 24-boundary case deterministic
+    // observation, the process-wide delta is 22 through 25. The required
+    // pre-claim expired-lease reconciliation accounts for the additional
+    // lifecycle boundary. The pre-armed
+    // PostgreSQL listener makes the settled 25-boundary case deterministic
     // enough to exercise; it does not add a tenant transaction itself.
     assert!(
-        transaction_delta <= 24,
+        transaction_delta <= 25,
         "trivial remote work regressed above the transaction budget: {transaction_delta}"
     );
     stop(&mut agent).await;
