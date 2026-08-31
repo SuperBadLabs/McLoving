@@ -70,6 +70,8 @@ podman run --rm \
   --env "MCLOVING_BENCH_IDLE_SECONDS=${MCLOVING_BENCH_IDLE_SECONDS:-10}" \
   --env "MCLOVING_BENCH_SOURCE_HEAD=${source_head}" \
   --env "MCLOVING_BENCH_SOURCE_TREE=${source_tree}" \
+  --env "MCLOVING_BUILD_SOURCE_HEAD=${source_head}" \
+  --env "MCLOVING_BUILD_SOURCE_TREE=${source_tree}" \
   --env "MCLOVING_BENCH_RUST_IMAGE=${MCLOVING_RUST_IMAGE}" \
   --env "MCLOVING_BENCH_POSTGRES_IMAGE=${MCLOVING_POSTGRES_IMAGE}" \
   --env "MCLOVING_BENCH_HOST=$(hostname -s)" \

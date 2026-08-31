@@ -89,6 +89,14 @@ const WORK_READY_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("build-provenance") {
+        println!(
+            "source_head={} source_tree={}",
+            env!("MCLOVING_BUILD_SOURCE_HEAD"),
+            env!("MCLOVING_BUILD_SOURCE_TREE")
+        );
+        return Ok(());
+    }
     let migration_database_url = std::env::var("MCLOVING_MIGRATION_DATABASE_URL")
         .context("MCLOVING_MIGRATION_DATABASE_URL is required")?;
     let runtime_database_url =
@@ -2115,6 +2123,8 @@ async fn run_embedded_worker(
         if worker.disabled {
             if let Err(error) = store.requeue_one_expired(worker.organization_id).await {
                 eprintln!("expired-lease reconciliation failed: {error}");
+                tokio::time::sleep(WORK_READY_RECONNECT_DELAY).await;
+                continue;
             }
             match store
                 .next_lease_expiry_delay(worker.organization_id, WORK_LONG_POLL_MAX)

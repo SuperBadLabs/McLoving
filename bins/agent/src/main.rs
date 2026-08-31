@@ -23,6 +23,13 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .map(String::as_str)
         .unwrap_or("foreground");
     match command {
+        "build-provenance" => {
+            println!(
+                "source_head={} source_tree={}",
+                env!("MCLOVING_BUILD_SOURCE_HEAD"),
+                env!("MCLOVING_BUILD_SOURCE_TREE")
+            );
+        }
         "foreground" => {
             let config = AgentConfig::from_environment()?;
             runtime()?.block_on(async {
@@ -105,7 +112,7 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: mcloving-agent [foreground|probe|journal-check PATH|journal-observe PATH|validate-config|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
+                "usage: mcloving-agent [foreground|build-provenance|probe|journal-check PATH|journal-observe PATH|validate-config|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
                     .into(),
             );
         }

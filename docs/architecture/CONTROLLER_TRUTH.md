@@ -124,7 +124,9 @@ authoritative next lease-expiry deadline with a 20-second lost-hint ceiling.
 The disabled deployment profile reconciles expired leases without claiming
 work and without retaining a fixed database loop. Lost/coalesced notifications
 therefore cannot grant or strand authority, while idle operation no longer
-repeatedly probes the queue.
+repeatedly probes the queue. A reconciliation or deadline-query error takes the
+bounded reconnect delay before retrying, including when an already-expired row
+would otherwise make the authoritative deadline immediately ready.
 
 ## Identity and tenant boundary
 

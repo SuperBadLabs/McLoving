@@ -117,17 +117,25 @@ if [[ -n "$(git -C "${repo_root}" status --porcelain)" ]]; then
   echo "idle-CPU receipt requires a clean source checkout" >&2
   exit 2
 fi
-expected_controller_binary="${MCLOVING_IDLE_CONTROLLER_BINARY:-${repo_root}/target/release/mcloving-controller}"
-expected_agent_binary="${MCLOVING_IDLE_AGENT_BINARY:-${repo_root}/target/release/mcloving-agent}"
+source_head="$(git -C "${repo_root}" rev-parse HEAD)"
+source_tree="$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
 postgres_image="${MCLOVING_IDLE_POSTGRES_IMAGE:-}"
-for binary in "${expected_controller_binary}" "${expected_agent_binary}"; do
-  if [[ ! -x "${binary}" ]]; then
-    echo "expected sampled release binary is not executable: ${binary}" >&2
-    exit 2
-  fi
-done
+postgres_container="${MCLOVING_IDLE_POSTGRES_CONTAINER:-}"
+container_engine="${MCLOVING_IDLE_CONTAINER_ENGINE:-podman}"
 if [[ ! "${postgres_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
   echo "MCLOVING_IDLE_POSTGRES_IMAGE must name a digest-pinned image" >&2
+  exit 2
+fi
+if [[ -z "${postgres_container}" ]]; then
+  echo "MCLOVING_IDLE_POSTGRES_CONTAINER is required" >&2
+  exit 2
+fi
+if [[ "${container_engine}" != podman && "${container_engine}" != docker ]]; then
+  echo "MCLOVING_IDLE_CONTAINER_ENGINE must be podman or docker" >&2
+  exit 2
+fi
+if ! command -v "${container_engine}" >/dev/null 2>&1; then
+  echo "container engine is unavailable: ${container_engine}" >&2
   exit 2
 fi
 sha256_file() {
@@ -138,12 +146,24 @@ sha256_file() {
 controller_binary_sha256="$(sha256_file "/proc/${controller_pid}/exe")"
 agent_binary_sha256="$(sha256_file "/proc/${agent_pid}/exe")"
 forwarder_binary_sha256="$(sha256_file "/proc/${forwarder_pid}/exe")"
-if [[ "${controller_binary_sha256}" != "$(sha256_file "${expected_controller_binary}")" ]]; then
-  echo "sampled controller binary does not match the source checkout release binary" >&2
+expected_provenance="source_head=${source_head} source_tree=${source_tree}"
+if [[ "$("/proc/${controller_pid}/exe" build-provenance)" != "${expected_provenance}" ]]; then
+  echo "sampled controller binary does not embed the source checkout provenance" >&2
   exit 2
 fi
-if [[ "${agent_binary_sha256}" != "$(sha256_file "${expected_agent_binary}")" ]]; then
-  echo "sampled agent binary does not match the source checkout release binary" >&2
+if [[ "$("/proc/${agent_pid}/exe" build-provenance)" != "${expected_provenance}" ]]; then
+  echo "sampled agent binary does not embed the source checkout provenance" >&2
+  exit 2
+fi
+container_pid="$("${container_engine}" inspect --format '{{.State.Pid}}' "${postgres_container}")"
+container_image_id="$("${container_engine}" inspect --format '{{.Image}}' "${postgres_container}")"
+expected_image_id="$("${container_engine}" image inspect --format '{{.Id}}' "${postgres_image}")"
+if [[ "${container_pid}" != "${postgres_pid}" ]]; then
+  echo "PostgreSQL PID does not match the inspected container init process" >&2
+  exit 2
+fi
+if [[ "${container_image_id}" != "${expected_image_id}" ]]; then
+  echo "sampled PostgreSQL container does not use the recorded image digest" >&2
   exit 2
 fi
 ticks_per_second="$(getconf CLK_TCK)"
@@ -187,12 +207,13 @@ for root_pid in "${input_pids[@]}"; do
   fi
 done
 
-echo -e "source_head\t$(git -C "${repo_root}" rev-parse HEAD)"
-echo -e "source_tree\t$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
+echo -e "source_head\t${source_head}"
+echo -e "source_tree\t${source_tree}"
 echo -e "host\t$(hostname -s)"
 echo -e "controller_binary_sha256\t${controller_binary_sha256}"
 echo -e "agent_binary_sha256\t${agent_binary_sha256}"
 echo -e "postgres_image\t${postgres_image}"
+echo -e "postgres_container_image_id\t${container_image_id}"
 echo -e "forwarder_binary_sha256\t${forwarder_binary_sha256}"
 echo -e "sample_seconds\t${seconds}"
 echo -e "target_percent\t5"

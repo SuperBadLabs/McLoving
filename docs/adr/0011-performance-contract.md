@@ -34,13 +34,16 @@ duplicate PIDs, validates each positional role from its Linux process identity,
 recursively includes every descendant under all four process roots, rejects a
 process tree that changes during sampling, includes cumulative waited-child CPU
 so a descendant born and reaped inside the window cannot escape accounting,
-requires the sampled controller and agent executable hashes to match the clean
-checkout's release binaries, records the forwarder executable hash and a
-digest-pinned PostgreSQL image, and applies the non-overridable contract
-threshold of 5%. Omitting the database or forwarder is not a whole-stack
-receipt:
+requires the sampled controller and agent binaries to embed the clean
+checkout's exact head and tree, records the forwarder executable hash, verifies
+the PostgreSQL PID and image ID against the named Podman or Docker container and
+digest-pinned image, and applies the non-overridable contract threshold of 5%.
+Build the provenance-bound binaries before starting the deployment; omitting
+the database or forwarder is not a whole-stack receipt:
 
 ```bash
+./scripts/build-idle-profile-binaries.sh
 MCLOVING_IDLE_POSTGRES_IMAGE=postgres@sha256:... \
+MCLOVING_IDLE_POSTGRES_CONTAINER=mcloving-postgres \
   ./scripts/profile-idle-cpu.sh 10 CONTROLLER_PID AGENT_PID POSTGRES_PID PORT_FORWARDER_PID
 ```
