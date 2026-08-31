@@ -891,10 +891,13 @@ reconciliation-only controller paths subscribe before reading authoritative
 state, wake on committed tenant hints or an earlier lease deadline, and retain
 a 20-second lost/coalesced-hint fallback independent of the compatibility poll
 setting. Exact reviewed source `e57f7c9` (tree `b4d4b86`) measured 71.2018
-ms/stage median and 1.099% complete-stack idle CPU on Mario. Immutable receipts,
-review identities, rejected estimator runs, and the protected-main tree mapping
-are in `docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31.md`. The broader
-capacity, saturation/backpressure, storage, recovery, regression-margin, and
+ms/stage median on Mario; the idle-CPU result is the separate
+`docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31_IDLE.tsv` receipt at 1.099%
+complete-stack idle CPU, while the JSON receipt's idle-CPU fields are not the
+reported measurement in this bundle. Immutable receipts, review identities,
+rejected estimator runs, and the protected-main tree mapping are in
+`docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31.md`. The broader capacity,
+saturation/backpressure, storage, recovery, regression-margin, and
 eligible-platform envelopes below remain pending.
 
 | Ticket | Status | Depends on | Objective and acceptance |

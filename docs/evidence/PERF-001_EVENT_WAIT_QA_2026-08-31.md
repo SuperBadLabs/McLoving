@@ -38,6 +38,12 @@ trees plus the SSH forwarder.
 | `PERF-001_EVENT_WAIT_QA_2026-08-31.json` | `c909d227d1cffc6df3ac19d155454637e3137ab078356e62679665e2d65a7a35` | five heats; 71.2018 ms/stage median, 61.0326 minimum; 14.3% estimator gap; 7.06 median transactions/stage; 183 ms target met |
 | `PERF-001_EVENT_WAIT_QA_2026-08-31_IDLE.tsv` | `043c5e485f92a310e81c4e59556b4fd8ee238fa7cc6dd417d7a822bc70e3bf77` | 1.099% complete-stack idle CPU across 14 processes; fixed 5% target met |
 
+The idle-CPU result reported for this evidence bundle is the value from
+`PERF-001_EVENT_WAIT_QA_2026-08-31_IDLE.tsv`; the JSON receipt includes
+`combined_idle_cpu_percent` and `idle_cpu_target_met` fields only as metadata
+for the stage-latency run and they are not the reported idle-CPU measurement in
+this bundle.
+
 Runtime identities in the strict receipt:
 
 - controller SHA-256: `1437efacb2a010ea8246a6aed0a042bdd5aa4ad2eaddaf1d1535631d3085d27f`
