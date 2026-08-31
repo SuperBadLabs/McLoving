@@ -1,0 +1,27 @@
+source_head	e57f7c9c6dcd8a1f45bc41393780d90fdbf7c13a
+source_tree	b4d4b86b06666fd9bae9f85b8e44f426a9b227dd
+host	mario
+controller_binary_sha256	1437efacb2a010ea8246a6aed0a042bdd5aa4ad2eaddaf1d1535631d3085d27f
+agent_binary_sha256	392cef655b572fea3eec47e7cf277cc7f584371ecade2871c6e6d012f3b92de4
+postgres_image	docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+postgres_container_image_id	d741b376874687de90374fd34f55c6b2760e8f7bd7e4ae5cd47f50757fc08cf8
+forwarder_binary_sha256	27a7f5e86ed31efa1e758c7f955bdc016adf58bb3266c68e217ab5bee311b46b
+sample_seconds	10
+target_percent	5
+process_count	14
+role	pid	comm	cpu_percent
+controller	3444373	mcloving-contro	0.100
+agent	3444526	mcloving-agent	0.000
+postgres	3443760	postgres	0.000
+postgres-child	3444077	postgres	0.000
+postgres-child	3444078	postgres	0.000
+postgres-child	3444093	postgres	0.000
+postgres-child	3444094	postgres	0.000
+postgres-child	3444095	postgres	0.000
+postgres-child	3444390	postgres	0.000
+postgres-child	3444391	postgres	0.400
+postgres-child	3444392	postgres	0.200
+postgres-child	3444395	postgres	0.200
+postgres-child	3444396	postgres	0.200
+port-forwarder	3444414	ssh	0.000
+total	-	-	1.099

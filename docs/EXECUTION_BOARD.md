@@ -885,6 +885,18 @@ gate proves the agent drains a returned batch without interval pacing. The
 capacity envelopes, pinned deployment profiles, saturation measurements, and
 reviewed regression margins in the `PERF-001` acceptance remain pending.
 
+PR #109 (`4f77485`) and PR #110 (`0f6499f`) close the bounded event-wait
+dimension without closing `PERF-001`: remote, schedulable embedded, and
+reconciliation-only controller paths subscribe before reading authoritative
+state, wake on committed tenant hints or an earlier lease deadline, and retain
+a 20-second lost/coalesced-hint fallback independent of the compatibility poll
+setting. Exact reviewed source `e57f7c9` (tree `b4d4b86`) measured 71.2018
+ms/stage median and 1.099% complete-stack idle CPU on Mario. Immutable receipts,
+review identities, rejected estimator runs, and the protected-main tree mapping
+are in `docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31.md`. The broader
+capacity, saturation/backpressure, storage, recovery, regression-margin, and
+eligible-platform envelopes below remain pending.
+
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | EXEC-001 | DONE | — | Fail closed end-to-end on unsupported execution specifications. Measured: a strict-YAML pipeline with 100 process steps in ONE stage passed `validate` and admission, scheduled, and was refused at claim time by the execution spine (`spec.steps.len() != 1`); the agent treated the permanent refusal as transient and retried the claim in an infinite session loop while the build reported `running` indefinitely (1,460+ build events accumulated before manual cancellation). A permanent condition presenting as progress is the silent worst outcome this board exists to prevent. Acceptance: validate/admission reject — or plan into per-attempt units — every spec the spine cannot execute, so validate-accepted implies runnable; an unsupported-spec refusal at claim time is terminal and fail-closed with a named code, never retried; a regression gate submits the 100-step single-stage pipeline and asserts a terminal state within one lease, never unbounded running **Closure:** merged to protected main as `5f9aa31` (PR #79). `validate` and admission now plan every accepted specification into per-attempt units, so validate-accepted implies runnable; a spec the spine cannot execute is refused at claim time as a named terminal failure that the agent never retries; and a gate submits the 100-step single-stage pipeline and asserts a bounded terminal outcome instead of an unbounded `running`. |
