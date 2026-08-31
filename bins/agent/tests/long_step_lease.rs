@@ -375,6 +375,7 @@ impl Harness {
     fn agent_command(&self, lease_seconds: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mcloving-agent"));
         command
+            .env_remove("MCLOVING_TEST_DATABASE_URL")
             .env("MCLOVING_AGENT_ID", &self.agent_id)
             .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
             .env(
