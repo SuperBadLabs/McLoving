@@ -1551,6 +1551,28 @@ impl Store {
         .await?)
     }
 
+    /// Returns scheduling capabilities and one negotiated feature decision
+    /// from the same exact-session read.
+    pub async fn agent_session_capabilities_and_feature(
+        &self,
+        agent_id: &str,
+        session_epoch: u64,
+        feature: &str,
+    ) -> Result<Option<(Vec<String>, bool)>, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        Ok(sqlx::query_as::<_, (Vec<String>, bool)>(
+            "SELECT capabilities, $3 = ANY(features)
+             FROM agent_sessions
+             WHERE agent_id = $1 AND session_epoch = $2",
+        )
+        .bind(agent_id)
+        .bind(session_epoch)
+        .bind(feature)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// Resolves a recovered attempt against current durable controller truth.
     pub async fn agent_reconciliation_disposition(
         &self,

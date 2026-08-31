@@ -1058,9 +1058,13 @@ impl AgentControl for ControllerAgentService {
                 "lease_seconds must be between 5 and 300",
             ));
         }
-        let capabilities = self
+        let (capabilities, long_poll_negotiated) = self
             .store
-            .agent_session_capabilities(&request.agent_id, request.session_epoch)
+            .agent_session_capabilities_and_feature(
+                &request.agent_id,
+                request.session_epoch,
+                LONG_POLL_WORK_DELIVERY_FEATURE,
+            )
             .await
             .map_err(internal_store_error)?
             .ok_or_else(|| stale_session_status(&self.session_churn, &request.agent_id))?;
@@ -1068,9 +1072,12 @@ impl AgentControl for ControllerAgentService {
         // hints and may be coalesced, but this ordering prevents the ordinary
         // check-then-sleep race within one healthy controller process.
         let mut wakeups = self.work_wakeups.subscribe();
-        // No lease exists while the request is waiting, so this budget is
-        // independent of the future assignment's lease duration.
-        let deadline = tokio::time::Instant::now() + WORK_LONG_POLL_MAX;
+        // No lease exists while a negotiated request is waiting, so this
+        // budget is independent of the future assignment's lease duration.
+        // A previous-release agent retains its client-side pacing and RPC
+        // deadline, so it must receive an empty offer immediately.
+        let deadline = work_wait_budget(long_poll_negotiated)
+            .map(|budget| tokio::time::Instant::now() + budget);
         loop {
             if let Some(assignment) = try_assign_work(
                 &self.store,
@@ -1086,6 +1093,12 @@ impl AgentControl for ControllerAgentService {
                     assignment: Some(assignment),
                 }));
             }
+            let Some(deadline) = deadline else {
+                return Ok(Response::new(WorkOffer {
+                    session_epoch: request.session_epoch,
+                    assignment: None,
+                }));
+            };
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Ok(Response::new(WorkOffer {
@@ -1589,6 +1602,10 @@ async fn wait_for_work_wakeup(
     })
     .await
     .unwrap_or(false)
+}
+
+fn work_wait_budget(long_poll_negotiated: bool) -> Option<Duration> {
+    long_poll_negotiated.then_some(WORK_LONG_POLL_MAX)
 }
 
 #[derive(Clone, Copy)]
@@ -2326,6 +2343,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_side_work_wait_requires_exact_session_negotiation() {
+        assert_eq!(work_wait_budget(false), None);
+        assert_eq!(work_wait_budget(true), Some(WORK_LONG_POLL_MAX));
+    }
 
     /// A complete, valid OIDC environment whose every URL is HTTPS.
     fn valid_oidc_environment() -> BTreeMap<&'static str, &'static str> {
