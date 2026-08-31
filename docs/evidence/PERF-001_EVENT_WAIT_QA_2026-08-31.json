@@ -1,0 +1,54 @@
+{
+  "combined_idle_cpu_percent": 0.0,
+  "controller_binary_sha256": "1437efacb2a010ea8246a6aed0a042bdd5aa4ad2eaddaf1d1535631d3085d27f",
+  "disabled_controller_idle_cpu_percent": 0.0,
+  "enabled_controller_idle_cpu_percent": 0.0,
+  "estimators_within_15_percent": true,
+  "heats": 5,
+  "host": "mario",
+  "idle_cpu_target_met": true,
+  "idle_cpu_target_percent": 5.0,
+  "idle_sample_seconds": 10,
+  "large_milliseconds": [
+    7915.773364,
+    6093.42192,
+    6999.298223000001,
+    6689.951852,
+    7132.238949
+  ],
+  "large_stages": 100,
+  "large_transactions": [
+    716.0,
+    715.0,
+    715.0,
+    715.0,
+    715.0
+  ],
+  "latency_target_met": true,
+  "latency_target_ms_per_stage": 183.0,
+  "median_ms_per_stage": 71.20182578000002,
+  "median_transactions_per_stage": 7.06,
+  "minimum_ms_per_stage": 61.032619759999996,
+  "minimum_transactions_per_stage": 7.08,
+  "postgres_image": "docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+  "profile": "release-embedded",
+  "rust_image": "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+  "schema": "mcloving.stage-latency.v1",
+  "small_milliseconds": [
+    3439.206934,
+    3739.390313,
+    3185.718391,
+    3561.967325,
+    3041.790932
+  ],
+  "small_stages": 50,
+  "small_transactions": [
+    362.0,
+    362.0,
+    361.0,
+    362.0,
+    363.0
+  ],
+  "source_head": "e57f7c9c6dcd8a1f45bc41393780d90fdbf7c13a",
+  "source_tree": "b4d4b86b06666fd9bae9f85b8e44f426a9b227dd"
+}
