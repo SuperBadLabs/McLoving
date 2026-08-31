@@ -16,17 +16,18 @@ controller_pid="$1"
 agent_pid="$2"
 postgres_pid="$3"
 forwarder_pid="$4"
-declare -A seen_pids
+input_pids=("$@")
+declare -A seen_input_pids
 for pid in "$@"; do
   if [[ ! "${pid}" =~ ^[1-9][0-9]*$ || ! -r "/proc/${pid}/stat" ]]; then
     echo "PID is not a readable live process: ${pid}" >&2
     exit 2
   fi
-  if [[ -n "${seen_pids["${pid}"]:-}" ]]; then
+  if [[ -n "${seen_input_pids["${pid}"]:-}" ]]; then
     echo "each profiled stack component must have a distinct PID: ${pid}" >&2
     exit 2
   fi
-  seen_pids["${pid}"]=1
+  seen_input_pids["${pid}"]=1
 done
 
 process_identity() {
@@ -49,6 +50,49 @@ require_component postgres "${postgres_pid}" '^postgres$'
 # The supported deployment port-forwarders are SSH, kubectl, socat, and the
 # container-engine proxy processes used by the local proof topology.
 require_component port-forwarder "${forwarder_pid}" '^(ssh|kubectl|socat|docker-proxy|rootlessport)$'
+
+collect_tree() {
+  local root_pid="$1" index=0 parent child
+  local -a tree=("${root_pid}")
+  while (( index < ${#tree[@]} )); do
+    parent="${tree[${index}]}"
+    while IFS= read -r child; do
+      tree+=("${child}")
+    done < <(pgrep -P "${parent}" 2>/dev/null || true)
+    index=$(( index + 1 ))
+  done
+  printf '%s\n' "${tree[@]}"
+}
+
+declare -a profile_pids profile_roles
+declare -A tree_snapshots seen_profile_pids
+append_tree() {
+  local root_pid="$1" root_role="$2" pid role
+  local -a tree
+  mapfile -t tree < <(collect_tree "${root_pid}")
+  tree_snapshots["${root_pid}"]="${tree[*]}"
+  for pid in "${tree[@]}"; do
+    if [[ -n "${seen_profile_pids["${pid}"]:-}" ]]; then
+      echo "required component process trees overlap at PID: ${pid}" >&2
+      exit 2
+    fi
+    seen_profile_pids["${pid}"]=1
+    role="${root_role}"
+    if [[ "${pid}" != "${root_pid}" ]]; then
+      role="${root_role}-child"
+    fi
+    profile_pids+=("${pid}")
+    profile_roles+=("${role}")
+  done
+}
+
+append_tree "${controller_pid}" controller
+append_tree "${agent_pid}" agent
+append_tree "${postgres_pid}" postgres
+append_tree "${forwarder_pid}" port-forwarder
+for pid in "${input_pids[@]:4}"; do
+  append_tree "${pid}" extra
+done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n "$(git -C "${repo_root}" status --porcelain)" ]]; then
@@ -76,7 +120,7 @@ read_start_time() {
   echo "${20}"
 }
 
-for pid in "$@"; do
+for pid in "${profile_pids[@]}"; do
   starts["${pid}"]="$(read_ticks "${pid}")"
   start_times["${pid}"]="$(read_start_time "${pid}")"
 done
@@ -84,16 +128,24 @@ started_ns="$(date +%s%N)"
 sleep "${seconds}"
 ended_ns="$(date +%s%N)"
 
+for root_pid in "${input_pids[@]}"; do
+  current_tree="$(collect_tree "${root_pid}" | paste -sd ' ' -)"
+  if [[ "${current_tree}" != "${tree_snapshots["${root_pid}"]}" ]]; then
+    echo "component process tree changed during sample at root PID: ${root_pid}" >&2
+    exit 1
+  fi
+done
+
 echo -e "source_head\t$(git -C "${repo_root}" rev-parse HEAD)"
 echo -e "source_tree\t$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
 echo -e "host\t$(hostname -s)"
 echo -e "sample_seconds\t${seconds}"
 echo -e "target_percent\t5"
+echo -e "process_count\t${#profile_pids[@]}"
 echo -e "role\tpid\tcomm\tcpu_percent"
 total_ticks=0
-role_index=0
-roles=(controller agent postgres port-forwarder)
-for pid in "$@"; do
+for index in "${!profile_pids[@]}"; do
+  pid="${profile_pids[${index}]}"
   if [[ "$(read_start_time "${pid}")" != "${start_times["${pid}"]}" ]]; then
     echo "PID identity changed during sample: ${pid}" >&2
     exit 1
@@ -102,8 +154,7 @@ for pid in "$@"; do
   delta=$(( end - starts["${pid}"] ))
   total_ticks=$(( total_ticks + delta ))
   comm="$(<"/proc/${pid}/comm")"
-  role="${roles[${role_index}]:-extra}"
-  role_index=$(( role_index + 1 ))
+  role="${profile_roles[${index}]}"
   awk -v role="${role}" -v pid="${pid}" -v comm="${comm}" -v ticks="${delta}" \
     -v hz="${ticks_per_second}" -v elapsed_ns="$(( ended_ns - started_ns ))" \
     'BEGIN { printf "%s\t%s\t%s\t%.3f\n", role, pid, comm, ticks / hz / (elapsed_ns / 1e9) * 100 }'
