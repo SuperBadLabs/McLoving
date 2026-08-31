@@ -194,6 +194,75 @@ async fn queued_work_emits_a_transactional_tenant_wakeup() {
         duplicate.is_err(),
         "a no-op queued-status update must not emit another work-ready hint"
     );
+
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "notification-scheduler".to_owned(),
+            agent_id: "notification-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".to_owned(),
+            lease_seconds: 30,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim notification work")
+        .expect("notification work is claimable");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let notification = listener.recv().await.expect("receive active-lease hint");
+            if notification.payload() == organization_id.to_string() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("a newly active lease wakes reconciliation-only controllers");
+
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = lease_expires_at - interval '5 seconds'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("shorten the active lease deadline");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let notification = listener.recv().await.expect("receive shorter-lease hint");
+            if notification.payload() == organization_id.to_string() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("an earlier active lease deadline wakes existing waiters");
+
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = lease_expires_at + interval '5 seconds'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("extend the active lease deadline");
+    let extension = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            let notification = listener.recv().await.expect("receive active-lease hint");
+            if notification.payload() == organization_id.to_string() {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        extension.is_err(),
+        "a later active lease deadline must not emit a redundant wake hint"
+    );
 }
 
 #[tokio::test]

@@ -183,6 +183,9 @@ pub const EFFECT_DISPATCH_COMMIT_GUARD_V33: &str =
 /// Transactional wake hints for event-driven work acquisition.
 pub const WORK_READY_NOTIFICATIONS_V34: &str =
     include_str!("../migrations/0034_work_ready_notifications.sql");
+/// Wake reconciliation-only controllers when a new active lease is created.
+pub const ACTIVE_LEASE_NOTIFICATIONS_V35: &str =
+    include_str!("../migrations/0035_active_lease_notifications.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -1358,6 +1361,7 @@ impl Store {
         apply_migration(&mut tx, 32, EFFECT_DISPATCH_COMMIT_V32).await?;
         apply_migration(&mut tx, 33, EFFECT_DISPATCH_COMMIT_GUARD_V33).await?;
         apply_migration(&mut tx, 34, WORK_READY_NOTIFICATIONS_V34).await?;
+        apply_migration(&mut tx, 35, ACTIVE_LEASE_NOTIFICATIONS_V35).await?;
         tx.commit().await?;
         Ok(())
     }
