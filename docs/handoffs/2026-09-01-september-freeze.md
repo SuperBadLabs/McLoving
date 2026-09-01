@@ -14,7 +14,7 @@ is authorized to start during September. The normative freeze contract is
 | GitHub verification | `verified=true`, `reason=valid` |
 | Open pull requests | none at authoring time |
 | Board | 107 tickets; 21 remaining; one selected pending slot, `EXEC-005` |
-| Closure accounting | 86 done; 31 receipted; 30 reviewed; 37 admitted historical debt items |
+| Closure accounting | 86 done; 31 receipted; 30 threat-model reviewed; 37 admitted historical debt items |
 | Production authority | none |
 | Release readiness | not ready |
 

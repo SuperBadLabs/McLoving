@@ -18,8 +18,8 @@ decision.
   pull request is the final planned September repository mutation.
 - The board verifier reports 107 tickets and 21 remaining. `EXEC-005` is the
   selected next ticket but must remain `PENDING` during the freeze.
-- The closure verifier reports 86 done, 31 receipted, 30 reviewed, and the
-  admitted, ratcheted 37-item historical debt.
+- The closure verifier reports 86 done, 31 receipted, 30 threat-model reviewed,
+  and the admitted, ratcheted 37-item historical debt.
 - Protected-main Foundation, native Windows, and Release Builder runs are green
   at the authoring baseline. All eight required contexts remain bound to GitHub
   Actions app id `15368`.
