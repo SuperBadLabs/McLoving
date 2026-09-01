@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-08-30
+Updated: 2026-08-31
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
@@ -874,8 +874,11 @@ protected-main `b75165d`, production remote-agent lane over mTLS. Evidence
 bundle: luigi `~/games-round1-receipts.tgz` (environment fingerprint, heat
 logs, controller/agent logs, and the preserved agent journal). The bench also
 measured ~500 ms wall per single-step stage with both controller and agent
-polls at 10 ms — cause never isolated; that observation belongs to `PERF-001`
-and is recorded here only so it is not lost. These four tickets were first
+polls at 10 ms — since isolated: the agent work loop ran one assignment per
+poll tick, so per-stage cost was max(poll interval, work), and the shipped
+500 ms default paid the whole interval per stage. Fixed by `b1301e9`
+(PR #103); the observation belonged to `PERF-001` and its receipts live
+there. These four tickets were first
 drafted in PR #41 and are adopted here with their measured evidence unchanged.
 
 PR #103 (`b1301e9`) is partial `PERF-001` evidence, not a separate unnamed
@@ -884,6 +887,44 @@ between work already returned by a poll and the next claim, and its remote-work
 gate proves the agent drains a returned batch without interval pacing. The
 capacity envelopes, pinned deployment profiles, saturation measurements, and
 reviewed regression margins in the `PERF-001` acceptance remain pending.
+
+Four further protected-main merges are partial `PERF-001` evidence in the
+same sense as PR #103 — measured, labeled, and not closure. PR #105
+(`30a206b`) cut the per-attempt agent-to-controller protocol from seven
+serialized round trips to four behind negotiated features; paired
+same-host cells on a fresh database measured 242.7 to 218.4 ms/stage
+(Mario, shipped 500 ms interval). PR #106 (`6f6b97f`) collapsed the
+controller's evidence write from seven statements to two and its
+per-RPC authorization to one, measuring 220.4 to 208.3 ms/stage on the
+same rig and configuration. PR #107 (`23b2273`) removed a rare
+fail-closed freeze — an unrelated process dying mid-scan parked an
+attempt as `reconciliation_required` and stopped the agent's lane —
+found and churn-validated at roughly one occurrence per five thousand
+attempts. PR #108 (`ef08716`) turned the agent's per-attempt durability
+fsyncs into concurrent batched barriers under named crash-recovery
+properties, measuring 271.5 to 228.0 and 291.9 to 238.5 ms/stage across
+two interleaved rounds (Luigi, whose fsync measured ~14 ms against
+Mario's 1.9 ms — per-stage numbers are within-rig, within-configuration
+deltas and must never be paired across rigs or poll settings).
+
+The externally filed 2026-08-29 observation "replace the fixed-interval
+polling regime with event-driven waits" (measured against `83a6d6c`,
+pre-dating all of the above) is CLOSED against its own acceptance
+criteria: per-stage cost at shipped defaults with no interval lowered —
+71.2018 ms/stage median against its 183 ms bar; idle CPU 1.099% of one
+core for the complete stack against its 5% bar; every property its
+sleeps guarded kept a gate (work-loop drain, submission wake, lease
+renewal, cancellation observation, reconciliation cadence, stale-fence
+rejection); and the measurements carry median and minimum estimators
+under its own admissibility rule. Its headline attribution — 19% of
+per-stage cost recoverable by event-driven waits — was true of the
+build it measured and not of later main: `893e06f` (PR #78) moved work
+acquisition onto the per-organization advisory-lock queue, which
+absorbed the poll sensitivity, and the shipped-default cost it never
+observed was the drain defect fixed by `b1301e9`. The filing campaign's
+own report marks its McLoving figures superseded (they were measured at
+a 10 ms poll, where the drain defect is invisible). Closure of the
+observation does not close `PERF-001`.
 
 PR #109 (`4f77485`) and PR #110 (`0f6499f`) close the bounded event-wait
 dimension without closing `PERF-001`: remote, schedulable embedded, and
