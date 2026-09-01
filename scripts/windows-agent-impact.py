@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -38,13 +39,19 @@ WINDOWS_VERIFIER_DIRECTORIES = {
 WINDOWS_VERIFIER_INPUT_DIRECTORIES = {Path("migration")}
 
 
-def run(*args: str, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
+def run(
+    *args: str,
+    cwd: Path | None = None,
+    text: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     completed = subprocess.run(
         args,
         cwd=cwd,
         check=False,
         capture_output=True,
         text=text,
+        env=env,
     )
     if completed.returncode != 0:
         stderr = completed.stderr
@@ -102,9 +109,41 @@ def export_revision(revision: str, repository: Path, destination: Path) -> None:
 
 
 def cargo_metadata(tree: Path) -> dict[str, Any]:
-    cargo = ["cargo"]
+    cargo_path = shutil.which("cargo")
+    rustc_path = shutil.which("rustc")
+    if cargo_path is None or rustc_path is None:
+        raise RuntimeError("trusted cargo and rustc executables must be on PATH")
+    cargo = [cargo_path]
     if os.environ.get("MCLOVING_CARGO_NO_TOOLCHAIN") != "1":
         cargo.append("+1.97.1")
+    # Candidate `.cargo/config*` changes are short-circuited before this
+    # function. Pin the compiler controls anyway, so a trusted base config or
+    # environment cannot accidentally delegate metadata to a wrapper. The
+    # absolute executable paths are resolved before Cargo reads any tree.
+    cargo.extend(
+        (
+            "--config",
+            f"build.rustc={json.dumps(rustc_path)}",
+            "--config",
+            'build.rustc-wrapper=""',
+            "--config",
+            'build.rustc-workspace-wrapper=""',
+        )
+    )
+    environment = dict(os.environ)
+    for variable in (
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        "GITHUB_OUTPUT",
+        "GITHUB_ENV",
+        "GITHUB_PATH",
+        "GITHUB_STEP_SUMMARY",
+    ):
+        environment.pop(variable, None)
     return json.loads(
         run(
             *cargo,
@@ -114,6 +153,8 @@ def cargo_metadata(tree: Path) -> dict[str, Any]:
             "1",
             "--manifest-path",
             str(tree / "Cargo.toml"),
+            cwd=tree,
+            env=environment,
         ).stdout
     )
 
@@ -258,26 +299,24 @@ def emit_result(run_windows: bool, reason: str) -> None:
     print(f"run-windows={'true' if run_windows else 'false'}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base", required=True)
-    parser.add_argument("--head", required=True)
-    parser.add_argument("--repository", type=Path, default=Path.cwd())
-    arguments = parser.parse_args()
+def classify_revisions(base: str, head: str, repository: Path) -> tuple[bool, str]:
+    """Classify revisions without executing changed gate configuration."""
+    paths = changed_paths(base, head, repository)
+    always = sorted(paths & ALWAYS_RUN_PATHS)
+    if always:
+        return True, f"gate definition changed: {always[0]}"
 
-    repository = arguments.repository.resolve()
-    paths = changed_paths(arguments.base, arguments.head, repository)
     with tempfile.TemporaryDirectory(prefix="mcloving-windows-impact-") as root:
         root_path = Path(root)
         base_tree = root_path / "base"
         head_tree = root_path / "head"
         base_tree.mkdir()
         head_tree.mkdir()
-        export_revision(arguments.base, repository, base_tree)
-        export_revision(arguments.head, repository, head_tree)
+        export_revision(base, repository, base_tree)
+        export_revision(head, repository, head_tree)
         base_directories, base_digest = closure(cargo_metadata(base_tree), base_tree)
         head_directories, head_digest = closure(cargo_metadata(head_tree), head_tree)
-        run_windows, reason = classify(
+        return classify(
             paths,
             base_directories,
             head_directories,
@@ -287,6 +326,16 @@ def main() -> None:
             root_policy(head_tree),
         )
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    parser.add_argument("--repository", type=Path, default=Path.cwd())
+    arguments = parser.parse_args()
+
+    repository = arguments.repository.resolve()
+    run_windows, reason = classify_revisions(arguments.base, arguments.head, repository)
     emit_result(run_windows, reason)
 
 

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("windows-agent-impact.py")
@@ -22,6 +23,98 @@ SPEC.loader.exec_module(IMPACT)
 
 
 class WindowsAgentImpactTests(unittest.TestCase):
+    def test_changed_cargo_configuration_short_circuits_before_execution(self) -> None:
+        with (
+            mock.patch.object(
+                IMPACT,
+                "changed_paths",
+                return_value={".cargo/config.toml", "bins/agent/src/main.rs"},
+            ),
+            mock.patch.object(
+                IMPACT,
+                "export_revision",
+                side_effect=AssertionError("candidate revision must not execute"),
+            ),
+            mock.patch.object(
+                IMPACT,
+                "cargo_metadata",
+                side_effect=AssertionError("candidate Cargo config must not load"),
+            ),
+        ):
+            run_windows, reason = IMPACT.classify_revisions(
+                "base", "head", Path(".")
+            )
+        self.assertTrue(run_windows)
+        self.assertIn(".cargo/config.toml", reason)
+
+    def test_cargo_metadata_pins_compiler_controls(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"packages": []}', stderr=""
+        )
+        with tempfile.TemporaryDirectory() as root:
+            tree = Path(root)
+            with (
+                mock.patch.object(
+                    IMPACT.shutil,
+                    "which",
+                    side_effect=("/trusted/cargo", "/trusted/rustc"),
+                ),
+                mock.patch.object(IMPACT, "run", return_value=completed) as command,
+                mock.patch.dict(
+                    IMPACT.os.environ,
+                    {
+                        "MCLOVING_CARGO_NO_TOOLCHAIN": "1",
+                        "RUSTC": "/candidate/rustc",
+                        "RUSTC_WRAPPER": "/candidate/wrapper",
+                        "RUSTC_WORKSPACE_WRAPPER": "/candidate/workspace-wrapper",
+                        "CARGO_BUILD_RUSTC": "/candidate/rustc",
+                        "CARGO_BUILD_RUSTC_WRAPPER": "/candidate/wrapper",
+                        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER":
+                            "/candidate/workspace-wrapper",
+                        "GITHUB_OUTPUT": "/runner/command/output",
+                        "GITHUB_ENV": "/runner/command/env",
+                        "GITHUB_PATH": "/runner/command/path",
+                        "GITHUB_STEP_SUMMARY": "/runner/command/summary",
+                    },
+                ),
+            ):
+                self.assertEqual(IMPACT.cargo_metadata(tree), {"packages": []})
+
+        arguments = command.call_args.args
+        options = command.call_args.kwargs
+        self.assertEqual(
+            arguments,
+            (
+                "/trusted/cargo",
+                "--config",
+                'build.rustc="/trusted/rustc"',
+                "--config",
+                'build.rustc-wrapper=""',
+                "--config",
+                'build.rustc-workspace-wrapper=""',
+                "metadata",
+                "--locked",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                str(tree / "Cargo.toml"),
+            ),
+        )
+        self.assertEqual(options["cwd"], tree)
+        for variable in (
+            "RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            "GITHUB_OUTPUT",
+            "GITHUB_ENV",
+            "GITHUB_PATH",
+            "GITHUB_STEP_SUMMARY",
+        ):
+            self.assertNotIn(variable, options["env"])
+
     def test_closure_includes_migration_verifier_dependencies(self) -> None:
         directories, _digest = IMPACT.closure(IMPACT.cargo_metadata(Path.cwd()), Path.cwd())
         self.assertTrue(

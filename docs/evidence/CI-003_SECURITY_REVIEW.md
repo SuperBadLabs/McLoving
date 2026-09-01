@@ -85,6 +85,15 @@ not succeed, or a non-impact execution that did not skip fails closed. Both
 jobs invoke the same checked-out `scripts/verify-workflow-aggregate.py` rather
 than carrying divergent shell predicates.
 
+The Windows classifier resolves changed paths before exporting either revision
+and immediately requires Windows for every Cargo/gate configuration path. It
+therefore never loads changed candidate Cargo configuration. Metadata runs from
+the exported tree with absolute Cargo/Rust compiler paths resolved first,
+command-line overrides disabling compiler wrappers, and inherited compiler
+override variables and GitHub command-file paths removed. A candidate
+`build.rustc-wrapper` cannot execute or mutate workflow outputs before the
+authoritative decision.
+
 `scripts/test-workflow-aggregate.py` exhausts all 390,625 combinations of five
 possible results across the eight Foundation lanes, the complete Windows
 classifier/decision/result matrix, malformed and duplicate inputs, and the
@@ -160,7 +169,9 @@ still subvert the gate.
 - ten mutation-oriented aggregate tests pass locally;
 - all 390,625 Foundation states have exactly one accepting state;
 - the full Windows truth table has exactly two accepting states;
-- the eleven existing Windows-impact classifier tests pass;
+- the thirteen Windows-impact classifier tests pass, including proof that
+  changed Cargo configuration short-circuits before revision export or
+  metadata and that metadata pins compiler/wrapper controls;
 - pinned actionlint 1.7.12 accepts all workflows;
 - board, closure-receipt, and Rust-denominator tests and verifiers pass;
 - `bash -n scripts/validate-foundation.sh` and `git diff --check` pass.
