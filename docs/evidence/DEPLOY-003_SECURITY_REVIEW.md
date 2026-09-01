@@ -167,6 +167,30 @@ image-provider digests before changing either mode; an image revision therefore
 fails closed until its pins are reviewed. The unchanged validator then repeats
 the exact-target, root-owner, non-writable, version, and hash checks.
 
+Protected run `33468046013` (job `99731881671`) then passed those digest pins,
+the controlled-input preflight, the full fallback/adverse suite, and exact
+release construction. Its wrapper refused before invoking the real-manager arm:
+the image account's `/home/runner` is mode 0750, so disposable uid 1002 could
+not traverse to the runtime gate and release beneath it. The two later
+`/home/runner/.config/containers/storage.conf` messages came from failure-only
+Podman diagnostics, not Quadlet, and exposed a separate environment-boundary
+flaw. The workflow now requires the exact image-owned home mode and owner, then
+adds only search permission (0750 to 0751) immediately before the disposable
+account run and restores 0750 on every exit path before later workflow steps.
+The wrapper names each traversal failure and never invokes Podman
+from diagnostics, preserving the generated volume unit as the cold first
+operation.
+
+Independently, the wrapper starts the manager with explicit account-local HOME and XDG bases,
+an exact account identity and PATH, unsets documented Podman remote, storage,
+configuration, policy, auth, and hook overrides, launches every account command
+from an empty environment with the same bases, and reads the manager's typed
+environment back to require those exact values, no container-override prefix,
+and no reference to the invoking account's home before the first Podman
+operation. User-environment generators cannot override that verdict: the
+wrapper reapplies the exact manager values and documented unsets through the
+manager API, then performs the typed readback.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the
@@ -184,7 +208,9 @@ cold-pull the pinned image,
 then proves install, Quadlet generation, dependency ordering, runtime
 hardening, ordered start, stability, health, upgrade, rollback, and both exact
 deployable-runtime tests. Failure captures unit status, the user journal,
-Podman state/logs, mount state, and tool versions before removing the account.
+mount state, and tool versions before removing the account; it deliberately
+does not invoke Podman because a pre-arm failure has not crossed the cold-first
+operation boundary.
 
 The arm snapshots configuration, state, runtime, manager `UnitPath`, and
 Quadlet roots once and reuses that model for probe, optional reset, and

@@ -151,6 +151,14 @@ normalized on the exact `/usr/share` and `/usr/local` input chains before that
 unchanged validator runs, together with only the two expected regular static
 bundle executables after their image-provider digests match reviewed pins, while
 any symlink, foreign owner, or new drift is refused;
+the short-lived service account receives only a temporary search bit on the
+exact owner/mode-checked hosted runner home needed to reach its inputs, and the
+job restores the original mode on every exit path;
+the disposable manager receives exact account-local HOME/XDG and identity
+values while every account command starts from an empty environment; inherited container
+remote/storage/configuration overrides are removed, and the manager's typed
+identity, PATH, environment prefixes, and absence of the invoking home are read
+back before the cold Podman operation;
 property-labelled typed manager command-tuple facts then bind every generated
 start and present stop command to that selected Podman executable, whose
 version is compared with Quadlet after cold start; runtime and administrator

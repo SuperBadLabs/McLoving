@@ -557,11 +557,30 @@ jobs:
           echo "runtime_gate=${runtime_gate}" >> "${GITHUB_OUTPUT}"
           echo "release_dir=${release_dir}" >> "${GITHUB_OUTPUT}"
       - name: Run the deployment under a controlled real user manager
-        run: >-
-          bash deploy/run-systemd-ci.sh
-          "${{ steps.systemd-inputs.outputs.runtime_gate }}"
-          "${{ steps.systemd-inputs.outputs.release_dir }}"
-          "${{ steps.systemd-inputs.outputs.release_dir }}/checksums.sha256"
+        # The disposable account must execute the gate and release below the
+        # runner home, which the hosted image owns at 0750. Add only search --
+        # never read or write -- after every runner-owned build has completed.
+        # Refuse image drift rather than broadening an unknown mode, and restore
+        # 0750 on every exit path before the failure artifact step can run.
+        run: |
+          test "${HOME}" = /home/runner
+          test -d "${HOME}"
+          test ! -L "${HOME}"
+          test "$(stat -c '%u' "${HOME}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${HOME}")" = 750
+          restore_home_mode() {
+            local status=$?
+            trap - EXIT
+            chmod 750 "${HOME}" || status=1
+            exit "${status}"
+          }
+          trap restore_home_mode EXIT
+          chmod o+x "${HOME}"
+          test "$(stat -c '%a' "${HOME}")" = 751
+          bash deploy/run-systemd-ci.sh \
+            "${{ steps.systemd-inputs.outputs.runtime_gate }}" \
+            "${{ steps.systemd-inputs.outputs.release_dir }}" \
+            "${{ steps.systemd-inputs.outputs.release_dir }}/checksums.sha256"
       - name: Upload the preserved smoke-test working directory
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

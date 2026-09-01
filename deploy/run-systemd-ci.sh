@@ -10,6 +10,8 @@ set -euo pipefail
 umask 022
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+invoking_home="${HOME:-}"
+controlled_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # shellcheck source=deploy/systemd-ci-lib.sh
 source "${repo_root}/deploy/systemd-ci-lib.sh"
 
@@ -51,27 +53,26 @@ generator_masks=()
 vendor_mounted=0
 account_created=0
 proof_started_epoch="$(date +%s)"
+user_env=()
 
 diagnostics() {
   [[ -n "${uid}" ]] || return 0
-  local runtime_dir="/run/user/${uid}" bus="unix:path=/run/user/${uid}/bus"
+  local runtime_dir="/run/user/${uid}"
   echo "== systemd-arm diagnostics"
-  sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}" \
-    DBUS_SESSION_BUS_ADDRESS="${bus}" systemctl --user show -p UnitPath --value 2>&1 || true
-  sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}" \
-    DBUS_SESSION_BUS_ADDRESS="${bus}" systemctl --user status \
+  (( ${#user_env[@]} > 0 )) || return 0
+  "${user_env[@]}" systemctl --user show -p UnitPath --value 2>&1 || true
+  "${user_env[@]}" systemctl --user status \
       mcloving-postgres.service mcloving-postgres-data-volume.service \
       mcloving-db-init.service \
       mcloving-controller.service mcloving-agent.service --no-pager -n 80 2>&1 || true
   sudo journalctl _UID="${uid}" --since "@${proof_started_epoch}" \
     --no-pager -n 300 2>&1 || true
-  sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}" \
-    DBUS_SESSION_BUS_ADDRESS="${bus}" podman ps -a 2>&1 || true
-  sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}" \
-    DBUS_SESSION_BUS_ADDRESS="${bus}" podman logs mcloving-postgres 2>&1 || true
+  # Podman diagnostics are forbidden here. A wrapper failure can happen before
+  # the generated volume unit performs the account's cold first operation;
+  # even `podman ps` creates state on supported Podman 4.9 and previously both
+  # broke that invariant and obscured the actual pre-arm refusal.
   findmnt -T "${vendor_root}" 2>&1 || true
   systemd --version | head -1 || true
-  podman --version || true
 }
 
 cleanup() {
@@ -117,6 +118,16 @@ account_created=1
 uid="$(id -u "${account}")"
 runtime_dir="/run/user/${uid}"
 bus_address="unix:path=${runtime_dir}/bus"
+user_env=(sudo -u "${account}" env -i
+  HOME="${home_dir}"
+  XDG_CONFIG_HOME="${home_dir}/.config"
+  XDG_DATA_HOME="${home_dir}/.local/share"
+  XDG_STATE_HOME="${home_dir}/.local/state"
+  XDG_CACHE_HOME="${home_dir}/.cache"
+  XDG_RUNTIME_DIR="${runtime_dir}"
+  DBUS_SESSION_BUS_ADDRESS="${bus_address}"
+  USER="${account}" LOGNAME="${account}" SHELL=/bin/bash
+  PATH="${controlled_path}")
 if [[ -e "${runtime_dir}" || -L "${runtime_dir}" ]]; then
   echo "refusing to adopt pre-existing runtime path ${runtime_dir}" >&2
   exit 1
@@ -145,8 +156,11 @@ if sudo test -e "${manager_dropin}" || sudo test -L "${manager_dropin}"; then
 fi
 sudo install -d -m 0755 "${manager_dropin_dir}"
 dropin_tmp="$(mktemp)"
-printf '[Service]\nEnvironment="SYSTEMD_UNIT_PATH=%s"\nEnvironment="QUADLET_UNIT_DIRS=%s"\n' \
-  "${unit_path}" "${quadlet_path}" > "${dropin_tmp}"
+printf '[Service]\nEnvironment="HOME=%s"\nEnvironment="XDG_CONFIG_HOME=%s/.config"\nEnvironment="XDG_DATA_HOME=%s/.local/share"\nEnvironment="XDG_STATE_HOME=%s/.local/state"\nEnvironment="XDG_CACHE_HOME=%s/.cache"\nEnvironment="XDG_RUNTIME_DIR=%s"\nEnvironment="USER=%s"\nEnvironment="LOGNAME=%s"\nEnvironment="SHELL=/bin/bash"\nEnvironment="PATH=%s"\nEnvironment="SYSTEMD_UNIT_PATH=%s"\nEnvironment="QUADLET_UNIT_DIRS=%s"\nUnsetEnvironment=CONTAINER_CONNECTION CONTAINER_HOST CONTAINER_SSHKEY CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF CONTAINERS_REGISTRIES_CONF CONTAINERS_REGISTRIES_CONF_DIR CONTAINERS_POLICY CONTAINERS_REGISTRIES_AUTH_FILE STORAGE_DRIVER STORAGE_OPTS REGISTRY_AUTH_FILE DOCKER_CONFIG PODMAN_PREEXEC_HOOKS_DIR\n' \
+  "${home_dir}" "${home_dir}" "${home_dir}" "${home_dir}" "${home_dir}" \
+  "${runtime_dir}" "${account}" "${account}" "${controlled_path}" \
+  "${unit_path}" "${quadlet_path}" \
+  > "${dropin_tmp}"
 sudo install -m 0644 "${dropin_tmp}" "${manager_dropin}"
 rm -f -- "${dropin_tmp}"
 
@@ -192,9 +206,7 @@ sudo systemctl daemon-reload
 sudo loginctl enable-linger "${account}"
 sudo systemctl start "user@${uid}.service"
 for _ in $(seq 1 60); do
-  if sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}" \
-    DBUS_SESSION_BUS_ADDRESS="${bus_address}" \
-    systemctl --user show-environment >/dev/null 2>&1; then
+  if "${user_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
     manager_ready=1
     break
   fi
@@ -203,9 +215,26 @@ done
 [[ "${manager_ready:-0}" == 1 ]] \
   || { echo "user manager did not answer an authenticated query" >&2; exit 1; }
 
-user_env=(sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}"
-  DBUS_SESSION_BUS_ADDRESS="${bus_address}" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-  MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION=1
+# User environment generators may refine the manager block after the service
+# drop-in is applied. Reassert the exact identity and clear the documented
+# Podman selectors through the manager API, still without invoking Podman.
+"${user_env[@]}" systemctl --user unset-environment \
+  CONTAINER_CONNECTION CONTAINER_HOST CONTAINER_SSHKEY \
+  CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF \
+  CONTAINERS_REGISTRIES_CONF CONTAINERS_REGISTRIES_CONF_DIR \
+  CONTAINERS_POLICY CONTAINERS_REGISTRIES_AUTH_FILE STORAGE_DRIVER STORAGE_OPTS \
+  REGISTRY_AUTH_FILE DOCKER_CONFIG PODMAN_PREEXEC_HOOKS_DIR
+"${user_env[@]}" systemctl --user set-environment \
+  "HOME=${home_dir}" \
+  "XDG_CONFIG_HOME=${home_dir}/.config" \
+  "XDG_DATA_HOME=${home_dir}/.local/share" \
+  "XDG_STATE_HOME=${home_dir}/.local/state" \
+  "XDG_CACHE_HOME=${home_dir}/.cache" \
+  "XDG_RUNTIME_DIR=${runtime_dir}" \
+  "USER=${account}" "LOGNAME=${account}" "SHELL=/bin/bash" \
+  "PATH=${controlled_path}"
+
+user_env+=(MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION=1
   MCLOVING_PODMAN_USER_GENERATOR="${MCLOVING_CI_PODMAN_GENERATOR}"
   MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE="${space_unit_root}"
   MCLOVING_EXPECT_ABSENT_UNIT_PATH_PARENT="${absent_bound_parent}")
@@ -213,8 +242,30 @@ actual_unit_path="$("${user_env[@]}" systemctl --user show -p UnitPath --value)"
 [[ -n "${actual_unit_path}" ]] \
   || { echo "controlled manager returned an empty UnitPath" >&2; exit 1; }
 manager_environment="$("${user_env[@]}" systemctl --user show-environment)"
+for expected_manager_environment in \
+  "HOME=${home_dir}" \
+  "XDG_CONFIG_HOME=${home_dir}/.config" \
+  "XDG_DATA_HOME=${home_dir}/.local/share" \
+  "XDG_STATE_HOME=${home_dir}/.local/state" \
+  "XDG_CACHE_HOME=${home_dir}/.cache" \
+  "XDG_RUNTIME_DIR=${runtime_dir}" \
+  "USER=${account}" \
+  "LOGNAME=${account}" \
+  "SHELL=/bin/bash" \
+  "PATH=${controlled_path}"; do
+  grep -Fqx "${expected_manager_environment}" <<<"${manager_environment}" \
+    || { echo "manager did not retain ${expected_manager_environment}" >&2; exit 1; }
+done
 grep -qx "QUADLET_UNIT_DIRS=${quadlet_path}" <<<"${manager_environment}" \
   || { echo "manager did not retain the exact Quadlet source boundary" >&2; exit 1; }
+! grep -Eq \
+  '^(CONTAINER_|CONTAINERS_|STORAGE_(DRIVER|OPTS)=|REGISTRY_AUTH_FILE=|DOCKER_CONFIG=|PODMAN_PREEXEC_HOOKS_DIR=)' \
+  <<<"${manager_environment}" \
+  || { echo "manager retained a forbidden container configuration override" >&2; exit 1; }
+if [[ -n "${invoking_home}" && "${invoking_home}" != "${home_dir}" ]]; then
+  ! grep -Fq "${invoking_home}" <<<"${manager_environment}" \
+    || { echo "manager retained a reference to the invoking account's home" >&2; exit 1; }
+fi
 findmnt -n -o OPTIONS -T "${vendor_root}" | tr ',' '\n' | grep -qx ro \
   || { echo "vendor unit bind is not read-only" >&2; exit 1; }
 if "${user_env[@]}" test -w "${vendor_root}"; then
@@ -233,9 +284,12 @@ fi
 # disposable account can traverse and execute both before starting a 10-step
 # arm that would otherwise fail only at its final acceptance gate.
 gate_controller="$(dirname "$(dirname "${runtime_gate}")")/mcloving-controller"
-"${user_env[@]}" test -x "${runtime_gate}"
-"${user_env[@]}" test -x "${gate_controller}"
-"${user_env[@]}" test -r "${release_dir}/mcloving-controller"
+"${user_env[@]}" test -x "${runtime_gate}" \
+  || { echo "service account cannot traverse and execute runtime gate ${runtime_gate}" >&2; exit 1; }
+"${user_env[@]}" test -x "${gate_controller}" \
+  || { echo "service account cannot traverse and execute embedded controller ${gate_controller}" >&2; exit 1; }
+"${user_env[@]}" test -r "${release_dir}/mcloving-controller" \
+  || { echo "service account cannot traverse and read staged release ${release_dir}" >&2; exit 1; }
 
 echo "controlled manager: uid=${uid} UnitPath=${actual_unit_path} Quadlet=${quadlet_path}"
 "${user_env[@]}" bash "${repo_root}/deploy/test-deployment-systemd.sh" \
