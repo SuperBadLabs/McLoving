@@ -172,6 +172,16 @@ jobs:
             deploy/apparmor/mcloving-external-shadow-replay
       - name: Run dependency resolver in its exact-capacity transport boundary
         run: bash scripts/dependency-resolver-contained.sh
+      - name: Run the complete destination-observer contract denominator
+        run: |
+          cargo +1.97.1 clippy --locked \
+            -p mcloving-destination-observer \
+            --all-targets --all-features -- -D warnings
+          bash scripts/run-verified-rust-test.sh \
+            58 destination-observer-contract \
+            cargo +1.97.1 test --locked \
+            -p mcloving-destination-observer \
+            --all-features --test observer_contract
       - name: Run external connector contracts and prove shadow network denial
         run: |
           cargo +1.97.1 test --locked -p mcloving-external-connector \
@@ -261,6 +271,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Clojure CLI
+        uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # 13.6.1
+        with:
+          cli: 1.12.4.1618
       - name: Verify foundation records
         run: |
           bash -n scripts/validate-foundation.sh
@@ -273,16 +287,24 @@ jobs:
           bash -n scripts/mario-runtime-effect-rehearsal.sh
           bash -n scripts/test-state-policy-differential.sh
           bash -n scripts/test-boundary-differential.sh
+          bash -n scripts/test-backup-restore.sh
+          bash -n scripts/run-verified-rust-test.sh
           bash -n scripts/verify-boundary-runtime.sh
           python3 scripts/test-execution-board.py
           python3 scripts/verify-execution-board.py
           python3 scripts/test-ticket-closure-receipts.py
           python3 scripts/verify-ticket-closure-receipts.py
+          python3 scripts/test-verify-rust-test-execution.py
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15
           test -s docs/architecture/CHARTER.md
           test -s docs/ALPHA_DEMO.md
           test -s docs/threat-model/README.md
           test -s docs/EXECUTION_BOARD.md
+      - name: Run Jenkins compatibility and plugin-directory contracts
+        working-directory: compat/jenkins-worker
+        run: |
+          timeout 60 clojure -M:test
+          ./test-plugin-directory.sh
 
   formal:
     name: Formal model
@@ -372,12 +394,57 @@ jobs:
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test external_admin_clients
       - name: Run contained OIDC protocol and session tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-api --test oidc_flow
+      - name: Run unsupported-spec admission gate against PostgreSQL
+        run: >-
+          bash scripts/run-verified-rust-test.sh
+          1 unsupported-spec --require-postgres
+          cargo +1.97.1 test --locked
+          -p mcloving-controller-api
+          --test unsupported_spec_gate
+      - name: Run real execution-spine contracts against PostgreSQL
+        run: >-
+          bash scripts/run-verified-rust-test.sh
+          30 real-spine --require-postgres
+          cargo +1.97.1 test --locked
+          -p mcloving-execution-spine
+          --test real_spine
+          -- --test-threads=1
       - name: Run shipped-controller credential rollout and rollback tests
         # `-- --ignored` because the gate is now #[ignore]d: it used to return
         # success with no assertions when MCLOVING_TEST_DATABASE_URL was unset,
         # and DEPLOY-001's acceptance names it, so an acceptance criterion was
         # satisfiable by not running. Without this flag it would not run here.
-        run: cargo +1.97.1 test --locked -p mcloving-controller --test deployable_runtime -- --ignored
+        run: >-
+          bash scripts/run-verified-rust-test.sh
+          2 deployable-runtime --require-postgres
+          cargo +1.97.1 test --locked
+          -p mcloving-controller --test deployable_runtime -- --ignored
+      - name: Run controller differential and capability gates
+        run: |
+          bash scripts/run-verified-rust-test.sh \
+            1 controller-differential --require-postgres \
+            cargo +1.97.1 test --locked -p mcloving-controller --test diff_001
+          bash scripts/run-verified-rust-test.sh \
+            2 capability-vocabulary --require-postgres \
+            cargo +1.97.1 test --locked -p mcloving-controller --test capability_vocabulary
+      - name: Build the shipped controller for remote-agent gates
+        run: cargo +1.97.1 build --locked -p mcloving-controller
+      - name: Run shipped remote-agent execution gates against PostgreSQL
+        env:
+          MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
+        run: |
+          # These binaries launch controller/agent processes on reserved
+          # loopback ports. Keep each binary serial so the bind after
+          # reservation release cannot race a sibling test for the same port.
+          bash scripts/run-verified-rust-test.sh \
+            3 remote-work --require-postgres \
+            cargo +1.97.1 test --locked -p mcloving-agent --test remote_work -- --test-threads=1
+          bash scripts/run-verified-rust-test.sh \
+            1 identity-collision --require-postgres \
+            cargo +1.97.1 test --locked -p mcloving-agent --test identity_collision -- --test-threads=1
+          bash scripts/run-verified-rust-test.sh \
+            2 long-step-lease --require-postgres \
+            cargo +1.97.1 test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1
 
   recovery-drill:
     name: Backup and restore
