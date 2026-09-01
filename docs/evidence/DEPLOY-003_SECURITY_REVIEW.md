@@ -112,6 +112,13 @@ The protected `Deployment lane` job now runs both halves in order:
 2. the service-managed arm under a disposable account on the same fresh
    `ubuntu-24.04` runner.
 
+The hosted 20260823 image exposes `/usr/share`, `/usr/share/containers`, and
+`/usr/share/systemd` as root-owned mode 0777. The fallback union correctly
+refuses those future source/drop-in creation points. Because the job owns the
+disposable VM, its preparation removes group/world write from those exact
+package ancestors before running the unchanged refusal specification; any new
+unsafe ancestor still fails by name.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the
