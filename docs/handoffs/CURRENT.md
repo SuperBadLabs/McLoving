@@ -1,53 +1,45 @@
 # Current custodian handoff
 
 The current dated handoff is
-[`2026-08-31-custodian.md`](2026-08-31-custodian.md).
+[`2026-09-01-september-freeze.md`](2026-09-01-september-freeze.md).
+
+McLoving is governed by the
+[`September 2026 code-freeze contract`](SEPTEMBER_2026_CODE_FREEZE.md) through
+2026-09-30 23:59:59 America/Chicago, unless the owner explicitly changes that
+decision.
 
 ## Read this first
 
 - Authoring baseline: protected `main`
-  `e7eefb6d66cf0886f4c9198fc88cbec757e80fd2`, tree
-  `65b2d78d099bd209e9a4ff247181f0be21da9009`.
-- The execution board is authoritative. Its selected pending implementation
-  slot is `DEPLOY-003`; do not mark it `ACTIVE` until an implementation branch
-  and pull request actually exist.
-- The board verifier reports 106 tickets and 22 remaining. No remaining ticket
-  is a batch. The closure-receipt verifier intentionally reports the admitted,
-  ratcheted 37-item historical debt.
-- There were no open pull requests at authoring time. The handoff publication
-  pull request is accounting only.
-- McLoving is not release-ready. No production effect, canary, cutover,
-  rollback, recutover, or decommission authority has been granted.
-- `PERF-001` is still `PENDING`. PRs #109 and #110 close only the bounded
-  event-wait dimension; the capacity, saturation, storage, recovery,
-  regression-margin, and eligible-platform envelopes remain open.
+  `c17bbafafe4f983b6e936cd2f57245edabfb1ffd`, tree
+  `dddf3c31edd2aa6f41d1614e119367beaa8dca5b`, GitHub-verified with reason
+  `valid`.
+- There were no open pull requests at authoring time. This handoff publication
+  pull request is the final planned September repository mutation.
+- The board verifier reports 107 tickets and 21 remaining. `EXEC-005` is the
+  selected next ticket but must remain `PENDING` during the freeze.
+- The closure verifier reports 86 done, 31 receipted, 30 reviewed, and the
+  admitted, ratcheted 37-item historical debt.
+- Protected-main Foundation, native Windows, and Release Builder runs are green
+  at the authoring baseline. All eight required contexts remain bound to GitHub
+  Actions app id `15368`.
+- McLoving is not release-ready and has no production authority.
+- Two open Dependabot records represent one moderate `jsonwebtoken` advisory.
+  They are deferred for reassessment, not resolved or accepted.
+
+## During September
+
+Do not start a board ticket, resume an old branch, open an implementation pull
+request, change dependencies or workflows, publish a release, or grant
+operational authority. Keep CI, branch protection, alerts, and monitoring
+enabled. Only an explicit written owner emergency decision may authorize a
+bounded exception, and every normal protected-merge obligation still applies.
 
 ## Safe next action
 
-Start with `DEPLOY-003` and read, in order:
-
-1. `docs/EXECUTION_BOARD.md`, especially the `DEPLOY-003` row and current
-   dispatch queue.
-2. `docs/architecture/DEPLOYMENT_TRUST_BOUNDARY_V1.md`.
-3. `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md`.
-4. `docs/evidence/DEPLOY-001_SECURITY_REVIEW.md`.
-5. `docs/evidence/CI-002_SECURITY_REVIEW.md`.
-
-The preferred closure is an ephemeral systemd-capable host with controlled
-global unit paths. A fresh lingering account on a shared host is not a clean
-host: root-owned global `UnitPath` entries remain shared. Preserve the board's
-manager-query, union-validation, retained-obligation, threat-model, exact-head
-review, and post-merge verification requirements.
-
-Before opening work, fetch protected main, verify the selected ticket is still
-current, and run:
-
-```text
-python3 scripts/verify-execution-board.py
-python3 scripts/verify-ticket-closure-receipts.py
-git status --short
-```
-
-The second command succeeds while printing the admitted debt. `--strict` is
-reserved for a zero-debt ceremony and is expected to fail until that debt is
-retired.
+Until the freeze expires or is explicitly lifted, the safe action is read-only
+observation. On thaw, follow the ordered procedure in the dated handoff:
+re-fetch protected main, audit September drift and alerts, re-read protection,
+run all board/closure/aggregate/Foundation gates, and only then decide whether
+`EXEC-005` is still the earliest ready ticket. Create a fresh branch rather
+than resuming a pre-freeze one.
