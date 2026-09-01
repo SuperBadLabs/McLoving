@@ -34,6 +34,15 @@ not nine branch-required contexts. The successful runs remain valid test
 evidence, but they were not proof that GitHub would reject a merge when an
 omitted job failed.
 
+App binding is deliberately scoped: it proves that GitHub Actions reported a
+context, not that a particular reviewed workflow definition produced it. The
+workflow and verifier are candidate-controlled source. The repository has one
+organization member and one CODEOWNER, so requiring a second human approval
+would deadlock owner-authored maintenance rather than create an operational
+control. `CI-003` therefore retains the six granular contexts, adds the two
+aggregates, requires independent exact-head source review by process, and
+records malicious authorized-writer workflow mutation as residual risk.
+
 ## Implementation
 
 The `Foundation` job is an `if: always()` aggregate over the terminal `Rust`,
@@ -66,6 +75,16 @@ The hosted Architecture job now downloads actionlint at the version pinned in
 and lints every workflow. This makes malformed workflow expressions and DAG
 edits a hosted failure instead of a local-only check.
 
+Independent review found that the first structural test allowed an aggregate
+verifier step to add `if: false` or `continue-on-error: true`; both mutations
+were actionlint-valid and left the seven tests green. The exact aggregate job
+schema is now allowlisted: only `name`, `runs-on`, `needs`, `if`, and `steps`
+are permitted at job level; exactly the pinned checkout and verifier steps are
+permitted; the verifier step may contain only `env` and `run`; and
+`continue-on-error` and verifier-step `if` are forbidden. Four negative
+mutations cover job- and step-level `continue-on-error`, a skipped verifier,
+and an extra step.
+
 ## Threat-model review
 
 `TM-052` records the branch-protection and aggregate boundary. `TM-016` and
@@ -80,14 +99,18 @@ reviewed with no mitigation change. `CI-003` changes whether their existing
 workflow evidence blocks merge; it does not replace those contracts. `TM-048`
 is corrected to describe its historical nine workflow outcomes accurately.
 
-Residual authority remains with GitHub and GitHub Actions, and an authorized
-repository administrator can mutate protection outside the source tree.
-Authority-sensitive merges therefore re-read the live rule. A compromised
-GitHub control plane or authorized administrator can still subvert the gate.
+Residual authority remains with GitHub and GitHub Actions. An authorized
+repository writer can weaken the candidate-controlled workflow and verifier;
+an authorized administrator can additionally mutate protection outside the
+source tree. App binding prevents a different app from impersonating a check
+but does not bind its workflow definition. Authority-sensitive merges therefore
+re-read the live rule and independently review exact workflow/verifier changes.
+A compromised GitHub control plane or authorized account can still subvert the
+gate.
 
 ## Verification in progress
 
-- seven mutation-oriented aggregate tests pass locally;
+- eight mutation-oriented aggregate tests pass locally;
 - all 390,625 Foundation states have exactly one accepting state;
 - the full Windows truth table has exactly two accepting states;
 - the eleven existing Windows-impact classifier tests pass;
@@ -97,9 +120,9 @@ GitHub control plane or authorized administrator can still subvert the gate.
 
 Closure additionally requires exact-head `Foundation` and `Windows` success,
 an independent exact-head review, zero unresolved threads, the after-state
-branch-protection readback with both contexts bound to GitHub Actions app id
-`15368`, merge, and protected-main verification. Until those receipts exist,
-the ticket remains `ACTIVE`.
+branch-protection readback with all six granular contexts plus both aggregates
+bound to GitHub Actions app id `15368`, merge, and protected-main verification.
+Until those receipts exist, the ticket remains `ACTIVE`.
 
 This review grants repository merge gating only. It grants no migration,
 runtime, deployment, production, credential, connector, canary, cutover,

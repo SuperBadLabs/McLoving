@@ -51,6 +51,50 @@ def needs(block: str) -> tuple[str, ...]:
     return tuple(re.findall(r"(?m)^      - ([a-z0-9-]+)$", match.group(1)))
 
 
+def step_blocks(block: str) -> tuple[str, ...]:
+    """Return the exact step mappings inside one top-level job block."""
+    matches = list(re.finditer(r"(?m)^      - name: .+$", block))
+    return tuple(
+        block[match.start() : matches[index + 1].start()]
+        if index + 1 < len(matches)
+        else block[match.start() :]
+        for index, match in enumerate(matches)
+    )
+
+
+def assert_safe_aggregate_job(
+    test: unittest.TestCase,
+    block: str,
+    *,
+    expected_name: str,
+) -> None:
+    """Reject workflow controls that can turn verifier failure into success."""
+    test.assertNotIn("continue-on-error:", block)
+    test.assertEqual(
+        re.findall(r"(?m)^    ([a-z][a-z-]*):", block),
+        ["name", "runs-on", "needs", "if", "steps"],
+    )
+    test.assertIn(f"\n    name: {expected_name}\n", block)
+    test.assertIn("\n    if: always()\n", block)
+
+    steps = step_blocks(block)
+    test.assertEqual(len(steps), 2)
+    checkout, verifier = steps
+    test.assertEqual(
+        re.findall(r"(?m)^        ([a-z][a-z-]*):", checkout),
+        ["uses"],
+    )
+    test.assertIn(
+        "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        checkout,
+    )
+    test.assertEqual(
+        re.findall(r"(?m)^        ([a-z][a-z-]*):", verifier),
+        ["env", "run"],
+    )
+    test.assertNotIn("\n        if:", verifier)
+
+
 def assert_rejected(test: unittest.TestCase, function, values: dict[str, str]) -> None:
     with redirect_stdout(StringIO()), test.assertRaises(AGGREGATE.AggregateError):
         function(values)
@@ -140,8 +184,9 @@ class WorkflowWiringTests(unittest.TestCase):
             "rust-boundary-suites",
         ))
         self.assertEqual(needs(jobs["foundation"]), AGGREGATE.FOUNDATION_JOBS)
-        self.assertIn("\n    name: Foundation\n", jobs["foundation"])
-        self.assertIn("\n    if: always()\n", jobs["foundation"])
+        assert_safe_aggregate_job(
+            self, jobs["foundation"], expected_name="Foundation"
+        )
 
         env_names = {
             "rust": "RUST_RESULT",
@@ -167,8 +212,7 @@ class WorkflowWiringTests(unittest.TestCase):
         jobs = workflow_jobs(WINDOWS_WORKFLOW)
         self.assertEqual(set(jobs), {"impact", "windows-agent", "windows"})
         self.assertEqual(needs(jobs["windows"]), ("impact", "windows-agent"))
-        self.assertIn("\n    name: Windows\n", jobs["windows"])
-        self.assertIn("\n    if: always()\n", jobs["windows"])
+        assert_safe_aggregate_job(self, jobs["windows"], expected_name="Windows")
         self.assertIn("IMPACT_RESULT: ${{ needs.impact.result }}", jobs["windows"])
         self.assertIn(
             "RUN_WINDOWS: ${{ needs.impact.outputs.run-windows }}", jobs["windows"]
@@ -185,6 +229,32 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn(
             "python3 scripts/verify-workflow-aggregate.py windows", jobs["windows"]
         )
+
+    def test_fail_open_workflow_controls_are_rejected(self) -> None:
+        jobs = workflow_jobs(FOUNDATION_WORKFLOW)
+        baseline = jobs["foundation"]
+        mutations = {
+            "job continue-on-error": baseline.replace(
+                "    if: always()\n", "    continue-on-error: true\n    if: always()\n"
+            ),
+            "verifier continue-on-error": baseline.replace(
+                "      - name: Require every Foundation lane to succeed\n",
+                "      - name: Require every Foundation lane to succeed\n"
+                "        continue-on-error: true\n",
+            ),
+            "verifier skipped": baseline.replace(
+                "      - name: Require every Foundation lane to succeed\n",
+                "      - name: Require every Foundation lane to succeed\n"
+                "        if: false\n",
+            ),
+            "extra success step": baseline
+            + "      - name: Override failure\n        run: true\n",
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                assert_safe_aggregate_job(
+                    self, mutation, expected_name="Foundation"
+                )
 
     def test_hosted_and_local_gates_run_this_suite(self) -> None:
         foundation = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")
