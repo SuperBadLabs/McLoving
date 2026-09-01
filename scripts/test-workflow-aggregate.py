@@ -77,6 +77,7 @@ ACTIONLINT_STEP = (
     '          actionlint_config="${RUNNER_TEMP}/actionlint-empty.yaml"\n'
     '          : > "${actionlint_config}"\n'
     "          unset GLOBIGNORE\n"
+    "          shopt -u failglob\n"
     "          shopt -s nullglob dotglob\n"
     "          workflow_files=(\n"
     "            .github/workflows/*.yml\n"
@@ -89,6 +90,7 @@ ACTIONLINT_STEP = (
 )
 LOCAL_ACTIONLINT_RUN = (
     "unset GLOBIGNORE\n"
+    "shopt -u failglob\n"
     "shopt -s nullglob dotglob\n"
     "workflow_files=(\n"
     '  "${repo_root}/.github/workflows/"*.yml\n'
@@ -410,7 +412,9 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_workflow_globs_clear_inherited_filters(self) -> None:
         script = """set -euo pipefail
 GLOBIGNORE='.github/workflows/*.yaml'
+shopt -s failglob
 unset GLOBIGNORE
+shopt -u failglob
 shopt -s nullglob dotglob
 workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
 ((${#workflow_files[@]} > 0))
@@ -421,7 +425,8 @@ printf '%s\\n' "${workflow_files[@]}"
             workflows = root / ".github/workflows"
             workflows.mkdir(parents=True)
             (workflows / "visible.yml").write_text("name: visible\n", encoding="utf-8")
-            (workflows / ".hidden.yaml").write_text("invalid: [\n", encoding="utf-8")
+            hidden_workflow = workflows / ".hidden.yaml"
+            hidden_workflow.write_text("invalid: [\n", encoding="utf-8")
 
             completed = subprocess.run(
                 ["bash", "-c", script],
@@ -449,6 +454,16 @@ printf '%s\\n' "${workflow_files[@]}"
                 filtered.stdout.splitlines(),
                 [".github/workflows/visible.yml"],
             )
+
+            hidden_workflow.unlink()
+            inherited_failglob = subprocess.run(
+                ["bash", "-c", script.replace("shopt -u failglob\n", "")],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(inherited_failglob.returncode, 0)
 
     def test_foundation_aggregate_covers_every_terminal_lane(self) -> None:
         jobs = workflow_jobs(FOUNDATION_WORKFLOW)

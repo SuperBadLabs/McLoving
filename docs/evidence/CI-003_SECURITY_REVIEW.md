@@ -116,10 +116,11 @@ a local-only check.
 
 The hosted step parses only one syntactically constrained actionlint version
 and SHA-256 assignment from `tools/versions.env`; it does not source candidate
-shell. Both hosted and local denominators clear `GLOBIGNORE`, enable `dotglob`
-and `nullglob`, and require at least one matched workflow. A regression injects
-a selective `.yaml` ignore while retaining a safe `.yml` and proves the hidden
-`.yaml` remains in the lint denominator. Both invocations pass an explicit
+shell. Both hosted and local denominators clear `GLOBIGNORE`, disable inherited
+`failglob`, enable `dotglob` and `nullglob`, and require at least one matched
+workflow. A regression injects selective `.yaml` filtering and inherited
+`failglob` while retaining a safe `.yml`, then proves the hidden `.yaml` remains
+in the lint denominator. Both invocations pass an explicit
 empty configuration from trusted temporary storage, so candidate
 `.github/actionlint.yml` or `.yaml` ignore rules are never auto-loaded.
 

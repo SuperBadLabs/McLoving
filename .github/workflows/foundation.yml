@@ -308,6 +308,7 @@ jobs:
           actionlint_config="${RUNNER_TEMP}/actionlint-empty.yaml"
           : > "${actionlint_config}"
           unset GLOBIGNORE
+          shopt -u failglob
           shopt -s nullglob dotglob
           workflow_files=(
             .github/workflows/*.yml

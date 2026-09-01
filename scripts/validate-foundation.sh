@@ -100,6 +100,7 @@ python3 -I "${repo_root}/scripts/test-workflow-aggregate.py"
 bash -n "${repo_root}/scripts/run-verified-rust-test.sh"
 bash -n "${repo_root}/scripts/validate-external-shadow-apparmor.sh"
 unset GLOBIGNORE
+shopt -u failglob
 shopt -s nullglob dotglob
 workflow_files=(
   "${repo_root}/.github/workflows/"*.yml
