@@ -130,6 +130,84 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-024 | UI or CLI hides uncertain or degraded state | Server-authoritative typed states and explicit gaps | User-journey and API contract tests | UX/CTRL | Client compromise |
 | TM-025 | Mixed-epoch, tampered, incomplete, stale, or secret-bearing Jenkins inventory is admitted as migration truth | Four typed strict-YAML families, byte-identical snapshot binding, detached SHA-256 sealing, mandatory owner-trusted external digest over both the complete binding and four-manifest filename/content-digest map at reconciliation/verification, independently sourced controller/direct-child/principal/ACL/client, per-job dependency/state-class, and per-state-class instance counts; every count/set commitment domain-separated and bound to the complete snapshot binding (controller/core/plugin/global configuration, collection time, exporter identity/version/content, and provenance) plus applicable owner identity; complete deterministic job, security-realm, principal, ACL, client, runtime-dependency, and state-record semantic commitments with distinct empty-group bindings; closed canonical runtime-dependency taxonomy whose credential/secret-parameter kinds force typed secret reference and consumer/taint evidence; mandatory runtime and state coverage for every job including retired jobs; referential and coverage reconciliation; exactly-once typed compatibility evidence for every declared library/trigger/platform/agent/toolchain requirement; workload-visible secrets forced unsupported; forward/rollback state-transform classification; create-new publication; and no execution authority | Digest tamper, strict-YAML alias, mixed-epoch, complete stale-bundle or same-binding semantic replay, cross-epoch or cross-configuration subgroup replay, stale semantic payload replay, unknown identity or dependency kind, secret-kind confidentiality downgrade, population omission and count mismatch, dependent count/set collector, same-cardinality identity, cross-domain empty-evidence replay, parent-edge, job-scope/owner/operational-state, principal lifecycle/mapping, ACL-permission/generation, client-contract, dependency-owner, state-owner, or state-instance-count substitution, retired/out-of-scope runtime or state omission, understated state instances, missing/duplicate/undeclared requirement evidence, incomplete coverage, unclassified secret/state behavior, workload-visible-secret downgrade, and secret-reference negative tests | COMPAT/SEC/OPS | Compromised trusted snapshot coordination state, Jenkins administrator/exporter, or false owner attestation |
 
+## DEPLOY-003 threat-model closure amendment
+
+The `PENDING under DEPLOY-003` clauses in TM-050 above are historical inputs
+to the ticket and are superseded by this amendment and
+`docs/evidence/DEPLOY-003_SECURITY_REVIEW.md`. Service-managed transitions now
+obtain typed composed unit facts from the user manager, consume mask/load
+answers directly, validate the complete manager `UnitPath` fragment union and
+independent Quadlet source union, and label every derived fallback. Install
+repeats the complete integrity verdict under the exclusive transition lock and
+again after `daemon-reload`. Service-environment capture pins the process with
+a pidfd and an opened `/proc/<pid>` directory, verifies control-group
+membership, and rechecks the manager invocation/PID/control-group tuple after
+copying directly from the held descriptor.
+Typed manager facts are supplemented by source-side classification where
+Quadlet's generated Podman argv loses the original policy class: `Volume=`
+contributes the real host ancestor, and `[Container] EnvironmentFile=`
+contributes an owner-only, default-deny environment contract, including from
+standalone recursive Quadlet drop-ins. Quadlet's relative `EnvironmentFile=`
+grammar is refused by source and value because the retained parser models only
+absolute contract paths; that refusal applies in manager and derived/offline
+modes, is limited to `[Container]`, and treats a leading dash as Quadlet does
+rather than importing systemd's optional-file syntax. No accepted Quadlet
+spelling is silently omitted.
+The protected deployment job proves this path under a disposable account with
+controlled unit and generator inputs. The generator is selected only from the
+version-matched `/usr` distro layout or image-provided `/usr/local` hosted
+bundle, with its exact target, ownership, modes, and version checked and its
+hashes recorded without invoking Podman before the generated volume unit;
+known root-owned writable package ancestors on the disposable hosted image are
+normalized on the exact `/usr/share` and `/usr/local` input chains before that
+unchanged validator runs, together with only the two expected regular static
+bundle executables after their image-provider digests match reviewed pins, while
+any symlink, foreign owner, or new drift is refused;
+the short-lived service account receives only a temporary search bit on the
+exact owner/mode-checked hosted runner home needed to reach its inputs, and the
+job restores the original mode on every exit path;
+the disposable manager receives exact account-local HOME/XDG and identity
+values while every account command starts from an empty environment through a
+direct UID/GID transition that cannot re-import variables through PAM; the
+disposable manager's drop-in also replaces `ExecStart` with a direct
+`/usr/bin/env -i` invocation carrying the exact block plus systemd's expanded
+notify socket, with no shell or inherited executable lookup before the clear;
+its PATH is required to equal the manager's compiled default so generator input
+does not change when systemd normalizes it; every installed user
+environment-generator basename is masked before startup so manager reloads
+cannot repopulate host variables; the account is created without a skeleton
+home, then its empty disposable home has inherited access and default ACLs
+removed and its exact 0755 three-entry ACL proved before any account-owned child
+is created; before
+D-Bus starts, the manager's private socket is used to install and prove an
+exact fourteen-entry identity/path/locale/unit/Quadlet/D-Bus allowlist so the
+daemon inherits only that block; the typed manager environment is then
+atomically replaced over D-Bus and read back by exact count and value before
+the cold Podman operation;
+property-labelled typed manager command-tuple facts then bind every generated
+start and present stop command to that selected Podman executable, whose
+version is compared with Quadlet after cold start; runtime and administrator
+overrides and mixed
+vendor layouts are refused. It requires
+and kernel-proves
+`NoNewPrivileges=yes` on the controller, agent, and database-init services,
+while deliberately requiring it absent on the two generated Podman services:
+an implementation-time fresh-account probe measured the bit preventing
+rootless `newuidmap`/`newgidmap`
+namespace creation. The generated volume unit performs the fresh account's
+first Podman operation, and the complete cold rootless lifecycle passes.
+
+The typed systemd 255 `ExecStart` tuple was measured not to resolve a bare
+executable. The lane therefore retains the named non-absolute refusal instead
+of guessing the manager's internal search path. Two residuals remain explicit:
+the point-in-time ancestor check is not TOCTOU-free, and a service-owned unit
+cannot make its own start-time verifier mandatory. `DEPLOY-002` now owns the
+external trust anchor required to detect unit, guard, selected-release, and
+permission drift on ordinary or crash restart. Until it closes, transition
+integrity is proved but restart-time integrity after drift is not, and no
+production qualification may claim otherwise. Workload authority over the
+service account remains the separate `SEC-005` boundary.
+
 ## DIFF-002 threat-model closure review
 
 Reviewed: 2026-08-14
@@ -370,6 +448,7 @@ had never claimed one.
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
 | DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
+| DEPLOY-003 | `docs/evidence/DEPLOY-003_SECURITY_REVIEW.md` |
 | DEPLOY-004 | `docs/evidence/DEPLOY-004_SECURITY_REVIEW.md` |
 | DIFF-002 | `docs/architecture/STATE_POLICY_DIFFERENTIAL_V1.md` |
 | DIFF-003 | `docs/evidence/DIFF-003_SECURITY_REVIEW.md` |

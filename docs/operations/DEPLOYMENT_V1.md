@@ -17,13 +17,13 @@ test cannot drift apart.
 
 | Service | Unit | Runs as | Health gate |
 | --- | --- | --- | --- |
-| PostgreSQL | `mcloving-postgres.service` (quadlet `deploy/podman/mcloving-postgres.container`) | rootless podman container, image digest-pinned from `tools/versions.env` | `pg_isready` health check; `Notify=healthy` means the unit only reports started when healthy |
-| DB bootstrap | `mcloving-db-init.service` (oneshot) | native | exits non-zero unless migrate + tenant login + organization provisioning all succeed |
+| PostgreSQL | `mcloving-postgres.service` (quadlet `deploy/podman/mcloving-postgres.container`) | rootless podman container, image digest-pinned from `tools/versions.env` | container health metadata is retained; the unit uses version-stable conmon readiness |
+| DB bootstrap | `mcloving-db-init.service` (oneshot) | native | requires two bounded `pg_isready` successes, then exits non-zero unless migrate + tenant login + organization provisioning all succeed |
 | Controller | `mcloving-controller.service` | native | `ExecStartPost` requires the public API to answer `/openapi.json` |
 | Agent | `mcloving-agent.service` | native | `ExecStartPre` runs `mcloving-agent probe` (one authenticated mTLS session + journal reconciliation) |
 
-Startup order (enforced by `Requires=`/`After=`): postgres healthy →
-db-init → controller → agent.
+Startup order (enforced by `Requires=`/`After=`): postgres container running →
+db-init PostgreSQL-readiness barrier → controller → agent.
 
 Durable state:
 

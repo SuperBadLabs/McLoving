@@ -390,6 +390,206 @@ if [[ "${#background_pids[@]}" -ne 0 ]]; then
   exit 1
 fi
 
+# The privileged systemd harness may run on a host where its named account and
+# manager policy predate this invocation.  Its EXIT trap must undo only the two
+# mutations this run actually completed.  Keep this source-level check in the
+# unprivileged suite: reproducing the refusal dynamically would require asking
+# an ordinary smoke test to disable a real user's linger or remove a root-owned
+# manager drop-in, exactly the collateral state this guard protects.
+python3 - "${repo_root}/deploy/run-systemd-ci.sh" <<'CI_CLEANUP_OWNERSHIP'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+cleanup_start = source.index("cleanup() {")
+cleanup_end = source.index("\n}\ntrap cleanup EXIT", cleanup_start)
+cleanup = source[cleanup_start:cleanup_end]
+
+checks = (
+    ("manager_started", 'sudo systemctl stop "user@${uid}.service"'),
+    ("linger_enabled", 'sudo loginctl disable-linger "${account}"'),
+    ("manager_dropin_created", 'sudo rm -f -- "${manager_dropin}"'),
+    ("manager_dropin_dir_created", 'sudo rmdir -- "${manager_dropin%/*}"'),
+)
+for flag, destructive_command in checks:
+    if not re.search(
+        rf"if \(\( {flag} \)\); then\n"
+        rf"    {re.escape(destructive_command)}",
+        cleanup,
+    ):
+        raise SystemExit(
+            f"run-systemd-ci cleanup does not guard {destructive_command!r} "
+            f"with invocation ownership flag {flag}"
+        )
+
+ordered_success_marks = (
+    ('sudo systemctl start "user@${uid}.service"', "manager_started=1"),
+    (
+        'sudo install -d -m 0755 "${manager_dropin_dir}"',
+        "manager_dropin_dir_created=1",
+    ),
+    (
+        'sudo install -m 0644 "${dropin_tmp}" "${manager_dropin}"',
+        "manager_dropin_created=1",
+    ),
+    ('sudo loginctl enable-linger "${account}"', "linger_enabled=1"),
+)
+for successful_mutation, ownership_mark in ordered_success_marks:
+    if f"{successful_mutation}\n{ownership_mark}" not in source:
+        raise SystemExit(
+            f"run-systemd-ci must set {ownership_mark} immediately after "
+            f"{successful_mutation!r} succeeds"
+        )
+
+trap_install = source.index("trap cleanup EXIT")
+for initialization in (
+    "manager_started=0",
+    "linger_enabled=0",
+    "manager_dropin_created=0",
+    "manager_dropin_dir_created=0",
+):
+    position = source.index(initialization)
+    if position > trap_install:
+        raise SystemExit(
+            f"run-systemd-ci initializes {initialization!r} only after its EXIT trap"
+        )
+
+absence_checks = (
+    (
+        'if sudo test -e "${linger_path}" || sudo test -L "${linger_path}"; then',
+        'sudo loginctl enable-linger "${account}"',
+    ),
+    (
+        'if sudo test -e "${manager_dropin_dir}" \\\n  || sudo test -L "${manager_dropin_dir}"; then',
+        'sudo install -d -m 0755 "${manager_dropin_dir}"',
+    ),
+)
+for absence_check, mutation in absence_checks:
+    if absence_check not in source or source.index(absence_check) > source.index(mutation):
+        raise SystemExit(
+            f"run-systemd-ci does not refuse pre-existing state before {mutation!r}"
+        )
+CI_CLEANUP_OWNERSHIP
+
+# Contract parsing and effective-environment observation carry passwords,
+# tokens, and private paths. They must not create or reopen files beneath an
+# inherited TMPDIR. Drive all three shared consumers with an absent TMPDIR;
+# held pipes preserve NUL framing and producer status without a pathname.
+secret_pipe_contract="${workdir}/secret-pipe-contract.env"
+printf 'MCLOVING_SECRET_PIPE_PROOF=held-only\n' > "${secret_pipe_contract}"
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  TMPDIR="${workdir}/absent-attacker-tmp"
+  export TMPDIR
+  load_environment_file "${secret_pipe_contract}"
+  contract_into secret_pipe_value MCLOVING_SECRET_PIPE_PROOF
+  [[ "${secret_pipe_value}" == held-only ]]
+  load_effective_contract "${secret_pipe_contract}"
+  contract_into secret_pipe_value MCLOVING_SECRET_PIPE_PROOF
+  [[ "${secret_pipe_value}" == held-only ]]
+  require_declared_variables_allowed "${repo_root}" "${secret_pipe_contract}"
+) || {
+  echo "secret-bearing parser paths still depend on caller-controlled TMPDIR" >&2
+  exit 1
+}
+rm -f "${secret_pipe_contract}"
+
+# Once an authenticated manager supplies both load-path boundaries, relative
+# XDG lists inherited only by the invoking shell are irrelevant and must not
+# veto that manager-authenticated answer.  The derived fallback still refuses
+# them in the end-to-end cases below.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  deployment_manager_speaks_for() { return 0; }
+  deployment_manager_unit_path() { encode_path_item /manager/units; }
+  deployment_manager_quadlet_unit_paths() { encode_path_item /manager/quadlets; }
+  XDG_CONFIG_DIRS=relative XDG_DATA_DIRS=also-relative \
+    require_usable_unit_search_path /fixture-home
+)
+
+# Manager-boundary unit fixtures run before the expensive build. These cover
+# values the controlled arm intentionally narrows (its Quadlet override is not
+# `/`, and its runtime directory is the UID default) while retaining the
+# production parser and transport.
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  deployment_manager_speaks_for() { return 0; }
+  deployment_manager_array_property() {
+    [[ "$2" == Environment ]] || return 1
+    encode_path_item 'QUADLET_UNIT_DIRS=/'
+  }
+  quadlet_root_raw="$(deployment_manager_quadlet_unit_paths /fixture-home)" || {
+    echo "typed QUADLET_UNIT_DIRS=/ was refused" >&2
+    exit 1
+  }
+  decode_path_item_into quadlet_root_decoded "${quadlet_root_raw}"
+  [[ "${quadlet_root_decoded}" == / ]] || {
+    echo "typed QUADLET_UNIT_DIRS=/ collapsed into a default-path answer" >&2
+    exit 1
+  }
+)
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  manager_python_args=""
+  deployment_python() { printf '%s\n' "$@"; }
+  XDG_RUNTIME_DIR='/run/custom manager'
+  DBUS_SESSION_BUS_ADDRESS='unix:path=/run/custom manager/bus'
+  manager_python_args="$(deployment_manager_python - payload)"
+  grep -qxF "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}" <<<"${manager_python_args}" \
+    && grep -qxF "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}" \
+      <<<"${manager_python_args}" || {
+    echo "typed manager query did not retain the authenticated bus endpoint" >&2
+    exit 1
+  }
+)
+(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
+  deployment_manager_speaks_for() { return 0; }
+  deployment_manager_array_property() {
+    [[ "$2" == Environment ]] || return 1
+    encode_path_item 'HOME=/fixture-home'
+    encode_path_item 'XDG_RUNTIME_DIR=/run/custom-runtime'
+  }
+  [[ "$(deployment_manager_runtime_root /fixture-home)" == /run/custom-runtime ]] || {
+    echo "the manager runtime root fell back to the caller's XDG_RUNTIME_DIR" >&2
+    exit 1
+  }
+  deployment_manager_quadlet_unit_paths() { return 2; }
+  deployment_effective_config_root() { printf '/fixture-home/.config\n'; }
+  deployment_effective_data_root() { printf '/fixture-home/.local/share\n'; }
+  quadlet_defaults="$(deployment_unit_load_paths /fixture-home all quadlet)"
+  quadlet_defaults_decoded=""
+  while IFS= read -r encoded_default; do
+    [[ -n "${encoded_default}" ]] || continue
+    decode_path_item_into decoded_default "${encoded_default}"
+    quadlet_defaults_decoded+="${decoded_default}"$'\n'
+  done <<<"${quadlet_defaults}"
+  grep -qxF /run/custom-runtime/containers/systemd \
+    <<<"${quadlet_defaults_decoded%$'\n'}" || {
+    echo "the default Quadlet union omitted the manager's runtime root" >&2
+    exit 1
+  }
+)
+
+# The process-environment capture must use an identity-bearing kernel handle,
+# never compare suspend-incompatible clocks or reopen a secret-bearing path.
+grep -q 'pidfd_open' "${repo_root}/deploy/bin/mcloving-deploy-lib.sh" || {
+  echo "process environment capture is not pidfd-bound" >&2
+  exit 1
+}
+if sed -n '/deployment_capture_unit_process_environment()/,/^}/p' \
+  "${repo_root}/deploy/bin/mcloving-deploy-lib.sh" \
+  | grep -q ExecMainStartTimestampMonotonic; then
+  echo "process environment capture still compares different clock domains" >&2
+  exit 1
+fi
+
 echo "== [0/9] pinned-digest drift guard"
 quadlet_image="$(sed -n 's/^Image=//p' "${repo_root}/deploy/podman/mcloving-postgres.container")"
 if [[ "${quadlet_image}" != "${MCLOVING_POSTGRES_IMAGE}" ]]; then
@@ -2100,6 +2300,39 @@ jq -e '
   echo "digest document is missing required coverage" >&2
   exit 1
 }
+# A nested Quadlet source is part of DEPLOY-003's complete candidate union
+# even though the installed top-level source currently wins. It is outside
+# the unit walk's owned top-level-name filter, so only the candidate inventory
+# can make a byte change visible in the canonical document.
+nested_candidate_dir="${smoke_quadlet_root}/inactive/nested"
+nested_candidate="${nested_candidate_dir}/mcloving-postgres.container"
+mkdir -p "${nested_candidate_dir}"
+cp "${smoke_quadlet_root}/mcloving-postgres.container" "${nested_candidate}"
+"${libexec}/helpers/mcloving-deployed-digests" --home "${home}" \
+  > "${workdir}/candidate-before.json"
+printf '\n# inactive candidate mutation\n' >> "${nested_candidate}"
+"${libexec}/helpers/mcloving-deployed-digests" --home "${home}" \
+  > "${workdir}/candidate-after.json"
+if cmp -s "${workdir}/candidate-before.json" "${workdir}/candidate-after.json"; then
+  echo "mutating a nested Quadlet candidate did not change deployed digests" >&2
+  exit 1
+fi
+jq -e '
+  [.unit_candidates[]
+   | select(.path | endswith("/inactive/nested/mcloving-postgres.container"))]
+  | length == 1
+' "${workdir}/candidate-after.json" >/dev/null || {
+  echo "nested Quadlet source is missing from the unit candidate inventory" >&2
+  exit 1
+}
+cp "${smoke_quadlet_root}/mcloving-postgres.container" "${nested_candidate}"
+"${libexec}/helpers/mcloving-deployed-digests" --home "${home}" \
+  > "${workdir}/candidate-restored.json"
+cmp "${workdir}/candidate-before.json" "${workdir}/candidate-restored.json" || {
+  echo "restoring the nested Quadlet candidate did not restore its digest" >&2
+  exit 1
+}
+rm -rf "${smoke_quadlet_root}/inactive"
 echo "digest re-read summary:"
 jq '{schema, current_release, previous_release,
      releases: (.releases | length), units: (.units | length),
@@ -3175,6 +3408,14 @@ race_status=0
 # set comes through the same derivation for the same reason: the payload
 # refuses to build a document without it rather than silently omitting the
 # type-wide and prefix drop-ins.
+race_unit_candidates="$(
+  # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
+  source "${libexec}/helpers/mcloving-deploy-lib.sh"
+  deployment_unit_candidate_files "${home}" \
+    "${smoke_unit_root}"/mcloving-*.service \
+    "${smoke_quadlet_root}"/mcloving-*.container \
+    "${smoke_quadlet_root}"/mcloving-*.volume
+)"
 race_shadowing_units="$(
   # shellcheck source=deploy/bin/mcloving-deploy-lib.sh
   source "${libexec}/helpers/mcloving-deploy-lib.sh"
@@ -3211,6 +3452,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_UNIT_CANDIDATES="${race_unit_candidates}" \
 MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" "${libexec}" <<'MODERACE' || race_status=$?
 import contextlib
@@ -3274,6 +3516,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_UNIT_CANDIDATES="${race_unit_candidates}" \
 MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/race-probe.txt" <<'CONTENTRACE' || content_race_status=$?
@@ -3351,6 +3594,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_UNIT_CANDIDATES="${race_unit_candidates}" \
 MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   "${config_dir}/ctime-probe.txt" <<'CTIMERACE' || ctime_race_status=$?
@@ -3427,6 +3671,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${race_dropin_dirs}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${race_system_dropin_dirs}" \
+MCLOVING_UNIT_CANDIDATES="${race_unit_candidates}" \
 MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 MCLOVING_CONFIGURED_PATHS="" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
@@ -4004,6 +4249,33 @@ mkdir -p "${dropin_root_home}"
   --no-systemd >/dev/null
 dropin_root_libexec="${dropin_root_home}/.local/libexec/mcloving"
 dropin_root_current="$(readlink "${dropin_root_libexec}/current")"
+
+# Quadlet [Container] EnvironmentFile= accepts a path relative to the source
+# unit, unlike systemd's absolute-only EnvironmentFile=. The shared parser
+# deliberately models the latter, so the derived/offline path must loudly
+# refuse both ordinary relative syntax and a leading dash -- Quadlet treats
+# that dash as part of the relative filename, not systemd's optional-file flag.
+dropin_quadlet_relative="${dropin_root_home}/.config/containers/systemd/mcloving-postgres.container.d/90-relative-env.conf"
+mkdir -p "${dropin_quadlet_relative%/*}"
+for relative_quadlet_value in relative.env -/etc/passwd; do
+  printf '[Container]\nEnvironmentFile=%s\n' "${relative_quadlet_value}" \
+    > "${dropin_quadlet_relative}"
+  relative_quadlet_slug="${relative_quadlet_value//\//-}"
+  if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+    --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+    --no-systemd > "${workdir}/logs/quadlet-relative-${relative_quadlet_slug}.log" 2>&1; then
+    echo "offline upgrade silently dropped relative Quadlet EnvironmentFile=${relative_quadlet_value}" >&2
+    exit 1
+  fi
+  grep -Fq "Quadlet source ${dropin_quadlet_relative} declares a relative EnvironmentFile (${relative_quadlet_value})" \
+    "${workdir}/logs/quadlet-relative-${relative_quadlet_slug}.log" || {
+    echo "relative Quadlet EnvironmentFile refusal did not name its source and value:" >&2
+    cat "${workdir}/logs/quadlet-relative-${relative_quadlet_slug}.log" >&2
+    exit 1
+  }
+done
+rm -rf "${dropin_quadlet_relative%/*}"
+
 mkdir -p "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d"
 printf '[Service]\nEnvironmentFile=%%h/dropin-shared/controller-extra.env\n' \
   > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/override.conf"
@@ -4644,14 +4916,21 @@ import pathlib
 import sys
 
 document = json.loads(pathlib.Path(sys.argv[1]).read_text())
-if "shadowing_units" not in document:
+if "unit_candidates" not in document:
     raise SystemExit(
-        "the canonical document has no shadowing_units key; a unit override "
-        "deciding what actually runs would be invisible drift"
+        "the canonical document has no unit_candidates key; unit inputs "
+        "that can decide what runs would be invisible drift"
     )
-recorded = {record["path"] for record in document["shadowing_units"]}
+recorded = {record["path"] for record in document["unit_candidates"]}
 if not any("user.control/mcloving-controller.service" in entry for entry in recorded):
     raise SystemExit(f"the shadowing unit was not recorded: {sorted(recorded)}")
+shadowing = {record["path"] for record in document["shadowing_units"]}
+if not any("user.control/mcloving-controller.service" in entry for entry in shadowing):
+    raise SystemExit(f"the v1 shadowing field lost its actual override: {sorted(shadowing)}")
+if ".config/systemd/user/mcloving-controller.service" in shadowing:
+    raise SystemExit(
+        "the v1 shadowing field changed into the complete candidate union"
+    )
 SHADOWDOC
 rm -f "${shadow_control}/mcloving-controller.service" "${workdir}/shadow-digests.json"
 # The QUADLET-GENERATED name is the case an installed-file comparison would
@@ -5184,6 +5463,7 @@ MCLOVING_DEPLOY_LIB="${libexec}/helpers/mcloving-deploy-lib.sh" \
 MCLOVING_UNIT_DIRS="${smoke_unit_dirs_env}" \
 MCLOVING_UNIT_DROPIN_DIRS="${sysdrop_dirs_env}" \
 MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${sysdrop_dirs_env}" \
+MCLOVING_UNIT_CANDIDATES="${race_unit_candidates}" \
 MCLOVING_SHADOWING_UNITS="${race_shadowing_units}" \
 python3 - "${libexec}/helpers/mcloving-deployed-digests" "${home}" \
   > "${workdir}/system-dropin-digests.json" <<'SYSCHAIN'
@@ -5671,7 +5951,7 @@ chmod 0755 "${absent_hook_dir}"
     exit 1
   }
   for ignored_absent in "${absent_hook_dir}" "--out=${absent_hook_dir}/other.sh"; do
-    if grep -qx "${ignored_absent}" <<<"${absent_seen}"; then
+    if grep -qx -- "${ignored_absent}" <<<"${absent_seen}"; then
       echo "the argument extractor claimed ${ignored_absent}, which the stated policy ignores" >&2
       exit 1
     fi
@@ -8641,6 +8921,42 @@ grep -q "daemon-reload so the manager" "${repo_root}/deploy/bin/mcloving-install
 }
 [[ "$(readlink "${libexec}/current")" == "${first_release}" ]] || {
   echo "paired installed rollbacks did not return to the original release" >&2
+  exit 1
+}
+
+# --no-systemd is an explicit offline contract. Even a systemctl found on
+# PATH must not be probed while the integrity gate derives unit truth; the
+# manager-authoritative path remains covered by the ordinary transitions.
+offline_release_dir="${workdir}/offline-manager-release"
+offline_manager_bin="${workdir}/offline-manager-bin"
+offline_manager_log="${workdir}/logs/offline-manager-probes.log"
+cp -r "${release_dir}" "${offline_release_dir}"
+printf '\n# offline manager regression\n' >> "${offline_release_dir}/mcloving-cli"
+(cd "${offline_release_dir}" && sha256sum mcloving-controller mcloving-agent \
+  mcloving-cli mcloving-identity-admin > "${workdir}/offline-checksums.sha256")
+mkdir -p "${offline_manager_bin}"
+cat > "${offline_manager_bin}/systemctl" <<'OFFLINESYSTEMCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${MCLOVING_MANAGER_PROBE_LOG:?}"
+exit 1
+OFFLINESYSTEMCTL
+chmod +x "${offline_manager_bin}/systemctl"
+PATH="${offline_manager_bin}:${PATH}" \
+MCLOVING_MANAGER_PROBE_LOG="${offline_manager_log}" \
+"${repo_root}/deploy/bin/mcloving-upgrade" --home "${home}" \
+  --release-dir "${offline_release_dir}" \
+  --checksums "${workdir}/offline-checksums.sha256" --no-systemd >/dev/null
+PATH="${offline_manager_bin}:${PATH}" \
+MCLOVING_MANAGER_PROBE_LOG="${offline_manager_log}" \
+"${repo_root}/deploy/bin/mcloving-rollback" --home "${home}" \
+  --no-systemd >/dev/null
+if [[ -s "${offline_manager_log}" ]]; then
+  echo "--no-systemd upgrade/rollback probed the service manager:" >&2
+  cat "${offline_manager_log}" >&2
+  exit 1
+fi
+[[ "$(readlink "${libexec}/current")" == "${first_release}" ]] || {
+  echo "offline manager regression did not restore the original release" >&2
   exit 1
 }
 

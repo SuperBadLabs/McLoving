@@ -44,6 +44,7 @@ UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_A
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Type=oneshot
 RemainAfterExit=yes
+NoNewPrivileges=yes
 # EnvironmentFile without "-" fails the unit when the contract file is absent.
 EnvironmentFile=%h/.config/mcloving/db-init.env
 ExecStartPre=%h/.local/libexec/mcloving/helpers/mcloving-env-guard db-init %h/.config/mcloving/db-init.env

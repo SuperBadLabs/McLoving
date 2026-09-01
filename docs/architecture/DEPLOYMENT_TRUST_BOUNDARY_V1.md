@@ -213,7 +213,7 @@ taken deliberately, with its cost stated.**
   the manager's unit load path. The lane verifies this and refuses otherwise;
   it does not establish it.
 - **What the lane is trusted for:** establishing the §2.1 invariant before every
-  transition, and refusing when it cannot. At **service start** that establishment is PARTIAL and must not be read as the full invariant: systemd has already loaded the unit before any `ExecStartPre` runs, and `mcloving-env-guard` walks only the environment file and the configured secret and state paths -- never the unit, the guard executable itself, or the selected release binary. An ancestor that became writable since the last transition is therefore not caught at start, and an attacker able to replace the unit can omit the guard entirely. A start-time verifier rooted outside the service-owned tree is PENDING under `DEPLOY-003`.
+  transition, and refusing when it cannot. At **service start** that establishment is PARTIAL and must not be read as the full invariant: systemd has already loaded the unit before any `ExecStartPre` runs, and `mcloving-env-guard` walks only the environment file and the configured secret and state paths -- never the unit, the guard executable itself, or the selected release binary. An ancestor that became writable since the last transition is therefore not caught at start, and an attacker able to replace the unit can omit the guard entirely. A start-time verifier rooted outside the service-owned tree is PENDING under `DEPLOY-002`.
 - **What is explicitly NOT claimed:** any bound on adversary B. That is `SEC-005`.
 
 ### Why not a root-owned tree (design-doc option A)
@@ -377,6 +377,13 @@ sharper than that. Measured:
   unquoted to one token, `\x2e` unescaped to `.`, `%h` expanded. Every one of
   the five constructs `require_parseable_unit_sources` refuses by name is
   resolved in that output.
+
+  **DEPLOY-003 measured correction (2026-08-31):** systemd 255 leaves a bare
+  executable bare in the typed `ExecStart` tuple; it does not report the
+  absolute binary selected from its internal search path. The other spellings
+  above are resolved. Manager mode therefore retains the named non-absolute
+  executable refusal rather than guessing the search path. This narrows the
+  claimed subtraction from O5; it does not weaken the fail-closed invariant.
 
 The lane refuses those five spellings precisely so it does not have to model
 them. The manager will simply report them.

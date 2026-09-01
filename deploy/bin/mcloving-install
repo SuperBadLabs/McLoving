@@ -196,6 +196,13 @@ chmod go-w "${unit_root}" "${quadlet_root}"
 # deployment-wide transition lock, alongside upgrade and rollback.
 acquire_transition_lock "${libexec_root}"
 
+# Re-establish the full verdict inside the same exclusion upgrade and rollback
+# use. The pre-create pass above protects mkdir/chmod from hostile ancestors;
+# this pass closes the previous check-to-lock window for every reinstall and
+# established tree. A concurrent sanctioned transition can no longer change
+# what install inspected between its verdict and its lock acquisition.
+require_deployment_integrity "${home_dir}"
+
 # An established deployment that has lost its current link is NOT a fresh
 # install: releases on disk mean services may be running on them, and
 # staging a release plus planting a new current here would skip every stop,
@@ -341,6 +348,12 @@ done
 
 if [[ "${no_systemd}" == "0" ]]; then
   systemctl --user daemon-reload
+  # The first pass necessarily sees either the pre-install manager cache or no
+  # loaded units. Query only after daemon-reload, while the transition lock is
+  # still held, so FragmentPath, DropInPaths, Exec*, EnvironmentFiles,
+  # WorkingDirectory and the generated Quadlet services describe the exact
+  # configuration the documented start command will execute.
+  require_deployment_integrity "${home_dir}" --manager-authoritative
   echo "systemd user units reloaded"
 else
   echo "skipping systemctl --user daemon-reload (--no-systemd)"

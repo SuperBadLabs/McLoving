@@ -20,9 +20,9 @@ Units (installed into `~/.config/systemd/user/` by
   probe` runs as `ExecStartPre` to prove identity, controller reachability,
   and journal health before the long-running service starts.
 
-Startup order: `mcloving-postgres.service` (healthy, via quadlet
-`Notify=healthy`) → `mcloving-db-init.service` → `mcloving-controller.service`
-→ `mcloving-agent.service`.
+Startup order: `mcloving-postgres.service` (container running) →
+`mcloving-db-init.service` (two-success PostgreSQL readiness barrier) →
+`mcloving-controller.service` → `mcloving-agent.service`.
 
 Every unit sources its environment contract from `~/.config/mcloving/*.env`
 (templates in `deploy/env/`) and refuses to start while any variable is

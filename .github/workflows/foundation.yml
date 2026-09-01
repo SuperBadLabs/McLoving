@@ -463,9 +463,47 @@ jobs:
   deployment:
     name: Deployment lane
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Normalize owned hosted-runner package ancestors
+        # The hosted image deliberately makes selected package/tool roots
+        # writable. This job owns the disposable VM; normalize only the exact
+        # roots the deployment enumerates or executes, then let the unchanged
+        # preflight refuse any new drift by name.
+        run: |
+          for directory in \
+            /usr/share /usr/share/containers /usr/share/systemd \
+            /usr/local /usr/local/bin /usr/local/lib \
+            /usr/local/lib/systemd /usr/local/lib/systemd/user-generators \
+            /usr/local/libexec /usr/local/libexec/podman; do
+            test ! -d "${directory}" || sudo chmod go-w "${directory}"
+          done
+          if test "$(command -v podman)" = /usr/local/bin/podman; then
+            for executable in \
+              /usr/local/bin/podman /usr/local/libexec/podman/quadlet; do
+              test -f "${executable}"
+              test ! -L "${executable}"
+              test "$(stat -c '%u' "${executable}")" -eq 0
+              case "${executable}" in
+                /usr/local/bin/podman)
+                  expected_sha256=3ae655eb71d62e2b44c25d83364da99175458a0a5f9a77a91c51e99f0cba4d79
+                  ;;
+                /usr/local/libexec/podman/quadlet)
+                  expected_sha256=5d974f1eac4d69afe29b6ef68bf83f1248fb6f22f023f2af690d447c705c1b00
+                  ;;
+              esac
+              actual_sha256="$(sha256sum "${executable}")"
+              test "${actual_sha256%% *}" = "${expected_sha256}"
+              sudo chmod go-w "${executable}"
+            done
+          fi
+      - name: Verify controlled systemd host inputs
+        # This is intentionally before the Rust build and the 20-minute
+        # fallback matrix. Runner-image Podman packaging drift must fail while
+        # the job is still cheap, without creating any rootless Podman state.
+        run: bash deploy/run-systemd-ci.sh --check-host
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Restore Rust cache
@@ -486,15 +524,63 @@ jobs:
           # parents are judged like any other component of the chain. mkdir
           # honours the runner's umask, which is not ours to assume; this is
           # the one level we own. A refusal naming a path ABOVE this directory
-          # is the runner image's own tree, and on a hosted runner you can
-          # neither fix the image nor move to a location with different
-          # ancestors -- so print the chain first. A red job is then one look
-          # rather than one bisect, and the printed modes are what a bug report
-          # against the image would need.
+          # is the runner image's own tree. The known unsafe package roots are
+          # normalized explicitly above; print this separate chain so any new
+          # image drift is one look rather than one bisect.
           chmod 755 "${RUNNER_TEMP}/mcloving-smoke"
           stat -c '%a %u %n' / /home "${HOME}" "$(dirname "${RUNNER_TEMP}")" \
             "${RUNNER_TEMP}" "${RUNNER_TEMP}/mcloving-smoke" || true
           TMPDIR="${RUNNER_TEMP}/mcloving-smoke" bash deploy/test-deployment.sh
+      - name: Build the service-managed runtime gate and exact release
+        id: systemd-inputs
+        run: |
+          cargo +1.97.1 test --locked --no-run \
+            -p mcloving-controller --test deployable_runtime \
+            --message-format=json > "${RUNNER_TEMP}/deployable-runtime-build.json"
+          runtime_gate="$(jq -r '
+            select(.reason == "compiler-artifact")
+            | select(.target.name == "deployable_runtime")
+            | .executable // empty
+          ' "${RUNNER_TEMP}/deployable-runtime-build.json" | tail -1)"
+          test -n "${runtime_gate}"
+          test -x "${runtime_gate}"
+          release_dir="${RUNNER_TEMP}/mcloving-systemd-release"
+          install -d -m 0755 "${release_dir}"
+          for binary in mcloving-controller mcloving-agent mcloving-cli mcloving-identity-admin; do
+            install -m 0755 "target/debug/${binary}" "${release_dir}/${binary}"
+          done
+          (
+            cd "${release_dir}"
+            sha256sum mcloving-controller mcloving-agent \
+              mcloving-cli mcloving-identity-admin > checksums.sha256
+          )
+          echo "runtime_gate=${runtime_gate}" >> "${GITHUB_OUTPUT}"
+          echo "release_dir=${release_dir}" >> "${GITHUB_OUTPUT}"
+      - name: Run the deployment under a controlled real user manager
+        # The disposable account must execute the gate and release below the
+        # runner home, which the hosted image owns at 0750. Add only search --
+        # never read or write -- after every runner-owned build has completed.
+        # Refuse image drift rather than broadening an unknown mode, and restore
+        # 0750 on every exit path before the failure artifact step can run.
+        run: |
+          test "${HOME}" = /home/runner
+          test -d "${HOME}"
+          test ! -L "${HOME}"
+          test "$(stat -c '%u' "${HOME}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${HOME}")" = 750
+          restore_home_mode() {
+            local status=$?
+            trap - EXIT
+            chmod 750 "${HOME}" || status=1
+            exit "${status}"
+          }
+          trap restore_home_mode EXIT
+          chmod o+x "${HOME}"
+          test "$(stat -c '%a' "${HOME}")" = 751
+          bash deploy/run-systemd-ci.sh \
+            "${{ steps.systemd-inputs.outputs.runtime_gate }}" \
+            "${{ steps.systemd-inputs.outputs.release_dir }}" \
+            "${{ steps.systemd-inputs.outputs.release_dir }}/checksums.sha256"
       - name: Upload the preserved smoke-test working directory
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
