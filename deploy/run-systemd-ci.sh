@@ -10,7 +10,6 @@ set -euo pipefail
 umask 022
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-invoking_home="${HOME:-}"
 controlled_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # shellcheck source=deploy/systemd-ci-lib.sh
 source "${repo_root}/deploy/systemd-ci-lib.sh"
@@ -30,6 +29,9 @@ usage() {
 }
 
 [[ $# -eq 3 ]] || usage
+if (( EUID != 0 )); then
+  exec sudo bash "${BASH_SOURCE[0]}" "$@"
+fi
 runtime_gate="$(readlink -f "$1")"
 release_dir="$(readlink -f "$2")"
 checksums="$(readlink -f "$3")"
@@ -37,7 +39,7 @@ checksums="$(readlink -f "$3")"
 [[ -x "${runtime_gate}" ]] || { echo "runtime gate is not executable: ${runtime_gate}" >&2; exit 1; }
 [[ -d "${release_dir}" ]] || { echo "release directory is absent: ${release_dir}" >&2; exit 1; }
 [[ -f "${checksums}" ]] || { echo "checksums are absent: ${checksums}" >&2; exit 1; }
-for command_name in systemctl loginctl podman busctl mount findmnt useradd userdel sha256sum; do
+for command_name in systemctl loginctl podman busctl jq mount findmnt setpriv useradd userdel sha256sum; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || { echo "required command is absent: ${command_name}" >&2; exit 1; }
 done
@@ -116,18 +118,27 @@ fi
 sudo useradd --create-home --home-dir "${home_dir}" --shell /bin/bash "${account}"
 account_created=1
 uid="$(id -u "${account}")"
+gid="$(id -g "${account}")"
 runtime_dir="/run/user/${uid}"
 bus_address="unix:path=${runtime_dir}/bus"
-user_env=(sudo -u "${account}" env -i
+# Invoke account commands through a direct credential transition. Repeated
+# `sudo -u` calls open PAM sessions whose pam_systemd hooks can mutate the live
+# user-manager environment after it has been sanitized.
+manager_private_env=(setpriv
+  --reuid="${uid}" --regid="${gid}" --init-groups
+  env -i
   HOME="${home_dir}"
   XDG_CONFIG_HOME="${home_dir}/.config"
   XDG_DATA_HOME="${home_dir}/.local/share"
   XDG_STATE_HOME="${home_dir}/.local/state"
   XDG_CACHE_HOME="${home_dir}/.cache"
   XDG_RUNTIME_DIR="${runtime_dir}"
-  DBUS_SESSION_BUS_ADDRESS="${bus_address}"
+  # systemctl prefers the manager's private socket. Poison its session-bus
+  # fallback so a transient private-socket failure cannot activate D-Bus early.
+  DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/mcloving-no-session-bus"
   USER="${account}" LOGNAME="${account}" SHELL=/bin/bash
-  PATH="${controlled_path}")
+  PATH="${controlled_path}" LANG=C.UTF-8)
+user_env=("${manager_private_env[@]}" DBUS_SESSION_BUS_ADDRESS="${bus_address}")
 if [[ -e "${runtime_dir}" || -L "${runtime_dir}" ]]; then
   echo "refusing to adopt pre-existing runtime path ${runtime_dir}" >&2
   exit 1
@@ -143,7 +154,7 @@ sudo mount -o remount,bind,ro /usr/lib/systemd/user "${vendor_root}"
 
 absent_bound_parent="${home_dir}/deploy003 creation parent"
 space_unit_root="${absent_bound_parent}/future unit root"
-sudo -u "${account}" install -d -m 0755 "${absent_bound_parent}"
+"${manager_private_env[@]}" install -d -m 0755 "${absent_bound_parent}"
 unit_path="${home_dir}/.config/systemd/user.control:${runtime_dir}/systemd/user.control:${runtime_dir}/systemd/transient:${runtime_dir}/systemd/generator.early:${home_dir}/.config/systemd/user:${space_unit_root}:${runtime_dir}/systemd/user:${runtime_dir}/systemd/generator:${vendor_root}:${runtime_dir}/systemd/generator.late"
 quadlet_custom_root="${home_dir}/.config/containers/deploy003-sources"
 quadlet_install_root="${home_dir}/.config/containers/systemd"
@@ -156,7 +167,7 @@ if sudo test -e "${manager_dropin}" || sudo test -L "${manager_dropin}"; then
 fi
 sudo install -d -m 0755 "${manager_dropin_dir}"
 dropin_tmp="$(mktemp)"
-printf '[Service]\nEnvironment="HOME=%s"\nEnvironment="XDG_CONFIG_HOME=%s/.config"\nEnvironment="XDG_DATA_HOME=%s/.local/share"\nEnvironment="XDG_STATE_HOME=%s/.local/state"\nEnvironment="XDG_CACHE_HOME=%s/.cache"\nEnvironment="XDG_RUNTIME_DIR=%s"\nEnvironment="USER=%s"\nEnvironment="LOGNAME=%s"\nEnvironment="SHELL=/bin/bash"\nEnvironment="PATH=%s"\nEnvironment="SYSTEMD_UNIT_PATH=%s"\nEnvironment="QUADLET_UNIT_DIRS=%s"\nUnsetEnvironment=CONTAINER_CONNECTION CONTAINER_HOST CONTAINER_SSHKEY CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF CONTAINERS_REGISTRIES_CONF CONTAINERS_REGISTRIES_CONF_DIR CONTAINERS_POLICY CONTAINERS_REGISTRIES_AUTH_FILE STORAGE_DRIVER STORAGE_OPTS REGISTRY_AUTH_FILE DOCKER_CONFIG PODMAN_PREEXEC_HOOKS_DIR\n' \
+printf '[Service]\nEnvironment="HOME=%s"\nEnvironment="XDG_CONFIG_HOME=%s/.config"\nEnvironment="XDG_DATA_HOME=%s/.local/share"\nEnvironment="XDG_STATE_HOME=%s/.local/state"\nEnvironment="XDG_CACHE_HOME=%s/.cache"\nEnvironment="XDG_RUNTIME_DIR=%s"\nEnvironment="USER=%s"\nEnvironment="LOGNAME=%s"\nEnvironment="SHELL=/bin/bash"\nEnvironment="PATH=%s"\nEnvironment="LANG=C.UTF-8"\nEnvironment="SYSTEMD_UNIT_PATH=%s"\nEnvironment="QUADLET_UNIT_DIRS=%s"\nUnsetEnvironment=CONTAINER_CONNECTION CONTAINER_HOST CONTAINER_SSHKEY CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF CONTAINERS_REGISTRIES_CONF CONTAINERS_REGISTRIES_CONF_DIR CONTAINERS_POLICY CONTAINERS_REGISTRIES_AUTH_FILE STORAGE_DRIVER STORAGE_OPTS REGISTRY_AUTH_FILE DOCKER_CONFIG PODMAN_PREEXEC_HOOKS_DIR\n' \
   "${home_dir}" "${home_dir}" "${home_dir}" "${home_dir}" "${home_dir}" \
   "${runtime_dir}" "${account}" "${account}" "${controlled_path}" \
   "${unit_path}" "${quadlet_path}" \
@@ -206,7 +217,7 @@ sudo systemctl daemon-reload
 sudo loginctl enable-linger "${account}"
 sudo systemctl start "user@${uid}.service"
 for _ in $(seq 1 60); do
-  if "${user_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
+  if "${manager_private_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
     manager_ready=1
     break
   fi
@@ -214,17 +225,21 @@ for _ in $(seq 1 60); do
 done
 [[ "${manager_ready:-0}" == 1 ]] \
   || { echo "user manager did not answer an authenticated query" >&2; exit 1; }
+for _ in $(seq 1 60); do
+  manager_running_state="$("${manager_private_env[@]}" systemctl --user is-system-running 2>/dev/null || true)"
+  if [[ "${manager_running_state}" == running ]]; then
+    manager_startup_complete=1
+    break
+  fi
+  case "${manager_running_state}" in
+    initializing | starting | "") sleep 0.1 ;;
+    *) echo "fresh user manager entered ${manager_running_state} state during startup" >&2; exit 1 ;;
+  esac
+done
+[[ "${manager_startup_complete:-0}" == 1 ]] \
+  || { echo "fresh user manager did not complete startup" >&2; exit 1; }
 
-# User environment generators may refine the manager block after the service
-# drop-in is applied. Reassert the exact identity and clear the documented
-# Podman selectors through the manager API, still without invoking Podman.
-"${user_env[@]}" systemctl --user unset-environment \
-  CONTAINER_CONNECTION CONTAINER_HOST CONTAINER_SSHKEY \
-  CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF \
-  CONTAINERS_REGISTRIES_CONF CONTAINERS_REGISTRIES_CONF_DIR \
-  CONTAINERS_POLICY CONTAINERS_REGISTRIES_AUTH_FILE STORAGE_DRIVER STORAGE_OPTS \
-  REGISTRY_AUTH_FILE DOCKER_CONFIG PODMAN_PREEXEC_HOOKS_DIR
-"${user_env[@]}" systemctl --user set-environment \
+expected_manager_environment=(
   "HOME=${home_dir}" \
   "XDG_CONFIG_HOME=${home_dir}/.config" \
   "XDG_DATA_HOME=${home_dir}/.local/share" \
@@ -232,7 +247,110 @@ done
   "XDG_CACHE_HOME=${home_dir}/.cache" \
   "XDG_RUNTIME_DIR=${runtime_dir}" \
   "USER=${account}" "LOGNAME=${account}" "SHELL=/bin/bash" \
-  "PATH=${controlled_path}"
+  "PATH=${controlled_path}" \
+  "LANG=C.UTF-8" \
+  "SYSTEMD_UNIT_PATH=${unit_path}" \
+  "QUADLET_UNIT_DIRS=${quadlet_path}" \
+  "DBUS_SESSION_BUS_ADDRESS=${bus_address}"
+)
+declare -A expected_manager_environment_names=()
+for expected_manager_environment_line in "${expected_manager_environment[@]}"; do
+  expected_manager_environment_names["${expected_manager_environment_line%%=*}"]=1
+done
+
+# Keep the private manager connection free of D-Bus activation until the
+# environment that dbus.service will inherit is exact. Set controlled values
+# first, then remove only snapshot extras: no empty or uncontrolled-core window
+# is observable, and no generator, reload, or service start occurs between.
+"${manager_private_env[@]}" systemctl --user set-environment \
+  "${expected_manager_environment[@]}"
+# A host user-environment helper may finish just after default.target. Converge
+# only while D-Bus is still unavailable, and refuse if the manager does not
+# stabilize promptly rather than racing activation against a late import.
+for _ in $(seq 1 20); do
+  private_manager_environment_json="$("${manager_private_env[@]}" \
+    systemctl --user --output=json show-environment)"
+  private_manager_environment_names_text="$(jq -er '
+    if type == "object"
+      and length > 0
+      and all(keys[]; test("^[A-Za-z_][A-Za-z0-9_]*$"))
+      and all(.[]; type == "string")
+    then keys[]
+    else error("invalid private manager environment")
+    end
+  ' <<<"${private_manager_environment_json}")" \
+    || { echo "private manager returned an invalid typed environment" >&2; exit 1; }
+  mapfile -t private_manager_environment_names \
+    <<<"${private_manager_environment_names_text}"
+  private_manager_environment_extras=()
+  for manager_environment_name in "${private_manager_environment_names[@]}"; do
+    if [[ -z "${expected_manager_environment_names["${manager_environment_name}"]:-}" ]]; then
+      private_manager_environment_extras+=("${manager_environment_name}")
+    fi
+  done
+  if (( ${#private_manager_environment_extras[@]} == 0 )); then
+    break
+  fi
+  "${manager_private_env[@]}" systemctl --user unset-environment \
+    "${private_manager_environment_extras[@]}"
+  sleep 0.1
+done
+private_manager_environment_json="$("${manager_private_env[@]}" \
+  systemctl --user --output=json show-environment)"
+private_manager_environment_text="$(jq -er '
+  if type == "object"
+    and all(keys[]; test("^[A-Za-z_][A-Za-z0-9_]*$"))
+    and all(.[]; type == "string")
+  then to_entries[] | "\(.key)=\(.value)"
+  else error("invalid private manager environment")
+  end
+' <<<"${private_manager_environment_json}")" \
+  || { echo "private manager returned an invalid typed environment after replacement" >&2; exit 1; }
+mapfile -t private_manager_environment_lines <<<"${private_manager_environment_text}"
+if [[ ${#private_manager_environment_lines[@]} -ne ${#expected_manager_environment[@]} ]]; then
+  for manager_environment_line in "${private_manager_environment_lines[@]}"; do
+    manager_environment_name="${manager_environment_line%%=*}"
+    [[ -n "${expected_manager_environment_names["${manager_environment_name}"]:-}" ]] \
+      || echo "private manager retained uncontrolled variable ${manager_environment_name}" >&2
+  done
+  echo "private manager retained variables outside the controlled environment" >&2
+  exit 1
+fi
+for expected_manager_environment_line in "${expected_manager_environment[@]}"; do
+  grep -Fqx "${expected_manager_environment_line}" \
+    <<<"${private_manager_environment_text}" \
+    || { echo "private manager did not retain ${expected_manager_environment_line}" >&2; exit 1; }
+done
+
+# D-Bus now inherits only the controlled block. Its activation is state-free
+# with respect to Podman and completes before the typed atomic transaction.
+"${manager_private_env[@]}" systemctl --user start dbus.service
+[[ "$("${manager_private_env[@]}" systemctl --user is-active dbus.service)" == active ]] \
+  || { echo "packaged user D-Bus service did not become active" >&2; exit 1; }
+
+# User environment generators may add arbitrary image-account variables after
+# the service drop-in is applied. Read names from the typed manager property,
+# then atomically replace the whole block with the exact minimal set this arm
+# permits. No empty intermediate block is observable and no Podman is invoked.
+manager_environment_json="$("${user_env[@]}" busctl --user --json=short \
+  get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager Environment)"
+manager_environment_names_text="$(jq -er '
+  if .type == "as"
+    and (.data | type) == "array"
+    and (.data | length) > 0
+    and all(.data[]; test("^[A-Za-z_][A-Za-z0-9_]*="))
+  then .data[] | capture("^(?<name>[A-Za-z_][A-Za-z0-9_]*)=").name
+  else error("invalid typed manager environment")
+  end
+' <<<"${manager_environment_json}")" \
+  || { echo "manager returned an invalid typed environment" >&2; exit 1; }
+mapfile -t manager_environment_names <<<"${manager_environment_names_text}"
+"${user_env[@]}" busctl --user call \
+  org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager UnsetAndSetEnvironment asas \
+  "${#manager_environment_names[@]}" "${manager_environment_names[@]}" \
+  "${#expected_manager_environment[@]}" "${expected_manager_environment[@]}"
 
 user_env+=(MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION=1
   MCLOVING_PODMAN_USER_GENERATOR="${MCLOVING_CI_PODMAN_GENERATOR}"
@@ -241,31 +359,28 @@ user_env+=(MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION=1
 actual_unit_path="$("${user_env[@]}" systemctl --user show -p UnitPath --value)"
 [[ -n "${actual_unit_path}" ]] \
   || { echo "controlled manager returned an empty UnitPath" >&2; exit 1; }
-manager_environment="$("${user_env[@]}" systemctl --user show-environment)"
-for expected_manager_environment in \
-  "HOME=${home_dir}" \
-  "XDG_CONFIG_HOME=${home_dir}/.config" \
-  "XDG_DATA_HOME=${home_dir}/.local/share" \
-  "XDG_STATE_HOME=${home_dir}/.local/state" \
-  "XDG_CACHE_HOME=${home_dir}/.cache" \
-  "XDG_RUNTIME_DIR=${runtime_dir}" \
-  "USER=${account}" \
-  "LOGNAME=${account}" \
-  "SHELL=/bin/bash" \
-  "PATH=${controlled_path}"; do
-  grep -Fqx "${expected_manager_environment}" <<<"${manager_environment}" \
-    || { echo "manager did not retain ${expected_manager_environment}" >&2; exit 1; }
+manager_environment_json="$("${user_env[@]}" busctl --user --json=short \
+  get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager Environment)"
+manager_environment_text="$(jq -er '
+  if .type == "as" and (.data | type) == "array"
+  then .data[]
+  else error("invalid typed manager environment")
+  end
+' <<<"${manager_environment_json}")" \
+  || { echo "manager returned an invalid typed environment after replacement" >&2; exit 1; }
+mapfile -t manager_environment_lines <<<"${manager_environment_text}"
+for manager_environment_line in "${manager_environment_lines[@]}"; do
+  manager_environment_name="${manager_environment_line%%=*}"
+  [[ -n "${expected_manager_environment_names["${manager_environment_name}"]:-}" ]] \
+    || { echo "manager retained uncontrolled variable ${manager_environment_name}" >&2; exit 1; }
 done
-grep -qx "QUADLET_UNIT_DIRS=${quadlet_path}" <<<"${manager_environment}" \
-  || { echo "manager did not retain the exact Quadlet source boundary" >&2; exit 1; }
-! grep -Eq \
-  '^(CONTAINER_|CONTAINERS_|STORAGE_(DRIVER|OPTS)=|REGISTRY_AUTH_FILE=|DOCKER_CONFIG=|PODMAN_PREEXEC_HOOKS_DIR=)' \
-  <<<"${manager_environment}" \
-  || { echo "manager retained a forbidden container configuration override" >&2; exit 1; }
-if [[ -n "${invoking_home}" && "${invoking_home}" != "${home_dir}" ]]; then
-  ! grep -Fq "${invoking_home}" <<<"${manager_environment}" \
-    || { echo "manager retained a reference to the invoking account's home" >&2; exit 1; }
-fi
+[[ ${#manager_environment_lines[@]} -eq ${#expected_manager_environment[@]} ]] \
+  || { echo "manager retained variables outside the exact controlled environment" >&2; exit 1; }
+for expected_manager_environment_line in "${expected_manager_environment[@]}"; do
+  grep -Fqx "${expected_manager_environment_line}" <<<"${manager_environment_text}" \
+    || { echo "manager did not retain ${expected_manager_environment_line}" >&2; exit 1; }
+done
 findmnt -n -o OPTIONS -T "${vendor_root}" | tr ',' '\n' | grep -qx ro \
   || { echo "vendor unit bind is not read-only" >&2; exit 1; }
 if "${user_env[@]}" test -w "${vendor_root}"; then

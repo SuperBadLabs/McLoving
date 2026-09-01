@@ -155,10 +155,13 @@ the short-lived service account receives only a temporary search bit on the
 exact owner/mode-checked hosted runner home needed to reach its inputs, and the
 job restores the original mode on every exit path;
 the disposable manager receives exact account-local HOME/XDG and identity
-values while every account command starts from an empty environment; inherited container
-remote/storage/configuration overrides are removed, and the manager's typed
-identity, PATH, environment prefixes, and absence of the invoking home are read
-back before the cold Podman operation;
+values while every account command starts from an empty environment through a
+direct UID/GID transition that cannot re-import variables through PAM; before
+D-Bus starts, the manager's private socket is used to install and prove an
+exact fourteen-entry identity/path/locale/unit/Quadlet/D-Bus allowlist so the
+daemon inherits only that block; the typed manager environment is then
+atomically replaced over D-Bus and read back by exact count and value before
+the cold Podman operation;
 property-labelled typed manager command-tuple facts then bind every generated
 start and present stop command to that selected Podman executable, whose
 version is compared with Quadlet after cold start; runtime and administrator

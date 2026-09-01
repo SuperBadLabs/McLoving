@@ -181,15 +181,27 @@ The wrapper names each traversal failure and never invokes Podman
 from diagnostics, preserving the generated volume unit as the cold first
 operation.
 
-Independently, the wrapper starts the manager with explicit account-local HOME and XDG bases,
-an exact account identity and PATH, unsets documented Podman remote, storage,
-configuration, policy, auth, and hook overrides, launches every account command
-from an empty environment with the same bases, and reads the manager's typed
-environment back to require those exact values, no container-override prefix,
-and no reference to the invoking account's home before the first Podman
-operation. User-environment generators cannot override that verdict: the
-wrapper reapplies the exact manager values and documented unsets through the
-manager API, then performs the typed readback.
+Independently, the wrapper starts the manager with explicit account-local HOME
+and XDG bases, exact account identity/path/locale values, and controlled unit
+and Quadlet paths. Every account command uses a direct UID/GID transition from
+an empty client environment, avoiding PAM sessions that could re-import host
+variables into the live manager. Before D-Bus starts, the wrapper uses the manager's private socket
+to install the exact fourteen-entry environment and remove every inherited
+extra, then proves exact count and value. D-Bus therefore inherits the same
+block. A typed atomic manager transaction and typed exact-count/value readback
+repeat that proof after D-Bus is live and before the first Podman operation, so
+user-environment generators cannot override the verdict.
+
+Protected run `33470333291` (job `99738626192`) passed traversal, then
+refused because the hosted manager retained an unrelated image variable
+mentioning `/home/runner`, even though every security-relevant
+HOME/XDG/identity/path and container-selector assertion had passed. A broad
+value-substring deny rule is not an environment boundary. The wrapper now
+sanitizes the live manager before D-Bus inheritance, then reads only inherited
+variable names through typed D-Bus and atomically replaces the manager's entire
+environment block with exactly the fourteen required
+HOME/XDG/identity/path/locale/unit/Quadlet/D-Bus entries, and requires an
+exact-count plus exact-value typed readback before the arm starts.
 
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only

@@ -946,7 +946,13 @@ transition lock and after `daemon-reload`, and binds service-environment reads
 to a held `/proc` descriptor plus a stable manager invocation/PID/start tuple.
 The protected `Deployment lane` runs the real service-managed arm under a
 disposable account with controlled unit, generator, HOME/XDG, and container
-configuration inputs. Its shared early
+configuration inputs. Account commands use direct UID/GID transitions rather
+than PAM-opening `sudo -u` sessions. After the fresh manager reaches a quiescent running
+state, the job uses its private socket to install and prove an exact
+fourteen-entry environment before starting packaged D-Bus, so the daemon
+inherits only that block. It then atomically replaces the typed manager
+environment over D-Bus and reads it back by exact count and value before any
+Podman operation. Its shared early
 preparation removes group/world write only from the known image-owned
 `/usr/share` union roots and explicit `/usr/local` Podman/Quadlet chain and
 regular executables after their image-provider digests match the reviewed pins; its
