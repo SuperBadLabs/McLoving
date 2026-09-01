@@ -1,0 +1,106 @@
+# CI-003 merge-authority security review
+
+Date: 2026-09-01
+Pull request: #116
+Implementation baseline: `5e91009`
+
+`CI-003` closes a repository-governance failure: branch protection could admit
+a commit even when recovery, deployment, or Windows validation was red. It
+changes no shipped runtime code, API, protocol, credential, persistence schema,
+deployment unit, migration evidence, or production authority.
+
+## Finding
+
+The live pre-ticket protection document had `strict: true`, admin enforcement,
+linear history, and conversation resolution, but required only these contexts:
+
+- `Rust`
+- `Dependencies and licenses`
+- `Secret scan`
+- `Architecture records`
+- `Formal model`
+- `Controller PostgreSQL`
+
+It omitted `Backup and restore`, `Deployment lane`, `Classify Windows impact`,
+and `Windows agent`. A failed omitted job did not block merge. In addition,
+`Rust`, `Dependencies and licenses`, `Secret scan`, and `Architecture records`
+had `app_id: null`; an identically named status from another integration could
+satisfy those slots. Only `Formal model` and `Controller PostgreSQL` were bound
+to GitHub Actions application id `15368`.
+
+This also corrects historical language in the board and earlier receipts.
+"All nine protected checks" meant nine observed successful workflow outcomes,
+not nine branch-required contexts. The successful runs remain valid test
+evidence, but they were not proof that GitHub would reject a merge when an
+omitted job failed.
+
+## Implementation
+
+The `Foundation` job is an `if: always()` aggregate over the terminal `Rust`,
+dependency, secret-scan, architecture, formal, PostgreSQL, recovery, and
+deployment lanes. It accepts only the exact eight-field state in which every
+result is the literal string `success`; missing, unexpected, failed, cancelled,
+skipped, or unknown results fail.
+
+The `Windows` job is an `if: always()` aggregate over classification and native
+execution. It accepts exactly two states:
+
+1. classification succeeded, `run-windows=true`, and native Windows execution
+   succeeded; or
+2. classification succeeded, `run-windows=false`, and native Windows execution
+   was skipped.
+
+A failed classifier, missing or invalid decision, required execution that did
+not succeed, or a non-impact execution that did not skip fails closed. Both
+jobs invoke the same checked-out `scripts/verify-workflow-aggregate.py` rather
+than carrying divergent shell predicates.
+
+`scripts/test-workflow-aggregate.py` exhausts all 390,625 combinations of five
+possible results across the eight Foundation lanes, the complete Windows
+classifier/decision/result matrix, malformed and duplicate inputs, and the
+exact workflow job, dependency, `always()`, environment, and verifier wiring.
+The hosted Architecture job and the local Foundation validator run this suite.
+
+The hosted Architecture job now downloads actionlint at the version pinned in
+`tools/versions.env`, verifies its repository-pinned SHA-256 before extraction,
+and lints every workflow. This makes malformed workflow expressions and DAG
+edits a hosted failure instead of a local-only check.
+
+## Threat-model review
+
+`TM-052` records the branch-protection and aggregate boundary. `TM-016` and
+`TM-023` were reviewed: actions remain commit-pinned, hosted actionlint is
+version- and digest-pinned, and the accepted upstream-plus-reviewed-digest
+compromise residual is unchanged. `TM-050` was reviewed: the deployment lane's
+product mitigations and two accepted residuals are unchanged, but its result is
+now transitively merge-blocking through `Foundation`.
+
+`TM-003` through `TM-007`, `TM-009`, `TM-010`, `TM-017`, and `TM-020` were
+reviewed with no mitigation change. `CI-003` changes whether their existing
+workflow evidence blocks merge; it does not replace those contracts. `TM-048`
+is corrected to describe its historical nine workflow outcomes accurately.
+
+Residual authority remains with GitHub and GitHub Actions, and an authorized
+repository administrator can mutate protection outside the source tree.
+Authority-sensitive merges therefore re-read the live rule. A compromised
+GitHub control plane or authorized administrator can still subvert the gate.
+
+## Verification in progress
+
+- seven mutation-oriented aggregate tests pass locally;
+- all 390,625 Foundation states have exactly one accepting state;
+- the full Windows truth table has exactly two accepting states;
+- the eleven existing Windows-impact classifier tests pass;
+- pinned actionlint 1.7.12 accepts all workflows;
+- board, closure-receipt, and Rust-denominator tests and verifiers pass;
+- `bash -n scripts/validate-foundation.sh` and `git diff --check` pass.
+
+Closure additionally requires exact-head `Foundation` and `Windows` success,
+an independent exact-head review, zero unresolved threads, the after-state
+branch-protection readback with both contexts bound to GitHub Actions app id
+`15368`, merge, and protected-main verification. Until those receipts exist,
+the ticket remains `ACTIVE`.
+
+This review grants repository merge gating only. It grants no migration,
+runtime, deployment, production, credential, connector, canary, cutover,
+rollback, recutover, or decommission authority.

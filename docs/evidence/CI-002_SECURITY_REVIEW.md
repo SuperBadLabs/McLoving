@@ -104,6 +104,10 @@ Windows workflow.
 - `python3 scripts/test-execution-board.py` and `python3 scripts/verify-execution-board.py`
 - `python3 scripts/test-ticket-closure-receipts.py` and `python3 scripts/verify-ticket-closure-receipts.py`
 
-The full Foundation and Windows workflows remain the merge authority. This
-receipt grants no migration, connector, effect, canary, cutover, rollback, or
-decommissioning authority.
+Historical correction from `CI-003`: the full Foundation and Windows workflows
+were observed evidence, but the pre-`CI-003` branch rule did not make the full
+workflows merge authority. It required six Foundation child contexts, omitted
+backup/restore, deployment, and Windows, and left four required contexts
+unbound to their reporting app. This receipt's test evidence remains valid;
+`CI-003` owns the branch-protection correction. Neither ticket grants migration,
+connector, effect, canary, cutover, rollback, or decommissioning authority.
