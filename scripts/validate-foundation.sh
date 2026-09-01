@@ -90,7 +90,7 @@ podman run --rm \
   "${MCLOVING_RUST_IMAGE}" \
   /tools/cargo-deny check
 
-python3 "${repo_root}/scripts/test-windows-agent-impact.py"
+python3 -I "${repo_root}/scripts/test-windows-agent-impact.py"
 python3 "${repo_root}/scripts/test-execution-board.py"
 python3 "${repo_root}/scripts/verify-execution-board.py"
 python3 "${repo_root}/scripts/test-ticket-closure-receipts.py"

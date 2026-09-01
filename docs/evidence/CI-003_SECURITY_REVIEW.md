@@ -36,12 +36,13 @@ omitted job failed.
 
 App binding is deliberately scoped: it proves that GitHub Actions reported a
 context, not that a particular reviewed workflow definition produced it. The
-workflow and verifier are candidate-controlled source. The repository has one
+workflows, classifier, verifier, and their oracles are candidate-controlled
+source. The repository has one
 organization member and one CODEOWNER, so requiring a second human approval
 would deadlock owner-authored maintenance rather than create an operational
 control. `CI-003` therefore retains the six granular contexts, adds the two
 aggregates, requires independent exact-head source review by process, and
-records malicious authorized-writer workflow mutation as residual risk.
+records malicious authorized-writer merge-authority mutation as residual risk.
 
 ## Live protection transition
 
@@ -107,18 +108,22 @@ controls; a skipped verifier; named and unnamed extra steps; plain and quoted
 extra environment authority; checkout-pin spoofing; shell-level failure
 suppression; and plain or quoted duplicate aggregate job IDs.
 
-The workflow parser also allowlists the semantic top-level keys, so workflow-
-level `env` or `defaults` cannot inject shell authority into the otherwise
-exact aggregate steps. The Architecture job's controls, six-step order,
+The workflow parser also allowlists the semantic top-level keys before `jobs`
+and rejects top-level keys after it, so workflow-level `env` or `defaults`
+cannot inject shell authority into the otherwise exact aggregate steps. The
+Architecture job's controls, six-step order,
 checkout, immediately following aggregate-suite step, and digest-verifying
 actionlint step are pinned as the first three steps, leaving no mutable
 predecessor before either hosted structural gate; the local suite command is
 pinned as a complete shell line. Two additional negative mutations cover shell
 failure suppression at both suite invocation sites. Noncanonical GitHub-valid
 job-key spellings are deliberately rejected instead of partially parsed.
-All authority-bearing Python invocations use isolated mode (`python3 -I`), so
-candidate files named after standard-library modules cannot intercept oracle or
-verifier startup through the script directory.
+All authority-bearing Python invocations—including Windows classification—use
+isolated mode (`python3 -I`), so candidate files named after standard-library
+modules cannot intercept oracle, classifier, or verifier startup through the
+script directory. Hosted authority uses the absolute trusted interpreter path;
+the complete Windows impact job is byte-pinned with classification before its
+candidate test, and PATH-override and mutable-predecessor mutations are denied.
 
 ## Threat-model review
 
@@ -135,11 +140,13 @@ workflow evidence blocks merge; it does not replace those contracts. `TM-048`
 is corrected to describe its historical nine workflow outcomes accurately.
 
 Residual authority remains with GitHub and GitHub Actions. An authorized
-repository writer can weaken the candidate-controlled workflow and verifier;
+repository writer can weaken candidate-controlled merge-authority workflows,
+classifier, verifier, or their oracles;
 an authorized administrator can additionally mutate protection outside the
 source tree. App binding prevents a different app from impersonating a check
 but does not bind its workflow definition. Authority-sensitive merges therefore
-re-read the live rule and independently review exact workflow/verifier changes.
+re-read the live rule and independently review every exact merge-authority
+workflow, classifier, verifier, and oracle change.
 The aggregates consume reported job conclusions; they cannot independently
 prove that an authorized workflow edit did not skip a child step with `if`,
 soften it with `continue-on-error`, or mask a shell failure before GitHub

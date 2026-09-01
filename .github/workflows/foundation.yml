@@ -272,7 +272,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test protected workflow aggregates
-        run: python3 -I scripts/test-workflow-aggregate.py
+        run: /usr/bin/python3 -I scripts/test-workflow-aggregate.py
       - name: Lint workflows with verified actionlint
         run: |
           set -euo pipefail
@@ -647,7 +647,7 @@ jobs:
           RECOVERY_DRILL_RESULT: ${{ needs.recovery-drill.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
         run: |
-          python3 -I scripts/verify-workflow-aggregate.py foundation \
+          /usr/bin/python3 -I scripts/verify-workflow-aggregate.py foundation \
             rust="${RUST_RESULT}" \
             dependencies="${DEPENDENCIES_RESULT}" \
             secrets="${SECRETS_RESULT}" \

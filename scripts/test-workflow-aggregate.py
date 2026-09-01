@@ -27,6 +27,7 @@ SPEC.loader.exec_module(AGGREGATE)
 
 FOUNDATION_WORKFLOW = REPO_ROOT / ".github/workflows/foundation.yml"
 WINDOWS_WORKFLOW = REPO_ROOT / ".github/workflows/windows-agent.yml"
+WINDOWS_IMPACT = SCRIPT_DIR / "windows-agent-impact.py"
 RESULTS = ("success", "failure", "cancelled", "skipped", "unknown")
 CHECKOUT_STEP = (
     "      - name: Check out aggregate verifier\n"
@@ -38,7 +39,7 @@ SOURCE_CHECKOUT_STEP = (
 )
 HOSTED_SUITE_STEP = (
     "      - name: Test protected workflow aggregates\n"
-    "        run: python3 -I scripts/test-workflow-aggregate.py\n"
+    "        run: /usr/bin/python3 -I scripts/test-workflow-aggregate.py\n"
 )
 ACTIONLINT_STEP = (
     "      - name: Lint workflows with verified actionlint\n"
@@ -57,7 +58,7 @@ ACTIONLINT_STEP = (
     '          "${actionlint_dir}/actionlint" .github/workflows/*.yml\n'
 )
 FOUNDATION_RUN = (
-    "          python3 -I scripts/verify-workflow-aggregate.py foundation \\\n"
+    "          /usr/bin/python3 -I scripts/verify-workflow-aggregate.py foundation \\\n"
     "            rust=\"${RUST_RESULT}\" \\\n"
     "            dependencies=\"${DEPENDENCIES_RESULT}\" \\\n"
     "            secrets=\"${SECRETS_RESULT}\" \\\n"
@@ -68,7 +69,7 @@ FOUNDATION_RUN = (
     "            deployment=\"${DEPLOYMENT_RESULT}\"\n"
 )
 WINDOWS_RUN = (
-    "          python3 -I scripts/verify-workflow-aggregate.py windows \\\n"
+    "          /usr/bin/python3 -I scripts/verify-workflow-aggregate.py windows \\\n"
     "            impact=\"${IMPACT_RESULT}\" \\\n"
     "            run-windows=\"${RUN_WINDOWS}\" \\\n"
     "            windows-agent=\"${WINDOWS_AGENT_RESULT}\"\n"
@@ -88,6 +89,39 @@ WINDOWS_ENV = (
     ("RUN_WINDOWS", "${{ needs.impact.outputs.run-windows }}"),
     ("WINDOWS_AGENT_RESULT", "${{ needs.windows-agent.result }}"),
 )
+WINDOWS_IMPACT_JOB = r"""  impact:
+    name: Classify Windows impact
+    runs-on: ubuntu-24.04
+    outputs:
+      run-windows: ${{ steps.impact.outputs.run-windows }}
+    steps:
+      - name: Check out source and comparison history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify exact change
+        id: impact
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            printf 'run-windows=true\n' >> "${GITHUB_OUTPUT}"
+          else
+            /usr/bin/python3 -I scripts/windows-agent-impact.py \
+              --base "${BASE_SHA}" \
+              --head "${HEAD_SHA}" \
+              >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Install pinned Rust toolchain
+        if: github.event_name == 'pull_request'
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Test impact classifier
+        if: github.event_name == 'pull_request'
+        run: /usr/bin/python3 -I scripts/test-windows-agent-impact.py
+
+"""
 
 
 def workflow_jobs(path: Path) -> dict[str, str]:
@@ -108,6 +142,13 @@ def workflow_jobs(path: Path) -> dict[str, str]:
     }
     if top_level not in allowed_top_levels:
         raise AssertionError(f"workflow has noncanonical top-level controls: {path}")
+    trailing_top_level = tuple(
+        line
+        for line in text.splitlines()
+        if line and not line[0].isspace() and not line.startswith("#")
+    )
+    if trailing_top_level:
+        raise AssertionError(f"workflow has controls after the jobs mapping: {path}")
     job_lines = tuple(
         line
         for line in text.splitlines()
@@ -209,6 +250,11 @@ def assert_safe_aggregate_job(
     test.assertEqual(verifier.split("        run: |\n", 1)[1], expected_run)
 
 
+def assert_exact_windows_impact(test: unittest.TestCase, block: str) -> None:
+    """Pin classifier controls, trust order, environment, and commands."""
+    test.assertEqual(block, WINDOWS_IMPACT_JOB)
+
+
 def assert_rejected(test: unittest.TestCase, function, values: dict[str, str]) -> None:
     with redirect_stdout(StringIO()), test.assertRaises(AGGREGATE.AggregateError):
         function(values)
@@ -243,6 +289,23 @@ class AggregateDecisionTests(unittest.TestCase):
                 [valid[0], *valid[2:]], capture_output=True, check=False
             )
             self.assertEqual(shadowed.returncode, 41)
+
+            impact = Path(directory) / WINDOWS_IMPACT.name
+            impact.write_text(
+                WINDOWS_IMPACT.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            isolated_impact = subprocess.run(
+                [sys.executable, "-I", str(impact), "--help"],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(isolated_impact.returncode, 0, isolated_impact.stderr)
+            shadowed_impact = subprocess.run(
+                [sys.executable, str(impact), "--help"],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(shadowed_impact.returncode, 41)
 
     def test_foundation_accepts_only_all_success(self) -> None:
         # This is the complete 5^8 state space, not one mutation per lane.
@@ -353,13 +416,15 @@ class WorkflowWiringTests(unittest.TestCase):
             )
             self.assertIn(f'{job}="${{{env_name}}}"', jobs["foundation"])
         self.assertIn(
-            "python3 -I scripts/verify-workflow-aggregate.py foundation",
+            "/usr/bin/python3 -I scripts/verify-workflow-aggregate.py foundation",
             jobs["foundation"],
         )
 
     def test_windows_aggregate_covers_classification_and_execution(self) -> None:
+        workflow = WINDOWS_WORKFLOW.read_text(encoding="utf-8")
         jobs = workflow_jobs(WINDOWS_WORKFLOW)
         self.assertEqual(set(jobs), {"impact", "windows-agent", "windows"})
+        assert_exact_windows_impact(self, jobs["impact"])
         self.assertEqual(needs(jobs["windows"]), ("impact", "windows-agent"))
         assert_safe_aggregate_job(
             self,
@@ -384,8 +449,33 @@ class WorkflowWiringTests(unittest.TestCase):
         ):
             self.assertIn(argument, jobs["windows"])
         self.assertIn(
-            "python3 -I scripts/verify-workflow-aggregate.py windows", jobs["windows"]
+            "/usr/bin/python3 -I scripts/verify-workflow-aggregate.py windows",
+            jobs["windows"],
         )
+        assert_exact_command(
+            self,
+            workflow,
+            "run: /usr/bin/python3 -I scripts/test-windows-agent-impact.py",
+        )
+        assert_exact_command(
+            self, workflow, "/usr/bin/python3 -I scripts/windows-agent-impact.py \\"
+        )
+        impact_mutations = {
+            "job PATH override": jobs["impact"].replace(
+                "    outputs:\n",
+                "    env:\n      PATH: ${{ github.workspace }}/attacker-bin:/usr/bin:/bin\n"
+                "    outputs:\n",
+            ),
+            "mutable predecessor": jobs["impact"].replace(
+                "      - name: Classify exact change\n",
+                "      - name: Install candidate command wrapper\n"
+                "        run: printf attacker >> \"${GITHUB_PATH}\"\n"
+                "      - name: Classify exact change\n",
+            ),
+        }
+        for name, mutation in impact_mutations.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                assert_exact_windows_impact(self, mutation)
 
     def test_fail_open_workflow_controls_are_rejected(self) -> None:
         jobs = workflow_jobs(FOUNDATION_WORKFLOW)
@@ -470,7 +560,7 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_hosted_and_local_gates_run_this_suite(self) -> None:
         foundation = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")
         local = (SCRIPT_DIR / "validate-foundation.sh").read_text(encoding="utf-8")
-        hosted_command = "python3 -I scripts/test-workflow-aggregate.py"
+        hosted_command = "/usr/bin/python3 -I scripts/test-workflow-aggregate.py"
         local_command = 'python3 -I "${repo_root}/scripts/test-workflow-aggregate.py"'
         architecture = workflow_jobs(FOUNDATION_WORKFLOW)["architecture"]
         architecture_fields = tuple(
@@ -503,17 +593,22 @@ class WorkflowWiringTests(unittest.TestCase):
 
     def test_workflow_level_shell_authority_is_rejected(self) -> None:
         workflow_text = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory() as directory:
-            candidate = Path(directory) / "foundation.yml"
-            candidate.write_text(
-                workflow_text.replace(
-                    "\njobs:\n",
-                    "\nenv:\n  BASH_ENV: scripts/bypass-aggregate.sh\n\njobs:\n",
-                ),
-                encoding="utf-8",
-            )
-            with self.assertRaises(AssertionError):
-                workflow_jobs(candidate)
+        mutations = {
+            "control before jobs": workflow_text.replace(
+                "\njobs:\n",
+                "\nenv:\n  BASH_ENV: scripts/bypass-aggregate.sh\n\njobs:\n",
+            ),
+            "flow-style control after jobs": workflow_text.replace(
+                "\n  foundation:\n",
+                "\nenv: {BASH_ENV: scripts/bypass-aggregate.sh}\n\n  foundation:\n",
+            ),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                candidate = Path(directory) / "foundation.yml"
+                candidate.write_text(mutation, encoding="utf-8")
+                with self.assertRaises(AssertionError):
+                    workflow_jobs(candidate)
 
 
 if __name__ == "__main__":
