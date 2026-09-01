@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import itertools
+import os
 import re
 import sys
 import unittest
@@ -60,7 +61,9 @@ class AggregateDecisionTests(unittest.TestCase):
         # This is the complete 5^8 state space, not one mutation per lane.
         # It proves success has exactly one accepting state and that multiple
         # simultaneous failures cannot interact into an accidental pass.
-        with redirect_stdout(StringIO()):
+        # Discard millions of diagnostic lines instead of retaining them in a
+        # StringIO while the complete state space is exercised.
+        with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink):
             for combination in itertools.product(
                 RESULTS, repeat=len(AGGREGATE.FOUNDATION_JOBS)
             ):
