@@ -876,11 +876,15 @@ protected-main `b75165d`, production remote-agent lane over mTLS. Evidence
 bundle: luigi `~/games-round1-receipts.tgz` (environment fingerprint, heat
 logs, controller/agent logs, and the preserved agent journal). The bench also
 measured ~500 ms wall per single-step stage with both controller and agent
-polls at 10 ms — since isolated: the agent work loop ran one assignment per
-poll tick, so per-stage cost was max(poll interval, work), and the shipped
-500 ms default paid the whole interval per stage. Fixed by `b1301e9`
-(PR #103); the observation belonged to `PERF-001` and its receipts live
-there. These four tickets were first
+polls recorded at 10 ms in its environment fingerprint. A later-found agent
+defect — the work loop ran one assignment per poll tick, making per-stage
+cost max(agent poll interval, work); fixed by `b1301e9` (PR #103) — produces
+exactly this figure at the agent's shipped 500 ms default (measured 496.4
+ms/stage on the 2026-08-29 filing's build) but cannot produce it at a 10 ms
+poll, so either the recorded environment did not reach the bench's agent
+process or its ~500 ms had a distinct cause on the `b75165d`-era tree that
+was never isolated. The observation belonged to `PERF-001` and its receipts
+live there. These four tickets were first
 drafted in PR #41 and are adopted here with their measured evidence unchanged.
 
 PR #103 (`b1301e9`) is partial `PERF-001` evidence, not a separate unnamed
@@ -901,7 +905,7 @@ per-RPC authorization to one, measuring 220.4 to 208.3 ms/stage on the
 same rig and configuration. PR #107 (`23b2273`) removed a rare
 fail-closed freeze — an unrelated process dying mid-scan parked an
 attempt as `reconciliation_required` and stopped the agent's lane —
-found and churn-validated at roughly one occurrence per five thousand
+found and churn-validated at roughly one occurrence per few thousand
 attempts. PR #108 (`ef08716`) turned the agent's per-attempt durability
 fsyncs into concurrent batched barriers under named crash-recovery
 properties, measuring 271.5 to 228.0 and 291.9 to 238.5 ms/stage across
@@ -920,10 +924,15 @@ renewal, cancellation observation, reconciliation cadence, stale-fence
 rejection); and the measurements carry median and minimum estimators
 under its own admissibility rule. Its headline attribution — 19% of
 per-stage cost recoverable by event-driven waits — was true of the
-build it measured and not of later main: `893e06f` (PR #78) moved work
-acquisition onto the per-organization advisory-lock queue, which
-absorbed the poll sensitivity, and the shipped-default cost it never
-observed was the drain defect fixed by `b1301e9`. The filing campaign's
+build it measured and not of later main: `893e06f` (PR #78) enrolled
+acceptance, start, renewal, and terminal publication in the same
+per-organization advisory lock the claim path already took, so an
+in-flight poll's claim waits out a concurrent finalize and claims its
+freshly queued successor the moment that finalize commits, instead of
+returning empty and sleeping an interval — replicated on
+pre-event-wait main, the filed 41 ms of poll sensitivity measured ~4 ms
+— and the shipped-default cost the filing never observed was the drain
+defect fixed by `b1301e9`. The filing campaign's
 own report marks its McLoving figures superseded (they were measured at
 a 10 ms poll, where the drain defect is invisible). Closure of the
 observation does not close `PERF-001`.
