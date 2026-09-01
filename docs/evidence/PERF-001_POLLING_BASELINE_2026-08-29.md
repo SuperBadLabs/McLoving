@@ -94,9 +94,11 @@ committed.
 
 - Attached to this baseline (`83a6d6c`, equivalently `6ac9be9` for every
   runtime crate, per the divergence above): the filing's 217.4 ms/stage
-  baseline, its 174.5 ms/stage poll-1ms cell, and the 41 ms/stage poll
-  sensitivity those imply (Mario, delta method, both polls at the stated
-  values).
+  durability baseline, its 215.8 ms/stage poll-10ms cell, its 174.5
+  ms/stage poll-1ms cell, and the 41.3 ms/stage poll sensitivity the
+  filing derived from the matching-durability pair (215.8 minus 174.5;
+  Mario, delta method). The durability baseline is not the sensitivity
+  minuend — 217.4 minus 174.5 is 42.9 and mixes configurations.
 - Attached to protected-main-reachable identities, not this baseline: the
   496.4 ms/stage shipped-default measurement is recorded in `b1301e9`'s
   commit message against its parent `bed6c0f`; the closing receipts are the

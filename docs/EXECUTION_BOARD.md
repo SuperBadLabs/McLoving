@@ -933,7 +933,10 @@ per-organization advisory lock the claim path already took, so an
 in-flight poll's claim waits out a concurrent finalize and claims its
 freshly queued successor the moment that finalize commits, instead of
 returning empty and sleeping an interval — replicated on
-pre-event-wait main, the filed 41 ms of poll sensitivity measured ~4 ms
+pre-event-wait main, the filed 41.3 ms of poll sensitivity (its
+poll-10ms cell at 215.8 ms/stage minus its poll-1ms cell at 174.5, the
+matching-durability pair; raw values retained in
+`docs/evidence/PERF-001_POLLING_BASELINE_2026-08-29.md`) measured ~4 ms
 — and the shipped-default cost the filing never observed was the drain
 defect fixed by `b1301e9`. The filing campaign's
 own report marks its McLoving figures superseded (they were measured at
