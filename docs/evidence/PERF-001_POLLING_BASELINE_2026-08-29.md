@@ -103,3 +103,24 @@ committed.
   496.4 ms/stage shipped-default measurement is recorded in `b1301e9`'s
   commit message against its parent `bed6c0f`; the closing receipts are the
   `e57f7c9` evidence in `docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31.md`.
+
+## Replication that superseded the filed sensitivity
+
+Measured 2026-08-30 on Mario's faceoff2 harness against protected-main
+`bed6c0f` (reachable from `main`; `b1301e9`'s parent, so pre-dating every
+event-wait and drain change), same delta method as the filing, with
+`MCLOVING_POLL_MILLISECONDS` and `MCLOVING_AGENT_POLL_MILLISECONDS` set
+together per cell. Raw wall-clock milliseconds, five heats per cell:
+
+```
+label         stages heat  wall_ms
+main-poll-10  50     1-5   12135 12590 11962 12019 12030
+main-poll-10  100    1-5   24054 24101 24639 24124 24059
+main-poll-1   50     1-5   12094 11412 11388 12011 11439
+main-poll-1   100    1-5   22328 23354 22292 23353 23323
+```
+
+Median-estimator deltas: poll-10 (24101 - 12030) / 50 = 241.4 ms/stage;
+poll-1 (23323 - 11439) / 50 = 237.7 ms/stage; sensitivity 3.7 ms/stage
+against the filing's 41.3 on the same rig and method. This is the "~4 ms"
+the board's supersession rationale cites.
