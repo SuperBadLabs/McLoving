@@ -66,6 +66,30 @@ scheduler, agent, controller, or store source differs from `6ac9be9`:
  14 files changed, 3160 insertions(+), 18 deletions(-)
 ```
 
+## Reconstruction and verification
+
+`PERF-001_POLLING_BASELINE_2026-08-29.patch` (same directory) is the
+binary-safe, full-index content delta `6ac9be9..83a6d6c`. From any clone of
+this repository the baseline tree is reproducible and every recorded id
+verifiable with no external source:
+
+```
+git worktree add --detach /tmp/baseline 6ac9be99bd3c3241de1e3d14a324b0eea02b3b73
+cd /tmp/baseline
+git apply --binary <repo>/docs/evidence/PERF-001_POLLING_BASELINE_2026-08-29.patch
+git add -A && git write-tree
+# prints fa88a0530189fbf7d40d9a407e49e673c73322fa — the filed baseline tree
+```
+
+Each raw commit object above, piped through
+`git hash-object -t commit --stdin`, reproduces its recorded commit id
+(`52a879c…` references the intermediate tree `40b7406…`, which the same
+patch minus its final commit's hunks would produce; the closure's claims
+rest only on the end-state tree verified above). This chain — reachable
+ancestor, in-repo content delta, reconstructed tree hash, content-addressed
+commit payloads — was executed and verified before this document was
+committed.
+
 ## Which measurements attach to which identity
 
 - Attached to this baseline (`83a6d6c`, equivalently `6ac9be9` for every
