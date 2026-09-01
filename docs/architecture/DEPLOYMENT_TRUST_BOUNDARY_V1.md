@@ -378,6 +378,13 @@ sharper than that. Measured:
   the five constructs `require_parseable_unit_sources` refuses by name is
   resolved in that output.
 
+  **DEPLOY-003 measured correction (2026-08-31):** systemd 255 leaves a bare
+  executable bare in the typed `ExecStart` tuple; it does not report the
+  absolute binary selected from its internal search path. The other spellings
+  above are resolved. Manager mode therefore retains the named non-absolute
+  executable refusal rather than guessing the search path. This narrows the
+  claimed subtraction from O5; it does not weaken the fail-closed invariant.
+
 The lane refuses those five spellings precisely so it does not have to model
 them. The manager will simply report them.
 

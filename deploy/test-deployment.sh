@@ -5671,7 +5671,7 @@ chmod 0755 "${absent_hook_dir}"
     exit 1
   }
   for ignored_absent in "${absent_hook_dir}" "--out=${absent_hook_dir}/other.sh"; do
-    if grep -qx "${ignored_absent}" <<<"${absent_seen}"; then
+    if grep -qx -- "${ignored_absent}" <<<"${absent_seen}"; then
       echo "the argument extractor claimed ${ignored_absent}, which the stated policy ignores" >&2
       exit 1
     fi

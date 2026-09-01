@@ -67,7 +67,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 # the probe is best-effort by design.
 health_environ_file=""
 if [[ -n "${health_unit}" ]]; then
-  health_environ_file="$(deployment_unit_process_environment "${health_unit}")" || {
+  health_environ_file="$(mktemp)" || {
+    echo "mcloving-health: cannot create a private environment snapshot" >&2
+    exit 1
+  }
+  trap 'rm -f -- "${health_environ_file}"' EXIT
+  deployment_capture_unit_process_environment "${health_unit}" "${health_environ_file}" || {
     echo "mcloving-health: cannot obtain the environment ${health_unit} is running with (the service manager did not answer, or the unit is not running); refusing to render a health verdict from the declared contract alone, because a transition has already moved the release and a probe of the wrong address would report success for a deployment nobody checked" >&2
     exit 1
   }

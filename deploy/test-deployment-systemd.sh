@@ -91,8 +91,15 @@ systemctl --user show -p UnitPath >/dev/null 2>&1 \
 [[ -x /usr/lib/systemd/user-generators/podman-user-generator ]] \
   || fail "podman's Quadlet generator is absent; the postgres quadlet cannot become a unit without it"
 
-podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -qx true \
-  || fail "rootless podman is not working for ${account}; the quadlet runs the database as this account"
+if [[ "${MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION:-0}" != 1 ]]; then
+  podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -qx true \
+    || fail "rootless podman is not working for ${account}; the quadlet runs the database as this account"
+else
+  [[ ! -e "${home_dir}/.local/share/containers" \
+    && ! -e "${XDG_RUNTIME_DIR}/containers" \
+    && ! -e "${XDG_RUNTIME_DIR}/libpod" ]] \
+    || fail "the controlled account already has Podman state; the generated volume unit would not be a cold first operation"
+fi
 
 echo "   account=${account} home=${home_dir} manager=$(systemctl --user is-system-running 2>&1) podman=$(podman --version | awk '{print $3}')"
 
@@ -132,18 +139,35 @@ existing=""
 # what systemd reads; modelling the list here would be the "wrong oracle"
 # mistake this file has already made three times.
 unit_probe_roots=()
+quadlet_probe_roots=()
+expected_space_path_seen=0
 declare -A seen_probe_root=()
+declare -A quadlet_probe_root_set=()
 while IFS= read -r encoded_root; do
   [[ -n "${encoded_root}" ]] || continue
   decode_path_item_into decoded_probe_root "${encoded_root}"
   [[ -z "${seen_probe_root["${decoded_probe_root}"]:-}" ]] || continue
   seen_probe_root["${decoded_probe_root}"]=1
   unit_probe_roots+=("${decoded_probe_root}")
+  if [[ -n "${MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE:-}" \
+    && "${decoded_probe_root}" == "${MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE}" ]]; then
+    expected_space_path_seen=1
+  fi
 done < <(deployment_manager_unit_path "${home_dir}")
-# The Quadlet SOURCE directory is not a unit load path -- systemd never reads
-# `.container` files, the generator does -- so it is named rather than asked
-# for, as is the installed-unit root in case the manager declines to answer.
-for extra_probe_root in "${config_probe}/systemd/user" "${config_probe}/containers/systemd"; do
+if [[ -n "${MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE:-}" ]]; then
+  (( expected_space_path_seen == 1 )) \
+    || fail "the typed UnitPath query did not preserve the exact entry containing whitespace: ${MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE}"
+fi
+# Quadlet is an independent recursive source namespace. Ask the manager's typed
+# QUADLET_UNIT_DIRS replacement when present, otherwise use Podman's complete
+# defaults, and snapshot those roots once alongside UnitPath.
+while IFS= read -r encoded_root; do
+  [[ -n "${encoded_root}" ]] || continue
+  decode_path_item_into extra_probe_root "${encoded_root}"
+  quadlet_probe_root_set["${extra_probe_root}"]=1
+  quadlet_probe_roots+=("${extra_probe_root}")
+done < <(deployment_unit_load_paths "${home_dir}" all quadlet)
+for extra_probe_root in "${config_probe}/systemd/user" "${quadlet_probe_roots[@]}"; do
   [[ -z "${seen_probe_root["${extra_probe_root}"]:-}" ]] || continue
   seen_probe_root["${extra_probe_root}"]=1
   unit_probe_roots+=("${extra_probe_root}")
@@ -165,9 +189,47 @@ done
 # a system path this account must not delete in.
 runtime_probe_root="$(deployment_runtime_root "${home_dir}")"
 foreign_units=""
+probe_candidate=""
+# Candidate-file view closes forms a top-level mcloving-* glob cannot see:
+# service.d/container.d type-wide drop-ins, dash/template forms, and recursive
+# Quadlet sources. Type-wide files are never resettable even under this home;
+# deleting one would change unrelated units, so they make the host non-clean.
+probe_candidate_raw="$(deployment_unit_candidate_files "${home_dir}" \
+  "${repo_root}/deploy/systemd/mcloving-db-init.service" \
+  "${repo_root}/deploy/systemd/mcloving-controller.service" \
+  "${repo_root}/deploy/systemd/mcloving-agent.service" \
+  "${repo_root}/deploy/podman/mcloving-postgres.container" \
+  "${repo_root}/deploy/podman/mcloving-postgres-data.volume")"
+while IFS= read -r probe_candidate_encoded; do
+  [[ -n "${probe_candidate_encoded}" ]] || continue
+  decode_path_item_into probe_candidate "${probe_candidate_encoded}"
+  if [[ "${probe_candidate}" == */service.d/*.conf \
+    || "${probe_candidate}" == */container.d/*.conf \
+    || "${probe_candidate}" == */volume.d/*.conf ]]; then
+    foreign_units+="${probe_candidate} "
+  elif [[ "${probe_candidate}" == "${home_dir}/"* ]]; then
+    existing+="installed unit, source, or drop-in at ${probe_candidate} "
+  elif [[ -n "${runtime_probe_root}" \
+    && "${probe_candidate}" == "${runtime_probe_root}/"* ]]; then
+    existing+="runtime unit, source, or drop-in at ${probe_candidate} "
+  else
+    foreign_units+="${probe_candidate} "
+  fi
+done <<<"${probe_candidate_raw}"
 for probe_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
   [[ -d "${probe_root}" ]] || continue
-  probe_hit="$(shopt -s nullglob; printf '%s\n' "${probe_root}"/mcloving-* | head -1)"
+  if [[ -n "${quadlet_probe_root_set["${probe_root}"]:-}" ]]; then
+    probe_hit=""
+    for quadlet_probe_name in mcloving-postgres.container mcloving-postgres-data.volume; do
+      probe_hit_encoded="$(deployment_quadlet_tree_candidates "${probe_root}" \
+        "${quadlet_probe_name}" | head -1)"
+      [[ -n "${probe_hit_encoded}" ]] || continue
+      decode_path_item_into probe_hit "${probe_hit_encoded}"
+      break
+    done
+  else
+    probe_hit="$(shopt -s nullglob; printf '%s\n' "${probe_root}"/mcloving-* | head -1)"
+  fi
   [[ -n "${probe_hit}" ]] || continue
   if [[ "${probe_root}" == "${home_dir}/"* ]] \
     || { [[ -n "${runtime_probe_root}" ]] && [[ "${probe_root}" == "${runtime_probe_root}/"* ]]; }; then
@@ -180,7 +242,10 @@ done
 [[ ! -e "${state_probe}/mcloving-agent" && ! -e "${state_probe}/mcloving-controller" ]] \
   || existing+="service state under ${state_probe} "
 [[ ! -e "${home_dir}/.config/mcloving" ]] || existing+="contracts at ${home_dir}/.config/mcloving "
-podman volume exists mcloving-postgres-data 2>/dev/null && existing+="the mcloving-postgres-data volume "
+if [[ "${MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION:-0}" != 1 ]]; then
+  podman volume exists mcloving-postgres-data 2>/dev/null \
+    && existing+="the mcloving-postgres-data volume "
+fi
 # THE NAMED CONTAINER IS ONE OF THE PARTS TOO, by the rule stated above. The
 # quadlet fixes ContainerName=mcloving-postgres, so a stale container of that
 # name collides with the start in step 8 -- and probing only the volume left a
@@ -188,7 +253,10 @@ podman volume exists mcloving-postgres-data 2>/dev/null && existing+="the mclovi
 # `existing` empty, so --reset ran no cleanup block at all and the run then
 # failed at step 8 for a reason that looks like a lane defect and is not.
 # `--reset` already removes it; what was missing was noticing it was there.
-podman container exists mcloving-postgres 2>/dev/null && existing+="the mcloving-postgres container "
+if [[ "${MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION:-0}" != 1 ]]; then
+  podman container exists mcloving-postgres 2>/dev/null \
+    && existing+="the mcloving-postgres container "
+fi
 if [[ -n "${existing}" ]]; then
   if (( reset == 0 )); then
     fail "refusing to run: ${existing}already exists, and this script would destroy it. Nothing here can tell a disposable test account from a real one. Run it on an account with no deployment, or pass --reset to say you know what is on this one"
@@ -199,6 +267,7 @@ if [[ -n "${existing}" ]]; then
   # it runs it holds the volume open, so removing the volume underneath it is at
   # best a race. Stop it by name.
   systemctl --user stop mcloving-postgres.service >/dev/null 2>&1 || true
+  systemctl --user stop mcloving-postgres-data-volume.service >/dev/null 2>&1 || true
   podman rm -f mcloving-postgres >/dev/null 2>&1 || true
   podman volume rm -f mcloving-postgres-data >/dev/null 2>&1 || true
   if podman volume exists mcloving-postgres-data 2>/dev/null; then
@@ -212,7 +281,8 @@ if [[ -n "${existing}" ]]; then
   # asks the running manager; a hard-coded ~/.config would clean a directory the
   # installer never wrote to whenever the two disagree, leave the real units in
   # place, and report a reset that had not happened.
-  reset_config_base="$(deployment_effective_config_root "${home_dir}")"
+  reset_config_base="${config_probe}"
+  reset_candidate=""
   # -rf and a bare mcloving-* glob: `rm -f` on `*.service` leaves the
   # `mcloving-agent.service.d/` drop-in directories standing, and a drop-in that
   # survives a reset is merged into the next run's units.
@@ -234,17 +304,39 @@ if [[ -n "${existing}" ]]; then
         || [[ "${reset_root}" != "${runtime_probe_root}/"* ]]; }; then
       continue
     fi
-    rm -rf "${reset_root}"/mcloving-* \
-           "${reset_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
+    if [[ -n "${quadlet_probe_root_set["${reset_root}"]:-}" ]]; then
+      for quadlet_reset_name in mcloving-postgres.container mcloving-postgres-data.volume; do
+        while IFS= read -r reset_candidate_encoded; do
+          [[ -n "${reset_candidate_encoded}" ]] || continue
+          decode_path_item_into reset_candidate "${reset_candidate_encoded}"
+          rm -f -- "${reset_candidate}" >/dev/null 2>&1 || true
+        done < <(deployment_quadlet_tree_candidates "${reset_root}" \
+          "${quadlet_reset_name}")
+      done
+    else
+      rm -rf "${reset_root}"/mcloving-* \
+             "${reset_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
+    fi
   done
   systemctl --user daemon-reload >/dev/null 2>&1 || true
+  [[ "$(systemctl --user show -p ActiveState --value mcloving-postgres-data-volume.service 2>/dev/null || true)" != active ]] \
+    || fail "--reset left mcloving-postgres-data-volume.service active after removing its volume"
   for reset_root in ${unit_probe_roots[@]+"${unit_probe_roots[@]}"}; do
     if [[ "${reset_root}" != "${home_dir}/"* ]] \
       && { [[ -z "${runtime_probe_root}" ]] \
         || [[ "${reset_root}" != "${runtime_probe_root}/"* ]]; }; then
       continue
     fi
-    reset_hit="$(shopt -s nullglob; printf '%s\n' "${reset_root}"/mcloving-* | head -1)"
+    if [[ -n "${quadlet_probe_root_set["${reset_root}"]:-}" ]]; then
+      reset_hit=""
+      for quadlet_reset_name in mcloving-postgres.container mcloving-postgres-data.volume; do
+        reset_hit="$(deployment_quadlet_tree_candidates "${reset_root}" \
+          "${quadlet_reset_name}" | head -1)"
+        [[ -z "${reset_hit}" ]] || break
+      done
+    else
+      reset_hit="$(shopt -s nullglob; printf '%s\n' "${reset_root}"/mcloving-* | head -1)"
+    fi
     [[ -z "${reset_hit}" ]] \
       || fail "--reset left ${reset_hit} in a manager load path; refusing to exercise a customised unit"
   done
@@ -255,12 +347,12 @@ fi
 # and quadlets under. `deployment_config_root` answers from the invoking shell's
 # environment instead, and the two differ whenever the manager carries its own
 # absolute XDG_CONFIG_HOME -- so cleanup would miss the real units entirely.
-config_base="$(deployment_effective_config_root "${home_dir}")"
+config_base="${config_probe}"
 unit_root="${config_base}/systemd/user"
 quadlet_root="${config_base}/containers/systemd"
 libexec_root="${home_dir}/.local/libexec/mcloving"
 units=(mcloving-db-init.service mcloving-controller.service mcloving-agent.service)
-generated=(mcloving-postgres.service)
+generated=(mcloving-postgres.service mcloving-postgres-data-volume.service)
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-d001.XXXXXX")"
 
@@ -269,10 +361,40 @@ teardown() {
   trap '' INT TERM HUP
   step "teardown"
   systemctl --user stop mcloving-agent.service mcloving-controller.service \
-    mcloving-db-init.service mcloving-postgres.service >/dev/null 2>&1 || true
+    mcloving-db-init.service mcloving-postgres.service \
+    mcloving-postgres-data-volume.service >/dev/null 2>&1 || true
   systemctl --user disable mcloving-agent.service mcloving-controller.service \
     mcloving-db-init.service >/dev/null 2>&1 || true
   podman rm -f mcloving-postgres >/dev/null 2>&1 || true
+  # These are proof-only shadow candidates, not deployment state. Remove both
+  # exact files even under --keep so the arm never leaves a manager-active
+  # customization behind for the next run.
+  if [[ -n "${union_high_dropin:-}" ]]; then
+    rm -f -- "${union_high_dropin}" >/dev/null 2>&1 || true
+    rmdir --ignore-fail-on-non-empty -- "${union_high_dropin%/*}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${union_low_dropin:-}" ]]; then
+    rm -f -- "${union_low_dropin}" >/dev/null 2>&1 || true
+    rmdir --ignore-fail-on-non-empty -- "${union_low_dropin%/*}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${negative_load_dropin:-}" ]]; then
+    rm -f -- "${negative_load_dropin}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${nnp_proof_dropin:-}" ]]; then
+    rm -f -- "${nnp_proof_dropin}" >/dev/null 2>&1 || true
+    rmdir --ignore-fail-on-non-empty -- "${nnp_proof_dropin%/*}" >/dev/null 2>&1 || true
+  fi
+  rm -f -- "${fixture_unit:-}" "${fixture_bare_unit:-}" \
+    "${fixture_contract:-}" >/dev/null 2>&1 || true
+  rm -f -- "${nnp_db_marker:-}" >/dev/null 2>&1 || true
+  for nested_fixture_file in ${nested_quadlet_fixture_files[@]+"${nested_quadlet_fixture_files[@]}"}; do
+    rm -f -- "${nested_fixture_file}" >/dev/null 2>&1 || true
+  done
+  if [[ -n "${nested_quadlet_fixture_root:-}" ]]; then
+    rmdir --ignore-fail-on-non-empty -- "${nested_quadlet_fixture_root}" \
+      "${nested_quadlet_fixture_root%/*}" \
+      "${nested_quadlet_fixture_parent:-}" >/dev/null 2>&1 || true
+  fi
   # The scratch tree holds a SECOND full copy of the release -- four large
   # binaries -- staged for the upgrade, and is removed on every path. It was
   # lost when a stray `rm -rf "${scratch}"` was deleted from the preconditions,
@@ -310,6 +432,9 @@ teardown() {
       >/dev/null 2>&1 || true
     rm -rf "${unit_root}"/mcloving-* "${quadlet_root}"/mcloving-* \
            "${unit_root}"/default.target.wants/mcloving-* >/dev/null 2>&1 || true
+    rm -f "${unit_root}/deploy003-manager-query-fixture.service" \
+      "${unit_root}/deploy003-manager-bare-fixture.service" \
+      "${home_dir}/.config/deploy003.fixture.env" >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   elif (( database_possibly_weakened == 1 )); then
     # --keep asked for the deployment, not for a database whose row-level
@@ -346,6 +471,9 @@ teardown() {
   # may outlive a SIGKILL of this script, and saying so beats implying otherwise.
   echo "   teardown ran (status ${status}); any surviving mcloving-postgres container is reported, not hidden:"
   podman ps -a --filter name=mcloving-postgres --format '     {{.Names}} {{.Status}}' || true
+  # The proof-only union files are removed in both keep modes. Make that
+  # removal visible to a retained manager as well.
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
   exit "${status}"
 }
 trap teardown EXIT
@@ -354,11 +482,201 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 # ---------------------------------------------------------------------------
+step "[query fixture] manager resolves supported spellings and leaves bare Exec named"
+
+# The retained no-manager parser refuses continuations, quoted/backslash-
+# escaped executables, non-%h specifiers, and a bare Exec executable because
+# modelling any of them incompletely is unsafe. The manager resolves the first
+# four. On systemd 255 its typed ExecStart tuple deliberately leaves a bare
+# executable bare, so manager mode retains that one safe refusal. Exercise both
+# answers before installation, then remove the fixtures so service-managed
+# evidence remains the shipped lane.
+fixture_unit="${unit_root}/deploy003-manager-query-fixture.service"
+fixture_bare_unit="${unit_root}/deploy003-manager-bare-fixture.service"
+fixture_contract="${home_dir}/.config/deploy003.fixture.env"
+for fixture_path in "${fixture_unit}" "${fixture_bare_unit}" "${fixture_contract}"; do
+  [[ ! -e "${fixture_path}" && ! -L "${fixture_path}" ]] \
+    || fail "refusing to replace pre-existing manager-query fixture path ${fixture_path}"
+done
+mkdir -p "${unit_root}" "${home_dir}/.config"
+printf 'FIXTURE=yes\n' > "${fixture_contract}"
+cat > "${fixture_unit}" <<'FIXTURE'
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/deploy003.fixture.env
+WorkingDirectory=%h
+ExecStart=-@"/usr/bin/pri\x6etf" fixture-argv0 \
+  "%h/a b" "%t/c"
+NoNewPrivileges=yes
+FIXTURE
+systemctl --user daemon-reload
+fixture_facts="$(deployment_manager_unit_facts "${home_dir}" \
+  deploy003-manager-query-fixture.service)" \
+  || fail "the typed manager query did not accept the five resolved spellings"
+fixture_unit_b64="$(printf '%s' deploy003-manager-query-fixture.service | base64 -w0)"
+fixture_contract_b64="$(printf '%s' "${fixture_contract}" | base64 -w0)"
+fixture_working_b64="$(printf '%s' "${home_dir}" | base64 -w0)"
+fixture_quoted_arg_b64="$(printf '%s' "${home_dir}/a b" | base64 -w0)"
+fixture_runtime_arg_b64="$(printf '%s' "${XDG_RUNTIME_DIR}/c" | base64 -w0)"
+printf '%s\n' "${fixture_facts}" \
+  | grep -q "^contract|${fixture_unit_b64}|${fixture_contract_b64}$" \
+  || fail "the manager did not resolve %h in EnvironmentFile to ${fixture_contract}"
+printf '%s\n' "${fixture_facts}" \
+  | grep -q "^working|${fixture_unit_b64}|${fixture_working_b64}$" \
+  || fail "the manager did not resolve WorkingDirectory=%h to ${home_dir}"
+printf '%s\n' "${fixture_facts}" \
+  | grep -q "^executable|${fixture_unit_b64}|$(printf '%s' /usr/bin/printf | base64 -w0)$" \
+  || fail "the manager did not decode the continued, quoted, escaped, prefixed executable"
+printf '%s\n' "${fixture_facts}" \
+  | grep -q "^executable|${fixture_unit_b64}|${fixture_quoted_arg_b64}$" \
+  || fail "the manager did not unquote and expand the absolute %h argument"
+printf '%s\n' "${fixture_facts}" \
+  | grep -q "^executable|${fixture_unit_b64}|${fixture_runtime_arg_b64}$" \
+  || fail "the manager did not expand the non-%h runtime specifier"
+cat > "${fixture_bare_unit}" <<'FIXTURE'
+[Service]
+Type=oneshot
+ExecStart=printf manager-left-this-bare
+FIXTURE
+systemctl --user daemon-reload
+if bare_facts="$(deployment_manager_unit_facts "${home_dir}" \
+  deploy003-manager-bare-fixture.service 2>&1)"; then
+  fail "the typed manager query accepted a bare executable without an absolute identity: ${bare_facts}"
+fi
+grep -q 'reported a non-absolute ExecStart executable' <<<"${bare_facts}" \
+  || fail "the bare-executable refusal did not name the measured manager answer: ${bare_facts}"
+rm -f "${fixture_unit}" "${fixture_bare_unit}" "${fixture_contract}"
+systemctl --user daemon-reload
+echo "   manager resolved continuation, quoting, C escape, prefixes and specifiers; bare executable refused; fixtures removed"
+
+# Two same-name drop-ins at different precedence levels. The manager reports
+# only the active higher one in DropInPaths; DEPLOY-003's additive union must
+# still judge and digest the lower file that would become active if the higher
+# one were removed later.
+union_high_dropin="${unit_root}/mcloving-controller.service.d/90-deploy003-union.conf"
+union_low_dropin="${runtime_probe_root}/systemd/user/mcloving-controller.service.d/90-deploy003-union.conf"
+mkdir -p "${union_high_dropin%/*}" "${union_low_dropin%/*}"
+printf '[Unit]\nDescription=McLoving controller (higher union fixture)\n' > "${union_high_dropin}"
+printf '[Unit]\nDescription=McLoving controller (lower union fixture)\n' > "${union_low_dropin}"
+
+nested_quadlet_fixture_root=""
+nested_quadlet_fixture_parent=""
+nested_quadlet_fixture_files=()
+nested_quadlet_root=""
+quadlet_override_status=0
+quadlet_override_raw="$(deployment_manager_quadlet_unit_paths "${home_dir}")" \
+  || quadlet_override_status=$?
+if [[ "${MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION:-0}" == 1 ]]; then
+  (( quadlet_override_status == 0 )) \
+    || fail "the controlled clean arm requires an explicit typed QUADLET_UNIT_DIRS boundary"
+  nested_quadlet_root_encoded="${quadlet_override_raw%%$'\n'*}"
+  decode_path_item_into nested_quadlet_root "${nested_quadlet_root_encoded}"
+  nested_quadlet_fixture_parent="${nested_quadlet_root}/deploy003-ci-fixture"
+  [[ ! -e "${nested_quadlet_fixture_parent}" \
+    && ! -L "${nested_quadlet_fixture_parent}" ]] \
+    || fail "refusing to adopt pre-existing recursive Quadlet fixture root ${nested_quadlet_fixture_parent}"
+  nested_quadlet_fixture_root="${nested_quadlet_fixture_parent}/nested/source"
+  mkdir -p "${nested_quadlet_fixture_root}"
+  cp "${repo_root}/deploy/podman/mcloving-postgres.container" \
+    "${nested_quadlet_fixture_root}/mcloving-postgres.container"
+  cp "${repo_root}/deploy/podman/mcloving-postgres-data.volume" \
+    "${nested_quadlet_fixture_root}/mcloving-postgres-data.volume"
+  nested_quadlet_fixture_files+=(
+    "${nested_quadlet_fixture_root}/mcloving-postgres.container"
+    "${nested_quadlet_fixture_root}/mcloving-postgres-data.volume"
+  )
+fi
+
+# Kernel-level NNP evidence for db-init, the native oneshot that has no live
+# MainPID by the time the arm can inspect it. ExecStartPost inherits the unit
+# sandbox and records a marker only after observing NoNewPrivs: 1 in its own
+# /proc status. The two Podman services deliberately omit NNP: a fresh-account
+# cold probe measured newuidmap failing under that bit before namespace setup.
+nnp_db_marker="${XDG_RUNTIME_DIR}/mcloving-deploy003-nnp-db-init"
+nnp_proof_dropin="${unit_root}/mcloving-db-init.service.d/80-deploy003-nnp-proof.conf"
+[[ ! -e "${nnp_db_marker}" && ! -L "${nnp_db_marker}" ]] \
+  || fail "refusing to replace pre-existing NNP proof marker ${nnp_db_marker}"
+mkdir -p "${unit_root}/mcloving-db-init.service.d"
+cat > "${nnp_proof_dropin}" <<'NNP'
+[Service]
+ExecStartPost=/bin/sh -c 'grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status && : > %t/mcloving-deploy003-nnp-db-init'
+NNP
+
+# ---------------------------------------------------------------------------
 step "[2/10] scripted install to the passwd home, WITHOUT --no-systemd"
 
+install_log="${scratch}/install.log"
 "${repo_root}/deploy/bin/mcloving-install" --home "${home_dir}" \
-  --release-dir "${release_dir}" --checksums "${checksums}"
+  --release-dir "${release_dir}" --checksums "${checksums}" 2>&1 \
+  | tee "${install_log}"
+grep -q 'deployment integrity used typed manager properties' "${install_log}" \
+  || fail "install completed without a typed post-daemon-reload manager verdict; the derived fallback must not satisfy this arm"
+grep -q 'complete manager UnitPath fragment union and the independent Quadlet source-path union' "${install_log}" \
+  || fail "install completed without the UnitPath and Quadlet source union verdict"
 echo "   installed into ${libexec_root}"
+
+# The absent UnitPath entry has its own parent that no installed deployment
+# path traverses. Make that parent world-writable and require the integrity
+# verdict to refuse the future creation point by name, then restore it. This
+# proves absent roots are consumed by the security verdict, not merely decoded.
+if [[ -n "${MCLOVING_EXPECT_ABSENT_UNIT_PATH_PARENT:-}" ]]; then
+  [[ ! -e "${MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE}" \
+    && ! -L "${MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE}" ]] \
+    || fail "the absent UnitPath creation-bound fixture unexpectedly exists"
+  chmod 0777 "${MCLOVING_EXPECT_ABSENT_UNIT_PATH_PARENT}"
+  absent_bound_status=0
+  absent_bound_log="$(require_deployment_integrity "${home_dir}" \
+    --manager-authoritative 2>&1)" || absent_bound_status=$?
+  chmod 0755 "${MCLOVING_EXPECT_ABSENT_UNIT_PATH_PARENT}"
+  (( absent_bound_status != 0 )) \
+    || fail "manager-authoritative integrity accepted an absent UnitPath below a world-writable creation parent"
+  grep -Fq "${MCLOVING_EXPECT_ABSENT_UNIT_PATH_PARENT}" <<<"${absent_bound_log}" \
+    || fail "absent-root refusal did not name its writable creation parent: ${absent_bound_log}"
+  require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
+  echo "   absent UnitPath creation bound refused and restored"
+fi
+
+# Enumeration is not enough: make a hidden lower-precedence drop-in and a
+# recursively selected custom Quadlet source writable in turn. Each must reach
+# the final file/ancestor verdict, refuse by exact path, and pass once restored.
+adverse_union_files=("${union_low_dropin}")
+if (( ${#nested_quadlet_fixture_files[@]} > 0 )); then
+  adverse_union_files+=("${nested_quadlet_fixture_files[0]}")
+fi
+for adverse_union_file in "${adverse_union_files[@]}"; do
+  chmod 0666 "${adverse_union_file}"
+  adverse_union_status=0
+  adverse_union_log="$(require_deployment_integrity "${home_dir}" \
+    --manager-authoritative 2>&1)" || adverse_union_status=$?
+  chmod 0644 "${adverse_union_file}"
+  (( adverse_union_status != 0 )) \
+    || fail "manager-authoritative integrity accepted writable union candidate ${adverse_union_file}"
+  grep -Fq "${adverse_union_file}" <<<"${adverse_union_log}" \
+    || fail "writable union refusal did not name ${adverse_union_file}: ${adverse_union_log}"
+done
+require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
+echo "   shadowed drop-in and recursive Quadlet candidates were security-judged, refused, and restored"
+
+# A reachable manager with a negative LoadState is authoritative too. Prove
+# that post-reload transitions refuse it rather than silently falling back to
+# the derived parser, then restore the exact installed configuration.
+negative_load_dropin="${unit_root}/mcloving-controller.service.d/95-deploy003-negative-load.conf"
+cat > "${negative_load_dropin}" <<'NEGATIVE_LOAD'
+[Service]
+ExecStart=
+NEGATIVE_LOAD
+systemctl --user daemon-reload
+if negative_load_log="$(require_deployment_integrity "${home_dir}" \
+  --manager-authoritative 2>&1)"; then
+  fail "manager-authoritative integrity accepted a negative LoadState"
+fi
+grep -q 'did not report every expected native and Quadlet-generated service as loaded or masked' \
+  <<<"${negative_load_log}" \
+  || fail "negative LoadState refusal did not name the authoritative manager boundary: ${negative_load_log}"
+rm -f -- "${negative_load_dropin}"
+systemctl --user daemon-reload
+require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
+echo "   negative manager LoadState refused authoritatively and clean state restored"
 
 # ---------------------------------------------------------------------------
 step "[3/10] the manager knows the installed units"
@@ -368,7 +686,7 @@ step "[3/10] the manager knows the installed units"
 # happened at all. Asked of the manager, not of the filesystem: a unit file on
 # disk that the manager has not loaded is precisely the state a missing reload
 # leaves behind, and `ls` cannot tell the two apart.
-for unit in "${units[@]}"; do
+for unit in "${units[@]}" "${generated[@]}"; do
   state="$(systemctl --user show -p LoadState --value "${unit}" 2>/dev/null || true)"
   [[ "${state}" == "loaded" ]] \
     || fail "${unit} is ${state:-unknown} to the manager after install; either the unit was not written or daemon-reload did not run"
@@ -387,13 +705,57 @@ step "[4/10] Quadlet generated the postgres unit, and the library's model agrees
 for unit in "${generated[@]}"; do
   state="$(systemctl --user show -p LoadState --value "${unit}" 2>/dev/null || true)"
   [[ "${state}" == "loaded" ]] \
-    || fail "${unit} was not generated from ${quadlet_root}/mcloving-postgres.container; Quadlet either did not run or named it something else"
+    || fail "${unit} was not generated from the sources under ${quadlet_root}; Quadlet either did not run or named it something else"
   echo "   ${unit} LoadState=${state} (generated)"
 done
 modelled="$(deployment_quadlet_generated_name mcloving-postgres.container)"
 [[ "${modelled}" == "mcloving-postgres.service" ]] \
   || fail "the library models mcloving-postgres.container as ${modelled}, but the generator produced mcloving-postgres.service; the model and the generator disagree"
 echo "   library model agrees with the generator: ${modelled}"
+
+union_candidates="$(deployment_unit_candidate_files "${home_dir}" \
+  "${unit_root}/mcloving-controller.service" \
+  "${quadlet_root}/mcloving-postgres.container" \
+  "${quadlet_root}/mcloving-postgres-data.volume")"
+for union_fixture in "${union_high_dropin}" "${union_low_dropin}"; do
+  union_fixture_b64="$(printf '%s' "${union_fixture}" | base64 -w0)"
+  grep -qx "${union_fixture_b64}" <<<"${union_candidates}" \
+    || fail "the complete drop-in union omitted ${union_fixture}"
+done
+if [[ -n "${nested_quadlet_fixture_root}" ]]; then
+  for union_fixture in \
+    "${nested_quadlet_fixture_root}/mcloving-postgres.container" \
+    "${nested_quadlet_fixture_root}/mcloving-postgres-data.volume"; do
+    union_fixture_b64="$(printf '%s' "${union_fixture}" | base64 -w0)"
+    grep -qx "${union_fixture_b64}" <<<"${union_candidates}" \
+      || fail "the recursive custom Quadlet union omitted ${union_fixture}"
+  done
+fi
+echo "   complete drop-in union covered active and shadowed same-name files"
+
+# Typed facts are the acceptance, not merely a notice. Require all five
+# composed services, exact sources and executables, and the deliberate NNP
+# split proved by the cold-start arm.
+manager_facts="$(deployment_manager_unit_facts "${home_dir}" \
+  "${units[@]}" "${generated[@]}")" \
+  || fail "the typed manager fact query failed after daemon-reload"
+for unit in "${units[@]}" "${generated[@]}"; do
+  unit_b64="$(printf '%s' "${unit}" | base64 -w0)"
+  grep -q "^source|${unit_b64}|" <<<"${manager_facts}" \
+    || fail "typed manager facts contained no FragmentPath/DropInPaths source for ${unit}"
+  grep -q "^executable|${unit_b64}|" <<<"${manager_facts}" \
+    || fail "typed manager facts contained no composed Exec* executable for ${unit}"
+  case "${unit}" in
+    mcloving-postgres.service | mcloving-postgres-data-volume.service)
+      expected_nnp=no
+      ;;
+    *) expected_nnp=yes ;;
+  esac
+  nnp_b64="$(printf '%s' "${expected_nnp}" | base64 -w0)"
+  grep -q "^no-new-privileges|${unit_b64}|${nnp_b64}$" <<<"${manager_facts}" \
+    || fail "the manager did not report runtime NoNewPrivileges=${expected_nnp} for ${unit}"
+done
+echo "   typed manager facts covered five services; NNP=yes on native services and measured-incompatible on cold Podman services"
 
 # ---------------------------------------------------------------------------
 step "[5/10] systemd resolved the ordering the units declare"
@@ -490,7 +852,7 @@ echo "   mcloving-env-guard: controller contract satisfied"
 # what StateDirectory= creates for the real units" -- a hand-made stand-in for
 # a systemd feature, which is precisely the coupling this arm exists to replace
 # with the real thing. Step 8 asserts systemd created it, and that we did not.
-state_base="$(deployment_effective_state_root "${home_dir}")"
+state_base="${state_probe}"
 [[ ! -e "${state_base}/mcloving-agent/workspace" ]] \
   || fail "the agent workspace root already exists before any unit ran; this arm must not create what StateDirectory= is supposed to"
 
@@ -544,7 +906,7 @@ step "[8/10] the lane the documented command started, as the manager reports it"
 # is the point of running the documented command rather than a convenient one.
 # This step only reads back what the manager made of it.
 
-for unit in mcloving-postgres.service mcloving-controller.service mcloving-agent.service; do
+for unit in mcloving-controller.service mcloving-agent.service; do
   active="$(systemctl --user show -p ActiveState --value "${unit}")"
   sub="$(systemctl --user show -p SubState --value "${unit}")"
   [[ "${active}" == "active" ]] \
@@ -556,6 +918,19 @@ db_init="$(systemctl --user show -p ActiveState --value mcloving-db-init.service
 [[ "${db_init}" == "active/exited" ]] \
   || fail "mcloving-db-init.service is ${db_init}, not active/exited"
 echo "   mcloving-db-init.service ${db_init}"
+volume_state="$(systemctl --user show -p ActiveState --value mcloving-postgres-data-volume.service)/$(systemctl --user show -p SubState --value mcloving-postgres-data-volume.service)"
+[[ "${volume_state}" == "active/exited" ]] \
+  || fail "mcloving-postgres-data-volume.service is ${volume_state}, not active/exited"
+for unit in mcloving-controller.service mcloving-agent.service; do
+  nnp_pid="$(systemctl --user show -p MainPID --value "${unit}")"
+  [[ "${nnp_pid}" =~ ^[0-9]+$ && "${nnp_pid}" -gt 0 ]] \
+    || fail "${unit} has no live PID for the kernel NoNewPrivs proof"
+  grep -Eq '^NoNewPrivs:[[:space:]]+1$' "/proc/${nnp_pid}/status" \
+    || fail "${unit} MainPID ${nnp_pid} does not carry the kernel NoNewPrivs bit"
+done
+[[ -f "${nnp_db_marker}" ]] \
+  || fail "the db-init in-unit probe did not observe kernel NoNewPrivs=1"
+echo "   kernel NoNewPrivs=1 observed in controller, agent, and db-init; cold Podman succeeded without the incompatible bit"
 
 # systemd created the agent's state tree, not this script. The other suite
 # mkdir -p's this path to stand in for StateDirectory=; here the real directive

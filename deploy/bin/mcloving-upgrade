@@ -69,7 +69,7 @@ acquire_transition_lock "${libexec_root}"
 # An ancestor relaxed after installation must refuse the transition before
 # anything is staged or any link moves -- same walk, same messages as
 # install, inside the lock.
-require_deployment_integrity "${home_dir}"
+require_deployment_integrity "${home_dir}" --manager-authoritative
 # Before anything is stopped: what MUST be here, not merely what is.
 require_deployment_assets_present "${home_dir}"
 old_target="$(require_release_link_target "${libexec_root}" current)"
