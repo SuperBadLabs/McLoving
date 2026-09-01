@@ -38,6 +38,7 @@ See:
 - [Architecture charter](docs/architecture/CHARTER.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Execution board](docs/EXECUTION_BOARD.md)
+- [Current custodian handoff](docs/handoffs/CURRENT.md)
 - [Threat model](docs/threat-model/README.md)
 - [Related work: Fogell](docs/related-work/FOGELL.md)
 - [Contributing](CONTRIBUTING.md)
