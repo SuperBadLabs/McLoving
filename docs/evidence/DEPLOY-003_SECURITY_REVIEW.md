@@ -119,14 +119,45 @@ disposable VM, its preparation removes group/world write from those exact
 package ancestors before running the unchanged refusal specification; any new
 unsafe ancestor still fails by name.
 
+The first protected run (`33463706014`, job `99719163651`) on image
+`20260823.283.1` also exposed a distinct packaging assumption: the image's
+Podman 5.8.4 static bundle
+puts `podman`, Quadlet, and its user-generator symlink under `/usr/local`, while
+Ubuntu's distro package puts the version-matched trio under `/usr`. The arm had
+hard-coded the distro generator path and refused before account creation after
+the fallback matrix had passed. The shared host preflight now maps only those
+two explicit command layouts to their exact generator and Quadlet target,
+requires one layout (never a mixed or discovered-first layout), checks root
+ownership and no group/world write on every fixed input, checks the symlink
+target and Quadlet version, and prints both executable hashes without invoking
+Podman. Podman 4.9 was measured initializing rootless state even for
+`--version`, so the selected command's version is read and compared with
+Quadlet only after the generated volume unit has performed the first Podman
+operation.
+It also refuses `/run` and `/etc` overrides and a second vendor generator. The
+same resolver runs before the expensive matrix and again under the disposable
+account. Those hashes are exact run evidence, not a repository-enforced bundle
+pin; the image provider's authenticated manifest owns the download checksum.
+After generation, typed manager facts retain the exact `Exec*` property name
+and command tuple. Every generated `ExecStart`, plus every present `ExecStop`
+and `ExecStopPost`, must execute the selected Podman path exactly. This binds
+the recorded generator/runtime identity to the cold lifecycle without
+mistaking an absolute argument, or a command belonging to another phase, for
+the start command executable.
+The per-PR closure claim remains conditional on a successful protected run at
+the corrected exact head, and that result remains the merge authority.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the
 packaged vendor units. `QUADLET_UNIT_DIRS` admits only two account-private
 source directories; the selected fixture exists in a nested custom root, so
 the proof exercises replacement and recursive-search semantics rather than
-coinciding with Podman's default. Higher-precedence Podman generators are refused and every
-unrelated user-generator basename is masked for this ephemeral job. The arm
+coinciding with Podman's default. Higher-precedence Podman generators, a
+second vendor generator, and every unrelated user-generator basename are
+refused or masked for this ephemeral job. The selected generator is the exact
+root-owned member of the version-matched Podman layout rather than an assumed
+`/usr` path. The arm
 asserts the manager retained both exact boundaries, lets the generated volume
 unit perform the first Podman operation and the generated container unit
 cold-pull the pinned image,
@@ -194,6 +225,7 @@ point-in-time bound rather than TOCTOU freedom.
 
 ## Verification
 
+- `bash deploy/run-systemd-ci.sh --check-host`
 - `bash deploy/test-deployment.sh`
 - `bash deploy/run-systemd-ci.sh ...` driving
   `deploy/test-deployment-systemd.sh` on a controlled disposable account

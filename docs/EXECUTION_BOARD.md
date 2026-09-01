@@ -945,7 +945,14 @@ independent Quadlet source union, repeats install integrity under the exclusive
 transition lock and after `daemon-reload`, and binds service-environment reads
 to a held `/proc` descriptor plus a stable manager invocation/PID/start tuple.
 The protected `Deployment lane` runs the real service-managed arm under a
-disposable account with controlled unit and generator inputs. That arm proved
+disposable account with controlled unit and generator inputs. Its shared early
+preflight accepts only Ubuntu's `/usr` Podman/Quadlet layout or the hosted
+runner's version-matched `/usr/local` static-bundle layout,
+validates the exact root-owned generator target, and refuses overrides, mixed
+layouts, or writable inputs without invoking Podman before the generated
+volume unit. Property-labelled typed manager command tuples then bind every
+generated start and present stop command to the selected absolute Podman path,
+and its version is compared with Quadlet after cold start. That arm proved
 the exact hardening split: `NoNewPrivileges=yes` and a kernel bit on the three
 compatible native services, deliberately absent on the two generated Podman
 services after a separate fresh-account implementation probe measured the bit blocking rootless
@@ -957,7 +964,8 @@ integration tests.
 One architecture-note premise was corrected by measurement: systemd 255 leaves
 a bare executable bare in its typed `ExecStart` tuple. The lane retains its
 named non-absolute-executable refusal rather than guessing systemd's internal
-search path. Audit observations 1–4 and 6 are closed. Observation 5 remains the
+search path. Audit observations 1–4 are closed; observation 6 is dispositioned
+below. Observation 5 remains the
 documented point-in-time/TOCTOU residual because taking the transition lock in
 `ExecStartPre` would deadlock the transition that is waiting for the service.
 Observation 6 is therefore closed on the native services and explicitly,

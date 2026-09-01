@@ -142,7 +142,16 @@ repeats the complete integrity verdict under the exclusive transition lock and
 again after `daemon-reload`. Service-environment capture holds the opened
 `/proc` descriptor while rechecking the manager invocation/PID/start tuple.
 The protected deployment job proves this path under a disposable account with
-controlled unit and generator inputs. It requires and kernel-proves
+controlled unit and generator inputs. The generator is selected only from the
+version-matched `/usr` distro layout or image-provided `/usr/local` hosted
+bundle, with its exact target, ownership, modes, and version checked and its
+hashes recorded without invoking Podman before the generated volume unit;
+property-labelled typed manager command-tuple facts then bind every generated
+start and present stop command to that selected Podman executable, whose
+version is compared with Quadlet after cold start; runtime and administrator
+overrides and mixed
+vendor layouts are refused. It requires
+and kernel-proves
 `NoNewPrivileges=yes` on the controller, agent, and database-init services,
 while deliberately requiring it absent on the two generated Podman services:
 an implementation-time fresh-account probe measured the bit preventing

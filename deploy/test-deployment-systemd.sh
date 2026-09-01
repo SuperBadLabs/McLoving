@@ -82,14 +82,23 @@ source "${repo_root}/deploy/bin/mcloving-deploy-lib.sh"
 require_systemd_home "${home_dir}" 0 \
   || fail "the deployment home is not this account's passwd home"
 
+# shellcheck source=deploy/systemd-ci-lib.sh
+source "${repo_root}/deploy/systemd-ci-lib.sh"
+expected_podman_generator="${MCLOVING_PODMAN_USER_GENERATOR:-}"
+mcloving_ci_select_podman_generator \
+  || fail "Podman and Quadlet do not form one supported, trusted vendor layout"
+[[ -z "${expected_podman_generator}" \
+  || "${expected_podman_generator}" == "${MCLOVING_CI_PODMAN_GENERATOR}" ]] \
+  || fail "the wrapper selected ${expected_podman_generator}, but the service account resolves ${MCLOVING_CI_PODMAN_GENERATOR}"
+
 [[ "$(loginctl show-user "$(id -u)" --property=Linger 2>/dev/null)" == "Linger=yes" ]] \
   || fail "lingering is not enabled for ${account}; without it the user manager stops at logout and a service-managed deployment is not what the runbook describes"
 
 systemctl --user show -p UnitPath >/dev/null 2>&1 \
   || fail "no reachable systemd --user manager for ${account}; this arm exists to exercise the manager and cannot stand in for it"
 
-[[ -x /usr/lib/systemd/user-generators/podman-user-generator ]] \
-  || fail "podman's Quadlet generator is absent; the postgres quadlet cannot become a unit without it"
+[[ -x "${MCLOVING_CI_PODMAN_GENERATOR}" ]] \
+  || fail "podman's selected Quadlet generator is absent; the postgres quadlet cannot become a unit without it"
 
 if [[ "${MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION:-0}" != 1 ]]; then
   podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -qx true \
@@ -101,7 +110,7 @@ else
     || fail "the controlled account already has Podman state; the generated volume unit would not be a cold first operation"
 fi
 
-echo "   account=${account} home=${home_dir} manager=$(systemctl --user is-system-running 2>&1) podman=$(podman --version | awk '{print $3}')"
+echo "   account=${account} home=${home_dir} manager=$(systemctl --user is-system-running 2>&1) quadlet=${MCLOVING_CI_QUADLET_VERSION} generator=${MCLOVING_CI_PODMAN_GENERATOR}"
 
 # THIS SCRIPT IS DESTRUCTIVE AND CANNOT TELL WHOSE DEPLOYMENT IT IS LOOKING AT.
 # Every precondition above passes just as well on a real McLoving service
@@ -739,6 +748,7 @@ echo "   complete drop-in union covered active and shadowed same-name files"
 manager_facts="$(deployment_manager_unit_facts "${home_dir}" \
   "${units[@]}" "${generated[@]}")" \
   || fail "the typed manager fact query failed after daemon-reload"
+selected_podman_b64="$(printf '%s' "${MCLOVING_CI_PODMAN_COMMAND}" | base64 -w0)"
 for unit in "${units[@]}" "${generated[@]}"; do
   unit_b64="$(printf '%s' "${unit}" | base64 -w0)"
   grep -q "^source|${unit_b64}|" <<<"${manager_facts}" \
@@ -748,6 +758,21 @@ for unit in "${units[@]}" "${generated[@]}"; do
   case "${unit}" in
     mcloving-postgres.service | mcloving-postgres-data-volume.service)
       expected_nnp=no
+      command_rows="$(grep "^command-executable-ExecStart|${unit_b64}|" <<<"${manager_facts}" || true)"
+      [[ -n "${command_rows}" ]] \
+        || fail "${unit} reports no typed ExecStart command executable"
+      if grep -v -x "command-executable-ExecStart|${unit_b64}|${selected_podman_b64}" \
+          <<<"${command_rows}" | grep -q .; then
+        fail "${unit} has an ExecStart command other than selected Podman ${MCLOVING_CI_PODMAN_COMMAND}"
+      fi
+      for stop_property in ExecStop ExecStopPost; do
+        command_rows="$(grep "^command-executable-${stop_property}|${unit_b64}|" <<<"${manager_facts}" || true)"
+        [[ -n "${command_rows}" ]] || continue
+        if grep -v -x "command-executable-${stop_property}|${unit_b64}|${selected_podman_b64}" \
+            <<<"${command_rows}" | grep -q .; then
+          fail "${unit} has an ${stop_property} command other than selected Podman ${MCLOVING_CI_PODMAN_COMMAND}"
+        fi
+      done
       ;;
     *) expected_nnp=yes ;;
   esac
@@ -755,7 +780,7 @@ for unit in "${units[@]}" "${generated[@]}"; do
   grep -q "^no-new-privileges|${unit_b64}|${nnp_b64}$" <<<"${manager_facts}" \
     || fail "the manager did not report runtime NoNewPrivileges=${expected_nnp} for ${unit}"
 done
-echo "   typed manager facts covered five services; NNP=yes on native services and measured-incompatible on cold Podman services"
+echo "   typed manager facts covered five services; generated units execute ${MCLOVING_CI_PODMAN_COMMAND}; NNP=yes on native services and measured-incompatible on cold Podman services"
 
 # ---------------------------------------------------------------------------
 step "[5/10] systemd resolved the ordering the units declare"
@@ -898,6 +923,17 @@ echo "   enabled: ${documented[*]}; mcloving-postgres refuses enable (generated)
 
 # ---------------------------------------------------------------------------
 step "[8/10] the lane the documented command started, as the manager reports it"
+
+# Podman 4.9 can initialize its rootless store even for `--version`, so the
+# early host resolver must not invoke it. The generated volume service above
+# owns the account's first Podman operation; only now compare the command and
+# Quadlet versions after manager facts already bound both generated units to
+# the selected absolute command path.
+actual_podman_version="$(podman --version | awk '{print $NF}')" \
+  || fail "the selected Podman command did not report its version after cold start"
+[[ "${actual_podman_version}" == "${MCLOVING_CI_QUADLET_VERSION}" ]] \
+  || fail "the selected Podman and Quadlet versions differ after cold start (${actual_podman_version} != ${MCLOVING_CI_QUADLET_VERSION})"
+echo "   selected Podman/Quadlet version=${actual_podman_version} after cold start"
 
 # `Notify=healthy` on the quadlet means the generated postgres unit reports
 # started only once `pg_isready` passes, so `After=mcloving-postgres.service`

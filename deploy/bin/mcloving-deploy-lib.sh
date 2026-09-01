@@ -1197,7 +1197,10 @@ deployment_manager_units_are_loaded() {
 # FragmentPath/DropInPaths from Unit, and Exec*, EnvironmentFiles,
 # WorkingDirectory, the managed-directory lists, Environment,
 # UnsetEnvironment and NoNewPrivileges from Service. The caller decides policy;
-# this function only transports exactly what the manager said.
+# this function only transports exactly what the manager said. Exec command
+# tuples carry their property name as `command-executable-ExecStart`, etc.; the
+# broader `executable` kind is retained for integrity validation of both the
+# command and absolute argv paths.
 deployment_manager_unit_facts() {
   local home_dir="${1%/}"
   shift
@@ -1321,6 +1324,7 @@ for unit in sys.argv[1:]:
             executable, argv = command[0], command[1]
             if not isinstance(executable, str) or not executable.startswith("/"):
                 fail(f"{unit} reported a non-absolute {property_name} executable")
+            emit(f"command-executable-{property_name}", unit, executable)
             emit("executable", unit, executable)
             if not isinstance(argv, list):
                 fail(f"{unit} reported malformed {property_name} argv")
@@ -4502,7 +4506,7 @@ require_deployment_integrity() {
               done < <(deployment_glob_matches "${manager_value}")
             fi
             ;;
-          executable)
+          command-executable-* | executable)
             # Match the retained fallback: an existing non-regular argument
             # is data, while an executable or absent bare path takes the file
             # identity/creation bound.

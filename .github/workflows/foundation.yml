@@ -467,6 +467,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify controlled systemd host inputs
+        # This is intentionally before the Rust build and the 20-minute
+        # fallback matrix. Runner-image Podman packaging drift must fail while
+        # the job is still cheap, without creating any rootless Podman state.
+        run: bash deploy/run-systemd-ci.sh --check-host
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Restore Rust cache

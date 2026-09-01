@@ -9,6 +9,19 @@
 set -euo pipefail
 umask 022
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=deploy/systemd-ci-lib.sh
+source "${repo_root}/deploy/systemd-ci-lib.sh"
+
+if [[ "${1:-}" == --check-host ]]; then
+  [[ $# -eq 1 ]] || { echo "usage: run-systemd-ci.sh --check-host" >&2; exit 64; }
+  command -v sha256sum >/dev/null 2>&1 \
+    || { echo "required command is absent: sha256sum" >&2; exit 1; }
+  mcloving_ci_select_podman_generator
+  mcloving_ci_print_podman_generator
+  exit 0
+fi
+
 usage() {
   echo "usage: run-systemd-ci.sh RUNTIME_GATE RELEASE_DIR CHECKSUMS" >&2
   exit 64
@@ -18,17 +31,16 @@ usage() {
 runtime_gate="$(readlink -f "$1")"
 release_dir="$(readlink -f "$2")"
 checksums="$(readlink -f "$3")"
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 [[ -x "${runtime_gate}" ]] || { echo "runtime gate is not executable: ${runtime_gate}" >&2; exit 1; }
 [[ -d "${release_dir}" ]] || { echo "release directory is absent: ${release_dir}" >&2; exit 1; }
 [[ -f "${checksums}" ]] || { echo "checksums are absent: ${checksums}" >&2; exit 1; }
-for command_name in systemctl loginctl podman busctl mount findmnt useradd userdel; do
+for command_name in systemctl loginctl podman busctl mount findmnt useradd userdel sha256sum; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || { echo "required command is absent: ${command_name}" >&2; exit 1; }
 done
-[[ -x /usr/lib/systemd/user-generators/podman-user-generator ]] \
-  || { echo "the packaged Podman user generator is absent" >&2; exit 1; }
+mcloving_ci_select_podman_generator
+mcloving_ci_print_podman_generator
 
 account=mcloving-ci
 home_dir=/home/mcloving-ci
@@ -138,15 +150,11 @@ printf '[Service]\nEnvironment="SYSTEMD_UNIT_PATH=%s"\nEnvironment="QUADLET_UNIT
 sudo install -m 0644 "${dropin_tmp}" "${manager_dropin}"
 rm -f -- "${dropin_tmp}"
 
-# Only the packaged Quadlet generator may populate the controlled generator
+# Only the selected version-matched Quadlet generator may populate the controlled generator
 # output directory. Refuse a higher-precedence replacement and mask unrelated
 # generator basenames for this disposable runner after the fallback smoke has
 # already completed.
 sudo install -d -m 0755 /run/systemd/user-generators
-for generator_dir in /run/systemd/user-generators /etc/systemd/user-generators /usr/local/lib/systemd/user-generators; do
-  [[ ! -e "${generator_dir}/podman-user-generator" ]] \
-    || { echo "higher-precedence Podman user generator exists at ${generator_dir}" >&2; exit 1; }
-done
 # A differently named runtime generator already occupies the highest
 # precedence directory and cannot be safely hidden by adding another entry at
 # the same path. Refuse it; /run is clean on the ephemeral runner by contract.
@@ -165,7 +173,11 @@ for generator_dir in /etc/systemd/user-generators /usr/local/lib/systemd/user-ge
   for generator in "${generator_dir}"/*; do
     [[ -e "${generator}" || -L "${generator}" ]] || continue
     generator_name="${generator##*/}"
-    [[ "${generator_name}" == podman-user-generator ]] && continue
+    if [[ "${generator_name}" == podman-user-generator ]]; then
+      [[ "${generator}" == "${MCLOVING_CI_PODMAN_GENERATOR}" ]] \
+        || { echo "unselected Podman user generator exists at ${generator}" >&2; exit 1; }
+      continue
+    fi
     [[ -z "${masked_names["${generator_name}"]:-}" ]] || continue
     mask="/run/systemd/user-generators/${generator_name}"
     [[ ! -e "${mask}" && ! -L "${mask}" ]] \
@@ -194,6 +206,7 @@ done
 user_env=(sudo -u "${account}" env HOME="${home_dir}" XDG_RUNTIME_DIR="${runtime_dir}"
   DBUS_SESSION_BUS_ADDRESS="${bus_address}" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION=1
+  MCLOVING_PODMAN_USER_GENERATOR="${MCLOVING_CI_PODMAN_GENERATOR}"
   MCLOVING_EXPECT_UNIT_PATH_WITH_SPACE="${space_unit_root}"
   MCLOVING_EXPECT_ABSENT_UNIT_PATH_PARENT="${absent_bound_parent}")
 actual_unit_path="$("${user_env[@]}" systemctl --user show -p UnitPath --value)"
