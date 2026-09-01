@@ -139,8 +139,10 @@ obtain typed composed unit facts from the user manager, consume mask/load
 answers directly, validate the complete manager `UnitPath` fragment union and
 independent Quadlet source union, and label every derived fallback. Install
 repeats the complete integrity verdict under the exclusive transition lock and
-again after `daemon-reload`. Service-environment capture holds the opened
-`/proc` descriptor while rechecking the manager invocation/PID/start tuple.
+again after `daemon-reload`. Service-environment capture pins the process with
+a pidfd and an opened `/proc/<pid>` directory, verifies control-group
+membership, and rechecks the manager invocation/PID/control-group tuple after
+copying directly from the held descriptor.
 The protected deployment job proves this path under a disposable account with
 controlled unit and generator inputs. The generator is selected only from the
 version-matched `/usr` distro layout or image-provided `/usr/local` hosted

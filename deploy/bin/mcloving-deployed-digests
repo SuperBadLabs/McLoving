@@ -144,12 +144,23 @@ fi
 export MCLOVING_UNIT_DROPIN_DIRS
 export MCLOVING_UNIT_SYSTEM_DROPIN_DIRS
 
-# A main unit file in a higher-priority load path SHADOWS the installed one
-# -- systemd loads it instead, and the installed file is never read. The
-# transition validates it and says so out loud; the canonical document must
-# pin its bytes too, or an override appearing, changing, or being removed
-# is drift the re-read cannot see. Through the same library derivation the
-# validator uses, so the two cannot disagree about what is shadowing what.
+# Every main-fragment or Quadlet source candidate the transition validator
+# considers belongs in the canonical document, not only the candidate that
+# currently shadows an installed unit. A lower-priority native unit or a
+# nested Quadlet source can become effective after another candidate is
+# removed, so changing either is deployment drift too. Use the validator's
+# complete candidate union so validation and inventory cannot disagree.
+MCLOVING_UNIT_CANDIDATES=""
+if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
+  MCLOVING_UNIT_CANDIDATES="$(deployment_unit_candidate_files "${home_dir}" \
+    "${digest_unit_files[@]}")"
+fi
+export MCLOVING_UNIT_CANDIDATES
+
+# Preserve the v1 field's original meaning for existing consumers: only main
+# unit files that outrank this deployment's installed fragments.  The new
+# complete union is additive under unit_candidates; changing the old field to
+# that union would turn every normal deployment into an apparent shadow.
 MCLOVING_SHADOWING_UNITS=""
 if [[ ${#digest_unit_files[@]} -gt 0 ]]; then
   MCLOVING_SHADOWING_UNITS="$(deployment_shadowing_unit_files "${home_dir}" \
@@ -203,7 +214,7 @@ MCLOVING_CONFIGURED_PATHS="${configured_paths%$'\n'}"
 export MCLOVING_CONFIGURED_PATHS
 
 # SANITIZED CHILD, with exactly what this payload needs named explicitly.
-# The seven MCLOVING_ variables below are the walker's inputs and are passed
+# The eight MCLOVING_ variables below are the walker's inputs and are passed
 # on this one invocation rather than inherited; nothing else crosses, so an
 # inherited PYTHONHOME, PYTHONUSERBASE or PYTHONPATH cannot redirect the
 # interpreter that builds the canonical document. They carry no secrets --
@@ -216,6 +227,7 @@ deployment_python \
   MCLOVING_UNIT_DIRS="${MCLOVING_UNIT_DIRS}" \
   MCLOVING_UNIT_DROPIN_DIRS="${MCLOVING_UNIT_DROPIN_DIRS}" \
   MCLOVING_UNIT_SYSTEM_DROPIN_DIRS="${MCLOVING_UNIT_SYSTEM_DROPIN_DIRS}" \
+  MCLOVING_UNIT_CANDIDATES="${MCLOVING_UNIT_CANDIDATES}" \
   MCLOVING_SHADOWING_UNITS="${MCLOVING_SHADOWING_UNITS}" \
   MCLOVING_CONFIGURED_PATHS="${MCLOVING_CONFIGURED_PATHS}" \
   -- - "${home_dir}" <<'PY'
@@ -300,9 +312,21 @@ system_dropin_dirs = tuple(
     for item in decode_path_items(system_dropin_dirs_supplied)
 )
 
-# Main unit files that outrank this deployment's installed units. Empty is
-# the normal case; UNSET means the document was built outside its wrapper
-# and would silently omit an override that decides what actually runs.
+# Complete candidate union for the deployment's native units and Quadlet
+# sources. Empty is legal; UNSET means the document was built outside its
+# wrapper and would silently omit candidates that can later become active.
+unit_candidates_supplied = os.environ.get("MCLOVING_UNIT_CANDIDATES")
+if unit_candidates_supplied is None:
+    raise SystemExit(
+        "mcloving-deployed-digests: MCLOVING_UNIT_CANDIDATES is not set; "
+        "run this through its shell wrapper"
+    )
+unit_candidates = tuple(
+    Path(posixpath.normpath(item))
+    for item in decode_path_items(unit_candidates_supplied)
+)
+
+# Existing v1 contract: main unit files that outrank the deployment's own.
 shadowing_units_supplied = os.environ.get("MCLOVING_SHADOWING_UNITS")
 if shadowing_units_supplied is None:
     raise SystemExit(
@@ -730,8 +754,12 @@ unit_entries = [
     if unit_owned(path, unit_dir)
 ]
 contract_entries = walk(config)
-# A shadowing unit is one FILE, not a tree: systemd selects it, it is not
-# merged. Its own chain is collected below with the other roots.
+# Candidate enumeration already admits only an existing node or symlink.
+# Keep the complete, sorted union here -- including dangling masks -- and
+# record each candidate as one node rather than walking its containing tree.
+unit_candidate_entries = sorted(set(unit_candidates))
+# Preserve the historical filter: a shadow is one selected main fragment,
+# not a walked tree or an inactive candidate.
 shadowing_unit_entries = [path for path in shadowing_units if path.exists()]
 # Recorded whole, like any other drop-in directory: systemd reads every
 # file inside one regardless of basename.
@@ -870,9 +898,12 @@ for system_dropin_dir in sorted(system_dropin_dirs):
     if not collect_chain(system_dropin_dir):
         unresolvable_links.append(system_dropin_dir)
 
-# Same reasoning for a shadowing unit file: relaxing the directory that
-# holds it makes the file another local user can replace, while its own
-# record stays byte-identical.
+# Same reasoning for every unit candidate: relaxing the directory that
+# holds it makes the candidate replaceable while its own record can remain
+# byte-identical.
+for unit_candidate in unit_candidate_entries:
+    if not collect_chain(unit_candidate):
+        unresolvable_links.append(unit_candidate)
 for shadowing_unit in sorted(shadowing_unit_entries):
     if not collect_chain(shadowing_unit):
         unresolvable_links.append(shadowing_unit)
@@ -889,6 +920,7 @@ for link in sorted(
             # somewhere, and that somewhere has parents another local user
             # may be able to rename. Same sweep, same reason.
             *system_dropin_entries,
+            *unit_candidate_entries,
             *shadowing_unit_entries,
         )
         if entry.is_symlink()
@@ -1080,10 +1112,15 @@ document = {
     # carry absolute spellings rather than home-relative ones. Normally
     # empty; non-empty is a fact about the host that the transition tools
     # also say out loud.
-    # Main unit files that outrank this deployment's own. Outside the home
-    # in the administrative cases, so absolute spellings there. Normally
-    # empty; non-empty means the service manager is running something other
-    # than what this deployment installed.
+    # Every native-unit and Quadlet-source candidate the transition
+    # validator considers, including inactive lower-priority and nested
+    # candidates. Administrative paths outside the home remain absolute.
+    "unit_candidates": [
+        file_record(path, home)
+        for path in unit_candidate_entries
+    ],
+    # v1 compatibility: retain the exact historical meaning for older
+    # consumers. The complete inactive union is additive above.
     "shadowing_units": [
         file_record(path, home)
         for path in shadowing_unit_entries

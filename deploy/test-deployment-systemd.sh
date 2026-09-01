@@ -450,6 +450,20 @@ teardown() {
     rm -f -- "${nnp_proof_dropin}" >/dev/null 2>&1 || true
     rmdir --ignore-fail-on-non-empty -- "${nnp_proof_dropin%/*}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${quadlet_volume_root:-}" ]]; then
+    chmod 0755 "${quadlet_volume_root}" >/dev/null 2>&1 || true
+    rmdir -- "${quadlet_volume_root}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${nested_quadlet_fixture_files[0]:-}" ]]; then
+    rm -f -- "${nested_quadlet_fixture_files[0]}.before-volume" \
+      >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${nested_quadlet_dropin:-}" ]]; then
+    rm -f -- "${nested_quadlet_dropin}" >/dev/null 2>&1 || true
+    rmdir --ignore-fail-on-non-empty -- "${nested_quadlet_dropin%/*}" \
+      "${nested_quadlet_dropin%/*/*}" \
+      "${nested_quadlet_dropin%/*/*/*}" >/dev/null 2>&1 || true
+  fi
   rm -f -- "${fixture_unit:-}" "${fixture_bare_unit:-}" \
     "${fixture_contract:-}" >/dev/null 2>&1 || true
   rm -f -- "${nnp_db_marker:-}" >/dev/null 2>&1 || true
@@ -628,6 +642,7 @@ printf '[Unit]\nDescription=McLoving controller (lower union fixture)\n' > "${un
 nested_quadlet_fixture_root=""
 nested_quadlet_fixture_parent=""
 nested_quadlet_fixture_files=()
+nested_quadlet_dropin=""
 nested_quadlet_root=""
 quadlet_override_status=0
 quadlet_override_raw="$(deployment_manager_quadlet_unit_paths "${home_dir}")" \
@@ -651,6 +666,9 @@ if [[ "${MCLOVING_CLEAN_PODMAN_BY_CONSTRUCTION:-0}" == 1 ]]; then
     "${nested_quadlet_fixture_root}/mcloving-postgres.container"
     "${nested_quadlet_fixture_root}/mcloving-postgres-data.volume"
   )
+  nested_quadlet_dropin="${nested_quadlet_fixture_parent}/dropin-only/nested/mcloving-postgres.container.d/95-deploy003-volume.conf"
+  mkdir -p "${nested_quadlet_dropin%/*}"
+  printf '[Container]\n' > "${nested_quadlet_dropin}"
 fi
 
 # Kernel-level NNP evidence for db-init, the native oneshot that has no live
@@ -708,6 +726,7 @@ fi
 adverse_union_files=("${union_low_dropin}")
 if (( ${#nested_quadlet_fixture_files[@]} > 0 )); then
   adverse_union_files+=("${nested_quadlet_fixture_files[0]}")
+  adverse_union_files+=("${nested_quadlet_dropin}")
 fi
 for adverse_union_file in "${adverse_union_files[@]}"; do
   chmod 0666 "${adverse_union_file}"
@@ -720,8 +739,29 @@ for adverse_union_file in "${adverse_union_files[@]}"; do
   grep -Fq "${adverse_union_file}" <<<"${adverse_union_log}" \
     || fail "writable union refusal did not name ${adverse_union_file}: ${adverse_union_log}"
 done
+if (( ${#nested_quadlet_fixture_files[@]} > 0 )); then
+  # Manager argv carries this as `/host:/container`; treating that whole
+  # token as a path misses the actual host ancestor. Put the directive only
+  # in an independently nested drop-in with no colocated main source and
+  # require the retained Quadlet source classifier to judge its host prefix.
+  quadlet_volume_root="${home_dir}/deploy003 writable volume root"
+  mkdir -p "${quadlet_volume_root}"
+  chmod 0777 "${quadlet_volume_root}"
+  printf '[Container]\nVolume=%s:/deploy003-proof:ro\n' "${quadlet_volume_root}" \
+    > "${nested_quadlet_dropin}"
+  volume_root_status=0
+  volume_root_log="$(require_deployment_integrity "${home_dir}" \
+    --manager-authoritative 2>&1)" || volume_root_status=$?
+  printf '[Container]\n' > "${nested_quadlet_dropin}"
+  chmod 0755 "${quadlet_volume_root}"
+  rmdir "${quadlet_volume_root}"
+  (( volume_root_status != 0 )) \
+    || fail "manager-authoritative integrity accepted a writable host path from an independent nested Quadlet Volume= drop-in"
+  grep -Fq "${quadlet_volume_root}" <<<"${volume_root_log}" \
+    || fail "Quadlet Volume= refusal did not name its writable host root: ${volume_root_log}"
+fi
 require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
-echo "   shadowed drop-in and recursive Quadlet candidates were security-judged, refused, and restored"
+echo "   shadowed drop-in, recursive Quadlet candidates, and inactive Volume= roots were security-judged, refused, and restored"
 
 # A reachable manager with a negative LoadState is authoritative too. Prove
 # that post-reload transitions refuse it rather than silently falling back to
@@ -791,7 +831,8 @@ done
 if [[ -n "${nested_quadlet_fixture_root}" ]]; then
   for union_fixture in \
     "${nested_quadlet_fixture_root}/mcloving-postgres.container" \
-    "${nested_quadlet_fixture_root}/mcloving-postgres-data.volume"; do
+    "${nested_quadlet_fixture_root}/mcloving-postgres-data.volume" \
+    "${nested_quadlet_dropin}"; do
     union_fixture_b64="$(printf '%s' "${union_fixture}" | base64 -w0)"
     grep -qx "${union_fixture_b64}" <<<"${union_candidates}" \
       || fail "the recursive custom Quadlet union omitted ${union_fixture}"
@@ -1070,10 +1111,18 @@ echo "   controller and agent held steady across the sampling window"
 
 # ExecStartPost=mcloving-health on the controller unit means a controller that
 # never answers fails the UNIT. Ask the manager, from outside, the way a
-# transition does.
-"${libexec_root}/helpers/mcloving-health" controller "${config}/controller.env" \
+# transition does.  Give it an unusable inherited TMPDIR too: the running
+# environment may contain credentials, so the snapshot must live on a held,
+# unlinked descriptor beneath the deployment root rather than in caller-chosen
+# temporary storage.
+TMPDIR="${scratch}/missing-untrusted-health-tmp" \
+  "${libexec_root}/helpers/mcloving-health" controller "${config}/controller.env" \
   --unit mcloving-controller.service \
   || fail "mcloving-health could not reach the controller through the manager"
+health_snapshot_residue="$(find "${libexec_root}" -maxdepth 1 \
+  -name '.mcloving-health.*' -print -quit)"
+[[ -z "${health_snapshot_residue}" ]] \
+  || fail "mcloving-health left a named environment snapshot at ${health_snapshot_residue}"
 echo "   mcloving-health answered through the manager"
 
 # ---------------------------------------------------------------------------

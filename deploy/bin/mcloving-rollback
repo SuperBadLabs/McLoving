@@ -59,7 +59,15 @@ acquire_transition_lock "${libexec_root}"
 # Revalidated before the services stop: a rollback that halts the fleet
 # and only then discovers a writable ancestor has already caused the
 # outage it exists to prevent.
-require_deployment_integrity "${home_dir}" --manager-authoritative
+if [[ "${no_systemd}" == "1" ]]; then
+  # Keep every derivation reached by the integrity gate offline, including
+  # its command-substitution children, and retain that contract for the
+  # remaining preflight reads in this --no-systemd process.
+  export MCLOVING_ASSUME_NO_MANAGER=1
+  require_deployment_integrity "${home_dir}"
+else
+  require_deployment_integrity "${home_dir}" --manager-authoritative
+fi
 # Before anything is stopped: what MUST be here, not merely what is.
 require_deployment_assets_present "${home_dir}"
 current_target="$(require_release_link_target "${libexec_root}" current)"

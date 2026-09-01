@@ -52,12 +52,17 @@ mcloving_ci_print_podman_generator
 
 account=mcloving-ci
 home_dir=/home/mcloving-ci
+linger_path="/var/lib/systemd/linger/${account}"
 vendor_root=/run/mcloving-ci/vendor-user-units
 manager_dropin=""
 uid=""
 generator_masks=()
 vendor_mounted=0
 account_created=0
+linger_enabled=0
+manager_dropin_created=0
+manager_dropin_dir_created=0
+manager_started=0
 environment_generator_runtime_created=0
 proof_started_epoch="$(date +%s)"
 user_env=()
@@ -86,12 +91,16 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
   (( status == 0 )) || diagnostics
-  if [[ -n "${uid}" ]]; then
+  if (( manager_started )); then
     sudo systemctl stop "user@${uid}.service" >/dev/null 2>&1 || true
   fi
-  sudo loginctl disable-linger "${account}" >/dev/null 2>&1 || true
-  if [[ -n "${manager_dropin}" ]]; then
+  if (( linger_enabled )); then
+    sudo loginctl disable-linger "${account}" >/dev/null 2>&1 || true
+  fi
+  if (( manager_dropin_created )); then
     sudo rm -f -- "${manager_dropin}" >/dev/null 2>&1 || true
+  fi
+  if (( manager_dropin_dir_created )); then
     sudo rmdir -- "${manager_dropin%/*}" >/dev/null 2>&1 || true
   fi
   for mask in "${generator_masks[@]}"; do
@@ -121,6 +130,10 @@ if getent passwd "${account}" >/dev/null; then
 fi
 if [[ -e "${home_dir}" || -L "${home_dir}" ]]; then
   echo "refusing to adopt pre-existing home path ${home_dir}" >&2
+  exit 1
+fi
+if sudo test -e "${linger_path}" || sudo test -L "${linger_path}"; then
+  echo "refusing to adopt pre-existing linger state ${linger_path}" >&2
   exit 1
 fi
 sudo useradd --no-create-home --home-dir "${home_dir}" --shell /bin/bash "${account}"
@@ -194,6 +207,11 @@ expected_manager_environment=(
 )
 manager_dropin_dir="/etc/systemd/system/user@${uid}.service.d"
 manager_dropin="${manager_dropin_dir}/mcloving-ci.conf"
+if sudo test -e "${manager_dropin_dir}" \
+  || sudo test -L "${manager_dropin_dir}"; then
+  echo "refusing to adopt pre-existing manager drop-in directory ${manager_dropin_dir}" >&2
+  exit 1
+fi
 if sudo test -e "${manager_dropin}" || sudo test -L "${manager_dropin}"; then
   echo "refusing to replace pre-existing manager drop-in ${manager_dropin}" >&2
   exit 1
@@ -201,6 +219,7 @@ fi
 [[ -x /usr/bin/env && -x /usr/lib/systemd/systemd ]] \
   || { echo "required manager execution input is absent" >&2; exit 1; }
 sudo install -d -m 0755 "${manager_dropin_dir}"
+manager_dropin_dir_created=1
 dropin_tmp="$(mktemp)"
 {
   printf '[Service]\nExecStart=\nExecStart=/usr/bin/env -i'
@@ -215,6 +234,7 @@ dropin_tmp="$(mktemp)"
   printf ' "NOTIFY_SOCKET=${NOTIFY_SOCKET}" /usr/lib/systemd/systemd --user\n'
 } >"${dropin_tmp}"
 sudo install -m 0644 "${dropin_tmp}" "${manager_dropin}"
+manager_dropin_created=1
 rm -f -- "${dropin_tmp}"
 [[ ! -L "${manager_dropin}" \
   && "$(stat -c '%u:%g:%a' "${manager_dropin}")" == 0:0:644 ]] \
@@ -298,7 +318,9 @@ done
 
 sudo systemctl daemon-reload
 sudo loginctl enable-linger "${account}"
+linger_enabled=1
 sudo systemctl start "user@${uid}.service"
+manager_started=1
 for _ in $(seq 1 60); do
   if "${manager_private_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
     manager_ready=1

@@ -66,18 +66,62 @@ source "$(dirname "${BASH_SOURCE[0]}")/mcloving-deploy-lib.sh"
 # manager by construction; there the contract IS the statement of intent and
 # the probe is best-effort by design.
 health_environ_file=""
+health_environ_fd=""
+health_snapshot_dir=""
+health_snapshot_cleanup() {
+  if [[ -n "${health_environ_fd}" ]]; then
+    exec {health_environ_fd}>&- 2>/dev/null || true
+    health_environ_fd=""
+  fi
+  if [[ -n "${health_snapshot_dir}" ]]; then
+    rm -f -- "${health_snapshot_dir}"/environment.* >/dev/null 2>&1 || true
+    rmdir -- "${health_snapshot_dir}" >/dev/null 2>&1 || true
+    health_snapshot_dir=""
+  fi
+}
 if [[ -n "${health_unit}" ]]; then
-  health_environ_file="$(mktemp)" || {
+  # The snapshot contains the complete service environment, including database
+  # credentials and API tokens.  An inherited TMPDIR is not a trust boundary:
+  # in a non-sticky shared directory another uid can unlink mktemp's initial
+  # 0600 file and redirect a later pathname open.  Create beneath the verified
+  # deployment root instead, open it once, then unlink both names before the
+  # first secret byte is copied.  The capture helper receives only the held fd;
+  # parsing reaches that same unlinked inode through the health shell's proc fd.
+  trap health_snapshot_cleanup EXIT
+  health_snapshot_dir="$(mktemp -d "${libexec_root}/.mcloving-health.XXXXXX")" || {
+    echo "mcloving-health: cannot create a private environment snapshot directory" >&2
+    exit 1
+  }
+  health_snapshot_path="$(mktemp "${health_snapshot_dir}/environment.XXXXXX")" || {
+    health_snapshot_cleanup
     echo "mcloving-health: cannot create a private environment snapshot" >&2
     exit 1
   }
-  trap 'rm -f -- "${health_environ_file}"' EXIT
-  deployment_capture_unit_process_environment "${health_unit}" "${health_environ_file}" || {
+  exec {health_environ_fd}<>"${health_snapshot_path}" || {
+    health_snapshot_cleanup
+    echo "mcloving-health: cannot hold the private environment snapshot" >&2
+    exit 1
+  }
+  rm -f -- "${health_snapshot_path}" || {
+    health_snapshot_cleanup
+    echo "mcloving-health: cannot unlink the private environment snapshot" >&2
+    exit 1
+  }
+  rmdir -- "${health_snapshot_dir}" || {
+    health_snapshot_cleanup
+    echo "mcloving-health: cannot unlink the private environment snapshot directory" >&2
+    exit 1
+  }
+  health_snapshot_dir=""
+  deployment_capture_unit_process_environment "${health_unit}" "${health_environ_fd}" || {
     echo "mcloving-health: cannot obtain the environment ${health_unit} is running with (the service manager did not answer, or the unit is not running); refusing to render a health verdict from the declared contract alone, because a transition has already moved the release and a probe of the wrong address would report success for a deployment nobody checked" >&2
     exit 1
   }
+  health_environ_file="/proc/$$/fd/${health_environ_fd}"
 fi
 load_effective_contract "${env_file}" "${health_environ_file}"
+health_snapshot_cleanup
+trap - EXIT
 
 case "${service}" in
   controller)

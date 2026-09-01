@@ -76,11 +76,16 @@ lock acquisition, and no pre-reload manager cache is accepted as the new
 configuration.
 
 The transition health path no longer returns `/proc/$PID/environ` for another
-process to open later. It samples the manager's invocation id, main PID, and
-monotonic exec-start timestamp, opens the environment immediately, compares
-the `/proc` start time, re-samples the exact manager tuple, and copies only
-through the held descriptor. PID reuse can no longer redirect the later read
-to an unrelated process.
+process to open later, and it does not compare systemd's suspend-excluding
+monotonic timestamp with `/proc`'s suspend-aware boot-time ticks. It samples
+the manager's invocation id, main PID, and control group; the trusted
+interpreter opens a pidfd and pinned proc-directory descriptor, requires that
+process to remain in the manager-reported cgroup, and copies its environment
+directly to the caller's already-open descriptor. The manager tuple is sampled
+again only after the complete copy. The caller creates the unlinked snapshot
+beneath the validated deployment root, parses it through the held descriptor,
+and closes it. PID reuse, a restart during capture, and an attacker-controlled
+`TMPDIR` can no longer redirect or expose the secret-bearing snapshot.
 
 Every fallback diagnostic now labels unit selection, hook stripping, cache
 root, and data root as manager-derived or shell-derived. On a loaded manager,
@@ -265,6 +270,37 @@ That evidence block is skipped while the runtime gate may have left database
 row-level security weakened, so no diagnostic query can delay immediate
 service teardown and removal of the proof database.
 
+A pre-merge review-thread audit found twelve additional live defects behind
+the otherwise-green implementation run. The evidence-head qualification was
+cancelled rather than accepted with those threads open. The follow-up closes
+them as one boundary:
+
+- typed `busctl` calls retain the exact `XDG_RUNTIME_DIR` and
+  `DBUS_SESSION_BUS_ADDRESS` used to authenticate the manager;
+- an explicit `QUADLET_UNIT_DIRS=/` remains `/` instead of becoming an empty
+  successful answer, and a default Quadlet union derives its runtime root from
+  the authenticated manager rather than the caller;
+- manager mode retains additive parsing of `Volume=` across every regular
+  Quadlet source and recursively nested Quadlet drop-in in the complete union,
+  so generated `/host:/container` argv cannot hide the real host ancestor;
+- the canonical digest document records the complete native/Quadlet candidate
+  union, including inactive and recursively nested sources, while preserving
+  the exact v1 `shadowing_units` semantics for existing consumers;
+- `--no-systemd` upgrade and rollback suppress manager discovery for their
+  offline integrity pass rather than being refused by stale loaded state; and
+- contract parsing and effective-environment observation stream secret-bearing
+  NUL records over held descriptors and accept them only after the producer
+  exits successfully, eliminating caller-controlled temporary paths;
+- disposable-manager cleanup disables linger and removes its root-owned
+  drop-in and directory only after this invocation successfully created the
+  corresponding state; and
+- once authenticated manager UnitPath and Quadlet boundaries are accepted,
+  caller-only XDG search lists cannot override or veto that manager truth.
+
+The thirteenth thread was already stale: command prerequisites are checked only
+after the wrapper re-execs as root, so `useradd` and `userdel` are resolved in
+the same execution environment that invokes them.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the
@@ -353,7 +389,11 @@ point-in-time bound rather than TOCTOU freedom.
   `deploy/test-deployment-systemd.sh` on a controlled disposable account
 - typed manager-fact fixtures covering the resolved spellings and the measured
   bare-executable refusal
-- held-descriptor environment capture against a live user-manager service
+- pidfd/cgroup-bound, held-descriptor environment capture against a live
+  transient user-manager service, including an unlinked snapshot
+- inactive recursive Quadlet `Volume=` host-root refusal and canonical-digest
+  mutation/restoration
+- offline upgrade/rollback with a zero-`systemctl`-probe witness
 - `bash -n deploy/bin/* deploy/*.sh`
 - `shellcheck -x -P deploy/bin deploy/bin/* deploy/*.sh`
 - `actionlint .github/workflows/foundation.yml`

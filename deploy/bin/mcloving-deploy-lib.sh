@@ -905,6 +905,12 @@ require_usable_unit_search_path() {
     if (( quadlet_status != 0 && quadlet_status != 2 )); then
       deploy_fail "the service manager's typed QUADLET_UNIT_DIRS override is empty, relative, duplicated, or unreadable; refusing to guess which generator source directories Podman searches"
     fi
+    # Once the authenticated manager has supplied a usable UnitPath and a
+    # usable explicit (0) or known-default (2) Quadlet boundary, the caller's
+    # XDG search lists are no longer inputs to either derivation.  Refusing a
+    # relative value inherited only by this shell would let unrelated ambient
+    # state veto manager-authenticated truth.
+    return 0
   fi
   for list_name in XDG_CONFIG_DIRS XDG_DATA_DIRS; do
     [[ -v "${list_name}" ]] || continue
@@ -985,6 +991,20 @@ deployment_manager_is_reachable() {
   return 0
 }
 
+# Run a typed manager query through the same user-bus selection inputs as the
+# systemctl probe that authenticated it. deployment_python deliberately clears
+# ambient state; passing these two values explicitly prevents a custom runtime
+# directory or bus address from being replaced with /run/user/$UID/bus between
+# authentication and the security verdict.
+deployment_manager_python() {
+  local -a manager_environment=()
+  [[ ! -v XDG_RUNTIME_DIR ]] \
+    || manager_environment+=("XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}")
+  [[ ! -v DBUS_SESSION_BUS_ADDRESS ]] \
+    || manager_environment+=("DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}")
+  deployment_python "${manager_environment[@]}" -- "$@"
+}
+
 deployment_manager_speaks_for() {
   local home_dir="${1%/}" manager_home
   [[ "${MCLOVING_ASSUME_NO_MANAGER:-}" != "1" ]] || return 1
@@ -1026,7 +1046,7 @@ deployment_manager_array_property() {
   local home_dir="${1%/}" property="$2"
   deployment_manager_speaks_for "${home_dir}" || return 1
   command -v busctl >/dev/null 2>&1 || return 1
-  deployment_python - "${property}" <<'MANAGER_ARRAY'
+  deployment_manager_python - "${property}" <<'MANAGER_ARRAY'
 import base64
 import json
 import os
@@ -1105,7 +1125,15 @@ deployment_manager_quadlet_unit_paths() {
   while :; do
     entry="${rest%%:*}"
     [[ -n "${entry}" && "${entry}" == /* ]] || return 1
-    encode_path_item "${entry%/}"
+    # Trimming the only slash turns the valid recursive root override into an
+    # empty successful answer, after which callers silently use Podman's
+    # defaults. Preserve / exactly; every other spelling loses only its
+    # redundant trailing slash.
+    if [[ "${entry}" == / ]]; then
+      encode_path_item /
+    else
+      encode_path_item "${entry%/}"
+    fi
     [[ "${rest}" == *:* ]] || break
     rest="${rest#*:}"
   done
@@ -1209,7 +1237,7 @@ deployment_manager_unit_facts() {
     echo "busctl is required to read typed service-manager properties" >&2
     return 1
   }
-  deployment_python - "$@" <<'MANAGER_FACTS'
+  deployment_manager_python - "$@" <<'MANAGER_FACTS'
 import base64
 import json
 import os
@@ -1479,6 +1507,34 @@ deployment_manager_xdg_root() {
   printf '%s\n' "${value%/}"
 }
 
+# deployment_manager_runtime_root HOME -> the runtime base used by the
+# authenticated manager. Quadlet's default rootless search union includes
+# $XDG_RUNTIME_DIR/containers/systemd, so deriving this value from the caller
+# after the manager has answered would inspect a different source namespace.
+deployment_manager_runtime_root() {
+  local home_dir="${1%/}" value="" home_uid raw encoded assignment matches=0
+  deployment_manager_speaks_for "${home_dir}" || return 1
+  raw="$(deployment_manager_array_property "${home_dir}" Environment)" || return 1
+  while IFS= read -r encoded; do
+    [[ -n "${encoded}" ]] || continue
+    decode_path_item_into assignment "${encoded}"
+    [[ "${assignment}" == XDG_RUNTIME_DIR=* ]] || continue
+    value="${assignment#XDG_RUNTIME_DIR=}"
+    matches=$((matches + 1))
+  done <<<"${raw}"
+  (( matches <= 1 )) || return 1
+  if (( matches == 0 )) || [[ "${value}" != /* ]]; then
+    home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || return 1
+    [[ -n "${home_uid}" ]] || return 1
+    value="/run/user/${home_uid}"
+  fi
+  if [[ "${value}" == / ]]; then
+    printf '/\n'
+  else
+    printf '%s\n' "${value%/}"
+  fi
+}
+
 # deployment_effective_state_root / _cache_root / _data_root HOME -> the base
 # this deployment should read from and write to: the manager's where it can
 # be established, the caller's derivation otherwise. The state one is what
@@ -1588,7 +1644,9 @@ deployment_unit_load_paths() {
   # deployment_effective_config_root means.
   config_base="$(deployment_effective_config_root "${home_dir}")"
   data_base="$(deployment_effective_data_root "${home_dir}")"
-  runtime_base="$(deployment_runtime_root "${home_dir}")"
+  if ! runtime_base="$(deployment_manager_runtime_root "${home_dir}")"; then
+    runtime_base="$(deployment_runtime_root "${home_dir}")"
+  fi
   home_uid="$(stat -Lc '%u' "${home_dir}" 2>/dev/null)" || home_uid=""
   # Two parallel arrays rather than one classified string: a path may carry
   # any byte, and pairing by index keeps the transport convention intact.
@@ -3715,9 +3773,10 @@ deployment_unit_invocation_is_authoritative() {
 #
 # Run by hand, nothing is overlaid and nothing is dropped: the parsed
 # contract stands unchanged.
-# deployment_capture_unit_process_environment UNIT DEST -- copy the running
-# service's NUL-delimited environment into DEST while holding the opened proc
-# descriptor and bounding it to the manager's process identity.
+# deployment_capture_unit_process_environment UNIT DEST_FD -- copy the running
+# service's NUL-delimited environment into the caller's already-open file
+# descriptor while binding the proc observation to the manager's process
+# identity.
 #
 # This is "ask the manager" carried to its conclusion. `systemctl show UNIT
 # -p Environment` is NOT sufficient and was checked rather than assumed: it
@@ -3729,83 +3788,132 @@ deployment_unit_invocation_is_authoritative() {
 # model of it. Readable because the transition runs as the same uid that
 # owns the service.
 deployment_capture_unit_process_environment() {
-  local unit_name="$1" destination="$2" properties properties_after
-  local line key value main_pid="" start_mono="" invocation=""
-  local main_pid_after="" start_mono_after="" invocation_after=""
-  local proc_start ticks expected_start delta environ_fd entry_count=0
+  local unit_name="$1" destination_fd="$2" properties properties_after
+  local line key value main_pid="" invocation="" control_group=""
+  local main_pid_after="" invocation_after="" control_group_after=""
   deployment_manager_is_reachable || return 1
+  [[ "${destination_fd}" =~ ^[0-9]+$ ]] || return 1
   properties="$(systemctl --user show "${unit_name}" \
-    -p ExecMainPID -p ExecMainStartTimestampMonotonic -p InvocationID \
+    -p ExecMainPID -p InvocationID -p ControlGroup \
     2>/dev/null 9>&-)" || return 1
   while IFS='=' read -r key value; do
     case "${key}" in
       ExecMainPID) main_pid="${value}" ;;
-      ExecMainStartTimestampMonotonic) start_mono="${value}" ;;
       InvocationID) invocation="${value}" ;;
+      ControlGroup) control_group="${value}" ;;
     esac
   done <<<"${properties}"
   [[ "${main_pid}" =~ ^[0-9]+$ ]] || return 1
   [[ "${main_pid}" -gt 0 ]] || return 1
-  [[ "${start_mono}" =~ ^[0-9]+$ && -n "${invocation}" ]] || return 1
+  [[ -n "${invocation}" && "${control_group}" == /* ]] || return 1
 
-  # Open first and read only through this descriptor. Returning the pathname
-  # left an unbounded window in which PID reuse could redirect the later open
-  # to an unrelated process.
-  exec {environ_fd}<"/proc/${main_pid}/environ" || return 1
-  proc_start="$(awk '{print $22}' "/proc/${main_pid}/stat" 2>/dev/null)" || {
-    exec {environ_fd}<&-
-    return 1
-  }
-  ticks="$(getconf CLK_TCK 2>/dev/null)" || ticks=""
-  [[ "${proc_start}" =~ ^[0-9]+$ && "${ticks}" =~ ^[0-9]+$ && "${ticks}" -gt 0 ]] || {
-    exec {environ_fd}<&-
-    return 1
-  }
-  expected_start=$((proc_start * 1000000 / ticks))
-  delta=$((start_mono - expected_start))
-  (( delta < 0 )) && delta=$((-delta))
-  # systemd records exec start while /proc exposes process creation rounded to
-  # one scheduler tick. A one-second ceiling is deliberately generous across
-  # kernels, yet rejects a recycled PID once the named service is older than
-  # that bound.
-  (( delta <= 1000000 )) || {
-    exec {environ_fd}<&-
-    return 1
-  }
+  # /proc/PID/stat's start field and systemd's monotonic timestamp do not use
+  # the same clock across suspend. Instead, the trusted interpreter opens a
+  # pidfd and a pinned proc-directory descriptor, proves that process remains
+  # inside the manager-reported cgroup, reads its environment through openat,
+  # and writes once to the caller's inherited descriptor. No pathname is
+  # reopened and no process environment is printed or placed in argv.
+  deployment_python -- - "${main_pid}" "${control_group}" "${destination_fd}" <<'CAPTURE_ENV' \
+    || return 1
+import os
+import select
+import stat
+import sys
 
+
+def fail():
+    raise SystemExit(1)
+
+
+try:
+    pid = int(sys.argv[1])
+    expected_group = sys.argv[2]
+    destination = int(sys.argv[3])
+    pidfd = os.pidfd_open(pid, 0)
+    procdir = os.open(
+        f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    )
+except (AttributeError, OSError, ValueError):
+    fail()
+
+poller = select.poll()
+poller.register(pidfd, select.POLLIN)
+if poller.poll(0):
+    fail()
+
+
+def read_proc(name):
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(name, flags, dir_fd=procdir)
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+try:
+    memberships = read_proc("cgroup").decode("utf-8", "strict").splitlines()
+    in_expected_group = False
+    for membership in memberships:
+        fields = membership.split(":", 2)
+        if len(fields) != 3:
+            fail()
+        actual_group = fields[2]
+        if actual_group == expected_group or actual_group.startswith(
+            expected_group.rstrip("/") + "/"
+        ):
+            in_expected_group = True
+    if not in_expected_group:
+        fail()
+    environment = read_proc("environ")
+    if not environment or not environment.endswith(b"\0"):
+        fail()
+    destination_stat = os.fstat(destination)
+    if not stat.S_ISREG(destination_stat.st_mode):
+        fail()
+    if poller.poll(0):
+        fail()
+    os.ftruncate(destination, 0)
+    os.lseek(destination, 0, os.SEEK_SET)
+    view = memoryview(environment)
+    while view:
+        written = os.write(destination, view)
+        if written <= 0:
+            fail()
+        view = view[written:]
+    os.lseek(destination, 0, os.SEEK_SET)
+    if poller.poll(0):
+        fail()
+except (OSError, UnicodeError, ValueError):
+    fail()
+finally:
+    os.close(procdir)
+    os.close(pidfd)
+CAPTURE_ENV
+
+  # This comparison deliberately happens after the complete copy. A restart
+  # at any point during capture changes PID, invocation, or cgroup and rejects
+  # the stale snapshot before a transition can render a health verdict.
   properties_after="$(systemctl --user show "${unit_name}" \
-    -p ExecMainPID -p ExecMainStartTimestampMonotonic -p InvocationID \
-    2>/dev/null 9>&-)" || {
-    exec {environ_fd}<&-
-    return 1
-  }
+    -p ExecMainPID -p InvocationID -p ControlGroup \
+    2>/dev/null 9>&-)" || return 1
   while IFS='=' read -r key value; do
     case "${key}" in
       ExecMainPID) main_pid_after="${value}" ;;
-      ExecMainStartTimestampMonotonic) start_mono_after="${value}" ;;
       InvocationID) invocation_after="${value}" ;;
+      ControlGroup) control_group_after="${value}" ;;
     esac
   done <<<"${properties_after}"
   [[ "${main_pid_after}" == "${main_pid}" \
-    && "${start_mono_after}" == "${start_mono}" \
-    && "${invocation_after}" == "${invocation}" ]] || {
-    exec {environ_fd}<&-
-    return 1
-  }
-
-  : > "${destination}" || {
-    exec {environ_fd}<&-
-    return 1
-  }
-  while IFS= read -r -d '' -u "${environ_fd}" entry; do
-    printf '%s\0' "${entry}" >> "${destination}" || {
-      exec {environ_fd}<&-
-      return 1
-    }
-    entry_count=$((entry_count + 1))
-  done
-  exec {environ_fd}<&-
-  (( entry_count > 0 )) || return 1
+    && "${invocation_after}" == "${invocation}" \
+    && "${control_group_after}" == "${control_group}" ]] || return 1
   return 0
 }
 
@@ -3846,8 +3954,8 @@ MCLOVING_CONTRACT_SOURCE="declared"
 # Run by hand with neither, nothing is overlaid and the parsed contract
 # stands, exactly as before round 32.
 load_effective_contract() {
-  local contract_file="$1" environ_file="${2-}" environ_temp=""
-  local contract_key environ_entry
+  local contract_file="$1" environ_file="${2-}" environ_fd
+  local environ_pid="" environ_status=0 contract_key environ_entry
   load_environment_file "${contract_file}"
   MCLOVING_CONTRACT_DECLARED=()
   MCLOVING_CONTRACT_DROPPED=()
@@ -3865,11 +3973,14 @@ load_effective_contract() {
   # is round 35's rule and is preserved below.
   if [[ -n "${environ_file}" ]]; then
     MCLOVING_CONTRACT_SOURCE="service-process"
+    exec {environ_fd}<"${environ_file}" \
+      || deploy_fail "cannot open the effective service environment"
   else
-    environ_temp="$(mktemp)" \
-      || deploy_fail "cannot create a temporary file for the effective environment"
-    env -0 > "${environ_temp}"
-    environ_file="${environ_temp}"
+    # A pipe retains every NUL separator and has no pathname for an
+    # attacker-controlled TMPDIR to substitute. Keep the producer pid so a
+    # partial stream can never be accepted after a failed producer.
+    exec {environ_fd}< <(env -0)
+    environ_pid=$!
     if deployment_unit_invocation_is_authoritative; then
       MCLOVING_CONTRACT_SOURCE="unit-invocation"
     else
@@ -3879,8 +3990,13 @@ load_effective_contract() {
   while IFS= read -r -d '' environ_entry; do
     [[ "${environ_entry}" == *=* ]] || continue
     MCLOVING_EFFECTIVE_ENV["${environ_entry%%=*}"]="${environ_entry#*=}"
-  done < "${environ_file}"
-  [[ -z "${environ_temp}" ]] || rm -f "${environ_temp}"
+  done <&"${environ_fd}"
+  exec {environ_fd}<&-
+  if [[ -n "${environ_pid}" ]]; then
+    wait "${environ_pid}" || environ_status=$?
+    (( environ_status == 0 )) \
+      || deploy_fail "cannot read the effective process environment"
+  fi
   # "observed" means: seen in THIS process, which is not the service. It is
   # evidence for the asymmetry check and nothing else -- the parsed contract
   # stands as the effective value, exactly as it did before round 32.
@@ -3897,25 +4013,31 @@ load_effective_contract() {
 }
 
 load_environment_file() {
-  local name value parsed status
+  local name value parsed_fd parsed_pid status=0
+  local -A parsed_contract=()
   # The parser's exit status has to be checked before any value is accepted.
   # Reading directly from a process substitution discards it, so a file that
   # parses partially — its required assignments emitted, then a malformed line
   # — would fill the map, report success, and defeat the fail-closed contract
-  # this guard exists to enforce. A temporary file is used because values may
-  # contain NUL separators, which command substitution strips.
-  parsed="$(mktemp)" || deploy_fail "cannot create a temporary file for the contract"
-  status=0
-  parse_environment_file "$1" > "${parsed}" || status=$?
+  # this guard exists to enforce. A held pipe preserves NUL separators while
+  # removing the secret-bearing temporary pathname entirely. The producer is
+  # waited explicitly before its staged values are committed to the global
+  # map, so partial parser output still fails closed.
+  exec {parsed_fd}< <(parse_environment_file "$1")
+  parsed_pid=$!
+  while IFS= read -r -d '' -u "${parsed_fd}" name \
+    && IFS= read -r -d '' -u "${parsed_fd}" value; do
+    parsed_contract["${name}"]="${value}"
+  done
+  exec {parsed_fd}<&-
+  wait "${parsed_pid}" || status=$?
   if [[ "${status}" -ne 0 ]]; then
-    rm -f "${parsed}"
     deploy_fail "environment file $1 could not be parsed"
   fi
   MCLOVING_CONTRACT=()
-  while IFS= read -r -d '' name && IFS= read -r -d '' value; do
-    MCLOVING_CONTRACT["${name}"]="${value}"
-  done < "${parsed}"
-  rm -f "${parsed}"
+  for name in "${!parsed_contract[@]}"; do
+    MCLOVING_CONTRACT["${name}"]="${parsed_contract[${name}]}"
+  done
 }
 
 # contract_value NAME — the parsed value, or empty when unset.
@@ -4104,7 +4226,8 @@ require_declared_variables_allowed() {
   for allowed_name in "${MCLOVING_CONTRACT_FOREIGN_VARIABLES[@]}"; do
     allowed["${allowed_name}"]=1
   done
-  local parsed parse_status
+  local parsed_fd parsed_pid parse_status key
+  local -A parsed_variables=()
   for contract_file in "$@"; do
     [[ -f "${contract_file}" ]] || continue
     # THE PARSER'S EXIT STATUS IS PART OF THE VERDICT, and discarding it
@@ -4119,26 +4242,27 @@ require_declared_variables_allowed() {
     # reached it. Combined with an interpreter resolved by name, that is a
     # local escalation and not a cosmetic gap.
     #
-    # A temporary file rather than a pipe because values may contain NUL
-    # separators, which command substitution strips. load_environment_file
-    # already applies this discipline in the guard, with the same reasoning
-    # written above it; this is that lesson reaching the validator, which is
-    # the side that runs BEFORE any service is stopped.
-    parsed="$(mktemp)" \
-      || deploy_fail "cannot create a temporary file to read ${contract_file}"
+    # A held pipe preserves NUL separators without creating a secret-bearing
+    # pathname. Stage names until the explicitly waited parser succeeds, so
+    # the validator cannot accept a prefix emitted before a malformed line.
+    parsed_variables=()
     parse_status=0
-    parse_environment_file "${contract_file}" > "${parsed}" 2>/dev/null \
-      || parse_status=$?
+    exec {parsed_fd}< <(parse_environment_file "${contract_file}" 2>/dev/null)
+    parsed_pid=$!
+    while IFS= read -r -d '' -u "${parsed_fd}" key \
+      && IFS= read -r -d '' -u "${parsed_fd}" value; do
+      parsed_variables["${key}"]=1
+    done
+    exec {parsed_fd}<&-
+    wait "${parsed_pid}" || parse_status=$?
     if [[ "${parse_status}" -ne 0 ]]; then
-      rm -f "${parsed}"
       deploy_fail "contract ${contract_file} could not be parsed, so this deployment cannot say which variables it declares -- refusing the transition rather than reading an unreadable contract as an empty one. systemd is deliberately more forgiving than this parser: it skips a line it cannot read and loads every assignment after it, so a contract that stops this parser can still put variables into the service environment that nothing has judged. A line without '=' is the usual cause; repair the file and retry"
     fi
-    while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    for key in "${!parsed_variables[@]}"; do
       [[ "${key}" != MCLOVING_* ]] || continue
       [[ -z "${allowed["${key}"]:-}" ]] || continue
       offending+="${key} in ${contract_file} "
-    done < "${parsed}"
-    rm -f "${parsed}"
+    done
   done
   if [[ -n "${offending}" ]]; then
     deploy_fail "contract(s) declare variable(s) this deployment does not recognise: ${offending% }-- a contract may declare the MCLOVING_ namespace, which no shell, loader, or language runtime consults, plus the few foreign names the shipped contracts genuinely need; anything else is refused BY DEFAULT rather than matched against a list of known-dangerous names, because an interpreter or loader hook nobody has enumerated yet (BASH_ENV, LD_PRELOAD, PYTHONUSERBASE and their successors) executes code as the service account before its first instruction. Remove the declaration, or add it to the shipped example contract if the deployment genuinely needs it"
@@ -4665,6 +4789,45 @@ require_deployment_integrity() {
     for system_dropin_file in "${system_dropin_files[@]}"; do
       deploy_notice "system-path drop-in ${system_dropin_file} is merged into this deployment's units by the service manager; it is validated under the same rules as the deployment's own sources, and is recorded in the canonical digest document"
     done
+    fi
+    if (( manager_query_mode )); then
+      # Typed manager argv is execution truth, but Podman's generated
+      # `--volume /host:/container` argument is not itself the host path.
+      # Retain the additive Quadlet source classification for every regular
+      # source in the complete union so Volume= host roots (including those
+      # introduced by an inactive candidate or drop-in) still take the
+      # ancestor rule. Native composed facts remain manager-authoritative.
+      local -a manager_quadlet_sources=()
+      local manager_quadlet_source manager_quadlet_basename
+      local manager_quadlet_parent_basename
+      for manager_quadlet_source in "${unit_files[@]}" "${union_unit_files[@]}"; do
+        manager_quadlet_basename="${manager_quadlet_source##*/}"
+        manager_quadlet_parent_basename="${manager_quadlet_source%/*}"
+        manager_quadlet_parent_basename="${manager_quadlet_parent_basename##*/}"
+        if [[ "${manager_quadlet_basename}" =~ \.(${MCLOVING_QUADLET_SOURCE_TYPES})$ ]]; then
+          :
+        elif [[ "${manager_quadlet_basename}" == *.conf \
+          && "${manager_quadlet_parent_basename}" =~ (^|\.)(${MCLOVING_QUADLET_SOURCE_TYPES})\.d$ ]]; then
+          # A recursively enumerated Quadlet drop-in remains a Quadlet source
+          # even when no main source is colocated in its nested directory.
+          # Retain it so a drop-in-only Volume= host path cannot disappear
+          # behind the generated manager argv's /host:/container spelling.
+          :
+        else
+          continue
+        fi
+        manager_quadlet_sources+=("${manager_quadlet_source}")
+      done
+      if [[ ${#manager_quadlet_sources[@]} -gt 0 ]]; then
+        require_parseable_unit_sources "${home_dir}" "${manager_quadlet_sources[@]}"
+        local manager_declared_root
+        while IFS= read -r encoded_root; do
+          [[ -n "${encoded_root}" ]] || continue
+          decode_path_item_into manager_declared_root "${encoded_root}"
+          unit_declared_roots+=("${manager_declared_root}")
+        done < <(deployment_unit_declared_roots "${home_dir}" \
+          "${manager_quadlet_sources[@]}" | sort -u)
+      fi
     fi
   fi
   # The two INSTALLED TREES the transition executes from -- retained
