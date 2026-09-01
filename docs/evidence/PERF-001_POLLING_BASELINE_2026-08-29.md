@@ -90,6 +90,34 @@ ancestor, in-repo content delta, reconstructed tree hash, content-addressed
 commit payloads — was executed and verified before this document was
 committed.
 
+## The filed remote-agent profile at shipped defaults, post event-wait
+
+The `e57f7c9` receipt's 71.2018 ms/stage is the `release-embedded` profile.
+The filing measured the faceoff2 remote-agent lane (standalone agent over
+mTLS, journal, both poll settings), so the acceptance target is also
+measured on that profile: binaries built from protected-main `ad2f37f`
+(2026-08-31 tip; the commits above `a711373` are documentation and CI
+scripts only), Mario, fresh stack, both `MCLOVING_POLL_MILLISECONDS` and
+`MCLOVING_AGENT_POLL_MILLISECONDS` at the shipped 500, delta method, two
+independent cells. Raw wall-clock milliseconds, five heats per row:
+
+```
+label              stages heat  wall_ms
+remote-close-500   50     1-5   9376 7582 9184 9112 9407
+remote-close-500   100    1-5   19219 17580 16919 16977 17587
+remote-close2-500  50     1-5   8848 8774 8828 8825 8736
+remote-close2-500  100    1-5   17544 17643 17542 17533 16942
+```
+
+Cell 1: median (17580 - 9184) / 50 = 167.9 ms/stage, minimum
+(16919 - 7582) / 50 = 186.7, disagreement 11.2% — admissible under the
+filing's 15% rule, with the minimum estimator 2% above the 183 ms target
+because of one fast N=50 heat; disclosed rather than dropped. Cell 2:
+median (17542 - 8825) / 50 = 174.3, minimum (16942 - 8736) / 50 = 164.1,
+disagreement 5.9% — both estimators under the target. The filed
+profile therefore meets the filing's 183 ms acceptance target at shipped
+defaults, on its own harness and method.
+
 ## Which measurements attach to which identity
 
 - Attached to this baseline (`83a6d6c`, equivalently `6ac9be9` for every

@@ -920,7 +920,12 @@ source identity, raw commit objects, and runtime-crate equivalence to
 that ancestor are preserved in
 `docs/evidence/PERF-001_POLLING_BASELINE_2026-08-29.md`; pre-dating all
 of the above) is CLOSED against its own acceptance criteria: per-stage cost at shipped defaults with no interval lowered —
-71.2018 ms/stage median against its 183 ms bar; idle CPU 1.099% of one
+71.2018 ms/stage median on the `release-embedded` profile, and on the
+filed remote-agent profile itself 167.9 and 174.3 ms/stage medians
+across two cells (the confirming cell under the bar on both estimators;
+raw cells and build identity retained in
+`docs/evidence/PERF-001_POLLING_BASELINE_2026-08-29.md`) against its
+183 ms bar; idle CPU 1.099% of one
 core for the complete stack against its 5% bar; every property its
 sleeps guarded kept a gate (work-loop drain, submission wake, lease
 renewal, cancellation observation, reconciliation cadence, stale-fence
