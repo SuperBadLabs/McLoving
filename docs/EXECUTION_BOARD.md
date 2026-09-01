@@ -946,7 +946,9 @@ transition lock and after `daemon-reload`, and binds service-environment reads
 to a held `/proc` descriptor plus a stable manager invocation/PID/start tuple.
 The protected `Deployment lane` runs the real service-managed arm under a
 disposable account with controlled unit and generator inputs. Its shared early
-preflight accepts only Ubuntu's `/usr` Podman/Quadlet layout or the hosted
+preparation removes group/world write only from the known image-owned
+`/usr/share` union roots and explicit `/usr/local` Podman/Quadlet chain; its
+unchanged preflight then accepts only Ubuntu's `/usr` Podman/Quadlet layout or the hosted
 runner's version-matched `/usr/local` static-bundle layout,
 validates the exact root-owned generator target, and refuses overrides, mixed
 layouts, or writable inputs without invoking Podman before the generated

@@ -467,6 +467,19 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Normalize owned hosted-runner package ancestors
+        # The hosted image deliberately makes selected package/tool roots
+        # writable. This job owns the disposable VM; normalize only the exact
+        # roots the deployment enumerates or executes, then let the unchanged
+        # preflight refuse any new drift by name.
+        run: |
+          for directory in \
+            /usr/share /usr/share/containers /usr/share/systemd \
+            /usr/local /usr/local/bin /usr/local/lib \
+            /usr/local/lib/systemd /usr/local/lib/systemd/user-generators \
+            /usr/local/libexec /usr/local/libexec/podman; do
+            test ! -d "${directory}" || sudo chmod go-w "${directory}"
+          done
       - name: Verify controlled systemd host inputs
         # This is intentionally before the Rust build and the 20-minute
         # fallback matrix. Runner-image Podman packaging drift must fail while
@@ -481,14 +494,6 @@ jobs:
       - name: Reclaim runner disk
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android
-          # The 20260823 hosted image ships these root-owned Quadlet/systemd
-          # ancestors as 0777. The deployment correctly refuses a future
-          # source/drop-in creation point beneath them. This job owns the
-          # disposable VM, so make the exact package roots meet the production
-          # invariant before exercising the unchanged fallback specification.
-          for directory in /usr/share /usr/share/containers /usr/share/systemd; do
-            test ! -d "${directory}" || sudo chmod go-w "${directory}"
-          done
           sync
       - name: Run the deployment smoke test
         # The smoke test preserves its working directory on failure, but a

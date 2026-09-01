@@ -147,6 +147,16 @@ the start command executable.
 The per-PR closure claim remains conditional on a successful protected run at
 the corrected exact head, and that result remains the merge authority.
 
+The correction's first protected run (`33467033677`, job `99728923622`) then
+proved why preflight belongs first: it refused in eight seconds because the
+hosted image also exposes `/usr/local/bin` as root-owned mode 0777. This is the
+same image-owned ancestor class as `/usr/share`, not a production exception.
+The disposable job now removes group/world write before preflight from only the
+fixed `/usr/share` union roots and the explicit `/usr/local` Podman/Quadlet
+ancestor chain; the validator and fallback specification remain unchanged and
+still refuse any new writable input by name. Fixed layout components other than
+the one expected generator link must also be non-symlinks.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the

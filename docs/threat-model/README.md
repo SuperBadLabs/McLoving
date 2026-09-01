@@ -146,6 +146,9 @@ controlled unit and generator inputs. The generator is selected only from the
 version-matched `/usr` distro layout or image-provided `/usr/local` hosted
 bundle, with its exact target, ownership, modes, and version checked and its
 hashes recorded without invoking Podman before the generated volume unit;
+known root-owned writable package ancestors on the disposable hosted image are
+normalized on the exact `/usr/share` and `/usr/local` input chains before that
+unchanged validator runs, while any new drift is refused;
 property-labelled typed manager command-tuple facts then bind every generated
 start and present stop command to that selected Podman executable, whose
 version is compared with Quadlet after cold start; runtime and administrator

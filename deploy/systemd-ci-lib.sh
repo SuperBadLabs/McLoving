@@ -80,6 +80,10 @@ mcloving_ci_select_podman_generator() {
     || { mcloving_ci_host_fail "Quadlet target is not a regular executable: ${expected_target}"; return 1; }
 
   for path in "${MCLOVING_CI_PODMAN_TRUST_PATHS[@]}"; do
+    if [[ "${path}" != "${MCLOVING_CI_PODMAN_GENERATOR}" && -L "${path}" ]]; then
+      mcloving_ci_host_fail "fixed Podman/Quadlet input is unexpectedly a symlink: ${path}"
+      return 1
+    fi
     mcloving_ci_require_root_input "${path}" "Podman/Quadlet input" || return 1
   done
 
