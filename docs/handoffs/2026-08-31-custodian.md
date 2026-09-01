@@ -87,6 +87,12 @@ head, all checks passed, and no unresolved thread remained.
 
 Canonical evidence:
 
+- `docs/evidence/PERF-001_EVENT_WAIT_SOURCE_e57f7c9.md` — durable source
+  identity, signer, and offline reconstruction procedure for the reviewed
+  commit that was replaced by the protected-main squash.
+- `docs/evidence/PERF-001_EVENT_WAIT_SOURCE_e57f7c9.commit` and
+  `docs/evidence/PERF-001_EVENT_WAIT_SOURCE_e57f7c9.allowed_signers` — exact
+  signed commit-object payload and its public verification material.
 - `docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31.md` — scope, identity map,
   rejected/superseded measurements, and explicit non-claims.
 - `docs/evidence/PERF-001_EVENT_WAIT_QA_2026-08-31.json` — five-heat stage
@@ -193,9 +199,14 @@ removed after no operator needs them for forensic convenience:
 - `/tmp/mcloving-split-idle-vuNa2H/split-idle-cpu.tsv`
 
 Their hashes match the committed files. No disposable benchmark or split-idle
-container was running. The local QA clone and source bundles live under
-`/tmp/mcloving-qa-npAVOa/` and `/tmp/mcloving-pr110-v11.bundle`; they are
-noncanonical scratch and can disappear without evidence loss.
+container was running. The local QA clone and source bundle live under
+`/tmp/mcloving-qa-npAVOa/` and `/tmp/mcloving-pr110-v11.bundle`; the bundle's
+SHA-256 is
+`95b60daafadb1f933532dea7ebcbc1b383306f1d4e3ae847b210617395df4fc0`.
+They are noncanonical scratch and can disappear without evidence loss because
+the exact signed source commit, public verification material, reconstruction
+procedure, and matching protected-main tree are now committed under
+`docs/evidence/PERF-001_EVENT_WAIT_SOURCE_e57f7c9.*`.
 
 No completed `codex/perf001*` branch remained on the remote at authoring time.
 There were no open pull requests. Recheck both facts rather than assuming they
