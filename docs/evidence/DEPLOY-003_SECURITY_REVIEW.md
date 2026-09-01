@@ -235,6 +235,36 @@ account-owned child. `useradd --no-create-home` prevents `/etc/skel` descendants
 from inheriting the host ACL before that proof. No existing account or shared
 home ACL is modified.
 
+Protected run `33476931957` (job `99758031256`) was the first to pass every
+host-input, manager-environment, ACL, install, union, typed-query, command-path,
+and runtime-policy gate and reach the cold service start. It exposed a real
+version-dependent readiness contract. Quadlet 4.9 treated `Notify=healthy` as
+conmon readiness, while the selected Quadlet 5.8.4 generated
+`--sdnotify=healthy`. The first attempt reached `Writing manifest to image
+destination` and then systemd enforced the shipped 300-second start bound. A
+second attempt emitted no pull progress and reached the same exact timeout.
+Because the original teardown erased the generated units and container before
+diagnostics, that run alone cannot distinguish pull finalization, storage,
+container creation, or health-wait state. Version-matched Podman source explains
+the observed repeated shape: its healthy-notify path waits without a
+retry-derived deadline; `HealthRetries=12` can mark the container unhealthy but
+does not bound that wait.
+
+The Quadlet now explicitly selects the stable conmon notification mode with
+`Notify=false`; the real-manager gate reads the generated `ExecStart` argv from
+typed manager properties, requires `--sdnotify=conmon`, and refuses both
+`--sdnotify=healthy` and `--sdnotify=container`. PostgreSQL health remains
+fail-closed at the existing db-init barrier: it requires two successive
+`pg_isready` successes within a bounded loop before any migration or
+provisioning, and the controller requires that successful oneshot. Container
+health metadata remains available for observation without becoming an
+unbounded unit-start dependency. A nonzero arm now captures secret-safe unit
+state, status, journals, and—only after rootless state proves the cold-first
+boundary was crossed—container state and logs before teardown removes them.
+That evidence block is skipped while the runtime gate may have left database
+row-level security weakened, so no diagnostic query can delay immediate
+service teardown and removal of the proof database.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the
@@ -254,7 +284,9 @@ hardening, ordered start, stability, health, upgrade, rollback, and both exact
 deployable-runtime tests. Failure captures unit status, the user journal,
 mount state, and tool versions before removing the account; it deliberately
 does not invoke Podman because a pre-arm failure has not crossed the cold-first
-operation boundary.
+operation boundary. The inner arm's guarded evidence block may invoke bounded,
+secret-safe Podman observations only after both the start attempt and an
+on-disk rootless store prove that boundary was crossed.
 
 The arm snapshots configuration, state, runtime, manager `UnitPath`, and
 Quadlet roots once and reuses that model for probe, optional reset, and

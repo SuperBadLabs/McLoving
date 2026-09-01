@@ -10,15 +10,15 @@ story the lane exists to protect.
 Files:
 
 - `mcloving-postgres.container` — quadlet unit for the digest-pinned
-  PostgreSQL image from `tools/versions.env`. The generated service reports
-  "started" only when `pg_isready` passes (`Notify=healthy`), so dependent
-  units order on database health, not process launch.
+  PostgreSQL image from `tools/versions.env`. The generated service uses
+  Quadlet's version-stable conmon readiness mode. The dependent db-init
+  oneshot owns the database-health barrier: it requires two bounded
+  `pg_isready` successes before migrations or provisioning.
 - `mcloving-postgres-data.volume` — quadlet definition of the named
   `mcloving-postgres-data` volume holding the database.
 
 Both files are installed into `~/.config/containers/systemd/` for the
-service user by `deploy/bin/mcloving-install`. Requires podman >= 4.9 for
-quadlet `Notify=healthy`.
+service user by `deploy/bin/mcloving-install`. Requires podman >= 4.9.
 
 The full lane — install, upgrade, rollback, health verification, digest
 re-read, and honest limitations — is documented in

@@ -39,10 +39,12 @@ checksums="$(readlink -f "$3")"
 [[ -x "${runtime_gate}" ]] || { echo "runtime gate is not executable: ${runtime_gate}" >&2; exit 1; }
 [[ -d "${release_dir}" ]] || { echo "release directory is absent: ${release_dir}" >&2; exit 1; }
 [[ -f "${checksums}" ]] || { echo "checksums are absent: ${checksums}" >&2; exit 1; }
-for command_name in systemctl systemd-path loginctl podman busctl jq mount findmnt getfacl setfacl setpriv useradd userdel sha256sum; do
+for command_name in systemctl systemd-path loginctl podman busctl jq mount findmnt getfacl setfacl setpriv useradd userdel sha256sum journalctl timeout; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || { echo "required command is absent: ${command_name}" >&2; exit 1; }
 done
+[[ -x /usr/bin/timeout && ! -L /usr/bin/timeout ]] \
+  || { echo "required bounded-diagnostics command is not a regular executable: /usr/bin/timeout" >&2; exit 1; }
 mcloving_ci_select_podman_generator
 mcloving_ci_print_podman_generator
 [[ "$(systemd-path search-binaries-default)" == "${controlled_path}" ]] \

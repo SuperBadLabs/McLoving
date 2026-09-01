@@ -1198,9 +1198,9 @@ deployment_manager_units_are_loaded() {
 # WorkingDirectory, the managed-directory lists, Environment,
 # UnsetEnvironment and NoNewPrivileges from Service. The caller decides policy;
 # this function only transports exactly what the manager said. Exec command
-# tuples carry their property name as `command-executable-ExecStart`, etc.; the
-# broader `executable` kind is retained for integrity validation of both the
-# command and absolute argv paths.
+# tuples carry their property name as `command-executable-ExecStart` and
+# `command-argument-ExecStart`, etc.; the broader `executable` kind is retained
+# for integrity validation of both the command and absolute argv paths.
 deployment_manager_unit_facts() {
   local home_dir="${1%/}"
   shift
@@ -1328,6 +1328,10 @@ for unit in sys.argv[1:]:
             emit("executable", unit, executable)
             if not isinstance(argv, list):
                 fail(f"{unit} reported malformed {property_name} argv")
+            for argument in argv:
+                if not isinstance(argument, str):
+                    fail(f"{unit} reported a non-string {property_name} argument")
+                emit(f"command-argument-{property_name}", unit, argument)
             # Over-validate bare absolute arguments exactly as the retained
             # fallback does. Options containing a path remain the owning
             # program's grammar rather than something this boundary guesses.
@@ -4514,6 +4518,7 @@ require_deployment_integrity() {
               declared_executables+=("${manager_value}")
             fi
             ;;
+          command-argument-*) : ;;
           working) unit_declared_roots+=("${manager_value}") ;;
           state-directory)
             unit_declared_roots+=("$(deployment_effective_state_root "${home_dir}")/${manager_value}")

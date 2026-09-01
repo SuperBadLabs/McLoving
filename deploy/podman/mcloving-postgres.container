@@ -20,9 +20,13 @@ HealthInterval=5s
 HealthTimeout=3s
 HealthRetries=12
 HealthStartPeriod=10s
-# The unit reports "started" only once the health check passes, so
-# After=mcloving-postgres.service means "after PostgreSQL is healthy".
-Notify=healthy
+# Use Quadlet's stable conmon readiness contract across the supported Podman
+# range.  Podman 4.9 silently treated Notify=healthy as conmon readiness while
+# 5.x waits for a separate health notification; the latter failed to converge
+# on a cold hosted start even though the image pull completed.  Health remains
+# fail-closed at mcloving-db-init: it requires two bounded pg_isready successes
+# before migrations, and the controller Requires= that successful oneshot.
+Notify=false
 
 [Service]
 # EXECUTION HOOKS ARE STRIPPED BEFORE ANY OF THIS UNIT'S PROCESSES START.

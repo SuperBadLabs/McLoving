@@ -213,7 +213,7 @@ taken deliberately, with its cost stated.**
   the manager's unit load path. The lane verifies this and refuses otherwise;
   it does not establish it.
 - **What the lane is trusted for:** establishing the §2.1 invariant before every
-  transition, and refusing when it cannot. At **service start** that establishment is PARTIAL and must not be read as the full invariant: systemd has already loaded the unit before any `ExecStartPre` runs, and `mcloving-env-guard` walks only the environment file and the configured secret and state paths -- never the unit, the guard executable itself, or the selected release binary. An ancestor that became writable since the last transition is therefore not caught at start, and an attacker able to replace the unit can omit the guard entirely. A start-time verifier rooted outside the service-owned tree is PENDING under `DEPLOY-003`.
+  transition, and refusing when it cannot. At **service start** that establishment is PARTIAL and must not be read as the full invariant: systemd has already loaded the unit before any `ExecStartPre` runs, and `mcloving-env-guard` walks only the environment file and the configured secret and state paths -- never the unit, the guard executable itself, or the selected release binary. An ancestor that became writable since the last transition is therefore not caught at start, and an attacker able to replace the unit can omit the guard entirely. A start-time verifier rooted outside the service-owned tree is PENDING under `DEPLOY-002`.
 - **What is explicitly NOT claimed:** any bound on adversary B. That is `SEC-005`.
 
 ### Why not a root-owned tree (design-doc option A)

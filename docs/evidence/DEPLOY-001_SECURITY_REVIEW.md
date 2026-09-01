@@ -89,8 +89,9 @@ deferral.
 
 - one supported single-host production deployment lane: systemd user units for
   the controller and agent, a oneshot database bootstrap, and PostgreSQL as a
-  rootless podman quadlet with a digest-pinned image and a `Notify=healthy`
-  gate, ordered postgres → db-init → controller → agent;
+  rootless podman quadlet with a digest-pinned image and version-stable conmon
+  readiness; the db-init oneshot requires two bounded `pg_isready` successes
+  before any mutation, ordered postgres → db-init → controller → agent;
 - digest-pinned release artifacts with install-time identity recomputation, a
   staged-then-published release directory, retained releases, and an atomic
   `current` symlink transition under an exclusive transition lock;
@@ -112,7 +113,7 @@ deferral.
   re-establishment is PARTIAL: systemd loads the unit before any `ExecStartPre`,
   and `mcloving-env-guard` walks only the environment file and configured secret
   and state paths, not the unit, the guard binary, or the release binary --
-  a start-time verifier is PENDING under `DEPLOY-003`;
+  a start-time verifier is PENDING under `DEPLOY-002`;
 - a deployed-digest re-read covering every installed executable, contracts and
   PKI committed by hash rather than by content, so `CUTOVER-001` can read
   deployed implementation digests without hand-assembled state;

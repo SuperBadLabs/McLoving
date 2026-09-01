@@ -32,6 +32,11 @@ release_dir=""
 checksums=""
 keep=0
 reset=0
+# Set immediately before the documented command can ask systemd to invoke the
+# generated Podman units.  Failure diagnostics may use Podman only after both
+# this flag and an on-disk rootless store prove the cold-first boundary was
+# crossed; an earlier refusal must remain incapable of creating that state.
+service_start_attempted=0
 # Set while the deployable-runtime gate is running, because that gate
 # deliberately weakens the database and only restores it AFTER its assertion.
 database_possibly_weakened=0
@@ -365,9 +370,61 @@ generated=(mcloving-postgres.service mcloving-postgres-data-volume.service)
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-d001.XXXXXX")"
 
+diagnose_bounded() {
+  /usr/bin/timeout --foreground --kill-after=2s 8s "$@"
+}
+
 teardown() {
   local status=$?
   trap '' INT TERM HUP
+  # When the runtime gate may have left database RLS weakened, teardown must
+  # quiesce services and remove the volume immediately.  Diagnostic commands
+  # are intentionally skipped on that path: a blocked manager/Podman query may
+  # never extend a known authorization-exposure window.
+  if (( status != 0 && database_possibly_weakened == 0 )); then
+    step "pre-teardown failure evidence"
+    for failed_unit in \
+      mcloving-postgres-data-volume.service mcloving-postgres.service \
+      mcloving-db-init.service mcloving-controller.service \
+      mcloving-agent.service; do
+      echo "--- ${failed_unit}: manager state"
+      diagnose_bounded systemctl --user show "${failed_unit}" \
+        -p Id -p LoadState -p ActiveState -p SubState -p Result \
+        -p Type -p NotifyAccess -p TimeoutStartUSec -p ExecMainCode \
+        -p ExecMainStatus -p NRestarts -p StatusText 2>&1 || true
+      diagnose_bounded systemctl --user status "${failed_unit}" \
+        --no-pager -n 80 2>&1 || true
+      echo "--- ${failed_unit}: journal"
+      diagnose_bounded journalctl --user -u "${failed_unit}" \
+        --no-pager -n 160 2>&1 || true
+    done
+
+    # State is the second half of the permission: setting the flag alone is
+    # not enough because systemctl could reject the command before scheduling
+    # the generated volume unit.  These observations are deliberately narrow:
+    # container State and logs diagnose start/health failure without printing
+    # the secret-bearing Config.Env array.
+    if (( service_start_attempted == 1 )) \
+      && { [[ -e "${home_dir}/.local/share/containers" ]] \
+        || [[ -e "${XDG_RUNTIME_DIR}/containers" ]] \
+        || [[ -e "${XDG_RUNTIME_DIR}/libpod" ]]; }; then
+      echo "--- rootless Podman state after the cold-first boundary"
+      diagnose_bounded "${MCLOVING_CI_PODMAN_COMMAND}" \
+        ps -a --no-trunc --filter name=mcloving-postgres \
+        --format 'container={{.ID}} name={{.Names}} status={{.Status}} image={{.Image}}' \
+        2>&1 || true
+      if diagnose_bounded "${MCLOVING_CI_PODMAN_COMMAND}" \
+          container exists mcloving-postgres 2>/dev/null; then
+        diagnose_bounded "${MCLOVING_CI_PODMAN_COMMAND}" inspect \
+          --format 'state={{json .State}}' mcloving-postgres 2>&1 || true
+        diagnose_bounded "${MCLOVING_CI_PODMAN_COMMAND}" logs \
+          --tail 200 mcloving-postgres 2>&1 || true
+      fi
+      diagnose_bounded "${MCLOVING_CI_PODMAN_COMMAND}" images --no-trunc \
+        --format 'image={{.ID}} repository={{.Repository}} tag={{.Tag}} digest={{.Digest}}' \
+        2>&1 || true
+    fi
+  fi
   step "teardown"
   systemctl --user stop mcloving-agent.service mcloving-controller.service \
     mcloving-db-init.service mcloving-postgres.service \
@@ -749,6 +806,9 @@ manager_facts="$(deployment_manager_unit_facts "${home_dir}" \
   "${units[@]}" "${generated[@]}")" \
   || fail "the typed manager fact query failed after daemon-reload"
 selected_podman_b64="$(printf '%s' "${MCLOVING_CI_PODMAN_COMMAND}" | base64 -w0)"
+sdnotify_conmon_b64="$(printf '%s' '--sdnotify=conmon' | base64 -w0)"
+sdnotify_healthy_b64="$(printf '%s' '--sdnotify=healthy' | base64 -w0)"
+sdnotify_container_b64="$(printf '%s' '--sdnotify=container' | base64 -w0)"
 for unit in "${units[@]}" "${generated[@]}"; do
   unit_b64="$(printf '%s' "${unit}" | base64 -w0)"
   grep -q "^source|${unit_b64}|" <<<"${manager_facts}" \
@@ -764,6 +824,18 @@ for unit in "${units[@]}" "${generated[@]}"; do
       if grep -v -x "command-executable-ExecStart|${unit_b64}|${selected_podman_b64}" \
           <<<"${command_rows}" | grep -q .; then
         fail "${unit} has an ExecStart command other than selected Podman ${MCLOVING_CI_PODMAN_COMMAND}"
+      fi
+      if [[ "${unit}" == mcloving-postgres.service ]]; then
+        grep -qx "command-argument-ExecStart|${unit_b64}|${sdnotify_conmon_b64}" \
+          <<<"${manager_facts}" \
+          || fail "${unit} does not use Quadlet's version-stable --sdnotify=conmon readiness mode"
+        for forbidden_sdnotify_b64 in \
+          "${sdnotify_healthy_b64}" "${sdnotify_container_b64}"; do
+          if grep -qx "command-argument-ExecStart|${unit_b64}|${forbidden_sdnotify_b64}" \
+              <<<"${manager_facts}"; then
+            fail "${unit} uses a container/health notification mode the PostgreSQL image does not own"
+          fi
+        done
       fi
       for stop_property in ExecStop ExecStopPost; do
         command_rows="$(grep "^command-executable-${stop_property}|${unit_b64}|" <<<"${manager_facts}" || true)"
@@ -905,6 +977,7 @@ documented=(mcloving-db-init mcloving-controller mcloving-agent)
 # enabling and starting are different operations and the runbook asks for both.
 # Running plain `enable` here and starting the units separately later would have
 # left the documented sequence unexercised while claiming to be its gate.
+service_start_attempted=1
 systemctl --user enable --now "${documented[@]}" \
   || fail "the documented enable --now command failed for ${documented[*]}"
 systemctl --user start mcloving-postgres.service \
@@ -935,9 +1008,10 @@ actual_podman_version="$(podman --version | awk '{print $NF}')" \
   || fail "the selected Podman and Quadlet versions differ after cold start (${actual_podman_version} != ${MCLOVING_CI_QUADLET_VERSION})"
 echo "   selected Podman/Quadlet version=${actual_podman_version} after cold start"
 
-# `Notify=healthy` on the quadlet means the generated postgres unit reports
-# started only once `pg_isready` passes, so `After=mcloving-postgres.service`
-# genuinely means "after PostgreSQL is healthy" and no wait loop belongs here.
+# Quadlet's conmon notification means the generated unit reports started once
+# the container is running.  The dependent db-init oneshot then owns the
+# version-stable health barrier: two bounded `pg_isready` successes precede all
+# migration/provisioning work, and the controller Requires= its success.
 # Nothing is started here: the documented `enable --now` in step 7 did it, which
 # is the point of running the documented command rather than a convenient one.
 # This step only reads back what the manager made of it.
