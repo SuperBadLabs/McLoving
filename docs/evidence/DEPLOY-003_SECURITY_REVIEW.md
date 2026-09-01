@@ -48,7 +48,12 @@ precedence levels and requires both candidates even though the manager's
 active `DropInPaths` reports only the higher one. A lower-precedence candidate
 cannot escape because it is inactive at the instant of review. The selected
 `FragmentPath` and exact `DropInPaths` remain operational truth, while the
-security property is additive.
+security property is additive. That additive Quadlet-source classification
+also retains two policy classes generated Podman argv cannot express faithfully:
+`Volume=` contributes its host-side ancestor, and `[Container]
+EnvironmentFile=` contributes a secret-bearing contract subject to the
+owner-only file rule and the declared-variable allowlist. This includes
+recursively nested drop-ins without a colocated main source.
 
 O4 remains deliberately local: systemd reports an `EnvironmentFiles` wildcard
 literally, so the lane still judges the pattern's containing-directory bound
@@ -283,6 +288,11 @@ them as one boundary:
 - manager mode retains additive parsing of `Volume=` across every regular
   Quadlet source and recursively nested Quadlet drop-in in the complete union,
   so generated `/host:/container` argv cannot hide the real host ancestor;
+- manager mode likewise retains Quadlet-source parsing of `[Container]
+  EnvironmentFile=` contracts because Quadlet translates them into Podman's
+  `--env-file` argv rather than systemd's typed `EnvironmentFiles` property;
+  every such file therefore still takes the owner-only secret-file rule and
+  declared-variable allowlist, including in standalone recursive drop-ins;
 - the canonical digest document records the complete native/Quadlet candidate
   union, including inactive and recursively nested sources, while preserving
   the exact v1 `shadowing_units` semantics for existing consumers;
@@ -393,6 +403,9 @@ point-in-time bound rather than TOCTOU freedom.
   transient user-manager service, including an unlinked snapshot
 - inactive recursive Quadlet `Volume=` host-root refusal and canonical-digest
   mutation/restoration
+- recursive Quadlet-only `[Container] EnvironmentFile=` refusal for both a
+  non-owner-only contract and an owner-only contract with an unrecognised
+  declaration
 - offline upgrade/rollback with a zero-`systemctl`-probe witness
 - `bash -n deploy/bin/* deploy/*.sh`
 - `shellcheck -x -P deploy/bin deploy/bin/* deploy/*.sh`

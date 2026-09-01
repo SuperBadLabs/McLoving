@@ -454,6 +454,7 @@ teardown() {
     chmod 0755 "${quadlet_volume_root}" >/dev/null 2>&1 || true
     rmdir -- "${quadlet_volume_root}" >/dev/null 2>&1 || true
   fi
+  rm -f -- "${quadlet_container_contract:-}" >/dev/null 2>&1 || true
   if [[ -n "${nested_quadlet_fixture_files[0]:-}" ]]; then
     rm -f -- "${nested_quadlet_fixture_files[0]}.before-volume" \
       >/dev/null 2>&1 || true
@@ -759,9 +760,47 @@ if (( ${#nested_quadlet_fixture_files[@]} > 0 )); then
     || fail "manager-authoritative integrity accepted a writable host path from an independent nested Quadlet Volume= drop-in"
   grep -Fq "${quadlet_volume_root}" <<<"${volume_root_log}" \
     || fail "Quadlet Volume= refusal did not name its writable host root: ${volume_root_log}"
+
+  # [Container] EnvironmentFile= is translated into Podman's --env-file
+  # argument, so systemd's typed EnvironmentFiles property never names it.
+  # Put one only in the standalone nested Quadlet drop-in and prove that the
+  # source-side manager union still applies both contract boundaries: the
+  # owner-only file rule and the declaration allowlist.
+  quadlet_container_contract="${home_dir}/.config/deploy003-quadlet-container.env"
+  printf 'MCLOVING_DEPLOY003_CONTAINER_ONLY=1\n' \
+    > "${quadlet_container_contract}"
+  chmod 0644 "${quadlet_container_contract}"
+  printf '[Container]\nEnvironmentFile=%%h/.config/deploy003-quadlet-container.env\n' \
+    > "${nested_quadlet_dropin}"
+  quadlet_contract_mode_status=0
+  quadlet_contract_mode_log="$(require_deployment_integrity "${home_dir}" \
+    --manager-authoritative 2>&1)" || quadlet_contract_mode_status=$?
+  (( quadlet_contract_mode_status != 0 )) \
+    || fail "manager-authoritative integrity accepted a non-owner-only EnvironmentFile declared only by a Quadlet [Container] drop-in"
+  grep -Fq "${quadlet_container_contract} (mode 644, expected owner-only)" \
+    <<<"${quadlet_contract_mode_log}" \
+    || fail "Quadlet-only contract permission refusal did not name its file: ${quadlet_contract_mode_log}"
+
+  printf 'DEPLOY003_UNRECOGNISED_CONTAINER_VARIABLE=1\n' \
+    > "${quadlet_container_contract}"
+  chmod 0600 "${quadlet_container_contract}"
+  quadlet_contract_variable_status=0
+  quadlet_contract_variable_log="$(require_deployment_integrity "${home_dir}" \
+    --manager-authoritative 2>&1)" || quadlet_contract_variable_status=$?
+  (( quadlet_contract_variable_status != 0 )) \
+    || fail "manager-authoritative integrity accepted an unrecognised variable from an EnvironmentFile declared only by a Quadlet [Container] drop-in"
+  grep -Fq "DEPLOY003_UNRECOGNISED_CONTAINER_VARIABLE in ${quadlet_container_contract}" \
+    <<<"${quadlet_contract_variable_log}" \
+    || fail "Quadlet-only contract allowlist refusal did not name its variable and file: ${quadlet_contract_variable_log}"
+
+  printf 'MCLOVING_DEPLOY003_CONTAINER_ONLY=1\n' \
+    > "${quadlet_container_contract}"
+  require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
+  printf '[Container]\n' > "${nested_quadlet_dropin}"
+  rm -f -- "${quadlet_container_contract}"
 fi
 require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
-echo "   shadowed drop-in, recursive Quadlet candidates, and inactive Volume= roots were security-judged, refused, and restored"
+echo "   shadowed drop-in, recursive Quadlet candidates, inactive Volume= roots, and container-only EnvironmentFile= contracts were security-judged, refused, and restored"
 
 # A reachable manager with a negative LoadState is authoritative too. Prove
 # that post-reload transitions refuse it rather than silently falling back to

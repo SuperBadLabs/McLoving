@@ -4792,11 +4792,14 @@ require_deployment_integrity() {
     fi
     if (( manager_query_mode )); then
       # Typed manager argv is execution truth, but Podman's generated
-      # `--volume /host:/container` argument is not itself the host path.
+      # `--volume /host:/container` argument is not itself the host path, and
+      # a Quadlet [Container] EnvironmentFile= becomes Podman's `--env-file`
+      # argument rather than systemd's typed EnvironmentFiles property.
       # Retain the additive Quadlet source classification for every regular
-      # source in the complete union so Volume= host roots (including those
-      # introduced by an inactive candidate or drop-in) still take the
-      # ancestor rule. Native composed facts remain manager-authoritative.
+      # source in the complete union so Volume= host roots and container-only
+      # EnvironmentFile= contracts (including those introduced by an inactive
+      # candidate or drop-in) still take their respective security rules.
+      # Native composed facts remain manager-authoritative.
       local -a manager_quadlet_sources=()
       local manager_quadlet_source manager_quadlet_basename
       local manager_quadlet_parent_basename
@@ -4820,12 +4823,18 @@ require_deployment_integrity() {
       done
       if [[ ${#manager_quadlet_sources[@]} -gt 0 ]]; then
         require_parseable_unit_sources "${home_dir}" "${manager_quadlet_sources[@]}"
-        local manager_declared_root
+        local manager_declared_root manager_declared_contract
         while IFS= read -r encoded_root; do
           [[ -n "${encoded_root}" ]] || continue
           decode_path_item_into manager_declared_root "${encoded_root}"
           unit_declared_roots+=("${manager_declared_root}")
         done < <(deployment_unit_declared_roots "${home_dir}" \
+          "${manager_quadlet_sources[@]}" | sort -u)
+        while IFS= read -r encoded_item; do
+          [[ -n "${encoded_item}" ]] || continue
+          decode_path_item_into manager_declared_contract "${encoded_item}"
+          declared_contracts+=("${manager_declared_contract}")
+        done < <(deployment_unit_declared_contracts "${home_dir}" \
           "${manager_quadlet_sources[@]}" | sort -u)
       fi
     fi

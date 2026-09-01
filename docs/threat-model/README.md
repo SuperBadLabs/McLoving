@@ -143,6 +143,11 @@ again after `daemon-reload`. Service-environment capture pins the process with
 a pidfd and an opened `/proc/<pid>` directory, verifies control-group
 membership, and rechecks the manager invocation/PID/control-group tuple after
 copying directly from the held descriptor.
+Typed manager facts are supplemented by source-side classification where
+Quadlet's generated Podman argv loses the original policy class: `Volume=`
+contributes the real host ancestor, and `[Container] EnvironmentFile=`
+contributes an owner-only, default-deny environment contract, including from
+standalone recursive Quadlet drop-ins.
 The protected deployment job proves this path under a disposable account with
 controlled unit and generator inputs. The generator is selected only from the
 version-matched `/usr` distro layout or image-provided `/usr/local` hosted
