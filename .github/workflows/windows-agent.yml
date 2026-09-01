@@ -24,12 +24,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Install pinned Rust toolchain
-        if: github.event_name == 'pull_request'
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - name: Test impact classifier
-        if: github.event_name == 'pull_request'
-        run: python3 scripts/test-windows-agent-impact.py
       - name: Classify exact change
         id: impact
         env:
@@ -40,11 +34,17 @@ jobs:
           if [[ "${EVENT_NAME}" == "push" ]]; then
             printf 'run-windows=true\n' >> "${GITHUB_OUTPUT}"
           else
-            python3 scripts/windows-agent-impact.py \
+            /usr/bin/python3 -I scripts/windows-agent-impact.py \
               --base "${BASE_SHA}" \
               --head "${HEAD_SHA}" \
               >> "${GITHUB_OUTPUT}"
           fi
+      - name: Install pinned Rust toolchain
+        if: github.event_name == 'pull_request'
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Test impact classifier
+        if: github.event_name == 'pull_request'
+        run: /usr/bin/python3 -I scripts/test-windows-agent-impact.py
 
   windows-agent:
     name: Windows agent
@@ -116,3 +116,27 @@ jobs:
         run: >-
           ./scripts/windows-agent-war.ps1
           -AgentBinary ./target/release/mcloving-agent.exe
+
+  windows:
+    name: Windows
+    # The classifier is authoritative only when it succeeds. A true decision
+    # requires the native Windows lane to succeed; a false decision requires
+    # that lane to be skipped. Every other combination fails closed.
+    runs-on: ubuntu-24.04
+    needs:
+      - impact
+      - windows-agent
+    if: always()
+    steps:
+      - name: Check out aggregate verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require the classified Windows outcome
+        env:
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          RUN_WINDOWS: ${{ needs.impact.outputs.run-windows }}
+          WINDOWS_AGENT_RESULT: ${{ needs.windows-agent.result }}
+        run: |
+          /usr/bin/python3 -I scripts/verify-workflow-aggregate.py windows \
+            impact="${IMPACT_RESULT}" \
+            run-windows="${RUN_WINDOWS}" \
+            windows-agent="${WINDOWS_AGENT_RESULT}"

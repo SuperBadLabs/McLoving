@@ -304,7 +304,7 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
     "ALPHA-001",
 })
 
-# The board's 15 tables in 4 row formats. Only the nine whose first header
+# The board's 16 tables in 4 row formats. Only the nine whose first header
 # cell is `Ticket` carry authoritative status; the lane, batch and dispatch
 # tables are redundant views and are cross-checked against them.
 TICKET_TABLE_HEADER = "Ticket"
@@ -323,7 +323,7 @@ KNOWN_TABLE_HEADERS = frozenset(
 # Raise a count when a table is genuinely added; a change here is deliberate.
 EXPECTED_TABLES = {
     TICKET_TABLE_HEADER: 9,
-    LANE_TABLE_HEADER: 4,
+    LANE_TABLE_HEADER: 5,
     BATCH_TABLE_HEADER: 1,
     DISPATCH_TABLE_HEADER: 1,
 }
@@ -336,7 +336,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 106
+MINIMUM_TICKET_ROWS = 107
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the

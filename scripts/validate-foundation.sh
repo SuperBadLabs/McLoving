@@ -90,15 +90,28 @@ podman run --rm \
   "${MCLOVING_RUST_IMAGE}" \
   /tools/cargo-deny check
 
-python3 "${repo_root}/scripts/test-windows-agent-impact.py"
+python3 -I "${repo_root}/scripts/test-windows-agent-impact.py"
 python3 "${repo_root}/scripts/test-execution-board.py"
 python3 "${repo_root}/scripts/verify-execution-board.py"
 python3 "${repo_root}/scripts/test-ticket-closure-receipts.py"
 python3 "${repo_root}/scripts/verify-ticket-closure-receipts.py"
 python3 "${repo_root}/scripts/test-verify-rust-test-execution.py"
+python3 -I "${repo_root}/scripts/test-workflow-aggregate.py"
 bash -n "${repo_root}/scripts/run-verified-rust-test.sh"
 bash -n "${repo_root}/scripts/validate-external-shadow-apparmor.sh"
-"${actionlint_dir}/actionlint" "${repo_root}/.github/workflows/"*.yml
+unset GLOBIGNORE
+shopt -u failglob
+shopt -s nullglob dotglob
+workflow_files=(
+  "${repo_root}/.github/workflows/"*.yml
+  "${repo_root}/.github/workflows/"*.yaml
+)
+((${#workflow_files[@]} > 0))
+actionlint_config="${actionlint_dir}/empty-config.yaml"
+: > "${actionlint_config}"
+"${actionlint_dir}/actionlint" \
+  -config-file "${actionlint_config}" \
+  "${workflow_files[@]}"
 
 java -cp "${tlaplus_jar}" tla2sany.SANY \
   "${repo_root}/formal/tla/AttemptLease.tla"

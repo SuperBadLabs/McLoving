@@ -271,6 +271,53 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test protected workflow aggregates
+        run: /usr/bin/python3 -I scripts/test-workflow-aggregate.py
+      - name: Lint workflows with verified actionlint
+        run: |
+          set -euo pipefail
+          ACTIONLINT_VERSION=""
+          ACTIONLINT_SHA256=""
+          actionlint_version_count=0
+          actionlint_sha_count=0
+          while IFS= read -r line; do
+            if [[ "${line}" =~ ^ACTIONLINT_VERSION=\"([0-9]+\.[0-9]+\.[0-9]+)\"$ ]]; then
+              ACTIONLINT_VERSION="${BASH_REMATCH[1]}"
+              ((actionlint_version_count += 1))
+            elif [[ "${line}" == ACTIONLINT_VERSION=* ]]; then
+              exit 1
+            elif [[ "${line}" =~ ^ACTIONLINT_SHA256=\"([0-9a-f]{64})\"$ ]]; then
+              ACTIONLINT_SHA256="${BASH_REMATCH[1]}"
+              ((actionlint_sha_count += 1))
+            elif [[ "${line}" == ACTIONLINT_SHA256=* ]]; then
+              exit 1
+            fi
+          done < tools/versions.env
+          ((actionlint_version_count == 1))
+          ((actionlint_sha_count == 1))
+          readonly ACTIONLINT_VERSION ACTIONLINT_SHA256
+          actionlint_archive="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}.tar.gz"
+          actionlint_dir="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}"
+          curl --fail --location --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "${actionlint_archive}"
+          printf '%s  %s\n' "${ACTIONLINT_SHA256}" "${actionlint_archive}" \
+            | sha256sum -c -
+          install -d -m 0755 "${actionlint_dir}"
+          tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"
+          actionlint_config="${RUNNER_TEMP}/actionlint-empty.yaml"
+          : > "${actionlint_config}"
+          unset GLOBIGNORE
+          shopt -u failglob
+          shopt -s nullglob dotglob
+          workflow_files=(
+            .github/workflows/*.yml
+            .github/workflows/*.yaml
+          )
+          ((${#workflow_files[@]} > 0))
+          "${actionlint_dir}/actionlint" \
+            -config-file "${actionlint_config}" \
+            "${workflow_files[@]}"
       - name: Install pinned Clojure CLI
         uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # 13.6.1
         with:
@@ -599,3 +646,44 @@ jobs:
             !${{ runner.temp }}/mcloving-smoke/**/mcloving-identity-admin
           if-no-files-found: warn
           retention-days: 7
+
+  foundation:
+    name: Foundation
+    # This is the stable branch-protection context for the entire workflow.
+    # `always()` is essential: without it, a failed or cancelled dependency
+    # would skip this job, and a skipped required check can be accepted by
+    # branch protection. Every child result must be literal success.
+    runs-on: ubuntu-24.04
+    needs:
+      - rust
+      - dependencies
+      - secrets
+      - architecture
+      - formal
+      - controller-postgres
+      - recovery-drill
+      - deployment
+    if: always()
+    steps:
+      - name: Check out aggregate verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require every Foundation lane to succeed
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
+          SECRETS_RESULT: ${{ needs.secrets.result }}
+          ARCHITECTURE_RESULT: ${{ needs.architecture.result }}
+          FORMAL_RESULT: ${{ needs.formal.result }}
+          CONTROLLER_POSTGRES_RESULT: ${{ needs.controller-postgres.result }}
+          RECOVERY_DRILL_RESULT: ${{ needs.recovery-drill.result }}
+          DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
+        run: |
+          /usr/bin/python3 -I scripts/verify-workflow-aggregate.py foundation \
+            rust="${RUST_RESULT}" \
+            dependencies="${DEPENDENCIES_RESULT}" \
+            secrets="${SECRETS_RESULT}" \
+            architecture="${ARCHITECTURE_RESULT}" \
+            formal="${FORMAL_RESULT}" \
+            controller-postgres="${CONTROLLER_POSTGRES_RESULT}" \
+            recovery-drill="${RECOVERY_DRILL_RESULT}" \
+            deployment="${DEPLOYMENT_RESULT}"

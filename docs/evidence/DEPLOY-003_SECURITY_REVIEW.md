@@ -154,8 +154,10 @@ and `ExecStopPost`, must execute the selected Podman path exactly. This binds
 the recorded generator/runtime identity to the cold lifecycle without
 mistaking an absolute argument, or a command belonging to another phase, for
 the start command executable.
-The per-PR closure claim remains conditional on a successful protected run at
-the corrected exact head, and that result remains the merge authority.
+The per-PR closure claim remains conditional on a successful workflow run at
+the corrected exact head. Historical correction from `CI-003`: that result was
+observed successful evidence under the pre-`CI-003` protection configuration;
+the `Deployment lane` itself was not branch-required merge authority.
 
 The correction's first protected run (`33467033677`, job `99728923622`) then
 proved why preflight belongs first: it refused in eight seconds because the
@@ -477,4 +479,6 @@ also qualified successfully in Foundation run `33496057351` (deployment job
 diagnostic correction was added.
 
 Protected exact-head qualification of this receipt commit and post-merge
-Foundation/Windows workflow results remain the merge authority.
+Foundation/Windows workflow results remain observed successful evidence.
+`CI-003` separately makes their complete aggregate outcomes app-bound merge
+authority; the pre-`CI-003` rule did not.
