@@ -23,29 +23,101 @@ SPEC.loader.exec_module(IMPACT)
 
 
 class WindowsAgentImpactTests(unittest.TestCase):
+    def test_protected_git_ntfs_alias_grammar(self) -> None:
+        for component in (
+            "GIT~1",
+            "GITMOD~1",
+            "GITMOD~4",
+            "GI7EBA~1",
+            "GI7EB~12",
+            "~1234567",
+            "MAILMA~3",
+            "MABA3~19",
+        ):
+            with self.subTest(component=component):
+                self.assertTrue(IMPACT.is_protected_git_ntfs_alias(component))
+
+        for component in (
+            "GIT~2",
+            "GITMOD~0",
+            "GITMOD~5",
+            "GI7EB~02",
+            "GI7EB~1X",
+            "GI7EBA~12",
+            "ordinary.txt",
+        ):
+            with self.subTest(component=component):
+                self.assertFalse(IMPACT.is_protected_git_ntfs_alias(component))
+
     def test_changed_cargo_configuration_short_circuits_before_execution(self) -> None:
-        with (
-            mock.patch.object(
-                IMPACT,
-                "changed_paths",
-                return_value={".cargo/config.toml", "bins/agent/src/main.rs"},
+        for path in (
+            ".Cargo/Config.TOML",
+            "crates/domain./src/lib.rs",
+            "GIT~1/config",
+            "GITMOD~4",
+            "GI7EBA~1",
+            "GI7EB~12",
+        ):
+            with (
+                self.subTest(path=path),
+                mock.patch.object(IMPACT, "changed_paths", return_value={path}),
+                mock.patch.object(
+                    IMPACT,
+                    "revision_paths",
+                    side_effect=AssertionError("short circuit must precede inventory"),
+                ),
+                mock.patch.object(
+                    IMPACT,
+                    "export_revision",
+                    side_effect=AssertionError("candidate revision must not execute"),
+                ),
+                mock.patch.object(
+                    IMPACT,
+                    "cargo_metadata",
+                    side_effect=AssertionError("candidate Cargo config must not load"),
+                ),
+            ):
+                run_windows, reason = IMPACT.classify_revisions(
+                    "base", "head", Path(".")
+                )
+            self.assertTrue(run_windows)
+            self.assertIn(path, reason)
+
+    def test_complete_head_inventory_detects_case_collision(self) -> None:
+        for changed, inventory in (
+            (
+                "docs/README.md",
+                {"docs/Readme.md", "docs/README.md"},
             ),
-            mock.patch.object(
-                IMPACT,
-                "export_revision",
-                side_effect=AssertionError("candidate revision must not execute"),
+            (
+                "docs/README/child.txt",
+                {"docs/Readme", "docs/README/child.txt"},
             ),
-            mock.patch.object(
-                IMPACT,
-                "cargo_metadata",
-                side_effect=AssertionError("candidate Cargo config must not load"),
+            (
+                "docs/README/b.txt",
+                {"docs/Readme/a.txt", "docs/README/b.txt"},
             ),
         ):
-            run_windows, reason = IMPACT.classify_revisions(
-                "base", "head", Path(".")
-            )
-        self.assertTrue(run_windows)
-        self.assertIn(".cargo/config.toml", reason)
+            with (
+                self.subTest(changed=changed),
+                mock.patch.object(IMPACT, "changed_paths", return_value={changed}),
+                mock.patch.object(IMPACT, "revision_paths", return_value=inventory),
+                mock.patch.object(
+                    IMPACT,
+                    "export_revision",
+                    side_effect=AssertionError("colliding revision must not export"),
+                ),
+                mock.patch.object(
+                    IMPACT,
+                    "cargo_metadata",
+                    side_effect=AssertionError("colliding revision must not run Cargo"),
+                ),
+            ):
+                run_windows, reason = IMPACT.classify_revisions(
+                    "base", "head", Path(".")
+                )
+            self.assertTrue(run_windows)
+            self.assertIn("colliding head tree", reason)
 
     def test_cargo_metadata_pins_compiler_controls(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -217,6 +289,42 @@ class WindowsAgentImpactTests(unittest.TestCase):
         self.assertTrue(run_windows)
         self.assertIn("Windows dependency source", reason)
 
+        for paths in (
+            {"crates/domain./src/lib.rs"},
+            {"docs/NUL.txt"},
+            {"GIT~1/config"},
+            {"GITMOD~4"},
+            {"GI7EBA~1"},
+            {"GI7EB~12"},
+            {"docs/Readme.md", "docs/README.md"},
+            {"docs/Readme", "docs/README/child.txt"},
+            {"docs/Readme/a.txt", "docs/README/b.txt"},
+        ):
+            with self.subTest(paths=paths):
+                run_windows, reason = IMPACT.classify(
+                    paths,
+                    {Path("bins/agent"), Path("crates/domain")},
+                    {Path("bins/agent"), Path("crates/domain")},
+                    "same",
+                    "same",
+                    "same",
+                    "same",
+                )
+                self.assertTrue(run_windows)
+                self.assertIn("Windows-unsafe or colliding", reason)
+
+        run_windows, reason = IMPACT.classify(
+            {"CRATES/DOMAIN/src/lib.rs"},
+            {Path("bins/agent"), Path("crates/domain")},
+            {Path("bins/agent"), Path("crates/domain")},
+            "same",
+            "same",
+            "same",
+            "same",
+        )
+        self.assertTrue(run_windows)
+        self.assertIn("Windows dependency source", reason)
+
     def test_windows_verifier_source_triggers(self) -> None:
         directories = {
             Path("bins/agent"),
@@ -259,7 +367,13 @@ class WindowsAgentImpactTests(unittest.TestCase):
         self.assertIn("Windows verifier input", reason)
 
     def test_repository_cargo_configuration_triggers(self) -> None:
-        for path in (".cargo/config", ".cargo/config.toml", ".gitattributes"):
+        for path in (
+            ".cargo/config",
+            ".cargo/config.toml",
+            ".Cargo/Config.TOML",
+            ".gitattributes",
+            ".GITATTRIBUTES",
+        ):
             with self.subTest(path=path):
                 run_windows, reason = IMPACT.classify(
                     {path},

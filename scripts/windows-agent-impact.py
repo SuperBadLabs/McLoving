@@ -28,6 +28,7 @@ ALWAYS_RUN_PATHS = {
     "scripts/test-windows-agent-impact.py",
     "scripts/windows-agent-war.ps1",
 }
+ALWAYS_RUN_PATHS_CASEFOLDED = frozenset(path.casefold() for path in ALWAYS_RUN_PATHS)
 WINDOWS_VERIFIER_DIRECTORIES = {
     Path("crates/boundary-differential"),
     Path("crates/differential-aggregate"),
@@ -37,6 +38,27 @@ WINDOWS_VERIFIER_DIRECTORIES = {
     Path("crates/state-policy-differential"),
 }
 WINDOWS_VERIFIER_INPUT_DIRECTORIES = {Path("migration")}
+WINDOWS_RESERVED_STEMS = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+    "com¹",
+    "com²",
+    "com³",
+    "lpt¹",
+    "lpt²",
+    "lpt³",
+}
+WINDOWS_INVALID_CHARACTERS = frozenset('<>:"\\|?*')
+WINDOWS_PROTECTED_GIT_NAMES = {
+    "gitmodules": "gi7eba",
+    "gitattributes": "gi7d29",
+    "gitignore": "gi250a",
+    "mailmap": "maba30",
+}
 
 
 def run(
@@ -72,6 +94,24 @@ def changed_paths(base: str, head: str, repository: Path) -> set[str]:
         "-z",
         base,
         head,
+        cwd=repository,
+        text=False,
+    ).stdout
+    return {
+        entry.decode("utf-8")
+        for entry in output.split(b"\0")
+        if entry
+    }
+
+
+def revision_paths(revision: str, repository: Path) -> set[str]:
+    output = run(
+        "git",
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        revision,
         cwd=repository,
         text=False,
     ).stdout
@@ -258,9 +298,91 @@ def root_policy(tree: Path) -> str:
 
 
 def path_is_within(path: str, directory: Path) -> bool:
-    candidate = PurePosixPath(path)
-    root = PurePosixPath(directory.as_posix())
+    # The classified gate executes on Windows, whose checkout is
+    # case-insensitive even though this classifier runs on Linux.
+    candidate = PurePosixPath(path.casefold())
+    root = PurePosixPath(directory.as_posix().casefold())
     return candidate == root or root in candidate.parents
+
+
+def first_always_run_path(paths: set[str]) -> str | None:
+    return next(
+        (
+            path
+            for path in sorted(paths, key=lambda candidate: candidate.casefold())
+            if path.casefold() in ALWAYS_RUN_PATHS_CASEFOLDED
+        ),
+        None,
+    )
+
+
+def is_protected_git_ntfs_alias(component: str) -> bool:
+    """Mirror Git's protected 8.3-name grammar for control files."""
+    candidate = component.casefold()
+    if candidate == "git~1":
+        return True
+
+    for name, fallback_prefix in WINDOWS_PROTECTED_GIT_NAMES.items():
+        if (
+            len(candidate) == 8
+            and candidate[:6] == name[:6]
+            and candidate[6] == "~"
+            and candidate[7] in "1234"
+        ):
+            return True
+
+        if len(candidate) != 8 or "~" not in candidate:
+            continue
+        tilde = candidate.index("~")
+        if (
+            tilde <= 6
+            and candidate[:tilde] == fallback_prefix[:tilde]
+            and candidate[tilde + 1] in "123456789"
+            and all(character in "0123456789" for character in candidate[tilde + 2 :])
+        ):
+            return True
+    return False
+
+
+def first_windows_unsafe_path(paths: set[str]) -> str | None:
+    """Return a path Windows may normalize, reject, or collide at checkout."""
+    seen_files: dict[str, str] = {}
+    seen_directories: dict[str, str] = {}
+    for path in sorted(paths, key=lambda candidate: candidate.casefold()):
+        components = PurePosixPath(path).parts
+        for component in components:
+            stem = component.split(".", 1)[0].rstrip(" .").casefold()
+            folded_component = component.casefold()
+            if (
+                component.endswith((".", " "))
+                or any(character in WINDOWS_INVALID_CHARACTERS for character in component)
+                or any(ord(character) < 32 for character in component)
+                or stem in WINDOWS_RESERVED_STEMS
+                or folded_component == ".git"
+                or is_protected_git_ntfs_alias(component)
+                or len(component.encode("utf-8")) > 255
+            ):
+                return path
+        folded_components = tuple(component.casefold() for component in components)
+        for index in range(1, len(folded_components)):
+            directory_key = "/".join(folded_components[:index])
+            if directory_key in seen_files:
+                return path
+            directory = "/".join(components[:index])
+            if (
+                directory_key in seen_directories
+                and seen_directories[directory_key] != directory
+            ):
+                return path
+            seen_directories[directory_key] = directory
+
+        key = "/".join(folded_components)
+        if key in seen_directories:
+            return path
+        if key in seen_files and seen_files[key] != path:
+            return path
+        seen_files[key] = path
+    return None
 
 
 def classify(
@@ -272,9 +394,13 @@ def classify(
     base_policy: str,
     head_policy: str,
 ) -> tuple[bool, str]:
-    always = sorted(paths & ALWAYS_RUN_PATHS)
-    if always:
-        return True, f"gate definition changed: {always[0]}"
+    unsafe = first_windows_unsafe_path(paths)
+    if unsafe is not None:
+        return True, f"Windows-unsafe or colliding path changed: {unsafe}"
+
+    always = first_always_run_path(paths)
+    if always is not None:
+        return True, f"gate definition changed: {always}"
 
     for path in sorted(paths):
         for directory in WINDOWS_VERIFIER_INPUT_DIRECTORIES:
@@ -302,9 +428,16 @@ def emit_result(run_windows: bool, reason: str) -> None:
 def classify_revisions(base: str, head: str, repository: Path) -> tuple[bool, str]:
     """Classify revisions without executing changed gate configuration."""
     paths = changed_paths(base, head, repository)
-    always = sorted(paths & ALWAYS_RUN_PATHS)
-    if always:
-        return True, f"gate definition changed: {always[0]}"
+    unsafe = first_windows_unsafe_path(paths)
+    if unsafe is not None:
+        return True, f"Windows-unsafe or colliding path changed: {unsafe}"
+    always = first_always_run_path(paths)
+    if always is not None:
+        return True, f"gate definition changed: {always}"
+
+    head_issue = first_windows_unsafe_path(revision_paths(head, repository))
+    if head_issue is not None:
+        return True, f"Windows-unsafe or colliding head tree: {head_issue}"
 
     with tempfile.TemporaryDirectory(prefix="mcloving-windows-impact-") as root:
         root_path = Path(root)

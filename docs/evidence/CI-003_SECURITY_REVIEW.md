@@ -86,8 +86,14 @@ jobs invoke the same checked-out `scripts/verify-workflow-aggregate.py` rather
 than carrying divergent shell predicates.
 
 The Windows classifier resolves changed paths before exporting either revision
-and immediately requires Windows for every Cargo/gate configuration path. It
-therefore never loads changed candidate Cargo configuration. Metadata runs from
+and immediately requires Windows for every Cargo/gate configuration path,
+case-folded to match the target Windows filesystem. Windows-unsafe components
+(including trailing-dot/space, reserved names, and Git-protected NTFS short-name
+aliases) and case-colliding changed paths also require the native gate; a
+complete trusted `git ls-tree` inventory
+detects collisions between changed and unchanged head paths before revision
+export. It therefore never loads changed candidate Cargo configuration.
+Metadata runs from
 the exported tree with absolute Cargo/Rust compiler paths resolved first,
 command-line overrides disabling compiler wrappers, and inherited compiler
 override variables and GitHub command-file paths removed. A candidate
@@ -169,7 +175,7 @@ still subvert the gate.
 - ten mutation-oriented aggregate tests pass locally;
 - all 390,625 Foundation states have exactly one accepting state;
 - the full Windows truth table has exactly two accepting states;
-- the thirteen Windows-impact classifier tests pass, including proof that
+- the fifteen Windows-impact classifier tests pass, including proof that
   changed Cargo configuration short-circuits before revision export or
   metadata and that metadata pins compiler/wrapper controls;
 - pinned actionlint 1.7.12 accepts all workflows;
