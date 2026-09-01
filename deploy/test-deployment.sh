@@ -4249,6 +4249,33 @@ mkdir -p "${dropin_root_home}"
   --no-systemd >/dev/null
 dropin_root_libexec="${dropin_root_home}/.local/libexec/mcloving"
 dropin_root_current="$(readlink "${dropin_root_libexec}/current")"
+
+# Quadlet [Container] EnvironmentFile= accepts a path relative to the source
+# unit, unlike systemd's absolute-only EnvironmentFile=. The shared parser
+# deliberately models the latter, so the derived/offline path must loudly
+# refuse both ordinary relative syntax and a leading dash -- Quadlet treats
+# that dash as part of the relative filename, not systemd's optional-file flag.
+dropin_quadlet_relative="${dropin_root_home}/.config/containers/systemd/mcloving-postgres.container.d/90-relative-env.conf"
+mkdir -p "${dropin_quadlet_relative%/*}"
+for relative_quadlet_value in relative.env -/etc/passwd; do
+  printf '[Container]\nEnvironmentFile=%s\n' "${relative_quadlet_value}" \
+    > "${dropin_quadlet_relative}"
+  relative_quadlet_slug="${relative_quadlet_value//\//-}"
+  if "${repo_root}/deploy/bin/mcloving-upgrade" --home "${dropin_root_home}" \
+    --release-dir "${release2_dir}" --checksums "${workdir}/checksums2.sha256" \
+    --no-systemd > "${workdir}/logs/quadlet-relative-${relative_quadlet_slug}.log" 2>&1; then
+    echo "offline upgrade silently dropped relative Quadlet EnvironmentFile=${relative_quadlet_value}" >&2
+    exit 1
+  fi
+  grep -Fq "Quadlet source ${dropin_quadlet_relative} declares a relative EnvironmentFile (${relative_quadlet_value})" \
+    "${workdir}/logs/quadlet-relative-${relative_quadlet_slug}.log" || {
+    echo "relative Quadlet EnvironmentFile refusal did not name its source and value:" >&2
+    cat "${workdir}/logs/quadlet-relative-${relative_quadlet_slug}.log" >&2
+    exit 1
+  }
+done
+rm -rf "${dropin_quadlet_relative%/*}"
+
 mkdir -p "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d"
 printf '[Service]\nEnvironmentFile=%%h/dropin-shared/controller-extra.env\n' \
   > "${dropin_root_home}/.config/systemd/user/mcloving-controller.service.d/override.conf"

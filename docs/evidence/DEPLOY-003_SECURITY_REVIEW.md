@@ -293,6 +293,11 @@ them as one boundary:
   `--env-file` argv rather than systemd's typed `EnvironmentFiles` property;
   every such file therefore still takes the owner-only secret-file rule and
   declared-variable allowlist, including in standalone recursive drop-ins;
+  Quadlet-relative `EnvironmentFile=` spellings are refused by source and
+  value because the shared systemd contract parser models absolute paths only,
+  in both manager and derived/offline modes, so a valid Quadlet spelling can
+  never be silently dropped; the check is `[Container]`-section-aware and does
+  not import systemd's leading-`-` optional-file grammar into Quadlet;
 - the canonical digest document records the complete native/Quadlet candidate
   union, including inactive and recursively nested sources, while preserving
   the exact v1 `shadowing_units` semantics for existing consumers;
@@ -405,7 +410,10 @@ point-in-time bound rather than TOCTOU freedom.
   mutation/restoration
 - recursive Quadlet-only `[Container] EnvironmentFile=` refusal for both a
   non-owner-only contract and an owner-only contract with an unrecognised
-  declaration
+  declaration, plus a named fail-closed refusal for Quadlet's relative-path
+  grammar in manager mode
+- unprivileged derived/offline refusals for both `relative.env` and Quadlet's
+  distinct dash-prefixed relative spelling `-/etc/passwd`
 - offline upgrade/rollback with a zero-`systemctl`-probe witness
 - `bash -n deploy/bin/* deploy/*.sh`
 - `shellcheck -x -P deploy/bin deploy/bin/* deploy/*.sh`

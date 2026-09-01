@@ -147,7 +147,12 @@ Typed manager facts are supplemented by source-side classification where
 Quadlet's generated Podman argv loses the original policy class: `Volume=`
 contributes the real host ancestor, and `[Container] EnvironmentFile=`
 contributes an owner-only, default-deny environment contract, including from
-standalone recursive Quadlet drop-ins.
+standalone recursive Quadlet drop-ins. Quadlet's relative `EnvironmentFile=`
+grammar is refused by source and value because the retained parser models only
+absolute contract paths; that refusal applies in manager and derived/offline
+modes, is limited to `[Container]`, and treats a leading dash as Quadlet does
+rather than importing systemd's optional-file syntax. No accepted Quadlet
+spelling is silently omitted.
 The protected deployment job proves this path under a disposable account with
 controlled unit and generator inputs. The generator is selected only from the
 version-matched `/usr` distro layout or image-provided `/usr/local` hosted

@@ -780,6 +780,9 @@ if (( ${#nested_quadlet_fixture_files[@]} > 0 )); then
   grep -Fq "${quadlet_container_contract} (mode 644, expected owner-only)" \
     <<<"${quadlet_contract_mode_log}" \
     || fail "Quadlet-only contract permission refusal did not name its file: ${quadlet_contract_mode_log}"
+  grep -Fq 'deployment integrity used typed manager properties' \
+    <<<"${quadlet_contract_mode_log}" \
+    || fail "Quadlet-only contract permission refusal did not traverse manager mode: ${quadlet_contract_mode_log}"
 
   printf 'DEPLOY003_UNRECOGNISED_CONTAINER_VARIABLE=1\n' \
     > "${quadlet_container_contract}"
@@ -792,15 +795,37 @@ if (( ${#nested_quadlet_fixture_files[@]} > 0 )); then
   grep -Fq "DEPLOY003_UNRECOGNISED_CONTAINER_VARIABLE in ${quadlet_container_contract}" \
     <<<"${quadlet_contract_variable_log}" \
     || fail "Quadlet-only contract allowlist refusal did not name its variable and file: ${quadlet_contract_variable_log}"
+  grep -Fq 'deployment integrity used typed manager properties' \
+    <<<"${quadlet_contract_variable_log}" \
+    || fail "Quadlet-only contract allowlist refusal did not traverse manager mode: ${quadlet_contract_variable_log}"
 
   printf 'MCLOVING_DEPLOY003_CONTAINER_ONLY=1\n' \
     > "${quadlet_container_contract}"
   require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
+
+  # Quadlet also accepts EnvironmentFile= relative to the source-unit
+  # location. The shared systemd parser intentionally accepts only absolute
+  # contracts, so manager mode must loudly refuse this otherwise-unvalidated
+  # spelling rather than silently dropping it.
+  printf '[Container]\nEnvironmentFile=relative.env\n' \
+    > "${nested_quadlet_dropin}"
+  quadlet_relative_contract_status=0
+  quadlet_relative_contract_log="$(require_deployment_integrity "${home_dir}" \
+    --manager-authoritative 2>&1)" || quadlet_relative_contract_status=$?
+  (( quadlet_relative_contract_status != 0 )) \
+    || fail "manager-authoritative integrity silently dropped a relative Quadlet EnvironmentFile"
+  grep -Fq "Quadlet source ${nested_quadlet_dropin} declares a relative EnvironmentFile (relative.env)" \
+    <<<"${quadlet_relative_contract_log}" \
+    || fail "relative Quadlet contract refusal did not name its source and value: ${quadlet_relative_contract_log}"
+  grep -Fq 'deployment integrity used typed manager properties' \
+    <<<"${quadlet_relative_contract_log}" \
+    || fail "relative Quadlet contract refusal did not traverse manager mode: ${quadlet_relative_contract_log}"
+
   printf '[Container]\n' > "${nested_quadlet_dropin}"
   rm -f -- "${quadlet_container_contract}"
 fi
 require_deployment_integrity "${home_dir}" --manager-authoritative >/dev/null
-echo "   shadowed drop-in, recursive Quadlet candidates, inactive Volume= roots, and container-only EnvironmentFile= contracts were security-judged, refused, and restored"
+echo "   shadowed drop-in, recursive Quadlet candidates, inactive Volume= roots, and absolute/relative container-only EnvironmentFile= contracts were security-judged, refused, and restored"
 
 # A reachable manager with a negative LoadState is authoritative too. Prove
 # that post-reload transitions refuse it rather than silently falling back to

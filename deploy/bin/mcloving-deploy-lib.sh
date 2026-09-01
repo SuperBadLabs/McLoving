@@ -2533,6 +2533,61 @@ deployment_unit_declared_contracts() {
   done < <(deployment_unit_assignment_lines "${source_files[@]}")
 }
 
+# require_absolute_quadlet_environment_files HOME QUADLET_SOURCE... --
+# Quadlet's [Container] EnvironmentFile= grammar differs from systemd's:
+# relative paths are accepted and resolved against the source-unit location.
+# The shared systemd contract extractor deliberately drops relative paths,
+# because systemd itself rejects them. Manager mode source-parses Quadlet files
+# to recover the policy class that generated Podman argv loses, so silently
+# feeding a relative spelling to that extractor would validate nothing while
+# Podman still loads the file. Refuse the unsupported spelling by source and
+# value; an absolute path or one made absolute by %h remains fully modelled.
+require_absolute_quadlet_environment_files() {
+  local home_dir="${1%/}" file line key value path section
+  local basename parent_basename encoded_source
+  local source_files=()
+  shift
+  while IFS= read -r encoded_source; do
+    [[ -n "${encoded_source}" ]] || continue
+    decode_path_item_into file "${encoded_source}"
+    source_files+=("${file}")
+  done < <(deployment_unit_source_files "${home_dir}" "$@")
+  for file in "${source_files[@]}"; do
+    basename="${file##*/}"
+    parent_basename="${file%/*}"
+    parent_basename="${parent_basename##*/}"
+    if [[ "${basename}" =~ \.(${MCLOVING_QUADLET_SOURCE_TYPES})$ ]]; then
+      :
+    elif [[ "${basename}" == *.conf \
+      && "${parent_basename}" =~ (^|\.)(${MCLOVING_QUADLET_SOURCE_TYPES})\.d$ ]]; then
+      :
+    else
+      continue
+    fi
+    section=""
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      case "${line}" in
+        '['*']') section="${line}"; continue ;;
+        '' | '#'* | ';'*) continue ;;
+      esac
+      [[ "${section}" == '[Container]' && "${line}" == *=* ]] || continue
+      key="${line%%=*}"
+      key="${key%"${key##*[![:space:]]}"}"
+      [[ "${key}" == EnvironmentFile ]] || continue
+      value="${line#*=}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      path="${value}"
+      [[ -n "${path}" ]] || continue
+      path="${path//%h/${home_dir}}"
+      [[ "${path}" == /* ]] \
+        || deploy_fail "Quadlet source ${file} declares a relative EnvironmentFile (${value}); Quadlet resolves that spelling relative to its source-unit location, while this deployment's shared systemd contract parser accepts only absolute paths and would otherwise validate nothing -- spell the contract with an absolute path or a %h prefix and retry"
+    done < "${file}"
+  done
+  return 0
+}
+
 # deployment_glob_matches PATTERN -> encoded items: every path the pattern
 # matches, with the glob(3) semantics systemd itself uses.
 #
@@ -4735,6 +4790,8 @@ require_deployment_integrity() {
     # shell -- inside the derivation substitutions below a refusal would
     # die with its subshell and validation would continue on partial output.
     require_parseable_unit_sources "${home_dir}" "${unit_files[@]}"
+    require_absolute_quadlet_environment_files "${home_dir}" \
+      "${unit_files[@]}"
     local decoded_declared_root
     while IFS= read -r encoded_root; do
       [[ -n "${encoded_root}" ]] || continue
@@ -4823,6 +4880,8 @@ require_deployment_integrity() {
       done
       if [[ ${#manager_quadlet_sources[@]} -gt 0 ]]; then
         require_parseable_unit_sources "${home_dir}" "${manager_quadlet_sources[@]}"
+        require_absolute_quadlet_environment_files "${home_dir}" \
+          "${manager_quadlet_sources[@]}"
         local manager_declared_root manager_declared_contract
         while IFS= read -r encoded_root; do
           [[ -n "${encoded_root}" ]] || continue
