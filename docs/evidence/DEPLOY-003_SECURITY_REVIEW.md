@@ -316,6 +316,17 @@ The thirteenth thread was already stale: command prerequisites are checked only
 after the wrapper re-execs as root, so `useradd` and `userdel` are resolved in
 the same execution environment that invokes them.
 
+Two finish-line threads arrived after that audit. The fourteenth showed that a
+Quadlet `[Container] EnvironmentFile=` is translated to Podman's `--env-file`
+argv and therefore is absent from systemd's typed `EnvironmentFiles` property;
+manager mode now retains source-side contract classification, while manager and
+derived/offline modes both loudly refuse Quadlet-relative spellings that the
+shared absolute-path contract parser cannot model. The fifteenth found that an
+unscoped stderr redirection on bash's bare `exec` descriptor close permanently
+silenced every later health diagnostic. The close now runs in a brace group
+whose redirection is restored before health evaluation continues, and the real
+manager arm proves an exact post-cleanup usage diagnostic on stderr.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the
@@ -414,6 +425,8 @@ point-in-time bound rather than TOCTOU freedom.
   grammar in manager mode
 - unprivileged derived/offline refusals for both `relative.env` and Quadlet's
   distinct dash-prefixed relative spelling `-/etc/passwd`
+- post-snapshot health cleanup followed by an exact stderr usage diagnostic,
+  proving the held-descriptor close does not permanently redirect fd 2
 - offline upgrade/rollback with a zero-`systemctl`-probe witness
 - `bash -n deploy/bin/* deploy/*.sh`
 - `shellcheck -x -P deploy/bin deploy/bin/* deploy/*.sh`
@@ -450,6 +463,18 @@ protected qualification successfully in Foundation run `33488965270`
 deployment job re-ran both the complete fallback smoke and the ten-stage
 controlled real-manager arm on a fresh hosted runner after every review fix;
 all thirteen review threads were audited and resolved.
+
+The finish-line implementation head
+`7d98a67efe3670a5fc76102e36b573da18609fa3` completed protected qualification
+successfully in Foundation run `33498586133` (deployment job `99826381754`)
+and Windows run `33498585911`. That deployment job re-ran the complete fallback
+smoke, including ordinary and dash-prefixed relative Quadlet contract
+refusals, then the controlled real-manager arm, including Quadlet-only contract
+mode/allowlist/relative refusals and the post-cleanup stderr witness. The
+intermediate Quadlet implementation head `473808cc197fe9b52eb35d9125fa624037a22b3c`
+also qualified successfully in Foundation run `33496057351` (deployment job
+`99818409541`) and Windows run `33496057346` before the independent health
+diagnostic correction was added.
 
 Protected exact-head qualification of this receipt commit and post-merge
 Foundation/Windows workflow results remain the merge authority.
