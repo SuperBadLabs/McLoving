@@ -947,7 +947,8 @@ to a held `/proc` descriptor plus a stable manager invocation/PID/start tuple.
 The protected `Deployment lane` runs the real service-managed arm under a
 disposable account with controlled unit and generator inputs. Its shared early
 preparation removes group/world write only from the known image-owned
-`/usr/share` union roots and explicit `/usr/local` Podman/Quadlet chain; its
+`/usr/share` union roots and explicit `/usr/local` Podman/Quadlet chain and
+regular executables after their image-provider digests match the reviewed pins; its
 unchanged preflight then accepts only Ubuntu's `/usr` Podman/Quadlet layout or the hosted
 runner's version-matched `/usr/local` static-bundle layout,
 validates the exact root-owned generator target, and refuses overrides, mixed

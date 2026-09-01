@@ -480,6 +480,25 @@ jobs:
             /usr/local/libexec /usr/local/libexec/podman; do
             test ! -d "${directory}" || sudo chmod go-w "${directory}"
           done
+          if test "$(command -v podman)" = /usr/local/bin/podman; then
+            for executable in \
+              /usr/local/bin/podman /usr/local/libexec/podman/quadlet; do
+              test -f "${executable}"
+              test ! -L "${executable}"
+              test "$(stat -c '%u' "${executable}")" -eq 0
+              case "${executable}" in
+                /usr/local/bin/podman)
+                  expected_sha256=3ae655eb71d62e2b44c25d83364da99175458a0a5f9a77a91c51e99f0cba4d79
+                  ;;
+                /usr/local/libexec/podman/quadlet)
+                  expected_sha256=5d974f1eac4d69afe29b6ef68bf83f1248fb6f22f023f2af690d447c705c1b00
+                  ;;
+              esac
+              actual_sha256="$(sha256sum "${executable}")"
+              test "${actual_sha256%% *}" = "${expected_sha256}"
+              sudo chmod go-w "${executable}"
+            done
+          fi
       - name: Verify controlled systemd host inputs
         # This is intentionally before the Rust build and the 20-minute
         # fallback matrix. Runner-image Podman packaging drift must fail while

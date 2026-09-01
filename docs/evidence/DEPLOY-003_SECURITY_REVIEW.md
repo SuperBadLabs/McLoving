@@ -157,6 +157,16 @@ ancestor chain; the validator and fallback specification remain unchanged and
 still refuse any new writable input by name. Fixed layout components other than
 the one expected generator link must also be non-symlinks.
 
+The next protected run (`33467671252`, job `99730797321`) passed that directory
+normalization and refused in the same eight-second preflight because the
+static `/usr/local/bin/podman` executable itself is also mode 0777. The known
+hosted-bundle normalization therefore covers exactly its two expected regular
+executables, `podman` and Quadlet, as well as their fixed directory chain. It
+refuses to chmod a symlink or non-root-owned file and requires the exact reviewed
+image-provider digests before changing either mode; an image revision therefore
+fails closed until its pins are reviewed. The unchanged validator then repeats
+the exact-target, root-owner, non-writable, version, and hash checks.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the

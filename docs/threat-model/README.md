@@ -148,7 +148,9 @@ bundle, with its exact target, ownership, modes, and version checked and its
 hashes recorded without invoking Podman before the generated volume unit;
 known root-owned writable package ancestors on the disposable hosted image are
 normalized on the exact `/usr/share` and `/usr/local` input chains before that
-unchanged validator runs, while any new drift is refused;
+unchanged validator runs, together with only the two expected regular static
+bundle executables after their image-provider digests match reviewed pins, while
+any symlink, foreign owner, or new drift is refused;
 property-labelled typed manager command-tuple facts then bind every generated
 start and present stop command to that selected Podman executable, whose
 version is compared with Quadlet after cold start; runtime and administrator
