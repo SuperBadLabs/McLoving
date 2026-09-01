@@ -39,7 +39,7 @@ checksums="$(readlink -f "$3")"
 [[ -x "${runtime_gate}" ]] || { echo "runtime gate is not executable: ${runtime_gate}" >&2; exit 1; }
 [[ -d "${release_dir}" ]] || { echo "release directory is absent: ${release_dir}" >&2; exit 1; }
 [[ -f "${checksums}" ]] || { echo "checksums are absent: ${checksums}" >&2; exit 1; }
-for command_name in systemctl systemd-path loginctl podman busctl jq mount findmnt setpriv useradd userdel sha256sum; do
+for command_name in systemctl systemd-path loginctl podman busctl jq mount findmnt getfacl setfacl setpriv useradd userdel sha256sum; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || { echo "required command is absent: ${command_name}" >&2; exit 1; }
 done
@@ -121,10 +121,21 @@ if [[ -e "${home_dir}" || -L "${home_dir}" ]]; then
   echo "refusing to adopt pre-existing home path ${home_dir}" >&2
   exit 1
 fi
-sudo useradd --create-home --home-dir "${home_dir}" --shell /bin/bash "${account}"
+sudo useradd --no-create-home --home-dir "${home_dir}" --shell /bin/bash "${account}"
 account_created=1
 uid="$(id -u "${account}")"
 gid="$(id -g "${account}")"
+# Hosted /home may carry a default ACL that grants group write regardless of
+# the arm's umask. Create no skeleton descendants: install the empty disposable
+# home, remove its inherited access/default ACLs, set the intended mode, and
+# prove the exact three-entry result before any account-owned child is created.
+sudo install -d -o "${uid}" -g "${gid}" -m 0755 "${home_dir}"
+sudo setfacl --remove-all --remove-default -- "${home_dir}"
+sudo chmod 0755 "${home_dir}"
+home_acl="$(getfacl -cp -- "${home_dir}")"
+[[ "$(stat -c '%u:%g:%a' "${home_dir}")" == "${uid}:${gid}:755" \
+  && "${home_acl}" == $'user::rwx\ngroup::r-x\nother::r-x' ]] \
+  || { echo "disposable home did not receive the exact ACL and mode boundary" >&2; exit 1; }
 runtime_dir="/run/user/${uid}"
 bus_address="unix:path=${runtime_dir}/bus"
 # Invoke account commands through a direct credential transition. Repeated

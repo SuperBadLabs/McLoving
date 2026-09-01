@@ -225,6 +225,16 @@ can erase the inherited base. The wrapper also masks the complete user
 environment-generator namespace, because those generators otherwise re-read
 host environment configuration at startup and reload independently of PAM.
 
+Protected run `33475226048` (job `99752965064`) passed the complete manager
+environment boundary and typed query fixture, then refused the first install
+because the hosted `/home` default ACL produced group-writable 0775 XDG parent
+directories despite the arm's 0022 umask. The wrapper now removes both inherited
+access and default ACLs from a newly installed empty disposable home, restores
+0755, and proves the exact owner/mode and three-entry ACL before creating any
+account-owned child. `useradd --no-create-home` prevents `/etc/skel` descendants
+from inheriting the host ACL before that proof. No existing account or shared
+home ACL is modified.
+
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only
 that account's home/runtime paths and one root-owned, read-only bind of the

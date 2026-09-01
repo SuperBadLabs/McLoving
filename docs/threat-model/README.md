@@ -163,7 +163,10 @@ notify socket, with no shell or inherited executable lookup before the clear;
 its PATH is required to equal the manager's compiled default so generator input
 does not change when systemd normalizes it; every installed user
 environment-generator basename is masked before startup so manager reloads
-cannot repopulate host variables; before
+cannot repopulate host variables; the account is created without a skeleton
+home, then its empty disposable home has inherited access and default ACLs
+removed and its exact 0755 three-entry ACL proved before any account-owned child
+is created; before
 D-Bus starts, the manager's private socket is used to install and prove an
 exact fourteen-entry identity/path/locale/unit/Quadlet/D-Bus allowlist so the
 daemon inherits only that block; the typed manager environment is then

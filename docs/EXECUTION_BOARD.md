@@ -1014,7 +1014,11 @@ executable lookup, so neither the system manager nor PAM can add to the exact
 manager process environment. Its controlled PATH must equal systemd's compiled
 user-manager default before startup. Every installed user environment
 generator is masked before startup so later manager reloads cannot repopulate
-the block from hosted image configuration.
+the block from hosted image configuration. The account is created without a
+skeleton home; its empty disposable home then has inherited access/default ACLs
+removed and its exact owner, 0755 mode, and three-entry ACL proved before any
+account child is created, so a host `/home` default ACL cannot silently defeat
+the arm's umask.
 After the fresh manager reaches a quiescent running
 state, the job uses its private socket to install and prove an exact
 fourteen-entry environment before starting packaged D-Bus, so the daemon
