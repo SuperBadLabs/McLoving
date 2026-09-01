@@ -362,5 +362,25 @@ point-in-time bound rather than TOCTOU freedom.
 - `python3 scripts/test-ticket-closure-receipts.py`
 - `python3 scripts/verify-ticket-closure-receipts.py`
 
-Protected exact-head and post-merge Foundation/Windows workflow results remain
-the merge authority.
+Protected qualification of implementation head
+`fd32508b6ca81bd48dae736ccf56be6ae93138aa` completed successfully in
+Foundation run `33481452092` (deployment job `99771776176`) and Windows run
+`33481452116`. The deployment job ran on the `ubuntu-24.04` image
+`20260823.283.1` and bound the cold lifecycle to Podman/Quadlet 5.8.4 at:
+
+- `/usr/local/bin/podman`, SHA-256
+  `3ae655eb71d62e2b44c25d83364da99175458a0a5f9a77a91c51e99f0cba4d79`;
+- `/usr/local/lib/systemd/user-generators/podman-user-generator`, targeting
+  `/usr/local/libexec/podman/quadlet`, SHA-256
+  `5d974f1eac4d69afe29b6ef68bf83f1248fb6f22f023f2af690d447c705c1b00`.
+
+The protected real-manager arm passed all ten stages: exact environment and
+manager boundaries, install, complete unit/Quadlet union validation, generated
+`--sdnotify=conmon`, ordered cold start, native-process `NoNewPrivs: 1`, stable
+controller and agent identities, health through the manager, service-managed
+upgrade and rollback, and both deployable-runtime tests. Teardown completed
+with status zero. The immutable run is
+<https://github.com/SuperBadLabs/McLoving/actions/runs/33481452092>.
+
+Protected exact-head qualification of this evidence commit and post-merge
+Foundation/Windows workflow results remain the merge authority.
