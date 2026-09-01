@@ -1189,6 +1189,27 @@ health_snapshot_residue="$(find "${libexec_root}" -maxdepth 1 \
   || fail "mcloving-health left a named environment snapshot at ${health_snapshot_residue}"
 echo "   mcloving-health answered through the manager"
 
+# Closing the held snapshot descriptor uses bash's bare `exec`. A redirection
+# attached to that builtin persists in the health shell; the former unscoped
+# `2>/dev/null` therefore silenced every diagnostic after cleanup. Use an
+# invalid service token with a live controller unit so capture, load, and
+# cleanup all succeed before usage writes the exact diagnostic to stderr.
+health_stderr_log="${scratch}/health-stderr-after-cleanup.log"
+health_stdout_log="${scratch}/health-stdout-after-cleanup.log"
+health_stderr_status=0
+TMPDIR="${scratch}/missing-untrusted-health-tmp" \
+  "${libexec_root}/helpers/mcloving-health" invalid-service "${config}/controller.env" \
+  --unit mcloving-controller.service \
+  >"${health_stdout_log}" 2>"${health_stderr_log}" || health_stderr_status=$?
+(( health_stderr_status == 64 )) \
+  || fail "mcloving-health invalid-service diagnostic exited ${health_stderr_status}, not 64: $(cat "${health_stderr_log}")"
+grep -Fxq 'usage: mcloving-health {controller|agent} ENV_FILE [--unit UNIT]' \
+  "${health_stderr_log}" \
+  || fail "mcloving-health cleanup silenced the diagnostic emitted after closing its snapshot descriptor: $(cat "${health_stderr_log}")"
+[[ ! -s "${health_stdout_log}" ]] \
+  || fail "mcloving-health wrote usage diagnostics to stdout: $(cat "${health_stdout_log}")"
+echo "   mcloving-health retained stderr after snapshot cleanup"
+
 # ---------------------------------------------------------------------------
 step "[9/10] service-managed upgrade and rollback"
 
