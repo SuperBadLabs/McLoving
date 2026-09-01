@@ -276,7 +276,26 @@ jobs:
       - name: Lint workflows with verified actionlint
         run: |
           set -euo pipefail
-          source tools/versions.env
+          ACTIONLINT_VERSION=""
+          ACTIONLINT_SHA256=""
+          actionlint_version_count=0
+          actionlint_sha_count=0
+          while IFS= read -r line; do
+            if [[ "${line}" =~ ^ACTIONLINT_VERSION=\"([0-9]+\.[0-9]+\.[0-9]+)\"$ ]]; then
+              ACTIONLINT_VERSION="${BASH_REMATCH[1]}"
+              ((actionlint_version_count += 1))
+            elif [[ "${line}" == ACTIONLINT_VERSION=* ]]; then
+              exit 1
+            elif [[ "${line}" =~ ^ACTIONLINT_SHA256=\"([0-9a-f]{64})\"$ ]]; then
+              ACTIONLINT_SHA256="${BASH_REMATCH[1]}"
+              ((actionlint_sha_count += 1))
+            elif [[ "${line}" == ACTIONLINT_SHA256=* ]]; then
+              exit 1
+            fi
+          done < tools/versions.env
+          ((actionlint_version_count == 1))
+          ((actionlint_sha_count == 1))
+          readonly ACTIONLINT_VERSION ACTIONLINT_SHA256
           actionlint_archive="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}.tar.gz"
           actionlint_dir="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}"
           curl --fail --location --silent --show-error \
@@ -286,7 +305,18 @@ jobs:
             | sha256sum -c -
           install -d -m 0755 "${actionlint_dir}"
           tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"
-          "${actionlint_dir}/actionlint" .github/workflows/*.yml
+          actionlint_config="${RUNNER_TEMP}/actionlint-empty.yaml"
+          : > "${actionlint_config}"
+          unset GLOBIGNORE
+          shopt -s nullglob dotglob
+          workflow_files=(
+            .github/workflows/*.yml
+            .github/workflows/*.yaml
+          )
+          ((${#workflow_files[@]} > 0))
+          "${actionlint_dir}/actionlint" \
+            -config-file "${actionlint_config}" \
+            "${workflow_files[@]}"
       - name: Install pinned Clojure CLI
         uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # 13.6.1
         with:

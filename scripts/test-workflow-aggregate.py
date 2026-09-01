@@ -45,7 +45,26 @@ ACTIONLINT_STEP = (
     "      - name: Lint workflows with verified actionlint\n"
     "        run: |\n"
     "          set -euo pipefail\n"
-    "          source tools/versions.env\n"
+    '          ACTIONLINT_VERSION=""\n'
+    '          ACTIONLINT_SHA256=""\n'
+    "          actionlint_version_count=0\n"
+    "          actionlint_sha_count=0\n"
+    "          while IFS= read -r line; do\n"
+    '            if [[ "${line}" =~ ^ACTIONLINT_VERSION=\\"([0-9]+\\.[0-9]+\\.[0-9]+)\\"$ ]]; then\n'
+    '              ACTIONLINT_VERSION="${BASH_REMATCH[1]}"\n'
+    "              ((actionlint_version_count += 1))\n"
+    '            elif [[ "${line}" == ACTIONLINT_VERSION=* ]]; then\n'
+    "              exit 1\n"
+    '            elif [[ "${line}" =~ ^ACTIONLINT_SHA256=\\"([0-9a-f]{64})\\"$ ]]; then\n'
+    '              ACTIONLINT_SHA256="${BASH_REMATCH[1]}"\n'
+    "              ((actionlint_sha_count += 1))\n"
+    '            elif [[ "${line}" == ACTIONLINT_SHA256=* ]]; then\n'
+    "              exit 1\n"
+    "            fi\n"
+    "          done < tools/versions.env\n"
+    "          ((actionlint_version_count == 1))\n"
+    "          ((actionlint_sha_count == 1))\n"
+    "          readonly ACTIONLINT_VERSION ACTIONLINT_SHA256\n"
     '          actionlint_archive="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}.tar.gz"\n'
     '          actionlint_dir="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}"\n'
     "          curl --fail --location --silent --show-error \\\n"
@@ -55,7 +74,32 @@ ACTIONLINT_STEP = (
     "            | sha256sum -c -\n"
     '          install -d -m 0755 "${actionlint_dir}"\n'
     '          tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"\n'
-    '          "${actionlint_dir}/actionlint" .github/workflows/*.yml\n'
+    '          actionlint_config="${RUNNER_TEMP}/actionlint-empty.yaml"\n'
+    '          : > "${actionlint_config}"\n'
+    "          unset GLOBIGNORE\n"
+    "          shopt -s nullglob dotglob\n"
+    "          workflow_files=(\n"
+    "            .github/workflows/*.yml\n"
+    "            .github/workflows/*.yaml\n"
+    "          )\n"
+    "          ((${#workflow_files[@]} > 0))\n"
+    '          "${actionlint_dir}/actionlint" \\\n'
+    '            -config-file "${actionlint_config}" \\\n'
+    '            "${workflow_files[@]}"\n'
+)
+LOCAL_ACTIONLINT_RUN = (
+    "unset GLOBIGNORE\n"
+    "shopt -s nullglob dotglob\n"
+    "workflow_files=(\n"
+    '  "${repo_root}/.github/workflows/"*.yml\n'
+    '  "${repo_root}/.github/workflows/"*.yaml\n'
+    ")\n"
+    "((${#workflow_files[@]} > 0))\n"
+    'actionlint_config="${actionlint_dir}/empty-config.yaml"\n'
+    ': > "${actionlint_config}"\n'
+    '"${actionlint_dir}/actionlint" \\\n'
+    '  -config-file "${actionlint_config}" \\\n'
+    '  "${workflow_files[@]}"\n'
 )
 FOUNDATION_RUN = (
     "          /usr/bin/python3 -I scripts/verify-workflow-aggregate.py foundation \\\n"
@@ -363,6 +407,49 @@ class AggregateDecisionTests(unittest.TestCase):
 
 
 class WorkflowWiringTests(unittest.TestCase):
+    def test_workflow_globs_clear_inherited_filters(self) -> None:
+        script = """set -euo pipefail
+GLOBIGNORE='.github/workflows/*.yaml'
+unset GLOBIGNORE
+shopt -s nullglob dotglob
+workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+((${#workflow_files[@]} > 0))
+printf '%s\\n' "${workflow_files[@]}"
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "visible.yml").write_text("name: visible\n", encoding="utf-8")
+            (workflows / ".hidden.yaml").write_text("invalid: [\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                ["bash", "-c", script],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                set(completed.stdout.splitlines()),
+                {
+                    ".github/workflows/visible.yml",
+                    ".github/workflows/.hidden.yaml",
+                },
+            )
+
+            filtered = subprocess.run(
+                ["bash", "-c", script.replace("unset GLOBIGNORE\n", "")],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                filtered.stdout.splitlines(),
+                [".github/workflows/visible.yml"],
+            )
+
     def test_foundation_aggregate_covers_every_terminal_lane(self) -> None:
         jobs = workflow_jobs(FOUNDATION_WORKFLOW)
         self.assertEqual(
@@ -581,6 +668,7 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertEqual(architecture_steps[1], HOSTED_SUITE_STEP)
         self.assertEqual(architecture_steps[2], ACTIONLINT_STEP)
         assert_exact_command(self, local, local_command)
+        self.assertEqual(local.count(LOCAL_ACTIONLINT_RUN), 1)
 
         suppressed_hosted = architecture.replace(
             hosted_command, hosted_command + " || true"
@@ -590,6 +678,10 @@ class WorkflowWiringTests(unittest.TestCase):
         suppressed_local = local.replace(local_command, local_command + " || true")
         with self.assertRaises(AssertionError):
             assert_exact_command(self, suppressed_local, local_command)
+        yml_only_local = local.replace(
+            '  "${repo_root}/.github/workflows/"*.yaml\n', ""
+        )
+        self.assertNotIn(LOCAL_ACTIONLINT_RUN, yml_only_local)
 
     def test_workflow_level_shell_authority_is_rejected(self) -> None:
         workflow_text = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")

@@ -109,8 +109,19 @@ The hosted Architecture job and the local Foundation validator run this suite.
 
 The hosted Architecture job now downloads actionlint at the version pinned in
 `tools/versions.env`, verifies its repository-pinned SHA-256 before extraction,
-and lints every workflow. This makes malformed workflow expressions and DAG
-edits a hosted failure instead of a local-only check.
+and lints every `.yml` and `.yaml` workflow. The local Foundation validator
+uses the same two-extension denominator, including dot-prefixed files. This
+makes malformed workflow expressions and DAG edits a hosted failure instead of
+a local-only check.
+
+The hosted step parses only one syntactically constrained actionlint version
+and SHA-256 assignment from `tools/versions.env`; it does not source candidate
+shell. Both hosted and local denominators clear `GLOBIGNORE`, enable `dotglob`
+and `nullglob`, and require at least one matched workflow. A regression injects
+a selective `.yaml` ignore while retaining a safe `.yml` and proves the hidden
+`.yaml` remains in the lint denominator. Both invocations pass an explicit
+empty configuration from trusted temporary storage, so candidate
+`.github/actionlint.yml` or `.yaml` ignore rules are never auto-loaded.
 
 Independent review found that the first structural test allowed an aggregate
 verifier step to add `if: false` or `continue-on-error: true`; both mutations
@@ -173,7 +184,7 @@ still subvert the gate.
 
 ## Verification in progress
 
-- ten mutation-oriented aggregate tests pass locally;
+- eleven mutation-oriented aggregate tests pass locally;
 - all 390,625 Foundation states have exactly one accepting state;
 - the full Windows truth table has exactly two accepting states;
 - the fifteen Windows-impact classifier tests pass, including proof that
