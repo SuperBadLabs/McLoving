@@ -914,9 +914,12 @@ Mario's 1.9 ms — per-stage numbers are within-rig, within-configuration
 deltas and must never be paired across rigs or poll settings).
 
 The externally filed 2026-08-29 observation "replace the fixed-interval
-polling regime with event-driven waits" (measured against `83a6d6c`,
-pre-dating all of the above) is CLOSED against its own acceptance
-criteria: per-stage cost at shipped defaults with no interval lowered —
+polling regime with event-driven waits" (measured against `83a6d6c`, an
+unmerged two-commit lineage atop protected-main `6ac9be9` whose full
+source identity, raw commit objects, and runtime-crate equivalence to
+that ancestor are preserved in
+`docs/evidence/PERF-001_POLLING_BASELINE_2026-08-29.md`; pre-dating all
+of the above) is CLOSED against its own acceptance criteria: per-stage cost at shipped defaults with no interval lowered —
 71.2018 ms/stage median against its 183 ms bar; idle CPU 1.099% of one
 core for the complete stack against its 5% bar; every property its
 sleeps guarded kept a gate (work-loop drain, submission wake, lease
