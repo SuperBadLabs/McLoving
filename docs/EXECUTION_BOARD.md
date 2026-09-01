@@ -879,9 +879,9 @@ measured ~500 ms wall per single-step stage with both controller and agent
 polls recorded at 10 ms in its environment fingerprint. A later-found agent
 defect — the work loop ran one assignment per poll tick, making per-stage
 cost max(agent poll interval, work); fixed by `b1301e9` (PR #103) — produces
-exactly this figure at the agent's shipped 500 ms default (measured 496.4
-ms/stage on the 2026-08-29 filing's build) but cannot produce it at a 10 ms
-poll, so either the recorded environment did not reach the bench's agent
+exactly this figure at the agent's shipped 500 ms default (496.4 ms/stage,
+recorded in `b1301e9` against its parent tree `bed6c0f`) but cannot produce
+it at a 10 ms poll, so either the recorded environment did not reach the bench's agent
 process or its ~500 ms had a distinct cause on the `b75165d`-era tree that
 was never isolated. The observation belonged to `PERF-001` and its receipts
 live there. These four tickets were first
