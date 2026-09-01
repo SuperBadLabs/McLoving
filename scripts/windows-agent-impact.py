@@ -357,6 +357,11 @@ def first_windows_unsafe_path(paths: set[str]) -> str | None:
                 component.endswith((".", " "))
                 or any(character in WINDOWS_INVALID_CHARACTERS for character in component)
                 or any(ord(character) < 32 for character in component)
+                # Python casefold is not identical to NTFS invariant casing
+                # (for example, dotless i aliases ASCII I on Windows). Route
+                # every non-ASCII path to the native checkout rather than
+                # guessing whether the Linux classifier can represent it.
+                or any(ord(character) > 127 for character in component)
                 or stem in WINDOWS_RESERVED_STEMS
                 or folded_component == ".git"
                 or is_protected_git_ntfs_alias(component)

@@ -88,9 +88,10 @@ than carrying divergent shell predicates.
 The Windows classifier resolves changed paths before exporting either revision
 and immediately requires Windows for every Cargo/gate configuration path,
 case-folded to match the target Windows filesystem. Windows-unsafe components
-(including trailing-dot/space, reserved names, and Git-protected NTFS short-name
-aliases) and case-colliding changed paths also require the native gate; a
-complete trusted `git ls-tree` inventory
+(including non-ASCII names whose NTFS invariant casing differs from Python,
+trailing-dot/space, reserved names, and Git-protected NTFS short-name aliases)
+and case-colliding changed paths also require the native gate; a complete
+trusted `git ls-tree` inventory
 detects collisions between changed and unchanged head paths before revision
 export. It therefore never loads changed candidate Cargo configuration.
 Metadata runs from

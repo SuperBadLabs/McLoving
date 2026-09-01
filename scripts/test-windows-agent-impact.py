@@ -57,6 +57,7 @@ class WindowsAgentImpactTests(unittest.TestCase):
             "GITMOD~4",
             "GI7EBA~1",
             "GI7EB~12",
+            "docs/\u0131.txt",
         ):
             with (
                 self.subTest(path=path),
@@ -96,6 +97,10 @@ class WindowsAgentImpactTests(unittest.TestCase):
             (
                 "docs/README/b.txt",
                 {"docs/Readme/a.txt", "docs/README/b.txt"},
+            ),
+            (
+                "docs/README.md",
+                {"docs/I.txt", "docs/\u0131.txt", "docs/README.md"},
             ),
         ):
             with (
@@ -296,6 +301,7 @@ class WindowsAgentImpactTests(unittest.TestCase):
             {"GITMOD~4"},
             {"GI7EBA~1"},
             {"GI7EB~12"},
+            {"docs/\u0131.txt"},
             {"docs/Readme.md", "docs/README.md"},
             {"docs/Readme", "docs/README/child.txt"},
             {"docs/Readme/a.txt", "docs/README/b.txt"},
