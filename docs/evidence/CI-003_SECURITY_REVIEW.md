@@ -2,7 +2,8 @@
 
 Date: 2026-09-01
 Pull request: #116
-Implementation baseline: `5e91009`
+Exact reviewed implementation head: `0ee95767a96d5664b41a7c035558e41c09f39270`
+Protected-main squash commit: `463ad646fecccf993fa8a837eb7b9a9c19eb71c7`
 
 `CI-003` closes a repository-governance failure: branch protection could admit
 a commit even when recovery, deployment, or Windows validation was red. It
@@ -183,7 +184,7 @@ residual and the exact-head source-review obligation, not a property claimed by
 the aggregate. A compromised GitHub control plane or authorized account can
 still subvert the gate.
 
-## Verification in progress
+## Verification and closure
 
 - eleven mutation-oriented aggregate tests pass locally;
 - all 390,625 Foundation states have exactly one accepting state;
@@ -195,11 +196,41 @@ still subvert the gate.
 - board, closure-receipt, and Rust-denominator tests and verifiers pass;
 - `bash -n scripts/validate-foundation.sh` and `git diff --check` pass.
 
-Closure additionally requires exact-head `Foundation` and `Windows` success,
-an independent exact-head review, zero unresolved threads, the after-state
-branch-protection readback with all six granular contexts plus both aggregates
-bound to GitHub Actions app id `15368`, merge, and protected-main verification.
-Until those receipts exist, the ticket remains `ACTIVE`.
+The final implementation head
+`0ee95767a96d5664b41a7c035558e41c09f39270` passed every check on pull request
+[#116](https://github.com/SuperBadLabs/McLoving/pull/116). In particular,
+Foundation run
+[`33549592659`](https://github.com/SuperBadLabs/McLoving/actions/runs/33549592659)
+ended in successful aggregate job
+[`100002605023`](https://github.com/SuperBadLabs/McLoving/actions/runs/33549592659/job/100002605023),
+and Windows Agent run
+[`33549592695`](https://github.com/SuperBadLabs/McLoving/actions/runs/33549592695)
+ended in successful aggregate job
+[`99997077572`](https://github.com/SuperBadLabs/McLoving/actions/runs/33549592695/job/99997077572).
+The exact head received an independent Codex source review after its last
+authority-bearing edit, three scoped independent repository reviews found no
+remaining actionable defect, and the pull request had zero unresolved review
+threads before merge.
+
+GitHub squash-merged the reviewed head at 2026-09-01T19:50:38Z as protected-main
+commit `463ad646fecccf993fa8a837eb7b9a9c19eb71c7`. The exact protected-main commit
+then passed Foundation run
+[`33551861202`](https://github.com/SuperBadLabs/McLoving/actions/runs/33551861202),
+aggregate job
+[`100009525576`](https://github.com/SuperBadLabs/McLoving/actions/runs/33551861202/job/100009525576),
+and Windows Agent run
+[`33551861207`](https://github.com/SuperBadLabs/McLoving/actions/runs/33551861207),
+aggregate job
+[`100004358785`](https://github.com/SuperBadLabs/McLoving/actions/runs/33551861207/job/100004358785).
+All four aggregate conclusions were `success` and all four runs reported their
+respective exact PR or protected-main SHA.
+
+The final branch-protection API readback after merge still reports strict branch
+synchronization; admin enforcement; linear history; conversation resolution;
+force pushes and deletion disabled; and exactly the eight required contexts
+listed above, every one bound to GitHub Actions app id `15368`. These receipts
+satisfy the ticket's exact-head, review, protection, merge, and protected-main
+closure conditions. `CI-003` is `DONE`.
 
 This review grants repository merge gating only. It grants no migration,
 runtime, deployment, production, credential, connector, canary, cutover,

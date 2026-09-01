@@ -447,6 +447,7 @@ had never claimed one.
 | AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
 | CANARY-000 | `docs/evidence/CANARY-000_SECURITY_REVIEW.md` |
 | CI-002 | `docs/evidence/CI-002_SECURITY_REVIEW.md` |
+| CI-003 | `docs/evidence/CI-003_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
 | DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
