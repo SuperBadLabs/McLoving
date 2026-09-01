@@ -7,7 +7,9 @@ import importlib.util
 import itertools
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -26,15 +28,99 @@ SPEC.loader.exec_module(AGGREGATE)
 FOUNDATION_WORKFLOW = REPO_ROOT / ".github/workflows/foundation.yml"
 WINDOWS_WORKFLOW = REPO_ROOT / ".github/workflows/windows-agent.yml"
 RESULTS = ("success", "failure", "cancelled", "skipped", "unknown")
+CHECKOUT_STEP = (
+    "      - name: Check out aggregate verifier\n"
+    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
+)
+SOURCE_CHECKOUT_STEP = (
+    "      - name: Check out source\n"
+    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
+)
+HOSTED_SUITE_STEP = (
+    "      - name: Test protected workflow aggregates\n"
+    "        run: python3 -I scripts/test-workflow-aggregate.py\n"
+)
+ACTIONLINT_STEP = (
+    "      - name: Lint workflows with verified actionlint\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          source tools/versions.env\n"
+    '          actionlint_archive="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}.tar.gz"\n'
+    '          actionlint_dir="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}"\n'
+    "          curl --fail --location --silent --show-error \\\n"
+    '            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \\\n'
+    '            --output "${actionlint_archive}"\n'
+    "          printf '%s  %s\\n' \"${ACTIONLINT_SHA256}\" \"${actionlint_archive}\" \\\n"
+    "            | sha256sum -c -\n"
+    '          install -d -m 0755 "${actionlint_dir}"\n'
+    '          tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"\n'
+    '          "${actionlint_dir}/actionlint" .github/workflows/*.yml\n'
+)
+FOUNDATION_RUN = (
+    "          python3 -I scripts/verify-workflow-aggregate.py foundation \\\n"
+    "            rust=\"${RUST_RESULT}\" \\\n"
+    "            dependencies=\"${DEPENDENCIES_RESULT}\" \\\n"
+    "            secrets=\"${SECRETS_RESULT}\" \\\n"
+    "            architecture=\"${ARCHITECTURE_RESULT}\" \\\n"
+    "            formal=\"${FORMAL_RESULT}\" \\\n"
+    "            controller-postgres=\"${CONTROLLER_POSTGRES_RESULT}\" \\\n"
+    "            recovery-drill=\"${RECOVERY_DRILL_RESULT}\" \\\n"
+    "            deployment=\"${DEPLOYMENT_RESULT}\"\n"
+)
+WINDOWS_RUN = (
+    "          python3 -I scripts/verify-workflow-aggregate.py windows \\\n"
+    "            impact=\"${IMPACT_RESULT}\" \\\n"
+    "            run-windows=\"${RUN_WINDOWS}\" \\\n"
+    "            windows-agent=\"${WINDOWS_AGENT_RESULT}\"\n"
+)
+FOUNDATION_ENV = (
+    ("RUST_RESULT", "${{ needs.rust.result }}"),
+    ("DEPENDENCIES_RESULT", "${{ needs.dependencies.result }}"),
+    ("SECRETS_RESULT", "${{ needs.secrets.result }}"),
+    ("ARCHITECTURE_RESULT", "${{ needs.architecture.result }}"),
+    ("FORMAL_RESULT", "${{ needs.formal.result }}"),
+    ("CONTROLLER_POSTGRES_RESULT", "${{ needs.controller-postgres.result }}"),
+    ("RECOVERY_DRILL_RESULT", "${{ needs.recovery-drill.result }}"),
+    ("DEPLOYMENT_RESULT", "${{ needs.deployment.result }}"),
+)
+WINDOWS_ENV = (
+    ("IMPACT_RESULT", "${{ needs.impact.result }}"),
+    ("RUN_WINDOWS", "${{ needs.impact.outputs.run-windows }}"),
+    ("WINDOWS_AGENT_RESULT", "${{ needs.windows-agent.result }}"),
+)
 
 
 def workflow_jobs(path: Path) -> dict[str, str]:
     """Return top-level job ids and their complete indented YAML blocks."""
     text = path.read_text(encoding="utf-8")
     try:
-        text = text.split("\njobs:\n", 1)[1]
+        prefix, text = text.split("\njobs:\n", 1)
     except IndexError as error:
         raise AssertionError(f"workflow has no jobs mapping: {path}") from error
+    top_level = tuple(
+        line
+        for line in prefix.splitlines()
+        if line and not line[0].isspace() and not line.startswith("#")
+    )
+    allowed_top_levels = {
+        ("name: Foundation", "on:", "permissions:", "concurrency:"),
+        ("name: Windows Agent", "on:", "permissions:", "concurrency:"),
+    }
+    if top_level not in allowed_top_levels:
+        raise AssertionError(f"workflow has noncanonical top-level controls: {path}")
+    job_lines = tuple(
+        line
+        for line in text.splitlines()
+        if line.startswith("  ")
+        and not line.startswith("    ")
+        and line.strip()
+        and not line[2:].startswith("#")
+    )
+    if any(not re.fullmatch(r"  [a-z0-9-]+:", line) for line in job_lines):
+        raise AssertionError(f"workflow has a noncanonical job key: {path}")
+    job_ids = tuple(line[2:-1] for line in job_lines)
+    if len(job_ids) != len(set(job_ids)):
+        raise AssertionError(f"workflow has a duplicate job key: {path}")
     matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\n", text))
     return {
         match.group(1): text[match.start() : matches[index + 1].start()]
@@ -53,11 +139,12 @@ def needs(block: str) -> tuple[str, ...]:
 
 def step_blocks(block: str) -> tuple[str, ...]:
     """Return the exact step mappings inside one top-level job block."""
-    matches = list(re.finditer(r"(?m)^      - name: .+$", block))
+    steps = block.split("\n    steps:\n", 1)[1]
+    matches = list(re.finditer(r"(?m)^      -(?: .*)?$", steps))
     return tuple(
-        block[match.start() : matches[index + 1].start()]
+        steps[match.start() : matches[index + 1].start()]
         if index + 1 < len(matches)
-        else block[match.start() :]
+        else steps[match.start() :]
         for index, match in enumerate(matches)
     )
 
@@ -67,32 +154,59 @@ def assert_safe_aggregate_job(
     block: str,
     *,
     expected_name: str,
+    expected_needs: tuple[str, ...],
+    expected_step_name: str,
+    expected_env: tuple[tuple[str, str], ...],
+    expected_run: str,
 ) -> None:
     """Reject workflow controls that can turn verifier failure into success."""
     test.assertNotIn("continue-on-error:", block)
-    test.assertEqual(
-        re.findall(r"(?m)^    ([a-z][a-z-]*):", block),
-        ["name", "runs-on", "needs", "if", "steps"],
+    job_fields = tuple(
+        line[4:]
+        for line in block.splitlines()
+        if line.startswith("    ")
+        and not line.startswith("      ")
+        and line.strip()
+        and not line[4:].startswith("#")
     )
-    test.assertIn(f"\n    name: {expected_name}\n", block)
-    test.assertIn("\n    if: always()\n", block)
+    test.assertEqual(
+        job_fields,
+        (
+            f"name: {expected_name}",
+            "runs-on: ubuntu-24.04",
+            "needs:",
+            "if: always()",
+            "steps:",
+        ),
+    )
+    test.assertEqual(needs(block), expected_needs)
 
     steps = step_blocks(block)
     test.assertEqual(len(steps), 2)
     checkout, verifier = steps
+    test.assertEqual(checkout, CHECKOUT_STEP)
     test.assertEqual(
         re.findall(r"(?m)^        ([a-z][a-z-]*):", checkout),
         ["uses"],
-    )
-    test.assertIn(
-        "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        checkout,
     )
     test.assertEqual(
         re.findall(r"(?m)^        ([a-z][a-z-]*):", verifier),
         ["env", "run"],
     )
     test.assertNotIn("\n        if:", verifier)
+    expected_verifier = (
+        f"      - name: {expected_step_name}\n"
+        "        env:\n"
+        + "".join(f"          {key}: {value}\n" for key, value in expected_env)
+        + "        run: |\n"
+        + expected_run
+    )
+    test.assertEqual(verifier, expected_verifier)
+    test.assertEqual(
+        tuple(re.findall(r"(?m)^          ([A-Z][A-Z0-9_]*): (.+)$", verifier)),
+        expected_env,
+    )
+    test.assertEqual(verifier.split("        run: |\n", 1)[1], expected_run)
 
 
 def assert_rejected(test: unittest.TestCase, function, values: dict[str, str]) -> None:
@@ -100,7 +214,36 @@ def assert_rejected(test: unittest.TestCase, function, values: dict[str, str]) -
         function(values)
 
 
+def assert_exact_command(test: unittest.TestCase, text: str, command: str) -> None:
+    """Require one executable line with no shell suffix or duplicate."""
+    test.assertEqual(
+        re.findall(rf"(?m)^[ \t]*({re.escape(command)})[ \t]*$", text),
+        [command],
+    )
+
+
 class AggregateDecisionTests(unittest.TestCase):
+    def test_isolated_python_refuses_candidate_module_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / VERIFIER.name
+            candidate.write_text(VERIFIER.read_text(encoding="utf-8"), encoding="utf-8")
+            (Path(directory) / "argparse.py").write_text(
+                "raise SystemExit(41)\n", encoding="utf-8"
+            )
+            valid = [
+                sys.executable,
+                "-I",
+                str(candidate),
+                "foundation",
+                *(f"{job}=success" for job in AGGREGATE.FOUNDATION_JOBS),
+            ]
+            isolated = subprocess.run(valid, capture_output=True, check=False)
+            self.assertEqual(isolated.returncode, 0, isolated.stderr)
+            shadowed = subprocess.run(
+                [valid[0], *valid[2:]], capture_output=True, check=False
+            )
+            self.assertEqual(shadowed.returncode, 41)
+
     def test_foundation_accepts_only_all_success(self) -> None:
         # This is the complete 5^8 state space, not one mutation per lane.
         # It proves success has exactly one accepting state and that multiple
@@ -185,7 +328,13 @@ class WorkflowWiringTests(unittest.TestCase):
         ))
         self.assertEqual(needs(jobs["foundation"]), AGGREGATE.FOUNDATION_JOBS)
         assert_safe_aggregate_job(
-            self, jobs["foundation"], expected_name="Foundation"
+            self,
+            jobs["foundation"],
+            expected_name="Foundation",
+            expected_needs=AGGREGATE.FOUNDATION_JOBS,
+            expected_step_name="Require every Foundation lane to succeed",
+            expected_env=FOUNDATION_ENV,
+            expected_run=FOUNDATION_RUN,
         )
 
         env_names = {
@@ -204,7 +353,7 @@ class WorkflowWiringTests(unittest.TestCase):
             )
             self.assertIn(f'{job}="${{{env_name}}}"', jobs["foundation"])
         self.assertIn(
-            "python3 scripts/verify-workflow-aggregate.py foundation",
+            "python3 -I scripts/verify-workflow-aggregate.py foundation",
             jobs["foundation"],
         )
 
@@ -212,7 +361,15 @@ class WorkflowWiringTests(unittest.TestCase):
         jobs = workflow_jobs(WINDOWS_WORKFLOW)
         self.assertEqual(set(jobs), {"impact", "windows-agent", "windows"})
         self.assertEqual(needs(jobs["windows"]), ("impact", "windows-agent"))
-        assert_safe_aggregate_job(self, jobs["windows"], expected_name="Windows")
+        assert_safe_aggregate_job(
+            self,
+            jobs["windows"],
+            expected_name="Windows",
+            expected_needs=("impact", "windows-agent"),
+            expected_step_name="Require the classified Windows outcome",
+            expected_env=WINDOWS_ENV,
+            expected_run=WINDOWS_RUN,
+        )
         self.assertIn("IMPACT_RESULT: ${{ needs.impact.result }}", jobs["windows"])
         self.assertIn(
             "RUN_WINDOWS: ${{ needs.impact.outputs.run-windows }}", jobs["windows"]
@@ -227,7 +384,7 @@ class WorkflowWiringTests(unittest.TestCase):
         ):
             self.assertIn(argument, jobs["windows"])
         self.assertIn(
-            "python3 scripts/verify-workflow-aggregate.py windows", jobs["windows"]
+            "python3 -I scripts/verify-workflow-aggregate.py windows", jobs["windows"]
         )
 
     def test_fail_open_workflow_controls_are_rejected(self) -> None:
@@ -236,6 +393,14 @@ class WorkflowWiringTests(unittest.TestCase):
         mutations = {
             "job continue-on-error": baseline.replace(
                 "    if: always()\n", "    continue-on-error: true\n    if: always()\n"
+            ),
+            "quoted job continue-on-error": baseline.replace(
+                "    if: always()\n",
+                '    "continue-on-error": true\n    if: always()\n',
+            ),
+            "spaced job continue-on-error": baseline.replace(
+                "    if: always()\n",
+                "    continue-on-error : true\n    if: always()\n",
             ),
             "verifier continue-on-error": baseline.replace(
                 "      - name: Require every Foundation lane to succeed\n",
@@ -247,24 +412,108 @@ class WorkflowWiringTests(unittest.TestCase):
                 "      - name: Require every Foundation lane to succeed\n"
                 "        if: false\n",
             ),
+            "quoted verifier continue-on-error": baseline.replace(
+                "      - name: Require every Foundation lane to succeed\n",
+                "      - name: Require every Foundation lane to succeed\n"
+                '        "continue-on-error": true\n',
+            ),
             "extra success step": baseline
             + "      - name: Override failure\n        run: true\n",
+            "unnamed verifier substitution step": baseline.replace(
+                "    steps:\n",
+                "    steps:\n"
+                "      - run: printf malicious > scripts/verify-workflow-aggregate.py\n",
+            ),
+            "extra verifier environment": baseline.replace(
+                "        env:\n",
+                "        env:\n          PATH: /tmp/attacker-bin:/usr/bin:/bin\n",
+            ),
+            "quoted extra verifier environment": baseline.replace(
+                "        env:\n",
+                '        env:\n          "PATH": ${{ github.workspace }}/attacker-bin:/usr/bin:/bin\n',
+            ),
+            "mutable checkout with pinned digest in comment": baseline.replace(
+                "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
+                "        uses: actions/checkout@main # uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+            ),
+            "verifier failure ignored in shell": baseline.replace(
+                '            deployment="${DEPLOYMENT_RESULT}"\n',
+                '            deployment="${DEPLOYMENT_RESULT}" || true\n',
+            ),
         }
         for name, mutation in mutations.items():
             with self.subTest(name=name), self.assertRaises(AssertionError):
                 assert_safe_aggregate_job(
-                    self, mutation, expected_name="Foundation"
+                    self,
+                    mutation,
+                    expected_name="Foundation",
+                    expected_needs=AGGREGATE.FOUNDATION_JOBS,
+                    expected_step_name="Require every Foundation lane to succeed",
+                    expected_env=FOUNDATION_ENV,
+                    expected_run=FOUNDATION_RUN,
                 )
+
+        workflow_text = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")
+        for name, suffix in {
+            "quoted duplicate aggregate job": '\n  "foundation":\n    uses: attacker.yml\n',
+            "plain duplicate aggregate job": "\n  foundation:\n    uses: attacker.yml\n",
+        }.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                candidate = Path(directory) / "mutation.yml"
+                try:
+                    candidate.write_text(workflow_text + suffix, encoding="utf-8")
+                    with self.assertRaises(AssertionError):
+                        workflow_jobs(candidate)
+                finally:
+                    candidate.unlink(missing_ok=True)
 
     def test_hosted_and_local_gates_run_this_suite(self) -> None:
         foundation = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")
         local = (SCRIPT_DIR / "validate-foundation.sh").read_text(encoding="utf-8")
-        self.assertIn("python3 scripts/test-workflow-aggregate.py", foundation)
-        self.assertIn('python3 "${repo_root}/scripts/test-workflow-aggregate.py"', local)
-        self.assertIn("source tools/versions.env", foundation)
-        self.assertIn("${ACTIONLINT_VERSION}", foundation)
-        self.assertIn("${ACTIONLINT_SHA256}", foundation)
-        self.assertIn('"${actionlint_dir}/actionlint" .github/workflows/*.yml', foundation)
+        hosted_command = "python3 -I scripts/test-workflow-aggregate.py"
+        local_command = 'python3 -I "${repo_root}/scripts/test-workflow-aggregate.py"'
+        architecture = workflow_jobs(FOUNDATION_WORKFLOW)["architecture"]
+        architecture_fields = tuple(
+            line[4:]
+            for line in architecture.splitlines()
+            if line.startswith("    ")
+            and not line.startswith("      ")
+            and line.strip()
+            and not line[4:].startswith("#")
+        )
+        self.assertEqual(
+            architecture_fields,
+            ("name: Architecture records", "runs-on: ubuntu-24.04", "steps:"),
+        )
+        architecture_steps = step_blocks(architecture)
+        self.assertEqual(len(architecture_steps), 6)
+        self.assertEqual(architecture_steps[0], SOURCE_CHECKOUT_STEP)
+        self.assertEqual(architecture_steps[1], HOSTED_SUITE_STEP)
+        self.assertEqual(architecture_steps[2], ACTIONLINT_STEP)
+        assert_exact_command(self, local, local_command)
+
+        suppressed_hosted = architecture.replace(
+            hosted_command, hosted_command + " || true"
+        )
+        with self.assertRaises(AssertionError):
+            self.assertEqual(step_blocks(suppressed_hosted)[1], HOSTED_SUITE_STEP)
+        suppressed_local = local.replace(local_command, local_command + " || true")
+        with self.assertRaises(AssertionError):
+            assert_exact_command(self, suppressed_local, local_command)
+
+    def test_workflow_level_shell_authority_is_rejected(self) -> None:
+        workflow_text = FOUNDATION_WORKFLOW.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "foundation.yml"
+            candidate.write_text(
+                workflow_text.replace(
+                    "\njobs:\n",
+                    "\nenv:\n  BASH_ENV: scripts/bypass-aggregate.sh\n\njobs:\n",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(AssertionError):
+                workflow_jobs(candidate)
 
 
 if __name__ == "__main__":

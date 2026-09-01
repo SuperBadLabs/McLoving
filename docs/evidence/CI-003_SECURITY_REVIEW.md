@@ -43,6 +43,26 @@ control. `CI-003` therefore retains the six granular contexts, adds the two
 aggregates, requires independent exact-head source review by process, and
 records malicious authorized-writer workflow mutation as residual risk.
 
+## Live protection transition
+
+The post-change GitHub API readback on 2026-09-01 reports `strict: true` and
+these eight required checks, each bound to GitHub Actions app id `15368`:
+
+- `Rust`
+- `Dependencies and licenses`
+- `Secret scan`
+- `Architecture records`
+- `Formal model`
+- `Controller PostgreSQL`
+- `Foundation`
+- `Windows`
+
+The same readback reports admin enforcement, linear history, and conversation
+resolution enabled, with force pushes and branch deletion disabled. The six
+granular contexts remain required as defense in depth; the two aggregates add
+complete coverage of reported terminal-job outcomes without pretending that
+app identity binds a candidate-controlled workflow definition.
+
 ## Implementation
 
 The `Foundation` job is an `if: always()` aggregate over the terminal `Rust`,
@@ -81,9 +101,24 @@ were actionlint-valid and left the seven tests green. The exact aggregate job
 schema is now allowlisted: only `name`, `runs-on`, `needs`, `if`, and `steps`
 are permitted at job level; exactly the pinned checkout and verifier steps are
 permitted; the verifier step may contain only `env` and `run`; and
-`continue-on-error` and verifier-step `if` are forbidden. Four negative
-mutations cover job- and step-level `continue-on-error`, a skipped verifier,
-and an extra step.
+`continue-on-error` and verifier-step `if` are forbidden. Fourteen negative
+mutations cover plain, quoted, and spaced job controls; plain and quoted step
+controls; a skipped verifier; named and unnamed extra steps; plain and quoted
+extra environment authority; checkout-pin spoofing; shell-level failure
+suppression; and plain or quoted duplicate aggregate job IDs.
+
+The workflow parser also allowlists the semantic top-level keys, so workflow-
+level `env` or `defaults` cannot inject shell authority into the otherwise
+exact aggregate steps. The Architecture job's controls, six-step order,
+checkout, immediately following aggregate-suite step, and digest-verifying
+actionlint step are pinned as the first three steps, leaving no mutable
+predecessor before either hosted structural gate; the local suite command is
+pinned as a complete shell line. Two additional negative mutations cover shell
+failure suppression at both suite invocation sites. Noncanonical GitHub-valid
+job-key spellings are deliberately rejected instead of partially parsed.
+All authority-bearing Python invocations use isolated mode (`python3 -I`), so
+candidate files named after standard-library modules cannot intercept oracle or
+verifier startup through the script directory.
 
 ## Threat-model review
 
@@ -105,12 +140,17 @@ an authorized administrator can additionally mutate protection outside the
 source tree. App binding prevents a different app from impersonating a check
 but does not bind its workflow definition. Authority-sensitive merges therefore
 re-read the live rule and independently review exact workflow/verifier changes.
-A compromised GitHub control plane or authorized account can still subvert the
-gate.
+The aggregates consume reported job conclusions; they cannot independently
+prove that an authorized workflow edit did not skip a child step with `if`,
+soften it with `continue-on-error`, or mask a shell failure before GitHub
+calculates that conclusion. Those edits are part of the candidate-workflow
+residual and the exact-head source-review obligation, not a property claimed by
+the aggregate. A compromised GitHub control plane or authorized account can
+still subvert the gate.
 
 ## Verification in progress
 
-- eight mutation-oriented aggregate tests pass locally;
+- ten mutation-oriented aggregate tests pass locally;
 - all 390,625 Foundation states have exactly one accepting state;
 - the full Windows truth table has exactly two accepting states;
 - the eleven existing Windows-impact classifier tests pass;

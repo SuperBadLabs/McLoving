@@ -271,6 +271,22 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test protected workflow aggregates
+        run: python3 -I scripts/test-workflow-aggregate.py
+      - name: Lint workflows with verified actionlint
+        run: |
+          set -euo pipefail
+          source tools/versions.env
+          actionlint_archive="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}.tar.gz"
+          actionlint_dir="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}"
+          curl --fail --location --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "${actionlint_archive}"
+          printf '%s  %s\n' "${ACTIONLINT_SHA256}" "${actionlint_archive}" \
+            | sha256sum -c -
+          install -d -m 0755 "${actionlint_dir}"
+          tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"
+          "${actionlint_dir}/actionlint" .github/workflows/*.yml
       - name: Install pinned Clojure CLI
         uses: DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d # 13.6.1
         with:
@@ -295,26 +311,11 @@ jobs:
           python3 scripts/test-ticket-closure-receipts.py
           python3 scripts/verify-ticket-closure-receipts.py
           python3 scripts/test-verify-rust-test-execution.py
-          python3 scripts/test-workflow-aggregate.py
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15
           test -s docs/architecture/CHARTER.md
           test -s docs/ALPHA_DEMO.md
           test -s docs/threat-model/README.md
           test -s docs/EXECUTION_BOARD.md
-      - name: Lint workflows with verified actionlint
-        run: |
-          set -euo pipefail
-          source tools/versions.env
-          actionlint_archive="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}.tar.gz"
-          actionlint_dir="${RUNNER_TEMP}/actionlint-${ACTIONLINT_VERSION}"
-          curl --fail --location --silent --show-error \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
-            --output "${actionlint_archive}"
-          printf '%s  %s\n' "${ACTIONLINT_SHA256}" "${actionlint_archive}" \
-            | sha256sum -c -
-          install -d -m 0755 "${actionlint_dir}"
-          tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"
-          "${actionlint_dir}/actionlint" .github/workflows/*.yml
       - name: Run Jenkins compatibility and plugin-directory contracts
         working-directory: compat/jenkins-worker
         run: |
@@ -646,7 +647,7 @@ jobs:
           RECOVERY_DRILL_RESULT: ${{ needs.recovery-drill.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
         run: |
-          python3 scripts/verify-workflow-aggregate.py foundation \
+          python3 -I scripts/verify-workflow-aggregate.py foundation \
             rust="${RUST_RESULT}" \
             dependencies="${DEPENDENCIES_RESULT}" \
             secrets="${SECRETS_RESULT}" \
