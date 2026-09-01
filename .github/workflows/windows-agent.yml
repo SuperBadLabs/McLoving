@@ -116,3 +116,27 @@ jobs:
         run: >-
           ./scripts/windows-agent-war.ps1
           -AgentBinary ./target/release/mcloving-agent.exe
+
+  windows:
+    name: Windows
+    # The classifier is authoritative only when it succeeds. A true decision
+    # requires the native Windows lane to succeed; a false decision requires
+    # that lane to be skipped. Every other combination fails closed.
+    runs-on: ubuntu-24.04
+    needs:
+      - impact
+      - windows-agent
+    if: always()
+    steps:
+      - name: Check out aggregate verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require the classified Windows outcome
+        env:
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          RUN_WINDOWS: ${{ needs.impact.outputs.run-windows }}
+          WINDOWS_AGENT_RESULT: ${{ needs.windows-agent.result }}
+        run: |
+          python3 scripts/verify-workflow-aggregate.py windows \
+            impact="${IMPACT_RESULT}" \
+            run-windows="${RUN_WINDOWS}" \
+            windows-agent="${WINDOWS_AGENT_RESULT}"
