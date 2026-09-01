@@ -1008,7 +1008,14 @@ to a held `/proc` descriptor plus a stable manager invocation/PID/start tuple.
 The protected `Deployment lane` runs the real service-managed arm under a
 disposable account with controlled unit, generator, HOME/XDG, and container
 configuration inputs. Account commands use direct UID/GID transitions rather
-than PAM-opening `sudo -u` sessions. After the fresh manager reaches a quiescent running
+than PAM-opening `sudo -u` sessions, and the disposable manager drop-in invokes
+the user manager directly through `env -i` without a shell or inherited
+executable lookup, so neither the system manager nor PAM can add to the exact
+manager process environment. Its controlled PATH must equal systemd's compiled
+user-manager default before startup. Every installed user environment
+generator is masked before startup so later manager reloads cannot repopulate
+the block from hosted image configuration.
+After the fresh manager reaches a quiescent running
 state, the job uses its private socket to install and prove an exact
 fourteen-entry environment before starting packaged D-Bus, so the daemon
 inherits only that block. It then atomically replaces the typed manager

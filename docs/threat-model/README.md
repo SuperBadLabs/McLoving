@@ -156,7 +156,14 @@ exact owner/mode-checked hosted runner home needed to reach its inputs, and the
 job restores the original mode on every exit path;
 the disposable manager receives exact account-local HOME/XDG and identity
 values while every account command starts from an empty environment through a
-direct UID/GID transition that cannot re-import variables through PAM; before
+direct UID/GID transition that cannot re-import variables through PAM; the
+disposable manager's drop-in also replaces `ExecStart` with a direct
+`/usr/bin/env -i` invocation carrying the exact block plus systemd's expanded
+notify socket, with no shell or inherited executable lookup before the clear;
+its PATH is required to equal the manager's compiled default so generator input
+does not change when systemd normalizes it; every installed user
+environment-generator basename is masked before startup so manager reloads
+cannot repopulate host variables; before
 D-Bus starts, the manager's private socket is used to install and prove an
 exact fourteen-entry identity/path/locale/unit/Quadlet/D-Bus allowlist so the
 daemon inherits only that block; the typed manager environment is then

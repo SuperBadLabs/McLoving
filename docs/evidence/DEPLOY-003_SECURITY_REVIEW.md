@@ -183,9 +183,21 @@ operation.
 
 Independently, the wrapper starts the manager with explicit account-local HOME
 and XDG bases, exact account identity/path/locale values, and controlled unit
-and Quadlet paths. Every account command uses a direct UID/GID transition from
-an empty client environment, avoiding PAM sessions that could re-import host
-variables into the live manager. Before D-Bus starts, the wrapper uses the manager's private socket
+and Quadlet paths. The disposable `user@UID` drop-in replaces `ExecStart`
+directly with `/usr/bin/env -i`, the exact fourteen-entry block, systemd's
+single expanded `NOTIFY_SOCKET`, and `/usr/lib/systemd/systemd --user`; no shell
+or inherited executable lookup runs before the environment is cleared. Thus
+neither the system service manager nor PAM can contribute to the manager
+process environment. The wrapper also requires its controlled PATH to equal
+the user manager's compiled `systemd-path search-binaries-default`, so systemd's
+documented PATH normalization cannot give initial or reload generators a
+different input. Every account command uses a direct UID/GID
+transition from an empty client environment, avoiding later PAM sessions that
+could re-import host variables into the live manager. All installed user
+environment-generator basenames are masked at the highest-precedence runtime
+directory before manager startup, preserving the exact block across every
+later `daemon-reload`. Before D-Bus starts, the
+wrapper uses the manager's private socket
 to install the exact fourteen-entry environment and remove every inherited
 extra, then proves exact count and value. D-Bus therefore inherits the same
 block. A typed atomic manager transaction and typed exact-count/value readback
@@ -202,6 +214,16 @@ variable names through typed D-Bus and atomically replaces the manager's entire
 environment block with exactly the fourteen required
 HOME/XDG/identity/path/locale/unit/Quadlet/D-Bus entries, and requires an
 exact-count plus exact-value typed readback before the arm starts.
+
+Protected run `33473297249` (job `99747328219`) proved that manager API
+unsets cannot remove the environment inherited into the manager process by
+`user@.service`'s process environment: the hosted image variables remained
+after every bounded unset. The disposable manager drop-in now replaces
+`ExecStart` with the direct exact-environment invocation described above, moving the
+boundary before manager process creation rather than claiming a runtime API
+can erase the inherited base. The wrapper also masks the complete user
+environment-generator namespace, because those generators otherwise re-read
+host environment configuration at startup and reload independently of PAM.
 
 The wrapper makes clean state true by construction. Before starting the
 account's manager it supplies an exact `SYSTEMD_UNIT_PATH` containing only

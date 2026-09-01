@@ -10,7 +10,7 @@ set -euo pipefail
 umask 022
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-controlled_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+controlled_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 # shellcheck source=deploy/systemd-ci-lib.sh
 source "${repo_root}/deploy/systemd-ci-lib.sh"
 
@@ -39,12 +39,14 @@ checksums="$(readlink -f "$3")"
 [[ -x "${runtime_gate}" ]] || { echo "runtime gate is not executable: ${runtime_gate}" >&2; exit 1; }
 [[ -d "${release_dir}" ]] || { echo "release directory is absent: ${release_dir}" >&2; exit 1; }
 [[ -f "${checksums}" ]] || { echo "checksums are absent: ${checksums}" >&2; exit 1; }
-for command_name in systemctl loginctl podman busctl jq mount findmnt setpriv useradd userdel sha256sum; do
+for command_name in systemctl systemd-path loginctl podman busctl jq mount findmnt setpriv useradd userdel sha256sum; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || { echo "required command is absent: ${command_name}" >&2; exit 1; }
 done
 mcloving_ci_select_podman_generator
 mcloving_ci_print_podman_generator
+[[ "$(systemd-path search-binaries-default)" == "${controlled_path}" ]] \
+  || { echo "systemd user-manager default PATH differs from the controlled path" >&2; exit 1; }
 
 account=mcloving-ci
 home_dir=/home/mcloving-ci
@@ -54,6 +56,7 @@ uid=""
 generator_masks=()
 vendor_mounted=0
 account_created=0
+environment_generator_runtime_created=0
 proof_started_epoch="$(date +%s)"
 user_env=()
 
@@ -92,6 +95,9 @@ cleanup() {
   for mask in "${generator_masks[@]}"; do
     sudo rm -f -- "${mask}" >/dev/null 2>&1 || true
   done
+  if (( environment_generator_runtime_created )); then
+    sudo rmdir -- /run/systemd/user-environment-generators >/dev/null 2>&1 || true
+  fi
   if (( vendor_mounted )); then
     sudo umount -- "${vendor_root}" >/dev/null 2>&1 || true
   fi
@@ -159,21 +165,47 @@ unit_path="${home_dir}/.config/systemd/user.control:${runtime_dir}/systemd/user.
 quadlet_custom_root="${home_dir}/.config/containers/deploy003-sources"
 quadlet_install_root="${home_dir}/.config/containers/systemd"
 quadlet_path="${quadlet_custom_root}:${quadlet_install_root}"
+expected_manager_environment=(
+  "HOME=${home_dir}" \
+  "XDG_CONFIG_HOME=${home_dir}/.config" \
+  "XDG_DATA_HOME=${home_dir}/.local/share" \
+  "XDG_STATE_HOME=${home_dir}/.local/state" \
+  "XDG_CACHE_HOME=${home_dir}/.cache" \
+  "XDG_RUNTIME_DIR=${runtime_dir}" \
+  "USER=${account}" "LOGNAME=${account}" "SHELL=/bin/bash" \
+  "PATH=${controlled_path}" \
+  "LANG=C.UTF-8" \
+  "SYSTEMD_UNIT_PATH=${unit_path}" \
+  "QUADLET_UNIT_DIRS=${quadlet_path}" \
+  "DBUS_SESSION_BUS_ADDRESS=${bus_address}"
+)
 manager_dropin_dir="/etc/systemd/system/user@${uid}.service.d"
 manager_dropin="${manager_dropin_dir}/mcloving-ci.conf"
 if sudo test -e "${manager_dropin}" || sudo test -L "${manager_dropin}"; then
   echo "refusing to replace pre-existing manager drop-in ${manager_dropin}" >&2
   exit 1
 fi
+[[ -x /usr/bin/env && -x /usr/lib/systemd/systemd ]] \
+  || { echo "required manager execution input is absent" >&2; exit 1; }
 sudo install -d -m 0755 "${manager_dropin_dir}"
 dropin_tmp="$(mktemp)"
-printf '[Service]\nEnvironment="HOME=%s"\nEnvironment="XDG_CONFIG_HOME=%s/.config"\nEnvironment="XDG_DATA_HOME=%s/.local/share"\nEnvironment="XDG_STATE_HOME=%s/.local/state"\nEnvironment="XDG_CACHE_HOME=%s/.cache"\nEnvironment="XDG_RUNTIME_DIR=%s"\nEnvironment="USER=%s"\nEnvironment="LOGNAME=%s"\nEnvironment="SHELL=/bin/bash"\nEnvironment="PATH=%s"\nEnvironment="LANG=C.UTF-8"\nEnvironment="SYSTEMD_UNIT_PATH=%s"\nEnvironment="QUADLET_UNIT_DIRS=%s"\nUnsetEnvironment=CONTAINER_CONNECTION CONTAINER_HOST CONTAINER_SSHKEY CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF CONTAINERS_REGISTRIES_CONF CONTAINERS_REGISTRIES_CONF_DIR CONTAINERS_POLICY CONTAINERS_REGISTRIES_AUTH_FILE STORAGE_DRIVER STORAGE_OPTS REGISTRY_AUTH_FILE DOCKER_CONFIG PODMAN_PREEXEC_HOOKS_DIR\n' \
-  "${home_dir}" "${home_dir}" "${home_dir}" "${home_dir}" "${home_dir}" \
-  "${runtime_dir}" "${account}" "${account}" "${controlled_path}" \
-  "${unit_path}" "${quadlet_path}" \
-  > "${dropin_tmp}"
+{
+  printf '[Service]\nExecStart=\nExecStart=/usr/bin/env -i'
+  for expected_manager_environment_line in "${expected_manager_environment[@]}"; do
+    [[ "${expected_manager_environment_line}" != *[\\\"%]* ]] \
+      || { echo "manager environment cannot be encoded in the unit" >&2; exit 1; }
+    printf ' "%s"' "${expected_manager_environment_line}"
+  done
+  # systemd expands this one service-manager value as a single argument before
+  # env -i clears the inherited block and execs the user manager.
+  # shellcheck disable=SC2016
+  printf ' "NOTIFY_SOCKET=${NOTIFY_SOCKET}" /usr/lib/systemd/systemd --user\n'
+} >"${dropin_tmp}"
 sudo install -m 0644 "${dropin_tmp}" "${manager_dropin}"
 rm -f -- "${dropin_tmp}"
+[[ ! -L "${manager_dropin}" \
+  && "$(stat -c '%u:%g:%a' "${manager_dropin}")" == 0:0:644 ]] \
+  || { echo "manager drop-in is not exact root-owned input" >&2; exit 1; }
 
 # Only the selected version-matched Quadlet generator may populate the controlled generator
 # output directory. Refuse a higher-precedence replacement and mask unrelated
@@ -213,6 +245,44 @@ for generator_dir in /etc/systemd/user-generators /usr/local/lib/systemd/user-ge
   done
 done
 
+# The manager receives its complete environment from the root-owned launcher;
+# no user environment generator is admitted. Mask every installed basename at
+# the highest-precedence runtime directory before the manager starts so startup
+# and every later daemon-reload preserve the same boundary.
+if [[ -e /run/systemd/user-environment-generators \
+  || -L /run/systemd/user-environment-generators ]]; then
+  [[ -d /run/systemd/user-environment-generators \
+    && ! -L /run/systemd/user-environment-generators ]] \
+    || { echo "invalid runtime user environment generator directory" >&2; exit 1; }
+else
+  environment_generator_runtime_created=1
+fi
+sudo install -d -m 0755 /run/systemd/user-environment-generators
+for environment_generator in /run/systemd/user-environment-generators/*; do
+  [[ -e "${environment_generator}" || -L "${environment_generator}" ]] || continue
+  echo "uncontrolled runtime user environment generator exists at ${environment_generator}" >&2
+  exit 1
+done
+declare -A masked_environment_generator_names=()
+for environment_generator_dir in \
+  /etc/systemd/user-environment-generators \
+  /usr/local/lib/systemd/user-environment-generators \
+  /usr/lib/systemd/user-environment-generators; do
+  [[ -d "${environment_generator_dir}" ]] || continue
+  for environment_generator in "${environment_generator_dir}"/*; do
+    [[ -e "${environment_generator}" || -L "${environment_generator}" ]] || continue
+    environment_generator_name="${environment_generator##*/}"
+    [[ -z "${masked_environment_generator_names["${environment_generator_name}"]:-}" ]] \
+      || continue
+    environment_generator_mask="/run/systemd/user-environment-generators/${environment_generator_name}"
+    [[ ! -e "${environment_generator_mask}" && ! -L "${environment_generator_mask}" ]] \
+      || { echo "refusing to replace existing environment generator mask ${environment_generator_mask}" >&2; exit 1; }
+    sudo ln -s /dev/null "${environment_generator_mask}"
+    generator_masks+=("${environment_generator_mask}")
+    masked_environment_generator_names["${environment_generator_name}"]=1
+  done
+done
+
 sudo systemctl daemon-reload
 sudo loginctl enable-linger "${account}"
 sudo systemctl start "user@${uid}.service"
@@ -239,20 +309,6 @@ done
 [[ "${manager_startup_complete:-0}" == 1 ]] \
   || { echo "fresh user manager did not complete startup" >&2; exit 1; }
 
-expected_manager_environment=(
-  "HOME=${home_dir}" \
-  "XDG_CONFIG_HOME=${home_dir}/.config" \
-  "XDG_DATA_HOME=${home_dir}/.local/share" \
-  "XDG_STATE_HOME=${home_dir}/.local/state" \
-  "XDG_CACHE_HOME=${home_dir}/.cache" \
-  "XDG_RUNTIME_DIR=${runtime_dir}" \
-  "USER=${account}" "LOGNAME=${account}" "SHELL=/bin/bash" \
-  "PATH=${controlled_path}" \
-  "LANG=C.UTF-8" \
-  "SYSTEMD_UNIT_PATH=${unit_path}" \
-  "QUADLET_UNIT_DIRS=${quadlet_path}" \
-  "DBUS_SESSION_BUS_ADDRESS=${bus_address}"
-)
 declare -A expected_manager_environment_names=()
 for expected_manager_environment_line in "${expected_manager_environment[@]}"; do
   expected_manager_environment_names["${expected_manager_environment_line%%=*}"]=1
