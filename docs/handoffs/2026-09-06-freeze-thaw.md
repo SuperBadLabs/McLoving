@@ -55,10 +55,46 @@ resolution are enabled; force pushes and deletion are disabled. This matches
 - Default-branch commits: one, `d534a1b` (#119), the freeze publication.
 - Open pull requests: none.
 - Releases: none.
-- Workflow outcomes: the last protected-main Foundation and Windows Agent runs
-  succeeded. The one `cancelled` Foundation run on the #119 branch was
-  superseded by a later successful run on the same branch, which is `CI-001`'s
-  designed supersession behavior, not a failure.
+- Workflow outcomes, including `Release Builder`, which is `workflow_run`
+  triggered on every `Foundation` completion and therefore produces an outcome
+  the other two do not:
+  - Protected-main `Foundation` `33556596622` and `Windows Agent` `33556596621`
+    both succeeded at the baseline `c17bbaf`.
+  - `Release Builder` `33558663955` succeeded at `c17bbaf`, driven by that
+    protected-main Foundation. This is the run the freeze handoff recorded.
+  - Three further `Release Builder` runs report `skipped`: `33562371951`,
+    `33564215818`, and the two triggered today by this pull request's own
+    Foundation runs. `skipped` is the designed outcome, not a missing result:
+    the job is gated on
+    `workflow_run.conclusion == 'success' && workflow_run.head_branch == 'main'`
+    within the same repository, so a completion on a pull-request branch, or a
+    cancelled Foundation, correctly builds nothing.
+  - The one `cancelled` Foundation run on the #119 branch was superseded by a
+    later successful run on the same branch -- `CI-001`'s designed supersession
+    behavior, not a failure.
+
+- **Gap found, and it predates the thaw.** The current protected-main head
+  `d534a1b` has **no `Foundation` run, no `Windows` run, and consequently no
+  `Release Builder` run at all.** Querying every workflow run at that head
+  returns exactly two, both `Release Builder` completions triggered by this
+  pull request today. `foundation.yml` triggers on `push` to `main` with no
+  path filter, and the preceding head `c17bbaf` did receive its push-triggered
+  Foundation and Windows Agent runs, so this is specific to the #119 merge
+  rather than a configuration exclusion.
+
+  The freeze document's recorded evidence is all at `c17bbaf`, and it described
+  its own publication pull request as "the final planned September repository
+  change". The merge that produced `d534a1b` therefore never received the
+  post-merge Foundation and Windows verification the repository's protocol
+  requires, and the freeze then held the repository still for five days with
+  that gap unrecorded.
+
+  Nothing is known to be broken: `d534a1b` is documentation-only, its
+  pull-request head passed both workflows before merging, and both verifiers
+  reproduce its expected numbers. What is missing is the protected-main
+  receipt, not a passing result. Merging this thaw pull request closes the gap
+  going forward, because its own post-merge Foundation and Windows runs verify
+  the successor head.
 - Dependabot: exactly the two recorded open alerts, numbers 1 and 2, both the
   moderate `jsonwebtoken` advisory `GHSA-h395-gr6q-cpjc`, in
   `crates/controller-api/Cargo.toml` and `Cargo.lock`. The freeze deferred
