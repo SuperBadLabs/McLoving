@@ -87,9 +87,26 @@ resolution are enabled; force pushes and deletion are disabled. This matches
   own activity, not September drift -- so they are deliberately not enumerated
   here, and their count rises with each push to this branch.
 
-  The one `cancelled` Foundation run on the #119 branch was superseded by a
-  later successful run on the same branch: `CI-001`'s designed supersession
-  behavior, not a failure.
+  The #119 branch itself produced four post-baseline runs across two heads.
+  `foundation.yml` and `windows-agent.yml` trigger on the same pull-request
+  updates and share the same PR-keyed supersession, so both must be accounted
+  for at both heads:
+
+  | Head | Workflow | Run | Conclusion |
+  |---|---|---|---|
+  | `cebf21f` | Foundation | `33562011710` | `cancelled` |
+  | `cebf21f` | Windows Agent | `33562011668` | `success` |
+  | `d4b88e6` | Foundation | `33562304718` | `success` |
+  | `d4b88e6` | Windows Agent | `33562304498` | `success` |
+
+  Supersession hit one workflow and not the other, and the asymmetry is
+  explained rather than incidental: the update arrived 3m16s after the first
+  head started, which is inside Foundation's 22m runtime but well outside
+  Windows Agent's 36s, so Windows Agent had already completed and only
+  Foundation was still cancellable. The cancellation is `CI-001`'s designed
+  supersession behavior, not a failure, and no conclusion at either head is
+  unaccounted for. `d4b88e6` is the final pull-request head that merged as
+  `d534a1b`.
 
 - **Gap found, and it predates the thaw.** The current protected-main head
   `d534a1b` has **no `Foundation` run, no `Windows` run, and consequently no
