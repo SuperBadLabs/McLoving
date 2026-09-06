@@ -55,23 +55,41 @@ resolution are enabled; force pushes and deletion are disabled. This matches
 - Default-branch commits: one, `d534a1b` (#119), the freeze publication.
 - Open pull requests: none.
 - Releases: none.
-- Workflow outcomes, including `Release Builder`, which is `workflow_run`
-  triggered on every `Foundation` completion and therefore produces an outcome
-  the other two do not:
-  - Protected-main `Foundation` `33556596622` and `Windows Agent` `33556596621`
-    both succeeded at the baseline `c17bbaf`.
-  - `Release Builder` `33558663955` succeeded at `c17bbaf`, driven by that
-    protected-main Foundation. This is the run the freeze handoff recorded.
-  - Three further `Release Builder` runs report `skipped`: `33562371951`,
-    `33564215818`, and the two triggered today by this pull request's own
-    Foundation runs. `skipped` is the designed outcome, not a missing result:
-    the job is gated on
-    `workflow_run.conclusion == 'success' && workflow_run.head_branch == 'main'`
-    within the same repository, so a completion on a pull-request branch, or a
-    cancelled Foundation, correctly builds nothing.
-  - The one `cancelled` Foundation run on the #119 branch was superseded by a
-    later successful run on the same branch -- `CI-001`'s designed supersession
-    behavior, not a failure.
+- Workflow outcomes. `Release Builder` needs separate treatment because it is
+  `workflow_run` triggered on *every* `Foundation` completion, so it emits
+  outcomes that reviewing only Foundation and Windows would miss.
+
+  Protected-main `Foundation` `33556596622` and `Windows Agent` `33556596621`
+  both succeeded at the baseline `c17bbaf`.
+
+  The audited window runs from the baseline push (2026-09-01T20:39:27Z) to the
+  start of this thaw. It contains **exactly three** `Release Builder` runs, and
+  this is the complete enumeration:
+
+  | Run | Conclusion | Created | Triggered by |
+  |---|---|---|---|
+  | `33558663955` | `success` | 2026-09-01T21:01:02Z | protected-main Foundation `33556596622` at `c17bbaf` |
+  | `33562371951` | `skipped` | 2026-09-01T21:40:45Z | the cancelled #119 branch Foundation |
+  | `33564215818` | `skipped` | 2026-09-01T22:02:04Z | the successful #119 branch Foundation |
+
+  `33558663955` is the run the freeze handoff cited. No `Release Builder` run
+  exists between 2026-09-01T22:02:04Z and this thaw.
+
+  Both `skipped` results are the **designed** outcome rather than a missing
+  one. The job is gated on
+  `workflow_run.conclusion == 'success' && workflow_run.head_branch == 'main'`
+  within the same repository, so a completion on a pull-request branch, or a
+  cancelled Foundation, correctly builds nothing.
+
+  This pull request's own `Foundation` completions each trigger one further
+  `skipped` `Release Builder` run, for the same pull-request-branch reason.
+  Those are outside the audited window by construction -- they are this thaw's
+  own activity, not September drift -- so they are deliberately not enumerated
+  here, and their count rises with each push to this branch.
+
+  The one `cancelled` Foundation run on the #119 branch was superseded by a
+  later successful run on the same branch: `CI-001`'s designed supersession
+  behavior, not a failure.
 
 - **Gap found, and it predates the thaw.** The current protected-main head
   `d534a1b` has **no `Foundation` run, no `Windows` run, and consequently no
