@@ -127,9 +127,24 @@ resolution are enabled; force pushes and deletion are disabled. This matches
   Nothing is known to be broken: `d534a1b` is documentation-only, its
   pull-request head passed both workflows before merging, and both verifiers
   reproduce its expected numbers. What is missing is the protected-main
-  receipt, not a passing result. Merging this thaw pull request closes the gap
-  going forward, because its own post-merge Foundation and Windows runs verify
-  the successor head.
+  receipt, not a passing result.
+
+  **This receipt does not claim that merging closes the gap.** An earlier draft
+  did, on the reasoning that this pull request's own post-merge Foundation and
+  Windows runs would verify the successor head. That reasoning assumes exactly
+  what the finding above disproves: `d534a1b` was also a documentation-only
+  merge to protected `main`, and it produced neither run. Predicting the same
+  mechanism will work this time, in a receipt whose entire subject is that
+  mechanism silently not working, would be the same error one paragraph later.
+
+  The gap therefore closes on **observation, not on merge**. The successor head
+  is verified only once a successful `Foundation` run and a successful
+  `Windows` run are seen at that exact SHA. `docs/handoffs/CURRENT.md` makes
+  `EXEC-005` conditional on that observation, and records the query and what to
+  do when either run is missing. If they are absent, the successor head is in
+  the same unverified state this thaw was published to correct, and the
+  repository has a reproducible defect worth its own ticket rather than a
+  one-off.
 - Dependabot: exactly the two recorded open alerts, numbers 1 and 2, both the
   moderate `jsonwebtoken` advisory `GHSA-h395-gr6q-cpjc`, in
   `crates/controller-api/Cargo.toml` and `Cargo.lock`. The freeze deferred

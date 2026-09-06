@@ -61,8 +61,26 @@ first container must be prevented from masking the remainder, and the
 source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 `EXEC-005` was re-read at thaw and is still the earliest ready ticket, with
-both start gates (`EXT-002`, `DEPLOY-001`) satisfied. It is the safe next
-action. Start it on a fresh `codex/` branch; do not resume a pre-freeze one.
+both start gates (`EXT-002`, `DEPLOY-001`) satisfied. Start it on a fresh
+`codex/` branch; do not resume a pre-freeze one.
+
+**One gate first, and it is not a formality.** Before starting it, confirm by
+observation that the protected-main head created by the thaw merge produced a
+successful `Foundation` run **and** a successful `Windows` run. Do not infer
+either from the merge having happened. The thaw receipt records that the
+preceding documentation-only merge, `d534a1b`, produced neither, so a merge
+completing is not evidence that its post-merge verification ran. Query the head
+directly:
+
+```text
+gh api "repos/SuperBadLabs/McLoving/actions/runs?head_sha=<successor head>" \
+  -q '.workflow_runs[] | "\(.name) \(.status) \(.conclusion)"'
+```
+
+If either run is absent, or either concludes anything other than `success`, the
+successor head is in the same unverified state this thaw was published to
+correct. `EXEC-005` does not start until both are observed green; re-run or
+repair the verification first and record the outcome.
 
 Two items the freeze deferred are now due and are not closed by the thaw: the
 two open `jsonwebtoken` Dependabot records (one moderate advisory,
