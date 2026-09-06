@@ -80,39 +80,66 @@ neither closes nor re-opens them.
 
 ### Foundation gate
 
-`bash scripts/validate-foundation.sh` was run on HeMan and exited `101`. Thirty
-test suites reported `ok`. One suite failed:
-`-p mcloving-source-acquirer --test contained_source`, 5 passed and 15 failed,
+Discharging this step took two runs, and the first one's failure was not what
+it looked like.
+
+`bash scripts/validate-foundation.sh` exits `101` on HeMan. The failing suite is
+`-p mcloving-source-acquirer --test contained_source`: 5 passed, 15 failed,
 every failure a `sealed helper source acquirer readiness: Elapsed(())` timeout
-rather than an assertion.
+rather than an assertion. HeMan sets
+`kernel.apparmor_restrict_unprivileged_userns=1`, so the sealed helper cannot
+execute, and the script runs the suite inside a podman container where the
+`mcloving-source-acquirer` profile is not applied.
 
-That is the documented environmental condition, not a regression. HeMan sets
-`kernel.apparmor_restrict_unprivileged_userns=1`, so an unprivileged user
-namespace cannot execute the sealed helper and the acquisition path times out
-waiting for readiness. `CONTRIBUTING.md` records that the full path "only runs
-under the deployment AppArmor profile, which grants exactly `userns create`"
-and prescribes the invocation `.github/workflows/foundation.yml` uses.
+**That failure aborts the gate rather than merely reddening one suite.** The
+script runs under `set -e` and the failing test sits inside the first
+`podman run`. Everything after it was therefore never executed: the
+`--all-features` destination-observer and external-connector clippy and test
+steps in that same container, `cargo-deny`, all seven Python board/closure/
+workflow verifiers, the two `bash -n` checks, `actionlint`, TLA+ `SANY` and
+`TLC`, the Jenkins Clojure compatibility suite and plugin-directory contract,
+`gitleaks`, and the ADR/charter/threat-model/board file assertions. A first
+draft of this receipt claimed thirty green suites established a green gate.
+It did not: thirty suites is what ran before the abort, and the untested
+remainder was the majority of the gate's distinct checks.
 
-Running that prescribed path on the same tree:
+The step was therefore re-run in two parts that together cover the whole gate:
+
+1. The complete script with the single change
+   `cargo test --locked --workspace --exclude mcloving-source-acquirer`, so the
+   abort cannot mask the remainder. It ran to completion and printed
+   `McLoving foundation validation passed.`, exit `0` — cargo-deny, every
+   verifier, actionlint, TLA+, the Clojure suite (6 tests, 20 assertions, 0
+   failures), the plugin-directory contract, and gitleaks (`no leaks found`)
+   all executed and passed.
+2. The excluded package under the profile the gate requires, as
+   `CONTRIBUTING.md` and `.github/workflows/foundation.yml` prescribe:
 
 ```text
 aa-exec -p mcloving-source-acquirer -- \
   cargo test --locked -p mcloving-source-acquirer -- --test-threads=1
 ```
 
-exits `0`, with the 20 `contained_source` tests all passing in 48.48s. The same
-tests that fail bare pass under the profile, on the same commit, in the same
-worktree, which isolates the cause to the missing `userns create` grant.
+   Exit `0`, with the 20 `contained_source` tests passing in 48.48s.
 
-Two competing explanations were checked and rejected. The host-global transport
-roots `/tmp/mcloving-source-transport-16m` and `-512k` were present and intact
-and are the fixtures the suite requires, not stale corruption; and no second
-suite ran concurrently, which is the other known way these roots produce false
+The same tests fail bare and pass under the profile on the same commit and in
+the same worktree, which isolates the cause to the missing `userns create`
+grant rather than the tree. Two competing explanations were checked and
+rejected: the host-global transport roots
+`/tmp/mcloving-source-transport-16m` and `-512k` were present and intact and
+are fixtures the suite requires rather than stale corruption, and no second
+suite ran concurrently, which is the other known way those roots produce false
 failures.
 
-The complete gate is therefore green on this host once the suite is run the way
-CI runs it. The authoritative signal remains the app-bound `Foundation` context,
-which runs against this thaw's own pull request head.
+This split is not a local workaround. It is the shape the authoritative gate
+already has: CI runs `Rust workspace tests`, `Rust boundary suites`,
+`Rust lint`, and a dedicated aa-exec `Rust source-acquirer suite` as separate
+jobs. `scripts/validate-foundation.sh` is the monolithic local approximation,
+and its `set -e` coupling is why one environmental failure reads as a total
+gate failure here.
+
+The authoritative signal is the app-bound `Foundation` context on this thaw's
+own pull request head, together with the seven other required contexts.
 
 ## Step 6 — dispatch slot
 

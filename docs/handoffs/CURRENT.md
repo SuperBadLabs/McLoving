@@ -56,7 +56,9 @@ The thaw procedure is complete; its receipts are in
 [`2026-09-06-freeze-thaw.md`](2026-09-06-freeze-thaw.md). Protection was
 re-read, September drift and alerts were audited, the board and closure
 verifiers reproduce the baseline numbers, and the Foundation gate is green on
-HeMan when the source-acquirer suite is run under `aa-exec` the way CI runs it.
+HeMan when it is run the way CI runs it: the script's `set -e` abort inside the
+first container must be prevented from masking the remainder, and the
+source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 `EXEC-005` was re-read at thaw and is still the earliest ready ticket, with
 both start gates (`EXT-002`, `DEPLOY-001`) satisfied. It is the safe next
