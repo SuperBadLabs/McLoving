@@ -1,16 +1,40 @@
 # September 2026 code freeze
 
-## Effective window
+## Status: LIFTED 2026-09-06
 
-McLoving is frozen from publication of this document through
-**2026-09-30 23:59:59 America/Chicago**. The freeze expires at
-**2026-10-01 00:00:00 America/Chicago** unless the owner explicitly extends or
-lifts it. The publication pull request for this handoff is the final planned
-September repository change.
+This freeze is **no longer in force**. The owner lifted it on 2026-09-06,
+before its scheduled expiry, under the term recorded in the effective window
+below: the freeze expires "unless the owner explicitly extends or lifts it."
 
-The purpose is to preserve the verified McLoving baseline while engineering
-effort moves to Fogell. A freeze is a refusal of new mutation, not permission to
+The six-step thaw procedure at the end of this document was executed in full
+and its receipts are recorded in `docs/handoffs/2026-09-06-freeze-thaw.md`.
+Nothing below is retracted; the frozen-actions list and the state snapshot
+remain accurate as the historical record of the September window. Read them as
+history, not as a live prohibition.
+
+The lift restores ordinary board custody. It grants no product, deployment,
+credential, connector, canary, cutover, rollback, or production authority, it
+closes no ticket, and it does not relax
+`docs/related-work/FOGELL.md`: Fogell measurements still inform design while
+Fogell receipts and authority still do not transfer.
+
+## Effective window (historical)
+
+McLoving was frozen from publication of this document through
+**2026-09-30 23:59:59 America/Chicago**, expiring at
+**2026-10-01 00:00:00 America/Chicago** unless the owner explicitly extended or
+lifted it. The owner lifted it early, on 2026-09-06; the window therefore ran
+2026-09-01 to 2026-09-06. The publication pull request for this handoff was the
+final planned September repository change under the freeze.
+
+The purpose was to preserve the verified McLoving baseline while engineering
+effort moved to Fogell. A freeze is a refusal of new mutation, not permission to
 weaken verification.
+
+That premise is what changed. A measurement campaign on 2026-09-05 and
+2026-09-06 reversed the assumed direction of effort, so holding the baseline
+for its original reason no longer applied. The measurements are Fogell-side
+evidence and are recorded as such; they license no McLoving claim.
 
 ## Frozen actions
 
