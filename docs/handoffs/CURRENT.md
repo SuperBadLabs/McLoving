@@ -27,7 +27,9 @@ authority, closes no ticket, and does not relax
   pull request is the final planned September repository mutation.
 - The board verifier reports 107 tickets and 21 remaining. `EXEC-005` is the
   selected next ticket and remains `PENDING`; it was re-read at thaw and is
-  still the earliest-ready work. It is now startable on a fresh `codex/` branch.
+  still the earliest-ready work. It is **not** yet startable: it is gated on
+  observing successful `Foundation` and `Windows` runs at the protected-main
+  head the thaw merge creates. See "Safe next action".
 - The closure verifier reports 86 done, 31 receipted, 30 threat-model reviewed,
   and the admitted, ratcheted 37-item historical debt.
 - Protected-main Foundation, native Windows, and Release Builder runs are green
@@ -61,10 +63,11 @@ first container must be prevented from masking the remainder, and the
 source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 `EXEC-005` was re-read at thaw and is still the earliest ready ticket, with
-both start gates (`EXT-002`, `DEPLOY-001`) satisfied. Start it on a fresh
-`codex/` branch; do not resume a pre-freeze one.
+both board start gates (`EXT-002`, `DEPLOY-001`) satisfied. It is the next work
+to dispatch, **once the condition below is met**. When it starts, it starts on
+a fresh `codex/` branch; do not resume a pre-freeze one.
 
-**One gate first, and it is not a formality.** Before starting it, confirm by
+**That condition is not a formality.** Before starting it, confirm by
 observation that the protected-main head created by the thaw merge produced a
 successful `Foundation` run **and** a successful `Windows` run. Do not infer
 either from the merge having happened. The thaw receipt records that the

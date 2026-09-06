@@ -235,8 +235,15 @@ start gates satisfied: `EXT-002` merged as `03a1f5d` and `DEPLOY-001` merged as
 current slot. `EXEC-005` is therefore still the selected earliest-ready work,
 and it keeps that position on thaw.
 
-No pre-freeze implementation branch is resumed. Any implementation starts from
-a fresh `codex/` branch off protected `main`.
+Being earliest-ready is not the same as being startable. `EXEC-005` is
+additionally gated on observing a successful `Foundation` run and a successful
+`Windows` run at the protected-main head this thaw merge creates, for the
+reason recorded under the step 4 gap: a merge completing is not evidence that
+its post-merge verification ran. `docs/handoffs/CURRENT.md` carries that
+condition, the query, and the response when either run is missing.
+
+No pre-freeze implementation branch is resumed. When implementation does start,
+it starts from a fresh `codex/` branch off protected `main`.
 
 ## What this receipt does not do
 
