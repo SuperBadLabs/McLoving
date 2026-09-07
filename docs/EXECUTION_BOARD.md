@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-09-01
+Updated: 2026-09-06
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
@@ -746,6 +746,7 @@ boundary is too large or authority-sensitive to share a pull request safely.
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
 | Library compiler | `MIG-005` | DONE | `MIG-002`, `MIG-003` are done | Separate deny-authority worker/ledger PR; exact 228-file reconciliation and prefetched-source verification are complete |
+| Compatibility plane | `GROOVY-001` | PARALLEL | none; it decides rather than implements | Standalone decision pull request: an ADR, and a threat-model re-derivation if the answer is YES. No interpreter code crosses here, and a port, if any, is a separate ticket |
 | State transforms | `MIG-005A` | DONE | Exact admitted-case corrective closure verified | The exact one-build `build-history` denominator now has bounded deterministic forward/reverse transforms, idempotent PostgreSQL import/retrieval proof, a durable imported-cursor/predecessor-bound effect-free McLoving continuation, and pinned Jenkins reverse-import/restart/next-build continuity; private source bytes and seal metadata remain only on HeMan |
 
 ### Repository integrity
@@ -1093,6 +1094,24 @@ service-owned unit/tree and is now an explicit `DEPLOY-002` acceptance blocker;
 until that external anchor lands, ordinary or crash restart after permission
 drift is not claimed as protected. No production or Jenkins authority is
 granted by this closure.
+
+## Compatibility-plane decision (2026-09-06 Fogell campaign)
+
+A measurement campaign run on Fogell on 2026-09-05 and 2026-09-06 proposed that
+McLoving absorb Fogell's Groovy parser and structurally-sandboxed interpreter,
+on the grounds that McLoving "has no interpreter and provably evaluates no
+Groovy". The second half of that sentence is accurate and is not an oversight:
+it is `ADR 0006` taken deliberately, and it is the mitigation `TM-020` claims.
+Whether to give it up is an architecture decision, not an import, so it gets a
+ticket before any code crosses.
+
+Those measurements are Fogell-side evidence. Under `docs/related-work/FOGELL.md`
+rules 1 and 2 they may shape this ticket's design and its expected outcome, and
+they license no McLoving claim, tier assignment, or board status.
+
+| Ticket | Status | Depends on | Objective and acceptance |
+|---|---|---|---|
+| GROOVY-001 | PENDING | — | Decide whether McLoving evaluates Groovy, and if so under what trust boundary -- a decision, with no interpreter code crossing in this ticket. `ADR 0006` chose an isolated, pinned, deterministic compiler with sealed provenance and accepted a lowering tax to get it; `docs/architecture/JENKINS_COMPILER_WORKER_V1.md` records that Groovy is used only to construct a CONVERSION-phase AST; and `TM-020` mitigates "compatibility worker executes untrusted Groovy" with the words *never evaluated*. An interpreter retires that sentence, so the threat entry is not amended around the change: it is re-derived against whatever boundary replaces it, or the decision is NO. Fogell's founding measurement was a 74.3% lowering tax against exactly this shape, and its `fogell:docs/adr/0002` answers it by interpreting the AST directly; `docs/related-work/FOGELL.md` already records that only differential receipts and `docs/adr/0011-performance-contract.md` can arbitrate between the two positions. The 2026-09-05/06 campaign is the first evidence that bears on it, and it does not support the tax being a product-level cost: across six real OSS builds McLoving beat the pinned Jenkins oracle by more than Fogell did, the trivial-step microbenchmark ranked the two engines in the opposite order from real work, and under six concurrent builds the engine choice and no engine at all were indistinguishable. None of that is a McLoving receipt and none of it decides this ticket; it is why the ticket exists rather than the answer. Acceptance, fail-closed. (1) An ADR that records the decision and its consequence for compatibility scope, in one of two shapes: NO, McLoving continues to compile rather than evaluate, and the ADR states plainly which Jenkinsfile constructs are therefore permanently out of scope rather than merely unimplemented; or YES, with the execution trust boundary named and `TM-020` re-derived against it. A YES that leaves `TM-020` reading *never evaluated* is not a decision, it is a contradiction with a merge commit. (2) A YES additionally requires a threat-model entry for evaluating attacker-authored pipeline source, and it must state the isolation the boundary actually has rather than the isolation it wants: neither project today has hostile-tenant execution isolation, Fogell's own threat model records that a VM boundary is required for it, and McLoving's hardened rootless-Podman worker is closer but is not that boundary either. (3) Either shape must state what happens to the over-acceptance defect the campaign measured, because an absorbed interpreter inherits it: given a Jenkinsfile whose quoting is malformed, the pinned Jenkins oracle refuses it at compilation and runs nothing, while Fogell parses it and executes two stages including a real Maven invocation. That is fail-open admission, and it is the exact inverse of the property `ARCH-002` proves at every schema level today. No differential case covers it in either project. A YES therefore requires a McLoving differential case that reproduces it and FAILS against any candidate interpreter before that interpreter is eligible for a port ticket -- a refusal that does not name its own offender does not count, and a case that passes for the wrong reason is why this is stated as a red-first gate rather than a checklist item. (4) Any port that follows is a separate ticket with its own review, threat-model and evidence gates, as `docs/related-work/FOGELL.md` rule 4 already requires; this ticket does not pre-authorize it and does not estimate it. (5) This ticket grants no production, canary, cutover, credential, or Jenkins authority, and closes none of the open compatibility work. |
 
 ## Migration campaign tickets
 

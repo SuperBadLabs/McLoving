@@ -304,9 +304,13 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
     "ALPHA-001",
 })
 
-# The board's 16 tables in 4 row formats. Only the nine whose first header
-# cell is `Ticket` carry authoritative status; the lane, batch and dispatch
-# tables are redundant views and are cross-checked against them.
+# The board's tables come in 4 row formats. Only those whose first header cell
+# is `Ticket` carry authoritative status; the lane, batch and dispatch tables
+# are redundant views and are cross-checked against them. The per-format counts
+# live in EXPECTED_TABLES below and are ratcheted there; this comment states no
+# number of its own, because a count repeated in prose beside the constant that
+# holds it goes stale on the first raise and then misleads exactly the reader
+# the ratchet was written for.
 TICKET_TABLE_HEADER = "Ticket"
 # Ticket | Status | Depends on | Objective and acceptance
 TICKET_TABLE_COLUMNS = 4
@@ -321,8 +325,13 @@ KNOWN_TABLE_HEADERS = frozenset(
     {TICKET_TABLE_HEADER, LANE_TABLE_HEADER, BATCH_TABLE_HEADER, DISPATCH_TABLE_HEADER}
 )
 # Raise a count when a table is genuinely added; a change here is deliberate.
+#
+# 9 -> 10 on 2026-09-06: the `Compatibility-plane decision (2026-09-06 Fogell
+# campaign)` section adds a ticket table holding `GROOVY-001`. Raised with the
+# section, not ahead of it, which is the point of the ratchet: an unadmitted
+# table is invisible to every check in this file while the gate stays green.
 EXPECTED_TABLES = {
-    TICKET_TABLE_HEADER: 9,
+    TICKET_TABLE_HEADER: 10,
     LANE_TABLE_HEADER: 5,
     BATCH_TABLE_HEADER: 1,
     DISPATCH_TABLE_HEADER: 1,
@@ -336,7 +345,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 107
+MINIMUM_TICKET_ROWS = 108
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
