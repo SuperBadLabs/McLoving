@@ -304,9 +304,13 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
     "ALPHA-001",
 })
 
-# The board's 16 tables in 4 row formats. Only the nine whose first header
-# cell is `Ticket` carry authoritative status; the lane, batch and dispatch
-# tables are redundant views and are cross-checked against them.
+# The board's tables come in 4 row formats. Only those whose first header cell
+# is `Ticket` carry authoritative status; the lane, batch and dispatch tables
+# are redundant views and are cross-checked against them. The per-format counts
+# live in EXPECTED_TABLES below and are ratcheted there; this comment states no
+# number of its own, because a count repeated in prose beside the constant that
+# holds it goes stale on the first raise and then misleads exactly the reader
+# the ratchet was written for.
 TICKET_TABLE_HEADER = "Ticket"
 # Ticket | Status | Depends on | Objective and acceptance
 TICKET_TABLE_COLUMNS = 4
