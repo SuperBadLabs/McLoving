@@ -25,15 +25,20 @@ authority, closes no ticket, and does not relax
   `valid`.
 - There were no open pull requests at authoring time. This handoff publication
   pull request is the final planned September repository mutation.
-- The board verifier reports 108 tickets and 22 remaining. `EXEC-005` is the
-  selected dispatch ticket and remains `PENDING`; it was re-read at thaw and is
-  still the earliest-ready work. Before starting it, evaluate the standing
-  successor-head verification gate against the current protected-main head --
-  see "Safe next action". That gate is not dischargeable by this file.
-  `GROOVY-001` was added on 2026-09-06 and is also `PENDING`; it is a
-  standalone decision lane and does not occupy the dispatch slot.
-- The closure verifier reports 86 done, 31 receipted, 30 threat-model reviewed,
-  and the admitted, ratcheted 37-item historical debt.
+- Board and closure totals are **not restated here**. Run
+  `scripts/verify-execution-board.py` and
+  `scripts/verify-ticket-closure-receipts.py`; they are the live source, and a
+  count copied into this file is stale on the next ticket. As an observation
+  rather than a current-state claim: on 2026-09-07 they reported 109 tickets
+  with 23 remaining, and 86 done with the admitted, ratcheted 37-item debt.
+- `EXEC-005` is the selected dispatch ticket and remains `PENDING`; it was
+  re-read at thaw and is still the earliest-ready work. Before starting it,
+  evaluate the standing successor-head verification gate against the current
+  protected-main head -- see "Safe next action". That gate is not dischargeable
+  by this file.
+- `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
+  `PARALLEL` lane and neither occupies the dispatch slot. Read the board rather
+  than this list for the full set; that is the point of the bullet above.
 - Protected-main Foundation, native Windows, and Release Builder runs are green
   at the authoring baseline. All eight required contexts remain bound to GitHub
   Actions app id `15368`.

@@ -808,7 +808,7 @@ tickets, because it gates `CANARY-001`, `CUTOVER-001`, and `REL-002`.
 
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
-| Claim staleness | `HYG-003` | PARALLEL | `HYG-002` is done | Standalone hygiene pull request generalising the existing protected-main pin rule to the class review measured; every new check proved red against real pre-fix text from history and green against the receipts that record observations correctly |
+| Claim staleness | `HYG-003` | PARALLEL | `HYG-002` is done | Standalone hygiene pull request generalising the existing protected-main pin rule to the class review measured. Nothing is proved yet: the ticket must show each new check red against real pre-fix text taken from history and green against the receipts that record observations correctly, and must name the cases it leaves to written convention rather than gating |
 
 ### Dispatch discipline
 
