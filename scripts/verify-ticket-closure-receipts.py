@@ -321,8 +321,13 @@ KNOWN_TABLE_HEADERS = frozenset(
     {TICKET_TABLE_HEADER, LANE_TABLE_HEADER, BATCH_TABLE_HEADER, DISPATCH_TABLE_HEADER}
 )
 # Raise a count when a table is genuinely added; a change here is deliberate.
+#
+# 9 -> 10 on 2026-09-06: the `Compatibility-plane decision (2026-09-06 Fogell
+# campaign)` section adds a ticket table holding `GROOVY-001`. Raised with the
+# section, not ahead of it, which is the point of the ratchet: an unadmitted
+# table is invisible to every check in this file while the gate stays green.
 EXPECTED_TABLES = {
-    TICKET_TABLE_HEADER: 9,
+    TICKET_TABLE_HEADER: 10,
     LANE_TABLE_HEADER: 5,
     BATCH_TABLE_HEADER: 1,
     DISPATCH_TABLE_HEADER: 1,
@@ -336,7 +341,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 107
+MINIMUM_TICKET_ROWS = 108
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
