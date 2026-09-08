@@ -56,7 +56,7 @@ installation in distinct temporary homes, with normal host ownership checks.
 | Digest-read median per installation, seconds | 1.868, 1.869 | 1.649, 1.679 |
 
 This is approximately 31% less installation time and 11% less digest-read
-time on this host; the hosted full-gate reduction remains to be measured.
+time on this host; the later hosted observations are recorded below.
 Filesystem, CPU, runner, and fixed verification costs prevent extrapolating
 an 81% payload-size reduction into an 81% end-to-end speedup.
 
@@ -64,8 +64,8 @@ Focused checks also passed: the stripped CLI executes, stale checksums reject
 a modified binary without changing the current release, a newly sealed
 upgrade changes the current release, and rollback restores its predecessor.
 Workflow aggregate tests (11), actionlint, shell syntax, and whitespace checks
-passed. Full smoke and controlled-systemd coverage remains required on the
-candidate PR; these local checks do not substitute for either hosted lane.
+passed. These local checks did not substitute for either hosted lane; the
+corrected-head full hosted validation is recorded below.
 
 ## Hosted precursor and correction
 
@@ -88,6 +88,40 @@ systemd qualification follows from this run.
 The correction removes the precursor's workflow edit entirely. Only the smoke
 fixture copies are stripped; systemd copies and its exact byte-identity oracle
 remain unchanged. The smoke script content is identical to the precursor's
-passed matrix. Full corrected-head hosted Foundation and Windows validation,
-and independent review of the final accounting, remain pending. CI-004 stays
-ACTIVE; no closure attribution or closed-ticket ratchet entry is claimed.
+passed matrix. At this correction point, full corrected-head hosted validation was
+still pending and CI-004 remained ACTIVE. The subsequent evidence follows.
+
+## Corrected-head full hosted validation
+
+[Foundation run 34289733746](https://github.com/SuperBadLabs/McLoving/actions/runs/34289733746)
+and [Windows run 34289733750](https://github.com/SuperBadLabs/McLoving/actions/runs/34289733750)
+both passed exact corrected head
+`3880043226f54b35984defc0d09957e5ff1d26ac`. Windows classification and aggregate
+passed with the native job explicitly skipped under the unchanged classifier.
+Deployment job `102273373588` ran the complete smoke and controlled-systemd
+lanes; its final exact-identity check and both runtime tests passed (2 passed,
+0 failed, 0 ignored).
+
+| Observed hosted duration | Adjacent PR #124 baseline | Corrected PR #125 |
+|---|---|---|
+| Smoke step | 16m23s | 10m59s |
+| Controlled-systemd step (unchanged) | 3m06s | 2m30s |
+| Complete deployment job | 22m02s | 15m17s |
+| Foundation run start to aggregate completion | 22m48s | 15m32s |
+
+Corrected smoke timestamps are 23:16:06–23:27:05 UTC; systemd is
+23:27:22–23:29:52; the job is 23:14:37–23:29:54; and Foundation is
+23:14:33–23:30:05, all on September 8. Baseline Foundation starts
+22:36:46 and its aggregate completes 22:59:34. The observed full-workflow
+reduction is 7m16s (31.9%); the smoke reduction is 5m24s (33.0%).
+
+This is an observed before/after comparison, not a guaranteed or isolated
+causal estimate. Even the unchanged systemd step became faster, and the two
+identical stripped smoke runs varied from 13m58s to 10m59s. Runner load,
+setup/queue time, and filesystem effects contribute. No systemd optimization
+or production-performance improvement is claimed.
+
+CI-004 implementation acceptance now has complete corrected-head evidence.
+Final closure-metadata head checks, independent review, protected merge, and
+post-merge verification remain separate obligations; these receipts bind the
+unchanged implementation content, not an untested future metadata head.

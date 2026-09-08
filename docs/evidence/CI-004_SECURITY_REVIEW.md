@@ -1,10 +1,14 @@
-# CI-004 security review working record
+# CI-004 security review
 
 ## Status and exact scope
 
-CI-004 remains ACTIVE. This record is not closure evidence: corrected-head
-hosted validation and independent final review are still pending. There is no
-closure-attribution entry or CLOSED_TICKETS entry for CI-004.
+CI-004 implementation acceptance is complete at exact corrected head
+`3880043226f54b35984defc0d09957e5ff1d26ac`. Independent source/accounting review
+found no actionable findings, and the full corrected-head Foundation and
+classified Windows gates passed. This closure-metadata successor adds the
+affirmative threat attribution and closed-ticket membership. Its own final
+head checks, protected merge, and post-merge verification remain pending;
+this document does not claim they have occurred.
 
 The retained implementation strips only debug sections from disposable smoke
 fixture copies before their checksum manifest is sealed. The smoke script is
@@ -32,9 +36,16 @@ but FAILED the controlled-systemd final runtime gate: its installed stripped
 controller differed from the unstripped controller the test would spawn. The
 identity gate correctly refused; the correction preserves the original systemd
 fixture and equality gate without weakening either. The passed precursor smoke
-matrix covers the unchanged smoke-script content only. Full corrected-head
-Foundation and Windows checks remain mandatory; no full-gate improvement,
-merged closure, or production capability is claimed.
+matrix covers the unchanged smoke-script content only. Corrected head
+`3880043226f54b35984defc0d09957e5ff1d26ac` subsequently passed Foundation run
+`34289733746` and Windows run `34289733750`. Deployment job `102273373588`
+passed the entire smoke matrix, controlled-systemd install/upgrade/rollback,
+exact controller-identity check, and both deployable-runtime tests (2 passed,
+0 failed, 0 ignored). Windows classification and its aggregate passed; the
+native Windows job was explicitly skipped by the unchanged classifier, so
+this is no claim of a new native-Windows execution campaign. The timing
+record distinguishes observed full-workflow duration from causal speed claims.
+No merged closure or production capability is claimed.
 
 ## Threat review scope and residuals
 
@@ -45,15 +56,17 @@ merged closure, or production capability is claimed.
   CI-004 because both own the deployment smoke script.
 - TM-052: all workflow jobs, tests, required context names, aggregate needs,
   literal-success behavior, and protected-main requirements remain unchanged.
-  The final source and its bookkeeping still need independent review and all
+  The corrected source and initial accounting passed independent review.
+  Final closure metadata still needs its own independent review and all
   exact-head checks before merge.
 - TM-016 and TM-023: the host-provided GNU `strip` utility becomes an explicit
   smoke-harness prerequisite. Its bytes/version are not newly pinned by this
   change. Trust in the CI runner's binutils installation is an explicit
   residual: a compromised tool could alter executable code before checksums
   are generated. This is a test-fixture trust assumption, not an assertion
-  that checksums authenticate the transformer. Review owns this residual; no
-  production release-builder toolchain change follows.
+  that checksums authenticate the transformer. CI maintainers own this
+  residual, reviewed on 2026-09-08; no production release-builder toolchain
+  change follows.
 - TM-042: production release artifacts, signing, provenance, and deployment
   authority are unchanged. Nothing in this ticket signs or releases a fixture.
 
@@ -63,11 +76,16 @@ symbol names, and unwind information remain present. The failed precursor is
 retained as evidence that those semantic checks do not replace exact binary
 identity where the deployment contract requires it.
 
-## Remaining closure obligations
+## Final metadata and merge obligations
 
-Independent review must approve the corrected scope and these residuals, the
-CI-004/SEC-005 graph edge, the 113-row floor, and the absence of premature
-closure attribution. Corrected source must pass all hosted gates. Only then
-may CI-004 become DONE with an affirmative threat-model attribution and the
-closed-ticket membership ratchet advanced. The selected JCOMP-001 milestone
-and its dispatch are unchanged.
+Independent review of corrected head 3880043 covered the smoke-only scope,
+unchanged exact systemd identity, source pins, the CI-004/SEC-005 graph edge,
+and host-strip residual. All 49 board tests, 78 closure tests, and 11 aggregate
+tests passed locally. The final metadata successor must independently pass its
+own review and protected checks before merge, with protected-main verification
+afterward. Implementation script and workflow content remain bound by the
+hashes above; a metadata update cannot silently replace that tested source.
+
+The row floor remains 113. CI-004 now enters CLOSED_TICKETS and the threat
+closure-attribution table; the admitted historical debt remains 37. The
+selected JCOMP-001 milestone and dispatch remain unchanged.

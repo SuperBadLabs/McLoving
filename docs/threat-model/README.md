@@ -421,17 +421,20 @@ inputs and a fresh explicit one-action owner grant.
 | Multibranch and organization-folder discovery | DISC-001 |
 | Deny-authority production shadow qualification | SHADOW-001 |
 
-## CI-004 smoke-fixture review in progress
+## CI-004 smoke-fixture closure review
 
-CI-004 is ACTIVE pending corrected-head hosted verification and independent
-review. Its working record is `docs/evidence/CI-004_SECURITY_REVIEW.md`.
-TM-050 and TM-052 retain every existing deployment-integrity assertion and
-merge-authority condition. The precursor's systemd byte-identity failure is
-recorded; systemd fixture transformation is removed instead of relaxing that
-oracle. TM-016 and TM-023 carry an explicit host-binutils trust residual for
-the smoke harness's unpinned `strip` executable. TM-042's production release
-and signing boundary is unchanged. This section does not attribute closure;
-CI-004 earns an entry below only after its required evidence and review pass.
+CI-004 implementation acceptance is complete at exact corrected head
+`3880043226f54b35984defc0d09957e5ff1d26ac`, independently reviewed and verified
+by full Foundation and classified Windows gates. The review and evidence are
+in `docs/evidence/CI-004_SECURITY_REVIEW.md`. TM-050 and TM-052 retain every
+existing deployment-integrity assertion and merge-authority condition. The
+failed precursor is retained: systemd fixture transformation was removed, and
+the original exact byte-identity oracle then passed with both runtime tests.
+TM-016 and TM-023 retain the explicit host-binutils trust residual for the
+smoke harness's unpinned `strip` executable; CI maintainers own that fixture
+trust assumption. TM-042's production release/signing boundary is unchanged.
+Final closure-metadata head checks and protected-main verification remain
+required; this review grants no production authority.
 
 ## Closure attribution
 
@@ -460,6 +463,7 @@ had never claimed one.
 | CANARY-000 | `docs/evidence/CANARY-000_SECURITY_REVIEW.md` |
 | CI-002 | `docs/evidence/CI-002_SECURITY_REVIEW.md` |
 | CI-003 | `docs/evidence/CI-003_SECURITY_REVIEW.md` |
+| CI-004 | `docs/evidence/CI-004_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
 | DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
