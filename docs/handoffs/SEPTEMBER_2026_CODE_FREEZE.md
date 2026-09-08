@@ -20,7 +20,7 @@ Fogell receipts and authority still do not transfer.
 
 ## September 8 execution priority
 
-The owner confirmed resumed implementation on 2026-09-08 and selected Jenkins
+The owner confirmed that implementation should resume on 2026-09-08 and selected Jenkins
 compatibility M1, the sequential `JCOMP-001` through `JCOMP-003` lane. This
 changes dispatch priority under the existing full thaw; it does not reinstate
 a freeze on other work. See `docs/handoffs/CURRENT.md` for the standing
