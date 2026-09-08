@@ -17,25 +17,46 @@ deployment, credential, connector, canary, cutover, rollback, or production
 authority, closes no ticket, and does not relax
 [`docs/related-work/FOGELL.md`](../related-work/FOGELL.md).
 
+## September 8 priority: Jenkins compatibility M1
+
+The owner selected broader pipeline support with Linux sequential Declarative
+pipelines and literal shell steps as the first milestone. The selected slot is
+now `JCOMP-001` (`PENDING`), then `JCOMP-002` and `JCOMP-003`, one PR at a time.
+The [board](../EXECUTION_BOARD.md) holds their complete acceptance criteria.
+The existing exact-source compiler admission is not general syntax support;
+M1 must earn a new versioned differential claim through contained submitted
+jobs, with authored fixtures and original-corpus coverage reported separately.
+
+The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
+`SEC-005` -> `CASE-001`; `EXEC-005` additionally waits for `JCOMP-003`.
+`GROOVY-001` and `HYG-003` retain their pending parallel lanes. M1 keeps the
+current compile-only architecture; an interpreter port requires a separate
+decision and ticket. Shared contract or documentation boundaries serialize.
+
+Use independent subagents for compiler/admission inspection and differential
+fixture design. Verify HeMan's Qwen model and connectivity before assigning
+cited corpus analysis or fixture drafts. Agent review is required, and model
+output cannot serve as Jenkins oracle evidence. Qwen is optional support.
+
 ## Read this first
 
-- Authoring baseline: protected `main`
+- September 1 authoring baseline: protected `main`
   `c17bbafafe4f983b6e936cd2f57245edabfb1ffd`, tree
   `dddf3c31edd2aa6f41d1614e119367beaa8dca5b`, GitHub-verified with reason
   `valid`.
-- There were no open pull requests at authoring time. This handoff publication
-  pull request is the final planned September repository mutation.
+- At the September 1 authoring time there were no open pull requests, and the
+  freeze publication was the final planned September mutation. The September 6
+  thaw superseded that plan; inspect GitHub for current open pull requests.
 - Board and closure totals are **not restated here**. Run
   `scripts/verify-execution-board.py` and
   `scripts/verify-ticket-closure-receipts.py`; they are the live source, and a
   count copied into this file is stale on the next ticket. As an observation
-  rather than a current-state claim: on 2026-09-07 they reported 109 tickets
-  with 23 remaining, and 86 done with the admitted, ratcheted 37-item debt.
-- `EXEC-005` is the selected dispatch ticket and remains `PENDING`; it was
-  re-read at thaw and is still the earliest-ready work. Before starting it,
-  evaluate the standing successor-head verification gate against the current
-  protected-main head -- see "Safe next action". That gate is not dischargeable
-  by this file.
+  rather than a current-state claim: on 2026-09-08 the reorganized local board
+  reported 112 tickets with 26 remaining, and 86 done with the admitted, ratcheted 37-item debt.
+- `JCOMP-001` is the selected dispatch ticket and remains `PENDING`. Before
+  starting it, evaluate the standing successor-head verification gate against
+  the current protected-main head -- see "Safe next action". That gate is not
+  dischargeable by this file.
 - `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
   `PARALLEL` lane and neither occupies the dispatch slot. Read the board rather
   than this list for the full set; that is the point of the bullet above.
@@ -69,11 +90,12 @@ HeMan when it is run the way CI runs it: the script's `set -e` abort inside the
 first container must be prevented from masking the remainder, and the
 source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
-`EXEC-005` was re-read at thaw and is still the earliest ready ticket, with
-both board start gates (`EXT-002`, `DEPLOY-001`) satisfied. It is the next work
-to dispatch, **once the condition below is met against the head that is current
-when you read this**. When it starts, it starts on a fresh `codex/` branch; do
-not resume a pre-freeze one.
+The September 8 priority replaces the thaw's `EXEC-005` selection with
+`JCOMP-001`; its foundation predecessors are `MIG-003` and `DIFF-001`.
+Before starting, refresh protected main, open PRs, alerts and protection,
+run the board/closure and full Foundation gates, and observe the condition
+below against the head that is current when you read this. Use a fresh
+`codex/` branch; do not resume a pre-freeze implementation branch.
 
 **The condition is a standing gate, not a box this file can tick.** It is
 evaluated against whatever protected-main head is current, so no document can
