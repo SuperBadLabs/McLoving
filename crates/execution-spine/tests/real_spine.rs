@@ -2750,7 +2750,12 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
     // already lost its fence that way under host load and was widened to 3s for
     // exactly this reason; this test carried the same 1s lease and the same
     // hazard. Widened with it, and the waits below are derived from the constant
-    // so the two stay coupled.
+    // so the two stay coupled. The initial `admitted_claim` lease takes it too:
+    // the worker config only governs the renewal interval and the extension, so
+    // a claim granted for 1s can expire before `run_claim` reaches its first
+    // renewal and fail the run with StaleAuthority before any dispatch. That is
+    // the startup half of the same window, and the sibling above already passes
+    // one constant to both.
     const LEASE_SECONDS: i32 = 3;
     // Bounds the pinned fixture services, and therefore bounds how long
     // the waits below may legitimately take.
@@ -2763,7 +2768,7 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
         &store,
         runtime_effect_spec(),
         "effect-crash-after-dispatch",
-        1,
+        LEASE_SECONDS,
     )
     .await;
     let root = tempfile::tempdir().unwrap();
