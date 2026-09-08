@@ -122,6 +122,8 @@ setup/queue time, and filesystem effects contribute. No systemd optimization
 or production-performance improvement is claimed.
 
 CI-004 implementation acceptance now has complete corrected-head evidence.
-Final closure-metadata head checks, independent review, protected merge, and
-post-merge verification remain separate obligations; these receipts bind the
-unchanged implementation content, not an untested future metadata head.
+The ticket remains ACTIVE until final-head checks, independent review,
+protected merge, and post-merge verification complete. Passing implementation
+tests does not earn closed-ticket attribution or satisfy downstream ticket
+dependencies. These receipts bind the unchanged implementation content, not
+an untested future metadata head.

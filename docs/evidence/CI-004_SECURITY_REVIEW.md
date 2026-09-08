@@ -5,10 +5,11 @@
 CI-004 implementation acceptance is complete at exact corrected head
 `3880043226f54b35984defc0d09957e5ff1d26ac`. Independent source/accounting review
 found no actionable findings, and the full corrected-head Foundation and
-classified Windows gates passed. This closure-metadata successor adds the
-affirmative threat attribution and closed-ticket membership. Its own final
-head checks, protected merge, and post-merge verification remain pending;
-this document does not claim they have occurred.
+classified Windows gates passed. CI-004 nevertheless remains ACTIVE: final-head
+checks, protected merge, and post-merge verification remain pending. There is
+no closure-attribution entry or closed-ticket membership for CI-004. Passing
+implementation tests does not satisfy its downstream dependency before the
+stated closure gates complete.
 
 The retained implementation strips only debug sections from disposable smoke
 fixture copies before their checksum manifest is sealed. The smoke script is
@@ -57,8 +58,8 @@ No merged closure or production capability is claimed.
 - TM-052: all workflow jobs, tests, required context names, aggregate needs,
   literal-success behavior, and protected-main requirements remain unchanged.
   The corrected source and initial accounting passed independent review.
-  Final closure metadata still needs its own independent review and all
-  exact-head checks before merge.
+  The final source still needs its own independent review and all exact-head
+  checks before merge, followed by protected-main verification before closure.
 - TM-016 and TM-023: the host-provided GNU `strip` utility becomes an explicit
   smoke-harness prerequisite. Its bytes/version are not newly pinned by this
   change. Trust in the CI runner's binutils installation is an explicit
@@ -86,6 +87,11 @@ own review and protected checks before merge, with protected-main verification
 afterward. Implementation script and workflow content remain bound by the
 hashes above; a metadata update cannot silently replace that tested source.
 
-The row floor remains 113. CI-004 now enters CLOSED_TICKETS and the threat
-closure-attribution table; the admitted historical debt remains 37. The
+The row floor remains 113. CI-004 stays ACTIVE and enters neither CLOSED_TICKETS
+nor the threat closure-attribution table until its protected merge and
+post-merge verification complete. The review finding against precursor
+`261858401e849f8f3b13892bf72b4c063701bdda` correctly identified that premature
+DONE status would satisfy downstream dependencies despite missing those gates;
+that candidate attribution and membership are removed. No previously merged
+closed-ticket membership is removed. Historical debt remains 37, and the
 selected JCOMP-001 milestone and dispatch remain unchanged.
