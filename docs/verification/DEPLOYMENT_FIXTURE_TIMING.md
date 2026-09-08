@@ -16,14 +16,14 @@ deployment verification, rather than Rust compilation, as the critical path.
 
 ## Change
 
-After copying each built executable into the disposable smoke or systemd
+After copying each built executable into the disposable smoke
 release fixture, run `strip --strip-debug` before generating checksums.
 Every installation, digest read, upgrade, rollback, and refusal assertion
 still runs against the entire sealed fixture. There are no cached digest
 verdicts, skipped suites, new conditionals, or changed aggregate dependencies.
 
 The original `target/debug` outputs, compilation profile, debug assertions,
-release builder, and published release policy remain unchanged. The fixture
+systemd fixture, release builder, and published release policy remain unchanged. The fixture
 retains executable code, allocated data, symbol names, and unwind sections.
 Source-line debug information is absent from the disposable copy; the build
 outputs retain it for diagnosis.
@@ -66,3 +66,28 @@ upgrade changes the current release, and rollback restores its predecessor.
 Workflow aggregate tests (11), actionlint, shell syntax, and whitespace checks
 passed. Full smoke and controlled-systemd coverage remains required on the
 candidate PR; these local checks do not substitute for either hosted lane.
+
+## Hosted precursor and correction
+
+[PR #125 precursor run 34287782278](https://github.com/SuperBadLabs/McLoving/actions/runs/34287782278)
+tested exact head `4e93d5d35caa5d827d18cd49803bc73ecdbcdb7d`. Its complete
+smoke matrix passed in 13m58s (22:50:28–23:04:26 UTC on September 8).
+The adjacent [PR #124 run 34286787846](https://github.com/SuperBadLabs/McLoving/actions/runs/34286787846),
+head `3e7255d8b1150152bd9ecc331a01d6bdf3d4a321`, passed the unchanged smoke
+matrix in 16m23s (22:39:32–22:55:55 UTC): the observed smoke reduction was
+2m25s, or 14.8%. Against the older 15m51s baseline, it was 1m53s, or 11.9%.
+These are individual hosted observations, not a statistically controlled claim.
+
+The precursor workflow FAILED. Its controlled-systemd final runtime gate
+correctly refused the stripped installed controller because it was not
+byte-identical to the unstripped controller beside the prebuilt runtime test.
+The service-managed install, upgrade, and rollback had run, but they did not
+complete the required final runtime gate. No full-workflow speedup or successful
+systemd qualification follows from this run.
+
+The correction removes the precursor's workflow edit entirely. Only the smoke
+fixture copies are stripped; systemd copies and its exact byte-identity oracle
+remain unchanged. The smoke script content is identical to the precursor's
+passed matrix. Full corrected-head hosted Foundation and Windows validation,
+and independent review of the final accounting, remain pending. CI-004 stays
+ACTIVE; no closure attribution or closed-ticket ratchet entry is claimed.

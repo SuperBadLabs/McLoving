@@ -595,10 +595,6 @@ jobs:
           install -d -m 0755 "${release_dir}"
           for binary in mcloving-controller mcloving-agent mcloving-cli mcloving-identity-admin; do
             install -m 0755 "target/debug/${binary}" "${release_dir}/${binary}"
-            # Match the smoke fixture: retain executable code, symbols and
-            # unwind data while avoiding repeated hashing of debug sections.
-            # Strip the disposable copy before sealing its exact checksums.
-            strip --strip-debug "${release_dir}/${binary}"
           done
           (
             cd "${release_dir}"

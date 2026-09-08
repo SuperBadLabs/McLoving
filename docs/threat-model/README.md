@@ -421,6 +421,18 @@ inputs and a fresh explicit one-action owner grant.
 | Multibranch and organization-folder discovery | DISC-001 |
 | Deny-authority production shadow qualification | SHADOW-001 |
 
+## CI-004 smoke-fixture review in progress
+
+CI-004 is ACTIVE pending corrected-head hosted verification and independent
+review. Its working record is `docs/evidence/CI-004_SECURITY_REVIEW.md`.
+TM-050 and TM-052 retain every existing deployment-integrity assertion and
+merge-authority condition. The precursor's systemd byte-identity failure is
+recorded; systemd fixture transformation is removed instead of relaxing that
+oracle. TM-016 and TM-023 carry an explicit host-binutils trust residual for
+the smoke harness's unpinned `strip` executable. TM-042's production release
+and signing boundary is unchanged. This section does not attribute closure;
+CI-004 earns an entry below only after its required evidence and review pass.
+
 ## Closure attribution
 
 Machine-readable, and read by `scripts/verify-ticket-closure-receipts.py` as the
