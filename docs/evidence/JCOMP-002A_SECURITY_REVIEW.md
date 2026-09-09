@@ -105,6 +105,29 @@ stale-session/fence refinement changed tests only, passed focused Clippy, and
 regenerated the complete contained campaign above. Protected PR and exact-main
 checks remain separate obligations.
 
+## Independent review disposition
+
+Copilot reviewed PR #130 at `f22226468ce26ae0824072503d31d46d165abe2b`
+on 2026-09-09 (review `PRR_kwDOTmTe488AAAABMzN6fQ`), including the
+Foundation workflow, aggregate verifier, gate controls and runtime driver.
+Its sole comment, `3968118329`, asserted that SET LOCAL before SET TRANSACTION
+would reject the projection at runtime. This is a false positive: PostgreSQL
+requires the isolation change before a data query, not before SET LOCAL.
+
+A separate disposable PostgreSQL 17.6 instance from the pinned image
+`sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`
+was run with no network, no published ports and tmpfs data, then removed.
+The exact sequence `BEGIN; SET LOCAL "mcloving.organization_id" =
+'00000000-0000-0000-0000-000000000001'; SET TRANSACTION ISOLATION LEVEL
+REPEATABLE READ, READ ONLY;` succeeded. SHOW reported `repeatable read`,
+`on`, and the exact tenant UUID. The negative control `BEGIN; SELECT 1;
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY;` failed with
+`SET TRANSACTION ISOLATION LEVEL must be called before any query`.
+The protected PostgreSQL job `102456048603` also passed the projection's
+actual concurrent-reader and shipped-runtime cases. No implementation change
+is warranted by this finding; future changes that query inside
+`tenant_transaction` must preserve the projection's pre-snapshot setup.
+
 ## Evidence required for closure
 
 Retain the final committed source/tree, source archive, runner/database image
