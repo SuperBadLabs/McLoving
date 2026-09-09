@@ -18,7 +18,7 @@ class SequentialGate(unittest.TestCase):
         (self.root / "scripts").mkdir()
         for name in ("test-sequential-runtime.sh", "run-verified-rust-test.sh", "verify-rust-test-execution.py"):
             shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
-        for name in ("bins/agent/tests/sequential_work.rs", "crates/controller-api/tests/sequential_store.rs"):
+        for name in ("bins/agent/tests/sequential_work.rs", "crates/controller-api/tests/sequential_store.rs", "crates/controller-api/tests/workspace_store.rs"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("// mock target-presence control\n")
@@ -27,8 +27,10 @@ class SequentialGate(unittest.TestCase):
         cargo = self.bin / "cargo"
         cargo.write_text('''#!/usr/bin/env python3
 import os, sys
-count = 4 if "sequential_store" in sys.argv else 6
-mode = os.environ.get("MOCK_MODE", "success")
+suite = sys.argv[sys.argv.index("--test") + 1]
+count = {"sequential_store": 4, "workspace_store": 3, "sequential_work": 11}[suite]
+print(f"mocked-suite {suite}")
+mode = os.environ.get("MOCK_MODE", "success") if os.environ.get("MOCK_SUITE", suite) == suite else "success"
 if mode == "failed": sys.exit(9)
 if mode == "empty": count = 0
 if mode == "wrong_count": count += 1
@@ -48,12 +50,16 @@ print(f"test result: ok. {count} passed; 0 failed; {ignored} ignored; 0 measured
     def test_exact_complete_populations_pass_the_mocked_control(self):
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for suite in ("sequential_store", "workspace_store", "sequential_work"):
+            self.assertEqual(result.stdout.count(f"mocked-suite {suite}"), 1)
 
     def test_failed_empty_wrong_skipped_and_ignored_are_refused(self):
-        for mode in ("failed", "empty", "wrong_count", "skipped", "ignored"):
-            with self.subTest(mode=mode):
-                self.env["MOCK_MODE"] = mode
-                self.assertNotEqual(self.run_gate().returncode, 0)
+        for suite in ("sequential_store", "workspace_store", "sequential_work"):
+            for mode in ("failed", "empty", "wrong_count", "skipped", "ignored"):
+                with self.subTest(suite=suite, mode=mode):
+                    self.env["MOCK_SUITE"] = suite
+                    self.env["MOCK_MODE"] = mode
+                    self.assertNotEqual(self.run_gate().returncode, 0)
 
     def test_missing_database_and_binary_are_refused(self):
         for name in ("MCLOVING_TEST_DATABASE_URL", "MCLOVING_CONTROLLER_BINARY"):
@@ -65,8 +71,15 @@ print(f"test result: ok. {count} passed; 0 failed; {ignored} ignored; 0 measured
         self.assertNotEqual(self.run_gate().returncode, 0)
 
     def test_missing_target_is_refused(self):
-        (self.root / "bins/agent/tests/sequential_work.rs").unlink()
-        self.assertNotEqual(self.run_gate().returncode, 0)
+        for name in ("bins/agent/tests/sequential_work.rs",
+                     "crates/controller-api/tests/sequential_store.rs",
+                     "crates/controller-api/tests/workspace_store.rs"):
+            with self.subTest(name=name):
+                path = self.root / name
+                original = path.read_text()
+                path.unlink()
+                self.assertNotEqual(self.run_gate().returncode, 0)
+                path.write_text(original)
 
 
 if __name__ == "__main__":

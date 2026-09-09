@@ -486,9 +486,9 @@ subsequent update records closure after PR #128 merged as `904fd1f`, with tree
 `34317917395` succeeded. Receipt and retained-evidence review confirm the
 compile-only boundary and residuals above; no runtime claim is added.
 
-## JCOMP-002A contained sequential execution review (active)
+## JCOMP-002A contained sequential execution review
 
-The candidate in `docs/evidence/JCOMP-002A_SECURITY_REVIEW.md` reviews the
+The completed receipt in `docs/evidence/JCOMP-002A_SECURITY_REVIEW.md` reviews the
 authority-free planner, validated immutable layout, atomic saved-digest-bound
 admission/replay, coherent result projection and sequential lease-expiry rule.
 Affected boundaries are TM-001, TM-003, TM-005, TM-006, TM-007, TM-008, TM-009,
@@ -496,8 +496,34 @@ TM-011, TM-016, TM-017, TM-018, TM-022, TM-023, TM-024, TM-026, TM-038 and
 TM-052. The architecture and receipt state the required evidence and residuals.
 Actual shell freshness, failure/skipping, cancellation and replay are tested in
 disposable fixtures; workspace continuity remains JCOMP-002B, hostile same-UID
-isolation SEC-005 and paired Jenkins execution JCOMP-003. JCOMP-002A remains
-ACTIVE with no closure attribution until its exact review, merge and main gates.
+isolation SEC-005 and paired Jenkins execution JCOMP-003. JCOMP-002A closes
+after independent review and protected PR #130 merge `c2aaa0d`, whose tree
+`77bc88fa006123ab72ae497334c1733dc0ac749b` matches final head `d7be0f7`.
+All eight final-head app-bound checks passed; exact-main Foundation
+`34351767851` and actual native Windows `34351767843` succeeded. The receipt
+records the bounded independent audit and retained-source/evidence bindings.
+
+## JCOMP-002B contained workspace transfer review (active)
+
+The candidate design `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md` and
+active record `docs/evidence/JCOMP-002B_SECURITY_REVIEW.md` cover the new
+internal checkpoint-transfer mode. A controller-owned unique build namespace,
+monotonic generation, typed bounded snapshot and digest bind the input to each
+fresh attempt workspace. Completion must retain existing session/restore/fence
+authority, compare current checkpoint ownership, and atomically publish output
+before successor readiness. Exact replay compares content and metadata receipts
+without retaining raw bytes in terminal history. Terminal cleanup closes the
+namespace and removes the controller checkpoint; uncertain StartWork remains
+reconciliation-required. Manual retries are refused for this mode.
+
+Affected boundaries are TM-001, TM-003, TM-005, TM-006, TM-007, TM-008, TM-009,
+TM-011, TM-016, TM-017, TM-018, TM-022, TM-023, TM-024, TM-038 and TM-052.
+Focused unit and PostgreSQL observations are recorded separately from the
+still-required actual shipped-runtime campaign. The transfer byte bounds do
+not impose a production filesystem quota, ordinary file transfer cannot identify
+workload-written secrets, and hostile same-UID sibling access remains SEC-005.
+JCOMP-003 retains paired Jenkins and original-corpus claims. JCOMP-002B is ACTIVE
+with no closure attribution or production authority.
 
 ## Closure attribution
 
@@ -547,6 +573,7 @@ had never claimed one.
 | INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
 | JCOMP-001 | `docs/evidence/JCOMP-001_SECURITY_REVIEW.md` |
 | JCOMP-002 | `docs/evidence/JCOMP-002_SECURITY_REVIEW.md` |
+| JCOMP-002A | `docs/evidence/JCOMP-002A_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |

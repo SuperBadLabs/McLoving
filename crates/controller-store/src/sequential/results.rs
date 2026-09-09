@@ -13,6 +13,10 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SequentialBuildResult {
+    pub workspace_namespace: Option<Uuid>,
+    pub workspace_generation: i64,
+    pub workspace_closed: bool,
+    pub workspace_receipt: Option<Value>,
     pub build_id: Uuid,
     pub pipeline_id: Uuid,
     pub pipeline_revision: i64,
@@ -69,6 +73,8 @@ struct Contract {
     priority: i32,
     nodes: Vec<ContractNode>,
     sequential_layout: Layout,
+    #[serde(default)]
+    workspace_transfer: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -115,11 +121,24 @@ fn restore_contract(mut dag: NewDagBuild, value: Value) -> Result<SequentialDagB
             "unknown contract version or changed build priority",
         ));
     }
+    let workspace = match contract.workspace_transfer {
+        None => false,
+        Some(value) if value == serde_json::json!({"version": 1}) => true,
+        _ => return Err(integrity("unknown workspace contract")),
+    };
+    let expected_capabilities = if workspace {
+        vec![
+            "platform:linux",
+            mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY,
+        ]
+    } else {
+        vec!["platform:linux"]
+    };
     dag.nodes = contract
         .nodes
         .into_iter()
         .map(|node| {
-            if node.kind != "work" || node.required_capabilities != ["platform:linux"] {
+            if node.kind != "work" || node.required_capabilities != expected_capabilities {
                 return Err(integrity("unsupported immutable node kind or capability"));
             }
             let dependencies = node
@@ -151,6 +170,11 @@ fn restore_contract(mut dag: NewDagBuild, value: Value) -> Result<SequentialDagB
         .collect::<Result<Vec<_>, StoreError>>()?;
     let input = SequentialDagBuild::new(dag, contract.sequential_layout.steps)
         .map_err(|_| integrity("invalid immutable sequential layout or process contract"))?;
+    let input = if workspace {
+        input.with_workspace_transfer()?
+    } else {
+        input
+    };
     if input.contract() != value {
         return Err(integrity("noncanonical immutable contract"));
     }
@@ -178,7 +202,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         let build = sqlx::query("SELECT pipeline_id, pipeline_revision, pipeline_operational_generation,
-                pipeline_digest, pipeline_revision_digest, idempotency_key, priority, status, dag_mode, dag_contract
+                pipeline_digest, pipeline_revision_digest, idempotency_key, priority, status, dag_mode, dag_contract, workspace_namespace, workspace_generation, workspace_closed, workspace_receipt, workspace_snapshot
             FROM builds WHERE organization_id = $1 AND project_id = $2 AND id = $3")
             .bind(organization_id).bind(project_id).bind(build_id).fetch_optional(&mut *tx).await?;
         let Some(build) = build else {
@@ -216,6 +240,43 @@ impl Store {
             nodes: Vec::new(),
         };
         let input = restore_contract(dag, contract)?;
+        let namespace: Option<Uuid> = build.try_get("workspace_namespace")?;
+        let closed: bool = build.try_get("workspace_closed")?;
+        let snapshot: Option<Value> = build.try_get("workspace_snapshot")?;
+        if input.workspace_transfer_enabled() != namespace.is_some()
+            || (closed && snapshot.is_some())
+        {
+            return Err(integrity(
+                "workspace contract and durable lifecycle disagree",
+            ));
+        }
+        if namespace.is_some()
+            && closed
+                != matches!(
+                    build.try_get::<String, _>("status")?.as_str(),
+                    "succeeded" | "failed" | "aborted"
+                )
+        {
+            return Err(integrity(
+                "workspace closure differs from build terminal status",
+            ));
+        }
+        if namespace.is_some() {
+            let snapshot: Option<mcloving_domain::workspace::WorkspaceSnapshot> = snapshot
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| integrity("invalid workspace snapshot"))?;
+            crate::workspace::validate_checkpoint(
+                build.try_get("workspace_generation")?,
+                snapshot.as_ref(),
+                build
+                    .try_get::<Option<Value>, _>("workspace_receipt")?
+                    .as_ref(),
+                closed,
+                input.layout.len() as i32,
+            )?;
+        }
+
         let node_rows = sqlx::query("SELECT id, node_key, node_kind, status, logical_outcome,
                 required_capabilities, required_trust_pool, priority, execution_spec, fail_fast, max_attempts,
                 cancellation_requested_at IS NOT NULL AS cancelled
@@ -236,7 +297,15 @@ impl Store {
                 .find(|node| node.node_key == key)
                 .ok_or_else(|| integrity("node absent from immutable contract"))?;
             if row.try_get::<String, _>("node_kind")? != "work"
-                || row.try_get::<Vec<String>, _>("required_capabilities")? != ["platform:linux"]
+                || row.try_get::<Vec<String>, _>("required_capabilities")?
+                    != if input.workspace_transfer_enabled() {
+                        vec![
+                            "platform:linux",
+                            mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY,
+                        ]
+                    } else {
+                        vec!["platform:linux"]
+                    }
                 || row.try_get::<String, _>("required_trust_pool")? != expected.required_trust_pool
                 || row.try_get::<i32, _>("priority")? != expected.priority
                 || row.try_get::<Value, _>("execution_spec")? != expected.execution_spec
@@ -410,6 +479,10 @@ impl Store {
                 .collect::<Vec<_>>(),
         )?;
         let result = SequentialBuildResult {
+            workspace_namespace: build.try_get("workspace_namespace")?,
+            workspace_generation: build.try_get("workspace_generation")?,
+            workspace_closed: build.try_get("workspace_closed")?,
+            workspace_receipt: build.try_get("workspace_receipt")?,
             build_id,
             pipeline_id: input.dag.pipeline_id,
             pipeline_revision: input.dag.pipeline_revision,
@@ -419,6 +492,7 @@ impl Store {
             status: build.try_get("status")?,
             stages,
         };
+        crate::workspace::validate_history(organization_id, &result)?;
         tx.commit().await?;
         Ok(Some(result))
     }

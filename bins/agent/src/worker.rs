@@ -28,6 +28,7 @@ use mcloving_agent_runtime::{
     SpoolEntry,
 };
 use mcloving_domain::ConnectorIntentSpec;
+use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -101,6 +102,7 @@ enum ProcessMode {
 }
 
 struct ValidatedAssignment {
+    workspace_grant: Option<WorkspaceGrant>,
     authority: WorkAuthority,
     workspace: PathBuf,
     payload_digest: [u8; 32],
@@ -136,6 +138,7 @@ struct ProcesslessCompletion<'a> {
 }
 
 struct DurableResult<'a> {
+    workspace_transfer: Option<&'a WorkspaceTransferResult>,
     outcome: WorkOutcome,
     exit_code: Option<i32>,
     termination: &'a str,
@@ -248,6 +251,11 @@ pub(super) async fn poll_and_run_one(
     let Some(assignment) = offer.assignment else {
         return Ok(PollOutcome::Idle);
     };
+    if !assignment.workspace_transfer_json.is_empty() && !features.workspace_transfer {
+        return Err(AgentError::InvalidAssignment(
+            "workspace transfer was not negotiated".to_owned(),
+        ));
+    }
     match validate_assignment(config, session_epoch, assignment)? {
         AssignmentDisposition::Runnable(assignment) => {
             run_assignment(
@@ -571,6 +579,27 @@ fn validate_assignment(
             "execution payload digest does not match".to_owned(),
         ));
     }
+    let workspace_grant = if assignment.workspace_transfer_json.is_empty() {
+        None
+    } else {
+        if !cfg!(target_os = "linux") || assignment.workspace_transfer_json.len() > 65_536 {
+            return Err(AgentError::InvalidAssignment(
+                "unsupported workspace transfer".to_owned(),
+            ));
+        }
+        let grant: WorkspaceGrant = serde_json::from_slice(&assignment.workspace_transfer_json)?;
+        grant
+            .validate()
+            .map_err(|error| AgentError::InvalidAssignment(error.to_string()))?;
+        if grant.organization_id != assignment.organization_id
+            || grant.build_id != assignment.build_id
+        {
+            return Err(AgentError::InvalidAssignment(
+                "workspace grant scope mismatch".to_owned(),
+            ));
+        }
+        Some(grant)
+    };
     let workspace = PathBuf::from(format!(
         "{}/{}/{}",
         assignment.organization_id, assignment.attempt_id, assignment.fence_token
@@ -585,7 +614,19 @@ fn validate_assignment(
     Ok(
         match classify_assignment_spec(&assignment.execution_spec_json) {
             SpecClassification::Process(process) => {
+                if workspace_grant.is_some()
+                    && (!process.env.is_empty() || !process.credentials.is_empty())
+                {
+                    return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                        authority,
+                        workspace,
+                        payload_digest,
+                        detail: "workspace transfer forbids environment overrides and credentials"
+                            .to_owned(),
+                    }));
+                }
                 AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                    workspace_grant,
                     authority,
                     workspace,
                     payload_digest,
@@ -1097,6 +1138,10 @@ async fn run_assignment(
         }
     };
     let request = ExecutionRequest {
+        workspace_seed: assignment
+            .workspace_grant
+            .as_ref()
+            .map(|grant| grant.snapshot.clone()),
         workspace_root: config.workspace_root.clone(),
         workspace: assignment.workspace.clone(),
         mode: match process.mode {
@@ -1193,7 +1238,12 @@ async fn run_assignment(
                         workspace: &assignment.workspace,
                         session_epoch,
                         outcome: WorkOutcome::Failed,
-                        reason: format!("process_spawn_failed: {error}"),
+                        reason: match &error {
+                            ExecutionError::WorkspaceTransfer(_) => {
+                                format!("workspace_seed_failed:{error}")
+                            }
+                            _ => format!("process_spawn_failed: {error}"),
+                        },
                     },
                     AuthorityRpcControl {
                         authority_lost: &authority_lost,
@@ -1205,12 +1255,36 @@ async fn run_assignment(
             }
         };
         validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
-        let terminal = match outcome.termination {
+        let mut terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
             Termination::TimedOut | Termination::OutputLimitExceeded => WorkOutcome::Failed,
             Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
             Termination::Exited => WorkOutcome::Failed,
         };
+        let workspace_transfer = assignment.workspace_grant.as_ref().map(|grant| {
+            let (snapshot, error) = match outcome.workspace_snapshot.clone() {
+                Some(Ok(snapshot)) => (Some(snapshot), None),
+                Some(Err(error)) => (None, Some(error)),
+                None => (None, Some("workspace_capture_missing".to_owned())),
+            };
+            WorkspaceTransferResult {
+                version: 1,
+                organization_id: grant.organization_id.clone(),
+                build_id: grant.build_id.clone(),
+                namespace_id: grant.namespace_id.clone(),
+                generation: grant.generation,
+                input_digest: grant.digest,
+                snapshot,
+                error,
+            }
+        });
+        let workspace_failure = workspace_transfer
+            .as_ref()
+            .and_then(|transfer| transfer.error.as_ref())
+            .map(|error| format!("workspace_capture_failed:{error}"));
+        if workspace_failure.is_some() && terminal == WorkOutcome::Succeeded {
+            terminal = WorkOutcome::Failed;
+        }
         // A cancellation forced by lease loss is named in the durable result so
         // the replayed terminal summary records why the step was cut short.
         let lease_loss = (outcome.termination == Termination::Cancelled)
@@ -1222,10 +1296,11 @@ async fn run_assignment(
             &config.workspace_root,
             &assignment.workspace,
             DurableResult {
+                workspace_transfer: workspace_transfer.as_ref(),
                 outcome: terminal,
                 exit_code: outcome.exit_code,
                 termination: termination_name(outcome.termination),
-                reason: lease_loss.as_deref(),
+                reason: workspace_failure.as_deref().or(lease_loss.as_deref()),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
             },
@@ -2056,6 +2131,7 @@ async fn write_result(
     result: DurableResult<'_>,
 ) -> Result<SpoolEntry, AgentError> {
     let DurableResult {
+        workspace_transfer,
         outcome,
         exit_code,
         termination,
@@ -2070,14 +2146,26 @@ async fn write_result(
         create_result_directory(workspace_root, &relative_parent).await?;
     let relative_path = relative_parent.join("result.json");
     let path = parent.join("result.json");
-    let content = serde_json::to_vec(&json!({
+    let mut value = json!({
         "outcome": outcome_name(outcome),
         "exit_code": exit_code,
         "termination": termination,
         "reason": reason,
         "completion_protocol": completion_protocol,
         "cancellation_outcome": cancellation_outcome,
-    }))?;
+    });
+    if let Some(transfer) = workspace_transfer {
+        transfer
+            .validate()
+            .map_err(|error| AgentError::InvalidAssignment(error.to_string()))?;
+        value["workspace_transfer"] = serde_json::to_value(transfer)?;
+    }
+    let content = serde_json::to_vec(&value)?;
+    if content.len() > MAX_RESULT_SPOOL_BYTES as usize {
+        return Err(AgentError::InvalidAssignment(
+            "result spool exceeds its quota".to_owned(),
+        ));
+    }
     match fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -2190,6 +2278,7 @@ pub(super) async fn persist_recovered_cancellation(
         &config.workspace_root,
         &attempt.workspace,
         DurableResult {
+            workspace_transfer: None,
             outcome: WorkOutcome::Aborted,
             exit_code: None,
             termination: "recovered_cancellation",
@@ -2282,6 +2371,7 @@ async fn finalize_without_process(
         &config.workspace_root,
         workspace,
         DurableResult {
+            workspace_transfer: None,
             outcome,
             exit_code: None,
             termination: &reason,
@@ -2539,6 +2629,7 @@ mod tests {
 
     fn assignment(spec: &[u8]) -> WorkAssignment {
         WorkAssignment {
+            workspace_transfer_json: Vec::new(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
             build_id: "00000000-0000-0000-0000-000000000124".to_owned(),
             node_id: "00000000-0000-0000-0000-000000000125".to_owned(),
@@ -2546,6 +2637,59 @@ mod tests {
             fence_token: (7_u64 << 32) | 9,
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_grants_bind_scope_digest_and_refuse_environment() {
+        use mcloving_domain::workspace::WorkspaceSnapshot;
+        let snapshot = WorkspaceSnapshot {
+            version: 1,
+            entries: Vec::new(),
+        };
+        let mut grant = WorkspaceGrant {
+            version: 1,
+            organization_id: config().organization_id,
+            build_id: "00000000-0000-0000-0000-000000000124".to_owned(),
+            namespace_id: "00000000-0000-0000-0000-000000000127".to_owned(),
+            generation: 0,
+            digest: snapshot.digest().unwrap(),
+            snapshot,
+        };
+        let spec = br#"{"version":1,"steps":[{"kind":"process","program":"/bin/sh","args":["-c","true"]}]}"#;
+        let mut offer = assignment(spec);
+        offer.workspace_transfer_json = serde_json::to_vec(&grant).unwrap();
+        assert!(
+            runnable(validate_assignment(&config(), 1, offer.clone()).unwrap())
+                .workspace_grant
+                .is_some()
+        );
+        grant.build_id = "00000000-0000-0000-0000-000000000999".to_owned();
+        offer.workspace_transfer_json = serde_json::to_vec(&grant).unwrap();
+        assert!(validate_assignment(&config(), 1, offer.clone()).is_err());
+        grant.build_id = offer.build_id.clone();
+        grant.digest = [0; 32];
+        offer.workspace_transfer_json = serde_json::to_vec(&grant).unwrap();
+        assert!(validate_assignment(&config(), 1, offer).is_err());
+        grant.digest = grant.snapshot.digest().unwrap();
+        for extras in [
+            json!({"env":{"SAFE":"value"}}),
+            json!({"credentials":["TOKEN"]}),
+        ] {
+            let mut process = json!({"kind":"process","program":"/bin/sh","args":["-c","true"]});
+            process
+                .as_object_mut()
+                .unwrap()
+                .extend(extras.as_object().unwrap().clone());
+            let mut offer =
+                assignment(&serde_json::to_vec(&json!({"version":1,"steps":[process]})).unwrap());
+            offer.workspace_transfer_json = serde_json::to_vec(&grant).unwrap();
+            assert!(
+                unsupported(validate_assignment(&config(), 1, offer).unwrap())
+                    .detail
+                    .contains("forbids")
+            );
         }
     }
 
@@ -3017,6 +3161,7 @@ mod tests {
             directory.path(),
             &workspace,
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Failed,
                 exit_code: None,
                 termination: "process_spawn_failed",
@@ -3031,6 +3176,7 @@ mod tests {
             directory.path(),
             &workspace,
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Failed,
                 exit_code: None,
                 termination: "process_spawn_failed",
@@ -3075,6 +3221,7 @@ mod tests {
             directory.path(),
             &workspace,
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Aborted,
                 exit_code: None,
                 termination: "recovered_cancellation",
@@ -3118,6 +3265,7 @@ mod tests {
                 directory.path(),
                 Path::new("org/attempt"),
                 DurableResult {
+                    workspace_transfer: None,
                     outcome: WorkOutcome::Failed,
                     exit_code: None,
                     termination: "process_spawn_failed",
@@ -3163,6 +3311,7 @@ mod tests {
                 directory.path(),
                 Path::new("org/attempt"),
                 DurableResult {
+                    workspace_transfer: None,
                     outcome: WorkOutcome::Failed,
                     exit_code: None,
                     termination: "process_spawn_failed",
@@ -3195,6 +3344,7 @@ mod tests {
             directory.path(),
             Path::new("org/attempt"),
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Failed,
                 exit_code: None,
                 termination: "exited",
@@ -3226,6 +3376,7 @@ mod tests {
             directory.path(),
             &workspace,
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Succeeded,
                 exit_code: Some(0),
                 termination: "exited",
@@ -3267,6 +3418,7 @@ mod tests {
             directory.path(),
             &attempt.workspace,
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Aborted,
                 exit_code: None,
                 termination: "recovered_cancellation",
@@ -3345,6 +3497,7 @@ mod tests {
             &config.workspace_root,
             &workspace,
             DurableResult {
+                workspace_transfer: None,
                 outcome: WorkOutcome::Succeeded,
                 exit_code: Some(0),
                 termination: "exited",

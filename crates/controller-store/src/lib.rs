@@ -24,6 +24,7 @@ mod sequential;
 mod state_transfer;
 mod test_results;
 mod trigger_ingress;
+mod workspace;
 
 pub use admin_migration::{
     ExternalAdminAuthority, ExternalAdminClientReceipt, ExternalAdminClientWrite,
@@ -193,6 +194,8 @@ pub const WORK_READY_NOTIFICATIONS_V34: &str =
 pub const ACTIVE_LEASE_NOTIFICATIONS_V35: &str =
     include_str!("../migrations/0035_active_lease_notifications.sql");
 
+pub const BUILD_WORKSPACE_V36: &str = include_str!("../migrations/0036_build_workspace.sql");
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
     Retain,
@@ -319,6 +322,7 @@ pub struct NewLogChunk<'a> {
 /// Exact execution payload authorized by a live fenced offer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptExecution {
+    pub workspace_transfer: Option<mcloving_domain::workspace::WorkspaceGrant>,
     pub build_id: Uuid,
     pub project_id: Uuid,
     pub pipeline_id: Option<Uuid>,
@@ -1372,6 +1376,7 @@ impl Store {
         apply_migration(&mut tx, 33, EFFECT_DISPATCH_COMMIT_GUARD_V33).await?;
         apply_migration(&mut tx, 34, WORK_READY_NOTIFICATIONS_V34).await?;
         apply_migration(&mut tx, 35, ACTIVE_LEASE_NOTIFICATIONS_V35).await?;
+        apply_migration(&mut tx, 36, BUILD_WORKSPACE_V36).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1583,6 +1588,28 @@ impl Store {
         .bind(agent_id)
         .bind(session_epoch)
         .bind(feature)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Returns capabilities and two negotiated features from one exact-session read.
+    pub async fn agent_session_capabilities_and_features(
+        &self,
+        agent_id: &str,
+        session_epoch: u64,
+        first_feature: &str,
+        second_feature: &str,
+    ) -> Result<Option<(Vec<String>, bool, bool)>, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        Ok(sqlx::query_as::<_, (Vec<String>, bool, bool)>(
+            "SELECT capabilities, $3 = ANY(features), $4 = ANY(features)
+             FROM agent_sessions WHERE agent_id = $1 AND session_epoch = $2",
+        )
+        .bind(agent_id)
+        .bind(session_epoch)
+        .bind(first_feature)
+        .bind(second_feature)
         .fetch_optional(&self.pool)
         .await?)
     }
@@ -3128,9 +3155,9 @@ impl Store {
         // execution-authority predicate after acquiring that lock; refreshing
         // cancellation alone could dispatch after lease expiry, requeue, or a
         // restore/fence handoff.
-        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool)>(
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool, Option<Uuid>, i64, Option<Value>, bool, Option<Value>, i32)>(
             "SELECT b.id, b.project_id, b.pipeline_id, n.execution_spec,
-                    b.cancellation_requested_at IS NOT NULL
+                    b.cancellation_requested_at IS NOT NULL, b.workspace_namespace, b.workspace_generation, b.workspace_snapshot, b.workspace_closed, b.workspace_receipt, COALESCE(jsonb_array_length(b.dag_contract->'sequential_layout'->'steps'),0)
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id AND n.organization_id = a.organization_id
@@ -3155,17 +3182,40 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(row.map(
-            |(build_id, project_id, pipeline_id, execution_spec, cancellation_requested)| {
-                AttemptExecution {
+        row.map(
+            |(
+                build_id,
+                project_id,
+                pipeline_id,
+                execution_spec,
+                cancellation_requested,
+                namespace,
+                generation,
+                snapshot,
+                closed,
+                receipt,
+                step_count,
+            )| {
+                Ok(AttemptExecution {
+                    workspace_transfer: workspace::grant(
+                        organization_id,
+                        build_id,
+                        namespace,
+                        generation,
+                        snapshot,
+                        closed,
+                        receipt,
+                        step_count,
+                    )?,
                     build_id,
                     project_id,
                     pipeline_id,
                     execution_spec,
                     cancellation_requested,
-                }
+                })
             },
-        ))
+        )
+        .transpose()
     }
 
     /// Idempotently records that an accepted attempt began running.
@@ -4599,10 +4649,11 @@ impl Store {
             .bind(format!("mcloving.retry.{attempt_id}"))
             .execute(&mut *tx)
             .await?;
-        let current = sqlx::query_as::<_, (Uuid, Uuid, i32, String, bool, bool, bool)>(
+        let current = sqlx::query_as::<_, (Uuid, Uuid, i32, String, bool, bool, bool, bool)>(
             "SELECT n.id, n.build_id, a.ordinal, a.status,
                     b.cancellation_requested_at IS NOT NULL,
                     b.dag_mode,
+                    b.workspace_namespace IS NOT NULL,
                     EXISTS (
                         SELECT 1
                         FROM build_events AS e
@@ -4630,13 +4681,15 @@ impl Store {
             status,
             cancelled,
             dag_mode,
+            workspace_mode,
             reconciliation_terminalized,
         )) = current
         else {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         };
-        if cancelled
+        if workspace_mode
+            || cancelled
             || reconciliation_terminalized
             || !matches!(status.as_str(), "failed" | "reconciliation_required")
         {
@@ -6379,9 +6432,10 @@ impl Store {
         agent_id: &str,
         session_epoch: Option<u64>,
         outcome: TerminalOutcome,
-        summary: Value,
+        mut summary: Value,
         cancellation_aborts: bool,
     ) -> Result<Option<TerminalOutcome>, StoreError> {
+        let workspace_result = workspace::normalize(&mut summary)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         if let Some(session_epoch) = session_epoch
             && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
@@ -6445,14 +6499,15 @@ impl Store {
                 outcome
             }));
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, bool, Option<Uuid>)>(
             "SELECT n.id, n.build_id,
                     a.status = 'cancelling'
-                    OR n.cancellation_requested_at IS NOT NULL
+                    OR n.cancellation_requested_at IS NOT NULL, b.workspace_namespace
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
               AND n.organization_id = a.organization_id
+             JOIN builds b ON b.id = n.build_id AND b.organization_id = n.organization_id
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
@@ -6475,7 +6530,7 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let Some((node_id, build_id, cancelling)) = authority else {
+        let Some((node_id, build_id, cancelling, workspace_namespace)) = authority else {
             tx.rollback().await?;
             return Ok(None);
         };
@@ -6600,6 +6655,16 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
+
+        workspace::commit(
+            &mut tx,
+            organization_id,
+            build_id,
+            workspace_namespace,
+            workspace_result.as_ref(),
+            outcome,
+        )
+        .await?;
 
         sqlx::query(
             "UPDATE attempts

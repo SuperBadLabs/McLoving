@@ -143,6 +143,8 @@ pub struct SessionReceipt {
 /// confirmed feature set — never assumed from the agent's own offer.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SessionFeatures {
+    /// The controller confirmed bounded build workspace transfer semantics.
+    pub workspace_transfer: bool,
     /// `PollWork` waits server-side, so an empty offer can be re-entered
     /// without a client-side fixed-interval delay.
     pub long_poll_work_delivery: bool,
@@ -157,6 +159,10 @@ pub struct SessionFeatures {
 impl SessionFeatures {
     fn from_negotiated(features: &[String]) -> Self {
         Self {
+            workspace_transfer: cfg!(target_os = "linux")
+                && features.iter().any(|feature| {
+                    feature == mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE
+                }),
             long_poll_work_delivery: features
                 .iter()
                 .any(|feature| feature == LONG_POLL_WORK_DELIVERY_FEATURE),
@@ -483,7 +489,7 @@ async fn open_session(
                 major: u32::from(PROTOCOL_MAJOR),
                 minimum_minor: u32::from(PROTOCOL_MINOR),
                 maximum_minor: u32::from(PROTOCOL_MINOR),
-                features: vec![
+                features: session_protocol_features(vec![
                     "journal-v1".to_owned(),
                     platform_feature().to_owned(),
                     WORK_DELIVERY_FEATURE.to_owned(),
@@ -493,7 +499,7 @@ async fn open_session(
                     RECOVERED_DISCHARGE_FEATURE.to_owned(),
                     ACCEPT_LEASE_STATE_FEATURE.to_owned(),
                     INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
-                ],
+                ]),
             }),
             trust_pool: config.trust_pool.clone(),
             capabilities: session_capabilities(),
@@ -1153,12 +1159,23 @@ const fn platform_feature() -> &'static str {
     "unix-process-group-v1"
 }
 
+fn session_protocol_features(mut features: Vec<String>) -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        features.push(mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned());
+    }
+    features
+}
+
 fn session_capabilities() -> Vec<String> {
-    vec![
+    let mut capabilities = vec![
         std::env::consts::OS.to_owned(),
         mcloving_domain::capability::platform_capability(std::env::consts::OS),
         std::env::consts::ARCH.to_owned(),
-    ]
+    ];
+    if cfg!(target_os = "linux") {
+        capabilities.push(mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY.to_owned());
+    }
+    capabilities
 }
 
 pub async fn run_service_smoke(
@@ -1205,6 +1222,7 @@ pub async fn run_execution_service_smoke(
     };
     journal.accept(&acceptance)?;
     let request = ExecutionRequest {
+        workspace_seed: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::Direct,
@@ -1267,6 +1285,7 @@ pub async fn run_creation_boundary_service_smoke(
     };
     journal.accept(&acceptance)?;
     let request = ExecutionRequest {
+        workspace_seed: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::PowerShell,

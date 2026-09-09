@@ -428,6 +428,7 @@ pub async fn run_claim(
         cancellation.clone(),
     ));
     let request = ExecutionRequest {
+        workspace_seed: None,
         workspace_root: config.workspace_root.clone(),
         workspace: workspace.clone(),
         mode: match process.mode {

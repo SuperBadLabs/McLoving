@@ -1,5 +1,7 @@
 //! Shared domain vocabulary. Runtime behavior begins in later tickets.
 
+pub mod workspace;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

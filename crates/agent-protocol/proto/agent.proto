@@ -144,6 +144,9 @@ message WorkAssignment {
   uint64 fence_token = 5;
   bytes execution_spec_json = 6;
   bytes payload_digest = 7;
+  // Present only for negotiated build-workspace-transfer-v1 in the contained Linux pool.
+  // Empty preserves legacy attempt-only workspace semantics.
+  bytes workspace_transfer_json = 8;
 }
 
 message WorkAuthority {

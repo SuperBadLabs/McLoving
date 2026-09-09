@@ -9,6 +9,7 @@ cd "${repo_root}"
 test -x "${MCLOVING_CONTROLLER_BINARY}"
 test -s bins/agent/tests/sequential_work.rs
 test -s crates/controller-api/tests/sequential_store.rs
+test -s crates/controller-api/tests/workspace_store.rs
 
 log_dir="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-sequential-gate.XXXXXX")"
 trap 'rm -rf -- "${log_dir}"' EXIT
@@ -30,6 +31,9 @@ PY
 run_case store bash scripts/run-verified-rust-test.sh \
   4 sequential-store --require-postgres \
   cargo test --locked -p mcloving-controller-api --test sequential_store -- --nocapture --test-threads=1
+run_case workspace bash scripts/run-verified-rust-test.sh \
+  3 workspace-store --require-postgres \
+  cargo test --locked -p mcloving-controller-api --test workspace_store -- --nocapture --test-threads=1
 run_case remote bash scripts/run-verified-rust-test.sh \
-  6 sequential-remote-work --require-postgres \
+  11 sequential-remote-work --require-postgres \
   cargo test --locked -p mcloving-agent --test sequential_work -- --nocapture --test-threads=1

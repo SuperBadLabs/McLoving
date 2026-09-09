@@ -1085,7 +1085,9 @@ async fn derive_build_outcome(
         };
         sqlx::query(
             "UPDATE builds
-             SET status = $3, completed_at = clock_timestamp()
+             SET status = $3, completed_at = clock_timestamp(),
+                 workspace_snapshot = CASE WHEN workspace_namespace IS NOT NULL THEN NULL ELSE workspace_snapshot END,
+                 workspace_closed = workspace_namespace IS NOT NULL OR workspace_closed
              WHERE organization_id = $1 AND id = $2",
         )
         .bind(organization_id)
