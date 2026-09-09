@@ -195,6 +195,12 @@ struct LeaseRenewalControl {
     /// the instant the attempt becomes reclaimable.
     lease_started_at: tokio::time::Instant,
     lease_window: Duration,
+    /// Reserved out of the term because cancelling is not stopping: the
+    /// executor signals the group, waits this long, and only then sends
+    /// `SIGKILL`. A deadline that reserved only the one-second margin left a
+    /// workload that ignores `SIGTERM` executing past the instant the attempt
+    /// becomes reclaimable.
+    termination_grace: Duration,
     execution_cancellation: CancellationToken,
     authority_lost: CancellationToken,
     stop: CancellationToken,
@@ -436,6 +442,7 @@ pub(super) async fn recover_finalizations(
                 renewal_interval: recovery_renewal_interval(config.lease_renewal_interval),
                 lease_started_at,
                 lease_window,
+                termination_grace: config.termination_grace,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -936,6 +943,7 @@ async fn refuse_unsupported_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
+            termination_grace: config.termination_grace,
             execution_cancellation,
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -1077,6 +1085,7 @@ async fn run_assignment(
                 renewal_interval: config.lease_renewal_interval,
                 lease_started_at,
                 lease_window,
+                termination_grace: config.termination_grace,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -1120,6 +1129,7 @@ async fn run_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
+            termination_grace: config.termination_grace,
             execution_cancellation: execution_cancellation.clone(),
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -1733,6 +1743,7 @@ async fn renew_lease(
         renewal_interval,
         lease_started_at,
         lease_window,
+        termination_grace,
         execution_cancellation,
         authority_lost,
         stop,
@@ -1748,8 +1759,10 @@ async fn renew_lease(
         }
         // Past this instant the agent must assume its lease has lapsed and the
         // controller may already have requeued the attempt, so it bounds both
-        // the renewal RPC and every retry of it.
-        let lease_deadline = lease_started_at + lease_rpc_budget(lease_window);
+        // the renewal RPC and every retry of it -- less the termination grace,
+        // because the workload has to be STOPPED by then, not just told to.
+        let lease_deadline =
+            lease_cancellation_deadline(lease_started_at, lease_window, termination_grace);
         let mut unanswered: u64 = 0;
         // Carried out of the loop with the receipt: the term a successful
         // renewal opens is measured from the moment THAT request left, so the
@@ -1883,6 +1896,26 @@ fn accept_consumed_claim_lease(
 
 pub(super) fn lease_rpc_budget(lease_window: Duration) -> Duration {
     lease_window.saturating_sub(Duration::from_secs(1))
+}
+
+/// The instant a lease term must have STOPPED the workload by, which is not the
+/// instant it may decide to.
+///
+/// Cancelling an execution signals the process group and waits the configured
+/// termination grace before `SIGKILL`, so a workload that ignores `SIGTERM`
+/// keeps running for that whole grace after the decision. Reserving only the
+/// one-second RPC margin therefore left it executing past the instant
+/// `requeue_one_expired` may hand the attempt to another runtime, which is the
+/// duplication this ticket's retry would otherwise have made routine rather
+/// than incidental. The agent's configuration refuses a renewal interval that
+/// does not fit inside what is left, so this never collapses below the first
+/// renewal.
+fn lease_cancellation_deadline(
+    lease_started_at: tokio::time::Instant,
+    lease_window: Duration,
+    termination_grace: Duration,
+) -> tokio::time::Instant {
+    lease_started_at + lease_rpc_budget(lease_window).saturating_sub(termination_grace)
 }
 
 async fn lease_window_rpc<T>(
@@ -3198,6 +3231,33 @@ mod tests {
         assert_eq!(
             renewal_status_cause(&tonic::Status::permission_denied("not in trust pool")),
             "renewal_refused"
+        );
+    }
+
+    /// AGENT-007, from review. Cancelling an execution is not stopping it: the
+    /// executor signals the group and waits the termination grace before
+    /// `SIGKILL`, so the grace has to come out of the lease. Reserving only the
+    /// one-second RPC margin left a workload that ignores `SIGTERM` running past
+    /// the instant another runtime may claim the same attempt.
+    #[test]
+    fn the_termination_grace_is_reserved_inside_the_lease() {
+        let start = tokio::time::Instant::now();
+        let window = Duration::from_secs(30);
+        let grace = Duration::from_secs(2);
+        assert_eq!(
+            lease_cancellation_deadline(start, window, grace),
+            start + Duration::from_secs(27),
+            "the deadline reserves the RPC margin AND the grace"
+        );
+        assert!(
+            lease_cancellation_deadline(start, window, grace) + grace <= start + window,
+            "a workload signalled at the deadline is dead before the lease expires"
+        );
+        // A grace wider than the whole window cannot go negative; the renewal
+        // then has no room at all, which the agent configuration refuses.
+        assert_eq!(
+            lease_cancellation_deadline(start, Duration::from_secs(5), Duration::from_secs(30)),
+            start
         );
     }
 

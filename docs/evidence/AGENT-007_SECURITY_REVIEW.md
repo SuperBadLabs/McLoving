@@ -149,6 +149,8 @@ and turned exactly the named test red, and no other:
 | The retry cadence loses its one-second cap | `the_renewal_retry_cadence_is_bounded_on_both_sides` |
 | The retry deadline drops the one-second margin | gate four's reclamation-ordering assertion, by 124 ms |
 | `next_renewal_retry` drops the lease bound (again, against gate five) | gate five, which then never sees the lease lost and times out at 40 s |
+| The deadline stops reserving the termination grace | `the_termination_grace_is_reserved_inside_the_lease` |
+| The configuration rule stops counting the grace | `configuration_is_strict_and_does_not_embed_tls_material` |
 
 The reverted-tree run is the strongest of these: it reproduces the campaign's
 finding exactly, gate three failing with `"aborted"` and a terminal summary of
@@ -212,6 +214,43 @@ instead is the arithmetic, as an executable test
 (`a_lease_term_anchored_on_receipt_can_outlive_the_controller`) that fails if
 the numbers stop supporting the reasoning, plus the reasoning recorded at both
 call sites.
+
+## A third defect, also from review: cancelling is not stopping
+
+The deadline reserved the one-second RPC margin and nothing else. But cancelling
+an execution does not stop it: `terminate_and_prove_group_empty` in
+`crates/agent-runtime/src/executor/unix.rs` signals the process group with
+`SIGTERM`, sleeps the configured termination grace, and only then sends
+`SIGKILL`. A workload that ignores `SIGTERM` therefore kept executing for that
+whole grace AFTER the agent decided to cancel — at the shipped default, two
+seconds past a deadline one second before expiry, so a full second past the
+instant `requeue_one_expired` may hand the attempt to another runtime. The
+setting has no upper bound, so the overrun is as large as an operator makes it.
+
+This was reachable before the ticket only by accident, when a refused renewal
+happened to land near expiry. The retry is what puts the cancellation
+deliberately at the end of the lease every time, which is what turns an
+incidental window into a structural one, so it is this ticket's to close.
+
+The term now reserves the grace as well as the margin:
+`lease_cancellation_deadline` subtracts both, so a workload signalled at the
+deadline is dead before the lease expires even if it ignores `SIGTERM`. `SIGKILL`
+cannot be ignored, so the executor's later bounded waits — for the leader to be
+reaped, and for anchored descendants — are reaping time rather than time the
+workload is still executing, and are not reserved.
+
+Reserving the grace could otherwise leave no room for the renewal itself, so the
+agent's configuration now refuses one where the renewal cadence plus the grace
+does not fit inside the lease. The shipped defaults — a 30-second lease, a
+5-second cadence, a 2-second grace — sit far inside it, and every configuration
+in this repository was checked against the new rule before it landed: the
+Windows persistent-agent lane (5 s, 500 ms, 250 ms), the deploy example, and
+every test harness all fit. Both halves are mutation-proved: dropping the
+reservation turns `the_termination_grace_is_reserved_inside_the_lease` red, and
+dropping it from the configuration rule turns
+`configuration_is_strict_and_does_not_embed_tls_material` red. That test also
+asserts the accepting case, so the rule refuses a configuration rather than a
+cadence.
 
 ## One harness defect found and fixed here
 
