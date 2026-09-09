@@ -5,9 +5,9 @@
 JCOMP-002B is ACTIVE. This is a review plan and implementation record, not a
 closure receipt. The historical shipped runtime campaign passed on `941d473`,
 but a continuation review identified an uncovered operator-reconciliation path.
-The correction requires independent review and a fresh committed-source campaign;
-the historical passing evidence does not verify the revised source. Protected
-final-head checks, merge and exact-main verification remain outstanding. The design is
+The correction passed independent review and a fresh committed-source campaign
+at `e4b6fcd`; the historical passing evidence does not verify the revised source.
+Protected final-head checks, merge and exact-main verification remain outstanding. The design is
 `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md`.
 
 The selected internal mode transfers a bounded controller-owned checkpoint
@@ -197,9 +197,48 @@ closure retains the last verified generation and receipt and removes live bytes.
 The added workspace-store regression covers refusal, terminal closure and exact
 replay. Both actual runtime gates now require four workspace-store tests.
 
-Independent review and actual execution of this correction are pending. Retain
-the fresh campaign in a new versioned evidence directory after the reviewed
-candidate is committed and clean; do not overwrite `jcomp-002b-workspace-v1`.
+The runtime reviewer independently inspected the store correction and regression
+and found no blocker. The same reviewer checked the complete gate-count delta:
+both drivers and the mocked control consistently require four workspace-store
+tests, with the strict population/skip refusal unchanged. The four mocked gate
+tests and shell syntax checks passed before the reviewed source was committed.
+
+## Corrected continuation campaign and validation
+
+The fresh contained campaign executed exact reviewed source
+`e4b6fcd9f21bd7bdf54986bff5dab3628942e426`, tree
+`a67078a4269ce017ed50b3f41a9fb1e4c9265af1`. All four sequential-store, four
+workspace-store and eleven actual remote-agent tests passed with zero failed,
+ignored or filtered tests. The named reconciliation regression executed against
+real private PostgreSQL. All eight sequential and five workspace markers were
+present. The separate [`jcomp-002b-workspace-v2`](jcomp-002b-workspace-v2/README.md)
+inventory supersedes v1 for this corrected candidate and preserves v1 unchanged.
+
+The executed controller hash is
+`f31457b73676f300519bfcf4935231cfaed253614f902d35a6492f3ec10baba3`;
+the agent hash remains
+`fa7abc7c60b98572916999639885034adf73ef40e1de0410ad83851786b5e5aa`.
+The source archive hash is
+`bda74702ab63c0c30f397b0e46ce1d861a7d216e35626dc0c4d892fa47c06e22`.
+The independent implementation reviewer reconstructed the archive and verified
+all raw inventory hashes, 4+4+11 exact test populations including the new
+regression, eleven controller/agent identity pairs, eighteen source hashes,
+nineteen source-bound results, thirty stdout attempt bindings and eight closed
+cleanup receipts. A separate Podman readback confirmed the private database
+container was absent. The reviewer also verified all eleven retained inventory
+hashes, all nine byte-identical copied execution artifacts, manifest/README
+claims and the unchanged v1 inventory, with no findings. These are independently
+checked execution receipts, not new protected GitHub evidence.
+
+The runtime reviewer also ran full local Foundation successfully on exact
+`e4b6fcd`, using the previously documented source-acquirer split. The split
+changes only the script location and exclusion of that one package from the
+workspace test command; the excluded package independently passed all 31 tests
+under its required AppArmor profile. Its retained local receipt explicitly
+distinguishes this Linux validation from native Windows and protected checks.
+The contained campaign above supplies the separate actual PostgreSQL execution
+evidence. Initial sandbox startup errors were diagnostic only; ordinary local
+Podman approvals allowed the unchanged validation commands to run successfully.
 
 ## Evidence required before closure
 
