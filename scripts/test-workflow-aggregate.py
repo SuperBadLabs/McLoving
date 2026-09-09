@@ -678,10 +678,13 @@ printf '%s\\n' "${workflow_files[@]}"
             ("name: Architecture records", "runs-on: ubuntu-24.04", "steps:"),
         )
         architecture_steps = step_blocks(architecture)
-        self.assertEqual(len(architecture_steps), 6)
+        self.assertEqual(len(architecture_steps), 7)
         self.assertEqual(architecture_steps[0], SOURCE_CHECKOUT_STEP)
         self.assertEqual(architecture_steps[1], HOSTED_SUITE_STEP)
-        self.assertEqual(architecture_steps[2], ACTIONLINT_STEP)
+        self.assertEqual(architecture_steps[2],
+                         "      - name: Test sequential runtime gate controls\n"
+                         "        run: /usr/bin/python3 -I scripts/test-sequential-runtime-gate.py\n")
+        self.assertEqual(architecture_steps[3], ACTIONLINT_STEP)
         assert_exact_command(self, local, local_command)
         self.assertEqual(local.count(LOCAL_ACTIONLINT_RUN), 1)
 

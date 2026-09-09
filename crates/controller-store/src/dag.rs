@@ -317,8 +317,17 @@ pub(crate) async fn admit_dag_transaction(
     input: &NewDagBuild,
 ) -> Result<DagAdmission, StoreError> {
     validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
+    admit_dag_contract_transaction(tx, input, normalized_dag_contract(input), false).await
+}
+
+pub(crate) async fn admit_dag_contract_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &NewDagBuild,
+    contract: Value,
+    sequential: bool,
+) -> Result<DagAdmission, StoreError> {
+    validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
     crate::lock_pipeline_transaction(tx, input.organization_id, input.pipeline_id).await?;
-    let contract = normalized_dag_contract(input);
     if sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
                  SELECT 1 FROM builds
@@ -341,6 +350,11 @@ pub(crate) async fn admit_dag_transaction(
         input.pipeline_operational_generation,
     )
     .await?;
+    if sequential && pipeline_revision_digest != input.pipeline_digest {
+        return Err(StoreError::InvalidDag(
+            "sequential semantic digest differs from the saved revision".to_owned(),
+        ));
+    }
     let build_id = Uuid::new_v4();
     let inserted = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO builds (
@@ -1116,11 +1130,13 @@ async fn existing_dag_admission(
             Vec<u8>,
             bool,
             bool,
+            Option<Vec<u8>>,
         ),
     >(
         "SELECT id, pipeline_id, pipeline_revision,
                 pipeline_operational_generation, pipeline_digest, dag_mode,
-                dag_contract IS NOT DISTINCT FROM $3 AS contract_matches
+                dag_contract IS NOT DISTINCT FROM $3 AS contract_matches,
+                pipeline_revision_digest
          FROM builds
          WHERE project_id = $1 AND idempotency_key = $2",
     )
@@ -1129,13 +1145,24 @@ async fn existing_dag_admission(
     .bind(contract)
     .fetch_one(&mut **tx)
     .await?;
-    let (build_id, pipeline_id, revision, generation, digest, dag_mode, contract_matches) = row;
+    let (
+        build_id,
+        pipeline_id,
+        revision,
+        generation,
+        digest,
+        dag_mode,
+        contract_matches,
+        saved_digest,
+    ) = row;
     if pipeline_id != Some(input.pipeline_id)
         || revision != Some(input.pipeline_revision)
         || generation != Some(input.pipeline_operational_generation)
         || !dag_mode
         || digest != input.pipeline_digest
         || !contract_matches
+        || (contract.get("sequential_layout").is_some()
+            && saved_digest.as_deref() != Some(input.pipeline_digest.as_slice()))
     {
         return Err(StoreError::IdempotencyConflict(
             "idempotency key already belongs to a different build contract".to_owned(),
@@ -1184,7 +1211,7 @@ async fn existing_dag_admission(
     })
 }
 
-fn normalized_dag_contract(input: &NewDagBuild) -> Value {
+pub(crate) fn normalized_dag_contract(input: &NewDagBuild) -> Value {
     let mut nodes = input.nodes.iter().collect::<Vec<_>>();
     nodes.sort_by(|left, right| left.node_key.cmp(&right.node_key));
     let nodes = nodes

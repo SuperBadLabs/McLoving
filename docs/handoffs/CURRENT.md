@@ -9,10 +9,11 @@ durable compiler supplement and reviewed runtime design. The earlier
 
 On September 9, PR #128 merged as `904fd1f`; exact-main Foundation
 `34317917356` and actual native Windows `34317917395` succeeded. JCOMP-002
-remains ACTIVE on the board pending its earned closure update. The next chief
-records that transition before starting JCOMP-002A. This handoff publication
-closes no ticket and starts no runtime implementation. Refresh current-main
-custody before acting; these observations verify only the named merge.
+now closes in the subsequent JCOMP-002A bookkeeping commit after receipt review
+and live verification. JCOMP-002A is the sole ACTIVE dispatch. The original dated
+handoff remains an immutable historical observation. Fresh custody on `09b6c53`
+observed successful Foundation `34342349617` and native Windows `34342349592`;
+those observations verify only that head.
 
 **The September code freeze is LIFTED.** The owner lifted it on 2026-09-06,
 ahead of its 2026-09-30 expiry, and the six-step thaw procedure was executed in
@@ -30,7 +31,7 @@ authority, closes no ticket, and does not relax
 
 The owner selected broader pipeline support with Linux sequential Declarative
 pipelines and literal shell steps as the first milestone. The selected slot is
-now solely `JCOMP-002` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
+now solely `JCOMP-002A` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
 `JCOMP-002` -> `JCOMP-002A` -> `JCOMP-002B` -> `JCOMP-003`, with one standalone
 PR per ticket. The [board](../EXECUTION_BOARD.md) holds their complete acceptance
 criteria; no successor starts before its predecessor is protected-main merged
@@ -41,8 +42,8 @@ A passing implementation check or draft artifact alone cannot close it.
 JCOMP-001 closed after PR #127 merged as
 `533dbff671b5a2d58e4d92339708375601d5b7d2` and exact-main Foundation
 `34306662841` and native Windows `34306662842` succeeded. The contract
-preregisters expectations only; generalized compilation and paired execution
-remain successor work. This closure update starts the separate JCOMP-002 PR.
+preregisters expectations only; it did not itself earn generalized compilation
+or paired execution. That earlier closure update started the separate JCOMP-002 PR.
 The [syntax contract](../architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md)
 and fixture expectations now have a shared Foundation authoring gate. The
 [review record](../evidence/JCOMP-001_SECURITY_REVIEW.md) records the completed
@@ -54,8 +55,7 @@ M1 must earn a new versioned differential claim through contained submitted
 jobs, with authored fixtures and original-corpus coverage reported separately.
 
 `JCOMP-002` generalizes compile-only translation and independent admission. Its explicit
-protocol-v2 implementation is merged and post-main verified, pending board
-closure, with a separate disabled logical
+protocol-v2 implementation is merged, post-main verified and closed, with a separate disabled logical
 document artifact and immutable worker/admission bindings. The
 [compiler review](../evidence/JCOMP-002_SECURITY_REVIEW.md) records focused and
 contained compilation checks; these do not establish runnable support.
@@ -69,6 +69,15 @@ Keep runtime admission guards until runnable support exists. Removing a guard,
 concatenating commands into one shell, or sharing an attempt path cannot satisfy
 these runtime tickets. `JCOMP-003` waits for both and earns the final paired
 execution evidence against their corrected exact runtime.
+
+
+JCOMP-002A now has an implementation candidate: the pure planner, owned
+sequential admission/layout, coherent internal result projection and contained
+controller/remote-agent fixtures. A real lease-loss test exposed generic
+requeue of a started shell; the candidate requires reconciliation for expired
+sequential StartWork. See the [active review](../evidence/JCOMP-002A_SECURITY_REVIEW.md).
+It remains ACTIVE pending final independent review, protected merge and exact
+main gates; no workspace-continuity or paired Jenkins execution claim is earned.
 
 `CI-004` is closed on observed protected-merge and post-merge evidence: PR #125
 merged as `1d81127`, whose Foundation run `34293282546` and native Windows run
@@ -103,7 +112,7 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   count copied into this file is stale on the next ticket. As an observation
   rather than a current-state claim: on 2026-09-08 the reorganized local board
   reported 112 tickets with 26 remaining, and 86 done with the admitted, ratcheted 37-item debt.
-- `JCOMP-002` is the selected dispatch ticket and is `ACTIVE`. Before
+- `JCOMP-002A` is the selected dispatch ticket and is `ACTIVE`. Before
   continuing on a successor head, evaluate the standing successor-head verification gate against
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
@@ -141,8 +150,8 @@ first container must be prevented from masking the remainder, and the
 source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 The September 8 priority replaces the thaw's `EXEC-005` selection with
-the Jenkins compatibility chain. `JCOMP-001` is now verified complete and
-`JCOMP-002` is selected; its dependency is that earned contract closure.
+the Jenkins compatibility chain. `JCOMP-001` and `JCOMP-002` are now verified complete and
+`JCOMP-002A` is selected; its dependency is earned compiler closure.
 Before starting, refresh protected main, open PRs, alerts and protection,
 run the board/closure and full Foundation gates, and observe the condition
 below against the head that is current when you read this. Use a fresh
