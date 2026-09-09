@@ -6,13 +6,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 fixture_dir="${repo_root}/compat/jenkins-worker/fixtures/sequential-v1"
 
-python3 "${fixture_dir}/validate.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "${fixture_dir}/validate.py"
 PYTHONDONTWRITEBYTECODE=1 python3 - "${fixture_dir}" <<'PY'
 import sys
 import unittest
 
 suite = unittest.defaultTestLoader.discover(sys.argv[1], pattern="test_manifest.py")
-expected = 15
+expected = 16
 actual = suite.countTestCases()
 if actual != expected:
     raise SystemExit(f"fixture integrity test population changed: expected {expected}, got {actual}")

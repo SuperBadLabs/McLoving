@@ -7,6 +7,8 @@ from pathlib import Path, PurePosixPath
 
 ASCII_FOLD = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 BASE = PurePosixPath('compat/jenkins-worker/fixtures/sequential-v1')
+CONTRACT = 'docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md'
+CONTRACT_SHA256 = 'ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe'
 PROFILE = 'compat/jenkins-worker/profile-v1.properties'
 PROFILE_SHA256 = 'feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271'
 HISTORICAL = 'migration/mario-jenkins-oracle-228/corpus-v1/sources/cinqict_jenkinsdev.Jenkinsfile'
@@ -60,9 +62,10 @@ def verify(root):
                         'e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0'},
             'profile reference changed')
     require(hashlib.sha256(read(root, PROFILE, 16384)).hexdigest() == PROFILE_SHA256, 'profile bytes changed')
-    require(manifest['contract_path'] == 'docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md',
+    require(manifest['contract_path'] == CONTRACT,
             'contract reference changed')
-    read(root, manifest['contract_path'], 65536)
+    require(hashlib.sha256(read(root, CONTRACT, 65536)).hexdigest() == CONTRACT_SHA256,
+            'contract bytes changed')
     expected_ids = {f'S{i:02}' for i in range(1, 11)} | {f'N{i:02}' for i in range(1, 13)} | {'C052'}
     fixtures = manifest['fixtures']
     require(len(fixtures) == len(expected_ids) and {f['id'] for f in fixtures} == expected_ids,

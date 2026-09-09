@@ -451,7 +451,7 @@ The contract separates authored fixtures from the 228-source historical corpus
 and permits no model output or local authoring result to become Jenkins evidence.
 
 TM-052's protected checks remain mandatory. Local and hosted Foundation both
-run the shared fixture gate, whose fixed 15-test population rejects missing,
+run the shared fixture gate, whose fixed 16-test population rejects missing,
 zero, skipped, and incomplete execution; independent negative controls passed.
 JCOMP-001 remains ACTIVE without closure attribution until protected merge and
 exact post-merge Foundation/native Windows verification support a later closure

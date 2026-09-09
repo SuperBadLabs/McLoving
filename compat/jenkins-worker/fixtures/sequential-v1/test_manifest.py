@@ -37,6 +37,12 @@ class ManifestIntegrity(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate.verify(self.root)
 
+    def test_contract_drift(self):
+        with (self.root / validate.CONTRACT).open('a') as contract:
+            contract.write('\nUnreviewed contract change.\n')
+        with self.assertRaisesRegex(ValueError, 'contract bytes changed'):
+            validate.verify(self.root)
+
     def test_profile_drift(self):
         (self.root / validate.PROFILE).write_text('substituted')
         with self.assertRaises(ValueError):
