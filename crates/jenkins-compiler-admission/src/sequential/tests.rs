@@ -237,12 +237,12 @@ fn independent_nonallowlisted_literals_and_separators() {
         "sh \"\\$HOME\"",
         "sh '🙂\u{2028}\u{85}\u{7f}'",
     ] {
-        // Raw odd backslash-u is separately forbidden, including this case.
+        // This odd backslash-u lacks four hex digits and is malformed.
         let source = program(body);
         if body.contains("\\u") {
             assert_eq!(
                 source::classify(&source),
-                Classification::Unsupported("E_SOURCE_LEXICAL")
+                Classification::Rejected("E_SOURCE_PARSE")
             );
             continue;
         }
@@ -715,4 +715,196 @@ fn mismatched_closers_and_nested_outside_forms_never_admit() {
             "{source:?}"
         );
     }
+}
+
+fn assert_fixed_parse_rejection(source: &[u8]) {
+    let ctx = context(source);
+    let authority = map([
+        "agent-protocol",
+        "controller-filesystem",
+        "controller-store",
+        "credentials",
+        "effects",
+        "network",
+        "scheduler",
+        "workload-execution",
+    ]
+    .into_iter()
+    .map(|key| (key, Edn::Bool(false)))
+    .collect());
+    let wire = encoded(&map(vec![
+        ("authority", authority),
+        ("compiler", text(COMPILER)),
+        ("protocol", text(PROTOCOL)),
+        ("status", keyword("rejected")),
+        (
+            "diagnostic",
+            map(vec![
+                ("code", text("E_SOURCE_PARSE")),
+                (
+                    "message",
+                    text("request rejected without execution authority"),
+                ),
+            ]),
+        ),
+    ]));
+    assert_eq!(
+        source::classify(source),
+        Classification::Rejected("E_SOURCE_PARSE"),
+        "{source:?}"
+    );
+    assert_eq!(
+        validate_sequential_response(&wire, expected(source, &ctx)).unwrap(),
+        SequentialValidatedResponse::Rejected {
+            code: "E_SOURCE_PARSE".to_owned()
+        }
+    );
+}
+
+#[test]
+fn recognized_mismatched_closers_are_verified_parse_rejections() {
+    for source in [
+        "pipeline { agent any; stages { stage('Build'} { steps { sh 'ok' } } } }",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok'} } } }",
+        "pipeline { agent any; stages { stage('Build'] { steps { sh 'ok' } } } }",
+        "pipeline { agent any; stages { stage('Build') { steps { sh 'ok' ) } } }",
+        "pipeline )",
+        "pipeline { agent any; stages )",
+        "pipeline { agent any; stages { stage('Build') { steps )",
+        "pipeline { agent any; stages { stage('Build') { steps { sh 'ok' } } } } }",
+    ] {
+        assert_fixed_parse_rejection(source.as_bytes());
+    }
+    for source in [
+        "pipeline {}",
+        "pipeline { agent any; stages }",
+        "pipeline { agent any; stages { stage } }",
+        "pipeline { agent any; stages { stage('Build') { steps { sh } } } }",
+    ] {
+        assert!(
+            matches!(
+                source::classify(source.as_bytes()),
+                Classification::Unsupported(_)
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn raw_unicode_preflight_distinguishes_malformed_from_valid_excluded_spelling() {
+    let slash = char::from(92);
+    for tail in [
+        "u",
+        "u0",
+        "u00",
+        "u000",
+        "u00ZZ",
+        "uu00ZZ",
+        "u+041",
+        "u-041",
+        "u 041",
+        "u0_41",
+        "u００４１",
+    ] {
+        for count in [1, 3] {
+            let escape = format!("{}{tail}", slash.to_string().repeat(count));
+            for source in [
+                program(&format!("sh '{escape}'")),
+                format!("// {escape}\n").into_bytes(),
+                format!("/* {escape} */").into_bytes(),
+            ] {
+                assert_fixed_parse_rejection(&source);
+            }
+        }
+    }
+    for tail in ["u0041", "uu0041", "uuu0041", "u00410"] {
+        let source = program(&format!("sh '{slash}{tail}'"));
+        assert_eq!(
+            source::classify(&source),
+            Classification::Unsupported("E_SOURCE_LEXICAL")
+        );
+    }
+    for count in [2, 4] {
+        for tail in ["u00ZZ", "u0041", "uu0041"] {
+            let source = program(&format!("sh '{}{tail}'", slash.to_string().repeat(count)));
+            assert!(matches!(
+                source::classify(&source),
+                Classification::Supported(_)
+            ));
+        }
+    }
+    assert_fixed_parse_rejection(format!("// {slash}u0041 {slash}uu00ZZ").as_bytes());
+    // Raw preprocessing is nonrecursive: decoded backslash must not invent a
+    // second eligible introducer. Valid spelling is still contract-excluded.
+    assert_eq!(
+        source::classify(format!("// {slash}u005cu00ZZ").as_bytes()),
+        Classification::Unsupported("E_SOURCE_LEXICAL")
+    );
+}
+
+#[test]
+fn literal_errors_distinguish_groovy_syntax_from_contract_exclusions() {
+    let slash = char::from(92);
+    for quote in ["'", "\"", "'''", "\"\"\""] {
+        // Independently verified against pinned Groovy PARSING: every
+        // printable ASCII character plus physical LF/tab, in all quote forms.
+        for escaped in (0x20_u8..=0x7e).map(char::from).chain(['\n', '\t']) {
+            let tail = if escaped == 'u' {
+                "u0041".to_owned()
+            } else {
+                escaped.to_string()
+            };
+            let source = program(&format!("sh {quote}{slash}{tail}{quote}"));
+            match escaped {
+                '"' | '$' | '\'' | '\\' | 'b' | 'f' | 'n' | 'r' | 't' => {
+                    assert!(
+                        matches!(source::classify(&source), Classification::Supported(_)),
+                        "quote={quote:?} escaped={escaped:?}"
+                    );
+                }
+                '0'..='7' | 'u' | '\n' => {
+                    assert_eq!(
+                        source::classify(&source),
+                        Classification::Unsupported("E_SOURCE_LEXICAL"),
+                        "quote={quote:?} escaped={escaped:?}"
+                    );
+                }
+                _ => assert_fixed_parse_rejection(&source),
+            }
+        }
+        for escaped in ['é', '🙂', '\u{1}', '\u{7f}'] {
+            let source = program(&format!("sh {quote}{slash}{escaped}{quote}"));
+            assert_eq!(source::classify(&source), Classification::Unclassified);
+        }
+        for tail in ["q", "a", "U0041", "8", "9", "v", "e", "?", "x41"] {
+            assert_fixed_parse_rejection(&program(&format!("sh {quote}{slash}{tail}{quote}")));
+        }
+        for tail in ["0", "00", "000", "07", "123", "377", "400", "777", "\n"] {
+            let source = program(&format!("sh {quote}{slash}{tail}{quote}"));
+            assert_eq!(
+                source::classify(&source),
+                Classification::Unsupported("E_SOURCE_LEXICAL")
+            );
+        }
+    }
+    for quote in ["\"", "\"\"\""] {
+        for tail in ["", " ", "1", "-", "?"] {
+            assert_fixed_parse_rejection(&program(&format!("sh {quote}${tail}{quote}")));
+        }
+        for tail in ["foo", "{foo}", "_foo", "é"] {
+            assert_eq!(
+                source::classify(&program(&format!("sh {quote}${tail}{quote}"))),
+                Classification::Unsupported("E_STEP_DYNAMIC")
+            );
+        }
+    }
+    // Unknown escapes inside a dynamic expression may be slashy content;
+    // ordinary outer-string rules cannot provide a verified syntax verdict.
+    let dynamic = program(&format!("sh \"${{ /{slash}q/ }}\""));
+    assert_eq!(source::classify(&dynamic), Classification::Unclassified);
+    assert_eq!(
+        source::classify(&program("sh \"${ '$?' }\"")),
+        Classification::Unsupported("E_STEP_DYNAMIC")
+    );
 }

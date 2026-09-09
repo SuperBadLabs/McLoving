@@ -7,6 +7,8 @@ pub(super) struct Stage {
     pub id: String,
     pub scripts: Vec<String>,
 }
+// Provisional independent classifications: only exact worker/status agreement
+// makes a denial verified. This is not a full Groovy parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Classification {
     Supported(Vec<Stage>),
@@ -44,7 +46,7 @@ pub(super) fn classify(bytes: &[u8]) -> Classification {
         cursor: 0,
         steps: 0,
         script_bytes: 0,
-        open_delimiters: 0,
+        open_delimiters: Vec::new(),
     };
     match parser.pipeline() {
         Ok(stages) => Classification::Supported(stages),
@@ -52,8 +54,12 @@ pub(super) fn classify(bytes: &[u8]) -> Classification {
         // Reaching EOF inside such an open block/argument is independently
         // known malformed syntax, even if the local expectation was a word
         // or separator. Do not guess Groovy syntax for unconsumed constructs.
+        // A closing delimiter incompatible with the opener actually consumed
+        // by the DSL parser is also a known syntax error. A matching closer
+        // where a DSL argument was expected can be valid outside-subset Groovy.
+        Err(_) if parser.cursor > 0 && parser.mismatched_closer() => Rejected("E_SOURCE_PARSE"),
         Err(_)
-            if parser.open_delimiters > 0
+            if !parser.open_delimiters.is_empty()
                 && parser.tokens[parser.cursor..]
                     .iter()
                     .all(|token| matches!(token, Token::Lf | Token::Punct(';'))) =>
@@ -68,6 +74,7 @@ fn lex(source: &str) -> Result<Vec<Token>> {
     // Groovy's Unicode preprocessing runs before comment removal.
     let chars: Vec<char> = source.chars().collect();
     let mut i = 0;
+    let mut has_unicode_escape = false;
     while i < chars.len() {
         if chars[i] == '\\' {
             let start = i;
@@ -75,11 +82,28 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             if (i - start) % 2 == 1 && chars.get(i) == Some(&'u') {
-                return Err(Unsupported("E_SOURCE_LEXICAL"));
+                // Groovy permits one or more lowercase u characters followed
+                // by exactly four ASCII hex digits, before comment processing.
+                while chars.get(i) == Some(&'u') {
+                    i += 1;
+                }
+                if chars
+                    .get(i..i + 4)
+                    .is_none_or(|digits| !digits.iter().all(char::is_ascii_hexdigit))
+                {
+                    return Err(Rejected("E_SOURCE_PARSE"));
+                }
+                i += 4;
+                has_unicode_escape = true;
             }
         } else {
             i += 1;
         }
+    }
+    // Finish the entire raw preflight: an earlier well-formed but excluded
+    // escape must not hide a later malformed introducer.
+    if has_unicode_escape {
+        return Err(Unsupported("E_SOURCE_LEXICAL"));
     }
     let mut tokens = Vec::new();
     i = 0;
@@ -119,11 +143,19 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                 let mut dynamic = false;
                 loop {
                     let Some(&ch) = chars.get(i) else {
-                        return Err(Rejected("E_SOURCE_PARSE"));
+                        return Err(if dynamic {
+                            Unclassified
+                        } else {
+                            Rejected("E_SOURCE_PARSE")
+                        });
                     };
                     if ch == '\\' {
                         let Some(&escaped) = chars.get(i + 1) else {
-                            return Err(Rejected("E_SOURCE_PARSE"));
+                            return Err(if dynamic {
+                                Unclassified
+                            } else {
+                                Rejected("E_SOURCE_PARSE")
+                            });
                         };
                         text.push(match escaped {
                             '\\' | '\'' | '"' | '$' => escaped,
@@ -132,7 +164,25 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                             't' => '\t',
                             'b' => '\u{8}',
                             'f' => '\u{c}',
-                            _ => return Err(Unsupported("E_SOURCE_LEXICAL")),
+                            // Valid Groovy octal and physical LF escapes are
+                            // deliberately outside the protected language.
+                            '0'..='7' | '\n' => {
+                                return Err(if dynamic {
+                                    Unclassified
+                                } else {
+                                    Unsupported("E_SOURCE_LEXICAL")
+                                });
+                            }
+                            // Only the independently verified ASCII family
+                            // supplies a syntax verdict. Interpolation may contain
+                            // a different literal kind; other scalars/controls are
+                            // outside this bounded recognizer's evidence.
+                            _ if !dynamic
+                                && ((' '..='~').contains(&escaped) || escaped == '\t') =>
+                            {
+                                return Err(Rejected("E_SOURCE_PARSE"));
+                            }
+                            _ => return Err(Unclassified),
                         });
                         i += 2;
                     } else if ch == quote
@@ -144,9 +194,26 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                         break;
                     } else {
                         if ch == '\n' && !triple {
-                            return Err(Rejected("E_SOURCE_PARSE"));
+                            return Err(if dynamic {
+                                Unclassified
+                            } else {
+                                Rejected("E_SOURCE_PARSE")
+                            });
                         }
                         if ch == '$' && quote == '"' {
+                            // Only known-invalid ASCII tails in the ordinary
+                            // literal portion; do not interpret expression bodies.
+                            if !dynamic
+                                && chars.get(i + 1).is_some_and(|next| {
+                                    next.is_ascii_digit()
+                                        || matches!(
+                                            next,
+                                            ' ' | '\t' | '\n' | '\u{c}' | '-' | '?' | '"'
+                                        )
+                                })
+                            {
+                                return Err(Rejected("E_SOURCE_PARSE"));
+                            }
                             dynamic = true;
                         }
                         text.push(ch);
@@ -192,7 +259,7 @@ struct Parser {
     cursor: usize,
     steps: usize,
     script_bytes: usize,
-    open_delimiters: usize,
+    open_delimiters: Vec<char>,
 }
 impl Parser {
     fn peek(&self) -> Option<&Token> {
@@ -201,9 +268,12 @@ impl Parser {
     fn take(&mut self, token: &Token) -> bool {
         if self.peek() == Some(token) {
             match token {
-                Token::Punct('{' | '(') => self.open_delimiters += 1,
+                Token::Punct(opener @ ('{' | '(')) => self.open_delimiters.push(*opener),
                 Token::Punct('}' | ')') => {
-                    self.open_delimiters = self.open_delimiters.saturating_sub(1);
+                    if self.mismatched_closer() {
+                        return false;
+                    }
+                    self.open_delimiters.pop();
                 }
                 _ => {}
             }
@@ -211,6 +281,15 @@ impl Parser {
             true
         } else {
             false
+        }
+    }
+    fn mismatched_closer(&self) -> bool {
+        match self.peek() {
+            Some(Token::Punct('}')) => self.open_delimiters.last() != Some(&'{'),
+            Some(Token::Punct(')')) => self.open_delimiters.last() != Some(&'('),
+            // Brackets are never opened by the accepted DSL parser.
+            Some(Token::Punct(']')) => true,
+            _ => false,
         }
     }
     fn punct(&mut self, ch: char) -> bool {

@@ -78,7 +78,7 @@ compiler admission or Jenkins evidence and is not an oracle for this receipt.
 
 ## Focused verification
 
-- The complete admission package passed 29 tests, including legacy library,
+- The complete admission package passed 32 tests, including legacy library,
   snapshot and golden tests, new source/context/forgery checks, and four actual
   CLI integration tests. Strict Clippy passed for all package targets.
 - The new Clojure suite passed 12 tests and 216 assertions, covering all 23
@@ -106,7 +106,7 @@ preregistered status and code. Expected shell failures are still supported
 compiler inputs; no shell workload was executed in this campaign.
 
 The campaign's SHA-256 is
-`c61ca0604fe4b5c1e3744ce4539a70f713bc834069f3631c08be7b038f93c503`.
+`3fa61b9cdb5c1fe6c771cba048bc74e0df5d9e9aba8e58308520e074c1d0937a`.
 Its 46 response files and 46 receipt files are retained unchanged alongside the
 campaign manifest. Independent digest checks verified every file pair.
 The offline verifier checks the exact 93-file inventory, all record and receipt
@@ -118,7 +118,7 @@ and hosted Foundation run this verification without launching a worker.
 | Binding | SHA-256 |
 |---|---|
 | Immutable compiler image | `0b687a72f8cd99a1c8401796714e5f9867f2288d7aff80bf1fdd22e2ac417232` |
-| Executed admission binary | `18dd2c2b375666d27106b22caf44ecf93f3152cf8e21d72b4641cab77eb52097` |
+| Executed admission binary | `8fca69f093cc62c73f71b54a96237a9327aa794f6cf3401cf0dd77d9183711d9` |
 | Syntax contract | `ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe` |
 | Frozen fixture manifest | `654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727` |
 | Target profile | `feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271` |
@@ -150,8 +150,8 @@ binary/image observations above.
 | `crates/jenkins-compiler-admission/src/lib.rs` | `b93456a823c1e6261b515b55716740ec0391ae7982de6b69ef866a711ed3ea78` |
 | `crates/jenkins-compiler-admission/src/main.rs` | `760371421ec57a951a0b865317303ed44ec9eaf96f2fcd2a78e303d89ea133e4` |
 | `crates/jenkins-compiler-admission/src/sequential/mod.rs` | `da5d4e8a617dc7842a7eff611e6a38d8b55a70b5b665585fcff7b77ea3fd3b66` |
-| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `50af486975ecea6e35f706e86605c349345ebac76f3c3922699895d9866d5a52` |
-| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `311d582659ddcff5a385b4b43eec8f7bef4b9e1d15060dfb7c3eeb152cd97cb9` |
+| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `84ae7df8ce6315702da9f614eb19209676adc1c504359ce5d45b43badadfed3a` |
+| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `48b34f1d65fe413d14f9d44fb637bff5cfa15db5d7b2875bad92adee02084de1` |
 | `crates/jenkins-compiler-admission/tests/sequential_cli.rs` | `567471b58dc03bbe940924a560109ad3b255035531fcb690ff76e2e2b2498c3b` |
 | `compat/jenkins-worker/Containerfile` | `f20d18163fe38d039b5d1d0ed312422344dd64ff896fea6fa77ef8d170bba3c7` |
 | `compat/jenkins-worker/deps.edn` | `40acc306d5e2cfea912ac1d6e6fbfd31a95d15cb7e34861820783cbaa438c597` |
@@ -160,7 +160,7 @@ binary/image observations above.
 | `compat/jenkins-worker/README.md` | `ad764263a1f387192b085b51294471d1975c0a4a962ed25c11e3b41fb62a98cf` |
 | `docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md` | `882c421c3e751b4f02e1b065650f55aacb69fa687406287bfd5295d7ce07744d` |
 | `scripts/test-jenkins-sequential-compiler.sh` | `fc6ffeb596b03ae1d98bf2f4c6f024ee63f4db847f197ec9693a2e4d629d3f96` |
-| `scripts/test-jenkins-sequential-contained.py` | `9b69308c632d94eb2bc5552a0d7ea5abde9d474675d7a69d716838e3b4bfde0a` |
+| `scripts/test-jenkins-sequential-contained.py` | `37b4b854883fbcdc0da4623a3050e94a21ff19651662232d4e3b2afa74d8744b` |
 | `scripts/test-jenkins-sequential-launcher.py` | `52a5597a7cfe9ecf70d6cd454b2fdc509797735a74a6e7b6c6e60b231bdf87d8` |
 | `scripts/test-jenkins-sequential-retained.py` | `65e75b23be201cf1e00fb567c44341b44ae4e089cd31b9a49976e2d20b1ce268` |
 | `.github/workflows/foundation.yml` | `bb77289978b28cdaf3a8fac3347ed0afef2cd7eb11281e5efe0079e292aac52a` |
@@ -208,23 +208,26 @@ failure at the end of that recognized prefix to the same parse rejection.
 Unknown grammar and mismatched/nonfinal tokens retain their fail-closed
 classification boundaries; this does not claim a general Groovy parser.
 
-The final Rust package passed 29 tests. The added regressions include 20
+The EOF-only correction package passed 29 tests. Its regressions included 20
 recognized EOF prefixes across seven suffixes (140 cases), literal/comment
 delimiter controls, and mismatched/nested outside-subset refusal. Independent
 worker-owner checking used the pinned Groovy PARSING phase for 150 cases;
 chief and worker-owner review found no remaining action items.
 
-A fresh 46-launch campaign used the corrected executable and replaced the
-pre-merge retained campaign above. All original fixture outcomes and worker
-response bytes remain unchanged; trusted receipts now bind the corrected
-executable. The earlier campaign with binary
+The historical EOF-only campaign used executable
+`18dd2c2b375666d27106b22caf44ecf93f3152cf8e21d72b4641cab77eb52097`
+and campaign digest
+`c61ca0604fe4b5c1e3744ce4539a70f713bc834069f3631c08be7b038f93c503`.
+It preserved all fixture outcomes and worker response bytes but is superseded
+by the final malformed-input correction below. The earlier campaign with binary
 `193db38b76687262ab9aa61ef7fe86466596eb1b99a093f8f8a2982d0bf9f232`
 and campaign digest
 `0c7644e0d8cbebcef2feb9084f16d90bec45572ca1405894cfb208028d791651`
 is a historical pre-correction observation, preserved in temporary campaign
 directories, and does not stand in for the current executed-binary evidence.
 
-Six additional actual isolated launches tested missing one through four final
+For that EOF-only executable, six additional actual isolated launches tested
+missing one through four final
 closing braces and missing-root-brace variants with trailing line/block
 comments. Every worker response was independently accepted only as
 `rejected/E_SOURCE_PARSE`, with exact source/context and implementation
@@ -233,3 +236,42 @@ files are preserved under `/tmp/mcloving-jcomp002-eof-01`; its supplemental
 campaign digest is
 `d9039c6db24d711bd020fe04754fdc64c348c81610430e50fc2328131bd8dffc`.
 The frozen 23-fixture manifest is unchanged and no shell workload was executed.
+
+## Malformed-delimiter and literal review correction
+
+Codex review of `b58d752` identified mismatched closing delimiters and malformed
+Unicode escapes that the worker rejected as parse errors but Rust had classified
+unsupported. The recognizer now compares closing delimiters against the exact
+openers consumed within its recognized grammar. Unicode preprocessing checks
+hex length/content before classifying well-formed excluded escapes. Literal
+syntax checks distinguish independently verified malformed printable-ASCII
+escapes from valid excluded octal/line-continuation forms. Ambiguous dynamic
+bodies, non-ASCII escapes and unverified control forms remain unclassified;
+they cannot earn a successful unsupported or parse-rejection receipt without
+independent agreement. This is not a general Groovy syntax validator.
+
+The final package passed 32 tests and strict all-target Clippy. The literal
+regressions include 388 ASCII/physical-whitespace cases across four quote forms
+and 16 non-ASCII/control cases, alongside the earlier 140 EOF cases and new
+mismatched-delimiter/Unicode regressions. Chief and independent worker-owner
+review checked the production boundary against pinned Groovy PARSING controls.
+
+A fresh 46-launch fixed campaign with the final executable produced the current
+retained evidence above. All 46 worker response files remain byte-identical to
+the earlier campaigns; the observed executable and trusted-receipt digests are
+updated. Offline verification, all sixteen retained-evidence mutation tests,
+and the shared compiler gate passed. The worker image, syntax contract and
+frozen 23-fixture manifest are unchanged.
+
+Eight supplemental actual isolated launches are retained under
+`/tmp/mcloving-jcomp002-parse-02`, with exact sources, canonical caller contexts,
+worker responses, trusted receipts, a campaign index and bounded README. Stage
+and root closer mismatches, malformed/short Unicode (including a comment),
+and an ordinary unknown quoted escape returned verified `rejected/E_SOURCE_PARSE`.
+Valid excluded Unicode and octal controls returned verified
+`unsupported/E_SOURCE_LEXICAL`, not parse rejection. The supplemental campaign
+digest is
+`8614a8562b7d8f0838ea5c64e1ceb7e7fb50adbe11532e34e5dcf249f6ed2d19`.
+Earlier supplemental observations remain in their original temporary directories
+and are not substituted for these final-executable results. No workload shell
+was executed and no new corpus-coverage claim is made.
