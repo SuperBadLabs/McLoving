@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
 use mcloving_controller_api::{
@@ -836,6 +836,125 @@ fn runtime_effect_worker(root: &Path, plan: EffectExecutionPlan) -> WorkerConfig
     }
 }
 
+/// How often every bounded wait in this file re-probes. The granularity was
+/// never the problem; only the budget was.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Probe interval for a wait whose probe is itself a database write. Running
+/// `requeue_one_expired` at [`POLL_INTERVAL`] would be a thousand write
+/// transactions against a shared server to learn one bit.
+const WRITE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Slack granted on top of whatever bound a wait is racing, so its budget
+/// clears that bound instead of sitting on it.
+const POLL_SLACK: Duration = Duration::from_secs(5);
+
+/// Budget for a wait on a child process appearing or being reaped. Nothing in
+/// the spine bounds these more tightly than the step's own `timeout_seconds`,
+/// so they get the standing slack rather than a bare second.
+const PROCESS_EVENT_BUDGET: Duration = Duration::from_secs(15);
+
+/// Budget for a wait on an event produced *inside* a pinned service call.
+///
+/// It has to clear that call's own `timeout_millis`, because until the timeout
+/// expires the spine is still legitimately waiting for the fixture to answer. A
+/// budget shorter than the timeout only guarantees the test gives up first.
+fn service_event_budget(service_timeout_millis: u64) -> Duration {
+    Duration::from_millis(service_timeout_millis) + POLL_SLACK
+}
+
+/// Budget for a wait on something the lease drives — a renewal tick landing, or
+/// a lease expiring once its holder is gone. It clears a whole lease period
+/// rather than the `lease_seconds / 3` renewal tick, so one starved tick cannot
+/// end the wait early.
+fn lease_event_budget(lease_seconds: i32) -> Duration {
+    Duration::from_secs(u64::try_from(lease_seconds).unwrap_or(1)) + POLL_SLACK
+}
+
+/// Poll `probe` every [`POLL_INTERVAL`] until it yields a value, or panic once
+/// `budget` is spent.
+///
+/// Every bounded wait here used to be an open-coded
+/// `for _ in 0..200 { …; sleep(5ms) }` — a flat one-second budget copied to
+/// nine sites, none of which derived it from the bound the code under test was
+/// working to. Every one of those bounds is longer than a second: the pinned
+/// service timeouts are 5s and 10s, and a lease outlives its renewal tick by
+/// design. So on a loaded runner the *test* gave up while the spine was still
+/// working normally, which is how
+/// `controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_effect`
+/// failed on GitHub Actions job 101679775818 against a documentation-only pull
+/// request. Measured on a single starved core, the dispatch that wait is
+/// watching for lands at 1.4-1.5s against its 1s budget, with the worker task
+/// still running.
+///
+/// Derive the budget from that bound — [`service_event_budget`],
+/// [`lease_event_budget`] — rather than picking a constant that looks big
+/// enough.
+async fn poll_until<T, Fut>(budget: Duration, what: &str, probe: impl FnMut() -> Fut) -> T
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    match poll_for(budget, POLL_INTERVAL, probe).await {
+        Some(value) => value,
+        None => panic!("timed out after {budget:?} waiting for {what}"),
+    }
+}
+
+/// [`poll_until`] without the panic, for the one wait that has a better
+/// diagnosis of its own to print on timeout.
+async fn poll_for<T, Fut>(
+    budget: Duration,
+    interval: Duration,
+    mut probe: impl FnMut() -> Fut,
+) -> Option<T>
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let started = Instant::now();
+    loop {
+        if let Some(value) = probe().await {
+            return Some(value);
+        }
+        if started.elapsed() >= budget {
+            return None;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Wait for something the spawned worker is supposed to produce.
+///
+/// Same budget rule as [`poll_until`], plus a second guard: the worker's
+/// `JoinHandle` is watched alongside the probe. If the worker finishes without
+/// producing the event then the event is never coming, so the wait ends at once
+/// and reports the worker's own `Result` — the actual diagnosis — instead of
+/// leaving behind a bare `left: 0, right: 1` that says nothing about whether
+/// the worker was slow or dead. That is also what keeps a budget generous
+/// enough for a loaded runner from slowing a genuine regression down to the
+/// budget.
+async fn await_worker_event<T: std::fmt::Debug>(
+    execution: &mut tokio::task::JoinHandle<Result<T, SpineError>>,
+    budget: Duration,
+    what: &str,
+    mut ready: impl FnMut() -> bool,
+) {
+    let started = Instant::now();
+    loop {
+        if ready() {
+            return;
+        }
+        if execution.is_finished() && !ready() {
+            let outcome = (&mut *execution).await;
+            panic!("worker finished before {what}: {outcome:?}");
+        }
+        assert!(
+            started.elapsed() < budget,
+            "timed out after {budget:?} waiting for {what}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 fn dispatch_count(root: &Path) -> usize {
     std::fs::read_to_string(root.join("effect-fixture-dispatches.txt"))
         .map(|entries| entries.lines().count())
@@ -1352,6 +1471,15 @@ async fn unsupported_execution_spec_is_published_as_named_terminal_failure() {
 
 #[tokio::test]
 async fn post_dispatch_timeout_freezes_retry_and_dispatches_exactly_once() {
+    // A genuinely two-sided window: the dispatch has to land inside this budget,
+    // and the budget then has to expire while the fixture is still holding the
+    // connector call open. The fixture holds 5s after writing its dispatch
+    // ledger line, so anything under 5s satisfies the second side -- and the
+    // original 100ms was so far down that it failed the first, a cold fixture
+    // spawn measuring ~50ms idle but 1.4s on a starved core. Both margins are
+    // widened rather than split between them: 3s clears the dispatch twice over
+    // at that load and still expires well inside the hold.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 3_000;
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -1371,7 +1499,7 @@ async fn post_dispatch_timeout_freezes_retry_and_dispatches_exactly_once() {
         &admission,
         &claim,
         "timeout_after_dispatch",
-        100,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let config = runtime_effect_worker(root.path(), plan);
     assert!(matches!(
@@ -2110,6 +2238,9 @@ async fn expired_observer_join_window_is_terminal_before_dispatch() {
 
 #[tokio::test]
 async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch() {
+    // Bounds the pinned fixture services, and therefore bounds how long
+    // the waits below may legitimately take.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 5_000;
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -2129,19 +2260,21 @@ async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch
         &admission,
         &claim,
         "slow_preflight_release_failure_once",
-        5_000,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let config = runtime_effect_worker(root.path(), plan);
     let run_store = store.clone();
     let run_claim_value = claim.clone();
-    let execution =
+    let mut execution =
         tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
-    for _ in 0..200 {
-        if preflight_count(root.path()) == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    await_worker_event(
+        &mut execution,
+        service_event_budget(SERVICE_TIMEOUT_MILLIS),
+        "the observer preflight",
+        || preflight_count(root.path()) >= 1,
+    )
+    .await;
+    // Arrival is the wait; exactly-once is the assertion. Do not fold them.
     assert_eq!(preflight_count(root.path()), 1);
     assert!(
         store
@@ -2178,6 +2311,9 @@ async fn cancellation_during_effect_preflight_abandons_before_connector_dispatch
 
 #[tokio::test]
 async fn dead_observer_release_session_routes_to_durable_reconciliation() {
+    // Bounds the pinned fixture services, and therefore bounds how long
+    // the waits below may legitimately take.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 5_000;
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -2197,19 +2333,21 @@ async fn dead_observer_release_session_routes_to_durable_reconciliation() {
         &admission,
         &claim,
         "slow_preflight_release_session_exit",
-        5_000,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let config = runtime_effect_worker(root.path(), plan);
     let run_store = store.clone();
     let run_claim_value = claim.clone();
-    let execution =
+    let mut execution =
         tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
-    for _ in 0..200 {
-        if preflight_count(root.path()) == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    await_worker_event(
+        &mut execution,
+        service_event_budget(SERVICE_TIMEOUT_MILLIS),
+        "the observer preflight",
+        || preflight_count(root.path()) >= 1,
+    )
+    .await;
+    // Arrival is the wait; exactly-once is the assertion. Do not fold them.
     assert_eq!(preflight_count(root.path()), 1);
     assert!(
         store
@@ -2217,7 +2355,7 @@ async fn dead_observer_release_session_routes_to_durable_reconciliation() {
             .await
             .expect("request cancellation during observer preflight")
     );
-    let result = tokio::time::timeout(Duration::from_secs(2), execution)
+    let result = tokio::time::timeout(service_event_budget(SERVICE_TIMEOUT_MILLIS), execution)
         .await
         .expect("dead observer release must not pin the worker or lease")
         .expect("worker task");
@@ -2369,6 +2507,16 @@ async fn ambiguous_observer_verify_failure_retains_release_reconciliation() {
 
 #[tokio::test]
 async fn authority_loss_after_observer_verification_records_release_pending() {
+    // A 1s lease renews at `lease_seconds / 3`, leaving each tick only ~667ms of
+    // slack. `effect_path_renews_a_short_lease_until_all_joins_are_durable`
+    // already lost its fence that way under host load and was widened to 3s for
+    // exactly this reason; this test carried the same 1s lease and the same
+    // hazard. Widened with it, and the waits below are derived from the constant
+    // so the two stay coupled.
+    const LEASE_SECONDS: i32 = 3;
+    // Bounds the pinned fixture services, and therefore bounds how long
+    // the waits below may legitimately take.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 5_000;
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -2388,20 +2536,22 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
         &admission,
         &claim,
         "slow_preflight_release_session_exit",
-        5_000,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let mut config = runtime_effect_worker(root.path(), plan);
-    config.lease_seconds = 1;
+    config.lease_seconds = LEASE_SECONDS;
     let run_store = store.clone();
     let run_claim_value = claim.clone();
-    let execution =
+    let mut execution =
         tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
-    for _ in 0..200 {
-        if preflight_count(root.path()) == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    await_worker_event(
+        &mut execution,
+        service_event_budget(SERVICE_TIMEOUT_MILLIS),
+        "the observer preflight",
+        || preflight_count(root.path()) >= 1,
+    )
+    .await;
+    // Arrival is the wait; exactly-once is the assertion. Do not fold them.
     assert_eq!(preflight_count(root.path()), 1);
     let mut authority_loss = store.pool().begin().await.expect("begin renewal race");
     let authority_loss_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
@@ -2418,32 +2568,31 @@ async fn authority_loss_after_observer_verification_records_release_pending() {
     .execute(&mut *authority_loss)
     .await
     .expect("stage authority expiry while observer verification is in flight");
-    let mut renewal_blocked = false;
-    for _ in 0..200 {
-        renewal_blocked = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1 FROM pg_stat_activity
-                 WHERE $1 = ANY(pg_blocking_pids(pid))
-             )",
-        )
-        .bind(authority_loss_backend_pid)
-        .fetch_one(store.pool())
-        .await
-        .expect("inspect lease-renewal waiter");
-        if renewal_blocked {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(
-        renewal_blocked,
-        "lease renewal must be in flight behind the held authority row"
-    );
+    // The renewal this waits on only ticks every `LEASE_SECONDS / 3`, so the
+    // budget has to clear a whole lease period rather than a single tick.
+    poll_until(
+        lease_event_budget(LEASE_SECONDS),
+        "the lease renewal to block behind the held authority row",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid))
+                 )",
+            )
+            .bind(authority_loss_backend_pid)
+            .fetch_one(store.pool())
+            .await
+            .expect("inspect lease-renewal waiter")
+            .then_some(())
+        },
+    )
+    .await;
     authority_loss
         .commit()
         .await
         .expect("commit authority expiry before the dispatch gate");
-    let result = tokio::time::timeout(Duration::from_secs(2), execution)
+    let result = tokio::time::timeout(service_event_budget(SERVICE_TIMEOUT_MILLIS), execution)
         .await
         .expect("authority-loss cleanup must not pin the worker")
         .expect("worker task");
@@ -2596,6 +2745,21 @@ async fn ambiguous_outcome_reconciles_without_a_second_dispatch() {
 
 #[tokio::test]
 async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_effect() {
+    // A 1s lease renews at `lease_seconds / 3`, leaving each tick only ~667ms of
+    // slack. `effect_path_renews_a_short_lease_until_all_joins_are_durable`
+    // already lost its fence that way under host load and was widened to 3s for
+    // exactly this reason; this test carried the same 1s lease and the same
+    // hazard. Widened with it, and the waits below are derived from the constant
+    // so the two stay coupled. The initial `admitted_claim` lease takes it too:
+    // the worker config only governs the renewal interval and the extension, so
+    // a claim granted for 1s can expire before `run_claim` reaches its first
+    // renewal and fail the run with StaleAuthority before any dispatch. That is
+    // the startup half of the same window, and the sibling above already passes
+    // one constant to both.
+    const LEASE_SECONDS: i32 = 3;
+    // Bounds the pinned fixture services, and therefore bounds how long
+    // the waits below may legitimately take.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 10_000;
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -2604,7 +2768,7 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
         &store,
         runtime_effect_spec(),
         "effect-crash-after-dispatch",
-        1,
+        LEASE_SECONDS,
     )
     .await;
     let root = tempfile::tempdir().unwrap();
@@ -2615,37 +2779,43 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
         &admission,
         &claim,
         "crash_after_dispatch",
-        10_000,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let mut config = runtime_effect_worker(root.path(), plan);
-    config.lease_seconds = 1;
+    config.lease_seconds = LEASE_SECONDS;
     let run_store = store.clone();
     let run_claim_value = claim.clone();
-    let execution =
+    let mut execution =
         tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
-    for _ in 0..200 {
-        if dispatch_count(root.path()) == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    await_worker_event(
+        &mut execution,
+        service_event_budget(SERVICE_TIMEOUT_MILLIS),
+        "the connector dispatch",
+        || dispatch_count(root.path()) >= 1,
+    )
+    .await;
+    // Arrival is the wait; exactly-once is the assertion. Do not fold them.
     assert_eq!(dispatch_count(root.path()), 1);
     execution.abort();
     let _ = execution.await;
     drop(store);
     let restarted = test_store().await.expect("reconnect controller store");
-    let mut expired_effect_routed = false;
-    for _ in 0..40 {
-        if restarted
-            .requeue_one_expired(organization_id)
-            .await
-            .expect("route expired runtime effect")
-        {
-            expired_effect_routed = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // The only wait in this file that was already derived from what it races —
+    // it budgeted 2s against the old 1s lease. Kept derived, so widening
+    // LEASE_SECONDS above cannot silently outrun it.
+    let expired_effect_routed = poll_for(
+        lease_event_budget(LEASE_SECONDS),
+        WRITE_PROBE_INTERVAL,
+        || async {
+            restarted
+                .requeue_one_expired(organization_id)
+                .await
+                .expect("route expired runtime effect")
+                .then_some(())
+        },
+    )
+    .await
+    .is_some();
     if !expired_effect_routed {
         let state: (String, Option<String>, String, String) = sqlx::query_as(
             "SELECT a.status, a.lease_expires_at::text, clock_timestamp()::text, e.status
@@ -2697,6 +2867,9 @@ async fn controller_crash_after_dispatch_and_lease_loss_never_reoffers_runtime_e
 
 #[tokio::test]
 async fn cancellation_after_dispatch_joins_evidence_then_aborts_without_duplicate_effect() {
+    // Bounds the pinned fixture services, and therefore bounds how long
+    // the waits below may legitimately take.
+    const SERVICE_TIMEOUT_MILLIS: u64 = 5_000;
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -2716,19 +2889,21 @@ async fn cancellation_after_dispatch_joins_evidence_then_aborts_without_duplicat
         &admission,
         &claim,
         "success",
-        5_000,
+        SERVICE_TIMEOUT_MILLIS,
     );
     let config = runtime_effect_worker(root.path(), plan);
     let run_store = store.clone();
     let run_claim_value = claim.clone();
-    let execution =
+    let mut execution =
         tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
-    for _ in 0..200 {
-        if dispatch_count(root.path()) == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    await_worker_event(
+        &mut execution,
+        service_event_budget(SERVICE_TIMEOUT_MILLIS),
+        "the connector dispatch",
+        || dispatch_count(root.path()) >= 1,
+    )
+    .await;
+    // Arrival is the wait; exactly-once is the assertion. Do not fold them.
     assert_eq!(dispatch_count(root.path()), 1);
     assert!(
         store
@@ -3267,33 +3442,34 @@ async fn admitted_claim(
 }
 
 async fn read_pid(path: &std::path::Path) -> i32 {
-    for _ in 0..200 {
-        if let Ok(value) = tokio::fs::read_to_string(path).await
-            && let Ok(pid) = value.trim().parse()
-        {
-            return pid;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("descendant PID was not written");
+    poll_until(PROCESS_EVENT_BUDGET, "the descendant PID file", || async {
+        tokio::fs::read_to_string(path)
+            .await
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+    })
+    .await
 }
 
 async fn assert_process_gone(pid: i32) {
-    for _ in 0..200 {
-        match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
-            Ok(status)
-                if status
-                    .rsplit_once(") ")
-                    .and_then(|(_, tail)| tail.chars().next())
-                    == Some('Z') =>
-            {
-                return;
+    poll_until(
+        PROCESS_EVENT_BUDGET,
+        &format!("descendant process {pid} to be reaped"),
+        || async {
+            match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
+                Ok(status)
+                    if status
+                        .rsplit_once(") ")
+                        .and_then(|(_, tail)| tail.chars().next())
+                        == Some('Z') =>
+                {
+                    Some(())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(()),
+                Ok(_) => None,
+                Err(error) => panic!("unexpected process probe error: {error}"),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Ok(_) => {}
-            Err(error) => panic!("unexpected process probe error: {error}"),
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("descendant process {pid} escaped cancellation");
+        },
+    )
+    .await;
 }

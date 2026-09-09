@@ -254,6 +254,11 @@ def connector_response(command, openssl, outcome_key, scenario, state_path, ledg
             output.flush()
             os.fsync(output.fileno())
         if scenario in ("timeout_after_dispatch", "crash_after_dispatch"):
+            # Held open past the caller's connector budget on purpose, so the
+            # timeout and the crash both land *after* the dispatch ledger line
+            # above. post_dispatch_timeout_freezes_retry_and_dispatches_exactly_once
+            # sets that budget to 3s against this 5s hold, so change the two
+            # together.
             time.sleep(5)
         elif scenario == "slow_success":
             # Held past one lease window on purpose: the dispatch has to outlive
