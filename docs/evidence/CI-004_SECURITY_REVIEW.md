@@ -2,14 +2,14 @@
 
 ## Status and exact scope
 
-CI-004 implementation acceptance is complete at exact corrected head
-`3880043226f54b35984defc0d09957e5ff1d26ac`. Independent source/accounting review
-found no actionable findings, and the full corrected-head Foundation and
-classified Windows gates passed. CI-004 nevertheless remains ACTIVE: final-head
-checks, protected merge, and post-merge verification remain pending. There is
-no closure-attribution entry or closed-ticket membership for CI-004. Passing
-implementation tests does not satisfy its downstream dependency before the
-stated closure gates complete.
+CI-004's implementation, protected-merge, and post-merge verification gates
+are complete. [PR #125](https://github.com/SuperBadLabs/McLoving/pull/125)
+squash-merged exact reviewed head
+`7ff7d726632cb1f0ee128b78a5cb92ec5432839a` as protected-main commit
+`1d81127c7913a92a43402e377eb62289897356e0` at 2026-09-09 00:02:38 UTC.
+Exact merged-main Foundation run `34293282546` and native Windows run
+`34293282632` both passed. This record now supports ticket closure; the earlier
+implementation-only results did not satisfy these later gates.
 
 The retained implementation strips only debug sections from disposable smoke
 fixture copies before their checksum manifest is sealed. The smoke script is
@@ -46,7 +46,9 @@ exact controller-identity check, and both deployable-runtime tests (2 passed,
 native Windows job was explicitly skipped by the unchanged classifier, so
 this is no claim of a new native-Windows execution campaign. The timing
 record distinguishes observed full-workflow duration from causal speed claims.
-No merged closure or production capability is claimed.
+Those corrected-head results preceded protected merge and therefore did not
+alone establish closure. The subsequent merge evidence is recorded below; no
+production capability is claimed.
 
 ## Threat review scope and residuals
 
@@ -58,8 +60,9 @@ No merged closure or production capability is claimed.
 - TM-052: all workflow jobs, tests, required context names, aggregate needs,
   literal-success behavior, and protected-main requirements remain unchanged.
   The corrected source and initial accounting passed independent review.
-  The final source still needs its own independent review and all exact-head
-  checks before merge, followed by protected-main verification before closure.
+  Final head 7ff7d72 passed independent review and all eight exact-head,
+  GitHub-Actions-bound required contexts before guarded merge. Exact merged-main
+  Foundation and actual native Windows execution subsequently passed.
 - TM-016 and TM-023: the host-provided GNU `strip` utility becomes an explicit
   smoke-harness prerequisite. Its bytes/version are not newly pinned by this
   change. Trust in the CI runner's binutils installation is an explicit
@@ -77,21 +80,60 @@ symbol names, and unwind information remain present. The failed precursor is
 retained as evidence that those semantic checks do not replace exact binary
 identity where the deployment contract requires it.
 
-## Final metadata and merge obligations
+## Final review correction and protected merge
 
-Independent review of corrected head 3880043 covered the smoke-only scope,
-unchanged exact systemd identity, source pins, the CI-004/SEC-005 graph edge,
-and host-strip residual. All 49 board tests, 78 closure tests, and 11 aggregate
-tests passed locally. The final metadata successor must independently pass its
-own review and protected checks before merge, with protected-main verification
-afterward. Implementation script and workflow content remain bound by the
-hashes above; a metadata update cannot silently replace that tested source.
+Independent review covered the smoke-only scope, unchanged exact systemd
+identity, source pins, CI-004/SEC-005 graph edge, and host-strip residual.
+All 49 board tests, 78 closure tests, and 11 aggregate tests passed locally.
 
-The row floor remains 113. CI-004 stays ACTIVE and enters neither CLOSED_TICKETS
-nor the threat closure-attribution table until its protected merge and
-post-merge verification complete. The review finding against precursor
-`261858401e849f8f3b13892bf72b4c063701bdda` correctly identified that premature
-DONE status would satisfy downstream dependencies despite missing those gates;
-that candidate attribution and membership are removed. No previously merged
-closed-ticket membership is removed. Historical debt remains 37, and the
-selected JCOMP-001 milestone and dispatch remain unchanged.
+The Codex P2 finding
+[3963247779](https://github.com/SuperBadLabs/McLoving/pull/125#discussion_r3963247779)
+against `261858401e849f8f3b13892bf72b4c063701bdda` correctly identified premature
+DONE status: it would have satisfied downstream dependencies while protected
+merge and post-merge verification were still pending. Correction
+`7ff7d726632cb1f0ee128b78a5cb92ec5432839a` restored ACTIVE and removed candidate
+closed-ticket membership and attribution. No previously merged closed-ticket
+membership was removed. The addressed thread was resolved, and independent
+review of exact 7ff7d72 found no actionable findings. The prior Copilot review
+recommended approval with zero generated comments; its GitHub review state was
+COMMENTED, not a formal approval.
+
+Final-head Foundation run `34292013621` and classified Windows run
+`34292013546` passed. Immediately before merge, a fresh readback verified:
+
+- the exact eight required contexts, all successful at 7ff7d72 and bound to
+  GitHub Actions application 15368;
+- strict synchronization, admin enforcement, conversation resolution, linear
+  history, and disabled force-push/deletion permissions;
+- an OPEN, non-draft, CLEAN/MERGEABLE PR at that exact head and a clean matching
+  worktree; and
+- completed automated reviews and all paginated review threads resolved.
+
+The eight contexts were Rust, Dependencies and licenses, Secret scan,
+Architecture records, Formal model, Controller PostgreSQL, Foundation, and
+Windows. Squash merge used `--match-head-commit` with exact 7ff7d72 and no admin
+bypass. GitHub verified merged commit 1d81127 with reason `valid`; its tree
+`6bf77499d5fe1667aba74b0e7e951ce400f87f21` exactly matches the tested head.
+
+## Exact protected-main verification
+
+[Foundation run 34293282546](https://github.com/SuperBadLabs/McLoving/actions/runs/34293282546)
+passed exact merged commit
+`1d81127c7913a92a43402e377eb62289897356e0`. Deployment job `102284301764` passed
+the full smoke matrix and controlled-systemd gate. The Foundation aggregate
+completed at 2026-09-09 00:22:19 UTC.
+
+[Windows run 34293282632](https://github.com/SuperBadLabs/McLoving/actions/runs/34293282632)
+passed the same exact merged commit. Unlike the PR's classified skip, native
+Windows agent job `102284330767` actually executed and succeeded in 4m56s,
+including Windows runtime, differential, migration/state-transfer, and both
+debug and release native-service/crash-recovery gates. Its Windows aggregate
+completed at 00:07:56 UTC.
+
+The implementation content remains bound by the hashes above. The protected
+merge and these post-merge successes now provide the previously missing
+closure evidence; closing CI-004 no longer depends on unexecuted gates.
+Historical debt remains 37, and this ticket grants no production authority.
+Observed Foundation timing varied from 15m32s on corrected PR head 3880043 to
+19m39s on merged main. The detailed timing record preserves that variation;
+a guaranteed 32% speedup is not established.

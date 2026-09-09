@@ -21,11 +21,33 @@ authority, closes no ticket, and does not relax
 
 The owner selected broader pipeline support with Linux sequential Declarative
 pipelines and literal shell steps as the first milestone. The selected slot is
-now `JCOMP-001` (`PENDING`), then `JCOMP-002` and `JCOMP-003`, one PR at a time.
-The [board](../EXECUTION_BOARD.md) holds their complete acceptance criteria.
+now solely `JCOMP-001` (`PENDING`). The serialized dispatch is `JCOMP-001` ->
+`JCOMP-002` -> `JCOMP-002A` -> `JCOMP-002B` -> `JCOMP-003`, with one standalone
+PR per ticket. The [board](../EXECUTION_BOARD.md) holds their complete acceptance
+criteria; no successor starts before its predecessor is protected-main merged
+and verified. Once started, a ticket remains `ACTIVE` until its required review,
+closure evidence, protected merge, and post-merge verification are complete.
+A passing implementation check or draft artifact alone cannot close it.
 The existing exact-source compiler admission is not general syntax support;
 M1 must earn a new versioned differential claim through contained submitted
 jobs, with authored fixtures and original-corpus coverage reported separately.
+
+`JCOMP-002` generalizes compile-only translation and independent admission.
+`JCOMP-002A` then owns real sequential step execution with distinct step/stage
+results and downstream skipping; current product admission rejects more than
+one step per stage. `JCOMP-002B` owns contained build-workspace continuity;
+current workspaces are scoped to each attempt and removed after finalization.
+Keep runtime admission guards until runnable support exists. Removing a guard,
+concatenating commands into one shell, or sharing an attempt path cannot satisfy
+these runtime tickets. `JCOMP-003` waits for both and earns the final paired
+execution evidence against their corrected exact runtime.
+
+`CI-004` is closed on observed protected-merge and post-merge evidence: PR #125
+merged as `1d81127`, whose Foundation run `34293282546` and native Windows run
+`34293282632` both succeeded. Its [security review](../evidence/CI-004_SECURITY_REVIEW.md)
+retains the corrected implementation and closure evidence. These receipts verify
+that exact merged head; they do not discharge the standing successor-head gate
+below for the current or any future head.
 
 The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`; `EXEC-005` additionally waits for `JCOMP-003`.

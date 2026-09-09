@@ -433,9 +433,11 @@ the original exact byte-identity oracle then passed with both runtime tests.
 TM-016 and TM-023 retain the explicit host-binutils trust residual for the
 smoke harness's unpinned `strip` executable; CI maintainers own that fixture
 trust assumption. TM-042's production release/signing boundary is unchanged.
-Final-head checks, protected merge, and post-merge verification remain
-required. CI-004 stays ACTIVE without closure attribution until those gates
-complete; this implementation review grants no production authority.
+Final reviewed head `7ff7d726632cb1f0ee128b78a5cb92ec5432839a` passed all
+protected checks and resolved its premature-closure review item before PR #125
+merged as `1d81127c7913a92a43402e377eb62289897356e0`. Exact post-merge
+Foundation `34293282546` and native Windows Agent `34293282632` passed.
+CI-004 now closes on those observed receipts; no production authority is granted.
 
 ## Closure attribution
 
@@ -464,6 +466,7 @@ had never claimed one.
 | CANARY-000 | `docs/evidence/CANARY-000_SECURITY_REVIEW.md` |
 | CI-002 | `docs/evidence/CI-002_SECURITY_REVIEW.md` |
 | CI-003 | `docs/evidence/CI-003_SECURITY_REVIEW.md` |
+| CI-004 | `docs/evidence/CI-004_SECURITY_REVIEW.md` |
 | CONSUMER-001 | `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md` |
 | DEP-001 | `docs/evidence/DEP-001_SECURITY_REVIEW.md` |
 | DEPLOY-001 | `docs/evidence/DEPLOY-001_SYSTEMD_LANE.md` |
