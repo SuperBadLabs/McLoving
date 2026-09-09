@@ -2,6 +2,8 @@
 //! Versioned public HTTP API and its Rust client.
 
 mod oidc;
+#[doc(hidden)]
+pub mod sequential;
 
 pub use mcloving_controller_store::{BuildCursor, PipelineOperationalState};
 pub use oidc::{

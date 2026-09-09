@@ -486,6 +486,19 @@ subsequent update records closure after PR #128 merged as `904fd1f`, with tree
 `34317917395` succeeded. Receipt and retained-evidence review confirm the
 compile-only boundary and residuals above; no runtime claim is added.
 
+## JCOMP-002A contained sequential execution review (active)
+
+The candidate in `docs/evidence/JCOMP-002A_SECURITY_REVIEW.md` reviews the
+authority-free planner, validated immutable layout, atomic saved-digest-bound
+admission/replay, coherent result projection and sequential lease-expiry rule.
+Affected boundaries are TM-001, TM-003, TM-005, TM-006, TM-007, TM-008, TM-009,
+TM-011, TM-016, TM-017, TM-018, TM-022, TM-023, TM-024, TM-026, TM-038 and
+TM-052. The architecture and receipt state the required evidence and residuals.
+Actual shell freshness, failure/skipping, cancellation and replay are tested in
+disposable fixtures; workspace continuity remains JCOMP-002B, hostile same-UID
+isolation SEC-005 and paired Jenkins execution JCOMP-003. JCOMP-002A remains
+ACTIVE with no closure attribution until its exact review, merge and main gates.
+
 ## Closure attribution
 
 Machine-readable, and read by `scripts/verify-ticket-closure-receipts.py` as the

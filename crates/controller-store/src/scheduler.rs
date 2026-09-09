@@ -699,7 +699,9 @@ impl Store {
     ///
     /// Safe work returns to the queue so the following claim increments the
     /// fence. An unresolved non-idempotent effect is instead made uncertain
-    /// and routes the attempt through explicit reconciliation.
+    /// and routes the attempt through explicit reconciliation. Contained
+    /// sequential work also requires reconciliation once StartWork was recorded:
+    /// losing its lease cannot silently execute the same logical shell again.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         // Every work poll runs this pass, and in a healthy build nothing is
@@ -736,7 +738,19 @@ impl Store {
                     (
                         n.cancellation_requested_at IS NOT NULL
                         OR b.cancellation_requested_at IS NOT NULL
-                    ) AS cancellation_requested
+                    ) AS cancellation_requested,
+                    (
+                        b.dag_mode AND b.dag_contract ? 'sequential_layout'
+                        AND EXISTS (
+                            SELECT 1 FROM build_events AS e
+                            WHERE e.organization_id = a.organization_id
+                              AND e.build_id = n.build_id
+                              AND e.kind = 'attempt.running'
+                              AND e.payload @> jsonb_build_object(
+                                  'attempt_id', a.id, 'fence', a.fence
+                              )
+                        )
+                    ) AS sequential_process_uncertain
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -813,7 +827,11 @@ impl Store {
         .bind(fence)
         .execute(&mut *tx)
         .await?;
-        let requires_reconciliation = !protected_effects.is_empty();
+        // StartWork is not proof of process birth, but it is the last point
+        // after which the controller cannot prove that no shell ran. Preserve
+        // this uncertainty instead of requeueing ordinal one under a new fence.
+        let requires_reconciliation = !protected_effects.is_empty()
+            || expired.try_get::<bool, _>("sequential_process_uncertain")?;
         let uncertain_effects = protected_effects
             .iter()
             .filter(|(_, status)| status != "confirmed")

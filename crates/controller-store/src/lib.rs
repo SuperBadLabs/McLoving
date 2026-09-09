@@ -20,6 +20,7 @@ mod identity;
 mod product;
 mod scheduler;
 mod security;
+mod sequential;
 mod state_transfer;
 mod test_results;
 mod trigger_ingress;
@@ -75,6 +76,11 @@ pub use scheduler::{
     AcceptedOffer, ClaimRequest, ClaimedAttempt, LeaseRenewalDisposition, WaitReason,
 };
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
+pub use sequential::results::{
+    SequentialAttemptResult, SequentialBuildResult, SequentialLogReference, SequentialStageResult,
+    SequentialStepResult,
+};
+pub use sequential::{SequentialDagBuild, SequentialStepLayout};
 pub use state_transfer::{ScmCheckoutEvidenceRef, StateTransferReceipt};
 pub use test_results::{
     DEFAULT_MAX_JUNIT_BYTES, DEFAULT_MAX_JUNIT_CASES, DEFAULT_MAX_JUNIT_SUITES, JunitLimits,
@@ -580,6 +586,10 @@ pub enum StoreError {
     InvalidTrustPool,
     #[error("invalid pipeline DAG: {0}")]
     InvalidDag(String),
+    #[error("sequential result integrity failure: {0}")]
+    SequentialIntegrity(String),
+    #[error("sequential result exceeds the operational read bound")]
+    SequentialReadIncomplete,
     #[error("idempotency key conflict: {0}")]
     IdempotencyConflict(String),
     #[error("invalid security operation: {0}")]

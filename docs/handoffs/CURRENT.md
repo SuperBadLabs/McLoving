@@ -70,6 +70,15 @@ concatenating commands into one shell, or sharing an attempt path cannot satisfy
 these runtime tickets. `JCOMP-003` waits for both and earns the final paired
 execution evidence against their corrected exact runtime.
 
+
+JCOMP-002A now has an implementation candidate: the pure planner, owned
+sequential admission/layout, coherent internal result projection and contained
+controller/remote-agent fixtures. A real lease-loss test exposed generic
+requeue of a started shell; the candidate requires reconciliation for expired
+sequential StartWork. See the [active review](../evidence/JCOMP-002A_SECURITY_REVIEW.md).
+It remains ACTIVE pending final independent review, protected merge and exact
+main gates; no workspace-continuity or paired Jenkins execution claim is earned.
+
 `CI-004` is closed on observed protected-merge and post-merge evidence: PR #125
 merged as `1d81127`, whose Foundation run `34293282546` and native Windows run
 `34293282632` both succeeded. Its [security review](../evidence/CI-004_SECURITY_REVIEW.md)
