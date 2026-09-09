@@ -9,8 +9,8 @@ durable compiler supplement and reviewed runtime design. The earlier
 
 On September 9, PR #128 merged as `904fd1f`; exact-main Foundation
 `34317917356` and actual native Windows `34317917395` succeeded. JCOMP-002
-now closes in the subsequent JCOMP-002A bookkeeping commit after receipt review
-and live verification. JCOMP-002A is the sole ACTIVE dispatch. The original dated
+closed in the subsequent JCOMP-002A bookkeeping commit after receipt review
+and live verification. JCOMP-002B is now the sole ACTIVE dispatch. The original dated
 handoff remains an immutable historical observation. Fresh custody on `09b6c53`
 observed successful Foundation `34342349617` and native Windows `34342349592`;
 those observations verify only that head.
@@ -31,7 +31,7 @@ authority, closes no ticket, and does not relax
 
 The owner selected broader pipeline support with Linux sequential Declarative
 pipelines and literal shell steps as the first milestone. The selected slot is
-now solely `JCOMP-002A` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
+now solely `JCOMP-002B` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
 `JCOMP-002` -> `JCOMP-002A` -> `JCOMP-002B` -> `JCOMP-003`, with one standalone
 PR per ticket. The [board](../EXECUTION_BOARD.md) holds their complete acceptance
 criteria; no successor starts before its predecessor is protected-main merged
@@ -71,13 +71,16 @@ these runtime tickets. `JCOMP-003` waits for both and earns the final paired
 execution evidence against their corrected exact runtime.
 
 
-JCOMP-002A now has an implementation candidate: the pure planner, owned
-sequential admission/layout, coherent internal result projection and contained
-controller/remote-agent fixtures. A real lease-loss test exposed generic
-requeue of a started shell; the candidate requires reconciliation for expired
-sequential StartWork. See the [active review](../evidence/JCOMP-002A_SECURITY_REVIEW.md).
-It remains ACTIVE pending final independent review, protected merge and exact
-main gates; no workspace-continuity or paired Jenkins execution claim is earned.
+JCOMP-002A closed after PR #130 merged as
+`c2aaa0da6aaf5f5a5800bca252fd0514584f56fa`, tree
+`77bc88fa006123ab72ae497334c1733dc0ac749b`, matching final head `d7be0f7`.
+All eight final-head protected checks and independent review passed, followed
+by exact-main Foundation `34351767851` and actual native Windows
+`34351767843`. The [closure review](../evidence/JCOMP-002A_SECURITY_REVIEW.md)
+records the pure planner, immutable sequential admission, coherent projection,
+and contained controller/agent evidence, including reconciliation after lease
+loss following StartWork. JCOMP-002B is selected for implementation; no workspace
+continuity or paired Jenkins execution claim is earned by JCOMP-002A.
 
 `CI-004` is closed on observed protected-merge and post-merge evidence: PR #125
 merged as `1d81127`, whose Foundation run `34293282546` and native Windows run
@@ -112,7 +115,7 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   count copied into this file is stale on the next ticket. As an observation
   rather than a current-state claim: on 2026-09-08 the reorganized local board
   reported 112 tickets with 26 remaining, and 86 done with the admitted, ratcheted 37-item debt.
-- `JCOMP-002A` is the selected dispatch ticket and is `ACTIVE`. Before
+- `JCOMP-002B` is the selected dispatch ticket and is `ACTIVE`. Before
   continuing on a successor head, evaluate the standing successor-head verification gate against
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
@@ -150,8 +153,8 @@ first container must be prevented from masking the remainder, and the
 source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 The September 8 priority replaces the thaw's `EXEC-005` selection with
-the Jenkins compatibility chain. `JCOMP-001` and `JCOMP-002` are now verified complete and
-`JCOMP-002A` is selected; its dependency is earned compiler closure.
+the Jenkins compatibility chain. `JCOMP-001`, `JCOMP-002` and `JCOMP-002A` are now verified complete and
+`JCOMP-002B` is selected; its dependency is earned sequential-runtime closure.
 Before starting, refresh protected main, open PRs, alerts and protection,
 run the board/closure and full Foundation gates, and observe the condition
 below against the head that is current when you read this. Use a fresh

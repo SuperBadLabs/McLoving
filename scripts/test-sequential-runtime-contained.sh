@@ -45,6 +45,7 @@ timeout 600 podman run --rm --name "${compiler_name}" --pull=never \
     rustc --version
     cargo build --locked -p mcloving-controller -p mcloving-agent
     cargo test --locked -p mcloving-controller-api --test sequential_store --no-run --message-format=json > /tmp/mcloving-sequential-target/store-artifacts.json
+    cargo test --locked -p mcloving-controller-api --test workspace_store --no-run --message-format=json > /tmp/mcloving-sequential-target/workspace-artifacts.json
     cargo test --locked -p mcloving-agent --test sequential_work --no-run --message-format=json > /tmp/mcloving-sequential-target/remote-artifacts.json
   ' > "${evidence_dir}/build.log" 2>&1
 cp "${scratch}/target/debug/mcloving-controller" "${scratch}/target/debug/mcloving-agent" "${scratch}/binaries/"
@@ -54,7 +55,7 @@ from pathlib import Path
 import shutil
 import sys
 root = Path(sys.argv[1])
-for records, name in (("store-artifacts.json", "sequential_store"), ("remote-artifacts.json", "sequential_work")):
+for records, name in (("store-artifacts.json", "sequential_store"), ("workspace-artifacts.json", "workspace_store"), ("remote-artifacts.json", "sequential_work")):
     artifacts = [json.loads(line) for line in (root / "target" / records).read_text().splitlines()]
     paths = [Path(item["executable"]) for item in artifacts
              if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == name
@@ -67,7 +68,7 @@ for records, name in (("store-artifacts.json", "sequential_store"), ("remote-art
 PY
 (
   cd "${scratch}/binaries"
-  sha256sum mcloving-controller mcloving-agent sequential_store sequential_work
+  sha256sum mcloving-controller mcloving-agent sequential_store workspace_store sequential_work
 ) > "${evidence_dir}/binaries.sha256"
 
 podman run -d --name "${database_name}" --pull=never --network=none \
@@ -94,7 +95,8 @@ timeout 180 podman run --rm --name "${runner_name}" --pull=never \
   "${MCLOVING_RUST_IMAGE}" bash -c '
     set -euo pipefail
     bash scripts/run-verified-rust-test.sh 4 sequential-store --require-postgres /tmp/mcloving-sequential-target/debug/sequential_store --nocapture --test-threads=1
-    bash scripts/run-verified-rust-test.sh 6 sequential-remote-work --require-postgres /tmp/mcloving-sequential-target/debug/sequential_work --nocapture --test-threads=1
+    bash scripts/run-verified-rust-test.sh 4 workspace-store --require-postgres /tmp/mcloving-sequential-target/debug/workspace_store --nocapture --test-threads=1
+    bash scripts/run-verified-rust-test.sh 11 sequential-remote-work --require-postgres /tmp/mcloving-sequential-target/debug/sequential_work --nocapture --test-threads=1
   ' > "${evidence_dir}/runtime.log" 2>&1
 python3 - "${evidence_dir}/runtime.log" <<'PY'
 import re
@@ -105,9 +107,11 @@ if "skipped:" in output.lower() or re.search(r"\b[1-9][0-9]* ignored;", output):
     raise SystemExit("contained runtime gate refuses skipped or ignored tests")
 if len(re.findall(r"^sequential-runtime-evidence ", output, re.M)) != 8:
     raise SystemExit("contained runtime evidence population is incomplete")
+if len(re.findall(r"^workspace-runtime-evidence ", output, re.M)) != 5:
+    raise SystemExit("contained workspace runtime evidence population is incomplete")
 PY
 podman rm -f "${database_name}" > "${evidence_dir}/cleanup.txt"
-printf 'contained-sequential-runtime-ok store=4 remote=6 production_authority=false\n' | tee "${evidence_dir}/result.txt"
+printf 'contained-sequential-runtime-ok store=4 workspace=4 remote=11 production_authority=false\n' | tee "${evidence_dir}/result.txt"
 (
   cd "${evidence_dir}"
   sha256sum source-commit.txt source-tree.txt source.tar images.txt build.log binaries.sha256 database-id.txt runtime.log cleanup.txt result.txt

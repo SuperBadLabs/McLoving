@@ -29,6 +29,7 @@ pub struct SequentialStepLayout {
 pub struct SequentialDagBuild {
     dag: NewDagBuild,
     layout: Vec<SequentialStepLayout>,
+    workspace_transfer: bool,
 }
 
 impl SequentialDagBuild {
@@ -138,7 +139,25 @@ impl SequentialDagBuild {
                 ));
             }
         }
-        Ok(Self { dag, layout })
+        Ok(Self {
+            dag,
+            layout,
+            workspace_transfer: false,
+        })
+    }
+
+    /// Select bounded, verified build workspace transfer for this contained admission.
+    pub fn with_workspace_transfer(mut self) -> Result<Self, StoreError> {
+        for node in &mut self.dag.nodes {
+            node.required_capabilities =
+                vec![mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY.to_owned()];
+        }
+        self.workspace_transfer = true;
+        Ok(self)
+    }
+
+    pub fn workspace_transfer_enabled(&self) -> bool {
+        self.workspace_transfer
     }
 
     pub fn dag(&self) -> &NewDagBuild {
@@ -151,6 +170,9 @@ impl SequentialDagBuild {
     pub(crate) fn contract(&self) -> Value {
         let mut value = crate::dag::normalized_dag_contract(&self.dag);
         value["sequential_layout"] = json!({"version": 1, "steps": self.layout});
+        if self.workspace_transfer {
+            value["workspace_transfer"] = json!({"version": 1});
+        }
         value
     }
 }
@@ -166,6 +188,10 @@ impl Store {
         let admission =
             crate::dag::admit_dag_contract_transaction(&mut tx, &input.dag, input.contract(), true)
                 .await?;
+        if admission.created && input.workspace_transfer {
+            crate::workspace::initialize(&mut tx, input.dag.organization_id, admission.build_id)
+                .await?;
+        }
         tx.commit().await?;
         Ok(admission)
     }

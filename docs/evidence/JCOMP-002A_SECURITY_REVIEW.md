@@ -2,8 +2,9 @@
 
 ## Status and boundary
 
-JCOMP-002A is ACTIVE. This implementation candidate has not earned protected
-merge, exact-main verification or closure attribution. The architecture is
+JCOMP-002A is DONE after protected merge, independent review and successful
+exact-main verification. This subsequent bookkeeping update records earned
+bounded closure. The architecture is
 `docs/architecture/SEQUENTIAL_STEP_EXECUTION_V1.md`; the original settled design
 and threat plan remain in the dated September 9 handoff.
 
@@ -128,14 +129,46 @@ actual concurrent-reader and shipped-runtime cases. No implementation change
 is warranted by this finding; future changes that query inside
 `tenant_transaction` must preserve the projection's pre-snapshot setup.
 
-## Evidence required for closure
+## Protected merge and exact-main closure
 
-Retain the final committed source/tree, source archive, runner/database image
-identities, executed controller/agent/test hashes, full non-skipped test output
-and cleanup result. Run the complete protected checks and independent review
-against the final PR head, resolve actionable findings, then verify the exact
-merged-main Foundation and actual native Windows jobs. No result for an earlier
-candidate can replace those observations.
+PR #130's final head `d7be0f777a5f68c528717d17f0238ced2f62cb03`
+passed all eight required GitHub Actions contexts (app `15368`): Rust,
+Dependencies and licenses, Secret scan, Architecture records, Formal model,
+Controller PostgreSQL, Foundation, and Windows. Final-head Foundation run
+`34349462276` and Windows run `34349462367` succeeded. The final change after
+Copilot's reviewed implementation head `f222264` was a 23-line documentation-only
+review disposition; it changed no implementation or gate behavior. The sole
+review thread was resolved with the positive and negative PostgreSQL controls
+above; no actionable finding remained.
+
+The protected squash merge is `c2aaa0da6aaf5f5a5800bca252fd0514584f56fa`,
+with GitHub signature verification `valid`. Its tree
+`77bc88fa006123ab72ae497334c1733dc0ac749b` exactly matches the final PR head.
+On that exact merged-main commit, Foundation run `34351767851` and Windows
+Agent run `34351767843` succeeded, including the actual native Windows job.
+Protection remained enabled with all eight app-bound contexts; no bypass was used.
+These exact-main observations were supplied by the integrating custodian after
+live verification, separately from the read-only audit below.
+
+An independent read-only subagent audit inspected the pure planner, owned
+sequential contract, atomic admission/replay, coherent projection, StartWork
+lease-expiry reconciliation, runtime fixtures, contained driver, hosted gates,
+and workflow aggregate changes. It found no actionable blocker, independently
+passed all four gate-control and 11 workflow-aggregate tests, and verified all
+11 retained artifact checksums. It also confirmed the candidate/merge tree
+identity and that only documentation/evidence changed after campaign source
+`68a7487`. The audit did not rerun PostgreSQL or native runtime tests or inspect
+live GitHub gates; those observations remain the separate campaign and hosted
+receipts recorded here.
+
+The retained inventory identifies the source commit/tree, image identities,
+executed controller/agent/test hashes, full non-skipped output and successful
+cleanup. The source archive is not retained: reconstruct it with
+`git archive 68a7487d2ef177a3ccbd0bffe98a5c846fa76020`. The independent audit
+reconstructed its SHA-256 as
+`f4606f2f43aa4157a10650913370e943d98467603d844c3897087bf165bc7700`, exactly
+matching `campaign.json`. Historical evidence-directory bytes remain unchanged.
+JCOMP-002B is selected next; this receipt grants no workspace continuity claim.
 
 ## Residuals and nonclaims
 

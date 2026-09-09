@@ -21,6 +21,8 @@ mod cleanup;
 mod unix;
 #[cfg(windows)]
 mod windows;
+#[cfg(unix)]
+mod workspace_transfer;
 
 pub use cleanup::{flush_terminal_cleanup, remove_terminal_relative_path};
 
@@ -49,6 +51,8 @@ pub enum ExecutionMode {
 
 #[derive(Clone, Debug)]
 pub struct ExecutionRequest {
+    /// Optional verified file state copied into this fresh attempt directory.
+    pub workspace_seed: Option<mcloving_domain::workspace::WorkspaceSnapshot>,
     pub workspace_root: PathBuf,
     pub workspace: PathBuf,
     pub mode: ExecutionMode,
@@ -77,6 +81,8 @@ pub enum Containment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionOutcome {
+    /// Capture occurs only after containment; failure preserves process/log evidence.
+    pub workspace_snapshot: Option<Result<mcloving_domain::workspace::WorkspaceSnapshot, String>>,
     pub termination: Termination,
     pub exit_code: Option<i32>,
     pub process_id: u32,
@@ -87,6 +93,8 @@ pub struct ExecutionOutcome {
 
 #[derive(Debug, Error)]
 pub enum ExecutionError {
+    #[error("workspace transfer failed: {0}")]
+    WorkspaceTransfer(String),
     #[error("invalid workspace path: {0}")]
     InvalidWorkspace(#[from] JournalError),
     #[error("workspace root must resolve to an existing directory")]

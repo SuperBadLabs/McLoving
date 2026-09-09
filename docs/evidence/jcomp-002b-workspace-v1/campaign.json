@@ -1,0 +1,32 @@
+{
+  "schema": "mcloving.contained-workspace-transfer/1",
+  "source_commit": "941d473144d942824b767eb78744ad27bdf6ac20",
+  "source_tree": "704318f0af27c905cca27b44c3855f46d124bf86",
+  "source_archive_sha256": "c5888fecf7b95a67f542ebf0e16a12defeaaf2e9c106b551c642bb6127c6ef55",
+  "source_archive_retained": false,
+  "source_archive_reconstruction": "git archive <source_commit>",
+  "sequential_store_tests": 4,
+  "workspace_store_tests": 3,
+  "real_remote_tests": 11,
+  "sequential_evidence_markers": 8,
+  "workspace_evidence_markers": 5,
+  "source_records": 18,
+  "result_records": 19,
+  "stdout_records": 30,
+  "cleanup_records": 8,
+  "production_authority": false,
+  "jenkins_execution": false,
+  "hostile_same_uid_isolation": false,
+  "workspace_continuity": true,
+  "artifacts": {
+    "source-commit.txt": "16c71ff711e75558d152d5d593749a9068341f1e0e28a0e32194ab870fac864f",
+    "source-tree.txt": "35ae7c07d14ce364e1e8a4bdbf619ce95637733f1794a4d94ad88e3c0c38bae1",
+    "images.txt": "0427b3f07f7c03f32596d265ab4d3c5b7c3f65ac581430ad6836bf2f232c4b19",
+    "build.log": "4c61b3eb43c7a07d85668de4fe605bb2fbb7cc852a4231ff99836952b0268361",
+    "binaries.sha256": "f2186f69d0df9217a571c70b5c1d0b55bb3ee1df26168fc5ab70b331b85f6859",
+    "database-id.txt": "fbba946b0eb5fbcdd3153c6a2d0a61714dc84f0f17993ed4bb8fe08b2e8dd5b5",
+    "runtime.log": "4f8ff38b0fa0a49dce1173a202190ec3155c8779a977b497c015cd0544a4f4e1",
+    "cleanup.txt": "20b65d0ddbe9ef52346112f975805243441849534420fd7f752ea9e4b6536b67",
+    "result.txt": "6fa649c90d8f6775efa8fbb6ec6ec966e5dc58f4023fdc5fde8f43a7d1314b7b"
+  }
+}
