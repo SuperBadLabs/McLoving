@@ -103,6 +103,30 @@ admission and include actual exit-7 failure with captured file receipts.
 Focused strict Clippy passes; actual execution of this corrected candidate
 remains the next verification obligation.
 
+## Development campaign correction
+
+The first contained campaign on `5152089` passed all four sequential-store
+and three workspace-store tests, then passed the six predecessor remote tests
+and failed all five new workspace tests. The actual agent wrote transfer data
+into its durable result but reconstructed a smaller wire summary that omitted
+it. Successful steps were therefore refused by the controller; a capture
+failure also lost its named reason. Source review and serialization-only tests
+had missed that publication boundary.
+
+The correction makes live completion and recovery use the same builder from
+the verified durable result. Workspace publications preserve full transfer,
+actual exit/termination, reason and original result digest; legacy summary
+shapes remain unchanged. New regression coverage checks the actual builder
+for success, capture failure and identical replay. All 56 agent library tests
+and strict all-target Clippy pass, and the store reviewer independently
+inspected both publication paths. A fresh contained campaign remains required.
+
+The initial full Foundation gate also refused an unversioned new local domain
+dependency. Adding its exact `=0.0.0` version passes the pinned dependency-ban
+check without changing policy. The separate source-acquirer package passed
+under its required AppArmor profile; those source files are unchanged by these
+corrections.
+
 ## Evidence required before closure
 
 Run the actual shipped controller/agent through cross-step/stage continuity,

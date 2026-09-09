@@ -77,6 +77,8 @@ struct ExecutionEnvironment {
 
 #[derive(Deserialize)]
 struct PersistedResult {
+    #[serde(default)]
+    workspace_transfer: Option<WorkspaceTransferResult>,
     outcome: String,
     exit_code: Option<i32>,
     termination: String,
@@ -85,6 +87,40 @@ struct PersistedResult {
     #[serde(default = "default_completion_protocol")]
     completion_protocol: String,
     cancellation_outcome: Option<i32>,
+}
+
+/// Build the wire summary from the digest-verified durable result. Workspace
+/// publications must carry the identical checkpoint and failure evidence on
+/// initial upload and replay; the controller normalizes its bytes to a receipt.
+fn work_completion_summary(
+    result: &PersistedResult,
+    digest: &[u8; 32],
+    legacy_replay: bool,
+) -> Result<Vec<u8>, AgentError> {
+    let mut summary = if result.workspace_transfer.is_none()
+        && legacy_replay
+        && result.reason.is_some()
+    {
+        json!({"reason": result.reason, "result_sha256": hex(digest)})
+    } else {
+        json!({"exit_code": result.exit_code, "termination": result.termination, "result_sha256": hex(digest)})
+    };
+    if let Some(transfer) = &result.workspace_transfer {
+        transfer
+            .validate()
+            .map_err(|error| AgentError::InvalidAssignment(error.to_string()))?;
+        summary["workspace_transfer"] = serde_json::to_value(transfer)?;
+        if let Some(reason) = &result.reason {
+            summary["reason"] = json!(reason);
+        }
+    }
+    let encoded = serde_json::to_vec(&summary)?;
+    if encoded.len() > MAX_RESULT_SPOOL_BYTES as usize {
+        return Err(AgentError::InvalidAssignment(
+            "completion summary exceeds its quota".to_owned(),
+        ));
+    }
+    Ok(encoded)
 }
 
 fn default_completion_protocol() -> String {
@@ -461,18 +497,7 @@ async fn replay_finalization(
     }
     match result.completion_protocol.as_str() {
         WORK_COMPLETION_PROTOCOL => {
-            let summary = if let Some(reason) = result.reason {
-                serde_json::to_vec(&json!({
-                    "reason": reason,
-                    "result_sha256": hex(&result_entry.digest),
-                }))?
-            } else {
-                serde_json::to_vec(&json!({
-                    "exit_code": result.exit_code,
-                    "termination": result.termination,
-                    "result_sha256": hex(&result_entry.digest),
-                }))?
-            };
+            let summary = work_completion_summary(&result, &result_entry.digest, true)?;
             let published = published_work_outcome(
                 authority_rpc(
                     control,
@@ -1353,11 +1378,10 @@ async fn run_assignment(
             inline_chunks.as_mut(),
         )
         .await?;
-        let summary = serde_json::to_vec(&json!({
-            "exit_code": outcome.exit_code,
-            "termination": termination_name(outcome.termination),
-            "result_sha256": hex(&result.digest),
-        }))?;
+        let result_content =
+            verified_spool_content(&config.workspace_root, &result, "result").await?;
+        let persisted: PersistedResult = serde_json::from_slice(&result_content)?;
+        let summary = work_completion_summary(&persisted, &result.digest, false)?;
         let completion = authority_rpc(
             publication.control,
             publication.client.complete_work(WorkCompletion {
@@ -2638,6 +2662,66 @@ mod tests {
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
         }
+    }
+
+    #[test]
+    fn workspace_publication_and_replay_preserve_checkpoint_reason_and_result_digest() {
+        use mcloving_domain::workspace::WorkspaceSnapshot;
+        let snapshot = WorkspaceSnapshot {
+            version: 1,
+            entries: Vec::new(),
+        };
+        for capture_failure in [false, true] {
+            let transfer = WorkspaceTransferResult {
+                version: 1,
+                organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
+                build_id: "00000000-0000-0000-0000-000000000124".to_owned(),
+                namespace_id: "00000000-0000-0000-0000-000000000127".to_owned(),
+                generation: 0,
+                input_digest: snapshot.digest().unwrap(),
+                snapshot: (!capture_failure).then_some(snapshot.clone()),
+                error: capture_failure.then_some("workspace_unsupported_entry".to_owned()),
+            };
+            let durable = json!({
+                "outcome": if capture_failure { "failed" } else { "succeeded" },
+                "exit_code": 0, "termination": "exited",
+                "reason": capture_failure.then_some("workspace_capture_failed:workspace_unsupported_entry"),
+                "completion_protocol": "work", "cancellation_outcome": null,
+                "workspace_transfer": transfer,
+            });
+            let bytes = serde_json::to_vec(&durable).unwrap();
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let persisted: PersistedResult = serde_json::from_slice(&bytes).unwrap();
+            let initial = work_completion_summary(&persisted, &digest, false).unwrap();
+            let replay = work_completion_summary(&persisted, &digest, true).unwrap();
+            assert_eq!(initial, replay);
+            let summary: serde_json::Value = serde_json::from_slice(&initial).unwrap();
+            assert_eq!(summary["workspace_transfer"], durable["workspace_transfer"]);
+            assert_eq!(summary["exit_code"], 0);
+            assert_eq!(summary["termination"], "exited");
+            assert_eq!(summary["result_sha256"], hex(&digest));
+            if capture_failure {
+                assert_eq!(summary["reason"], durable["reason"]);
+            }
+            assert!(initial.len() <= MAX_RESULT_SPOOL_BYTES as usize);
+        }
+        let legacy: PersistedResult = serde_json::from_value(json!({
+            "outcome":"succeeded", "exit_code":0, "termination":"exited", "reason":null,
+            "completion_protocol":"work", "cancellation_outcome":null,
+        }))
+        .unwrap();
+        let expected = serde_json::to_vec(
+            &json!({"exit_code":0,"termination":"exited","result_sha256":hex(&[7;32])}),
+        )
+        .unwrap();
+        assert_eq!(
+            work_completion_summary(&legacy, &[7; 32], false).unwrap(),
+            expected
+        );
+        assert_eq!(
+            work_completion_summary(&legacy, &[7; 32], true).unwrap(),
+            expected
+        );
     }
 
     #[cfg(target_os = "linux")]
