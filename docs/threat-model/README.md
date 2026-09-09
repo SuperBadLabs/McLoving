@@ -421,6 +421,22 @@ inputs and a fresh explicit one-action owner grant.
 | Multibranch and organization-folder discovery | DISC-001 |
 | Deny-authority production shadow qualification | SHADOW-001 |
 
+## CI-004 smoke-fixture implementation review
+
+CI-004 implementation acceptance is complete at exact corrected head
+`3880043226f54b35984defc0d09957e5ff1d26ac`, independently reviewed and verified
+by full Foundation and classified Windows gates. The review and evidence are
+in `docs/evidence/CI-004_SECURITY_REVIEW.md`. TM-050 and TM-052 retain every
+existing deployment-integrity assertion and merge-authority condition. The
+failed precursor is retained: systemd fixture transformation was removed, and
+the original exact byte-identity oracle then passed with both runtime tests.
+TM-016 and TM-023 retain the explicit host-binutils trust residual for the
+smoke harness's unpinned `strip` executable; CI maintainers own that fixture
+trust assumption. TM-042's production release/signing boundary is unchanged.
+Final-head checks, protected merge, and post-merge verification remain
+required. CI-004 stays ACTIVE without closure attribution until those gates
+complete; this implementation review grants no production authority.
+
 ## Closure attribution
 
 Machine-readable, and read by `scripts/verify-ticket-closure-receipts.py` as the

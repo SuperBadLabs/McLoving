@@ -17,7 +17,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/versions.env
 source "${repo_root}/tools/versions.env"
 
-for tool in podman openssl python3 curl jq cargo sha256sum flock; do
+for tool in podman openssl python3 curl jq cargo sha256sum flock strip; do
   command -v "${tool}" >/dev/null || {
     echo "missing required tool: ${tool}" >&2
     exit 1
@@ -606,6 +606,10 @@ mkdir -p "${release_dir}" "${workdir}/logs"
 printf '%s\n' "${invoking_xdg_environment}" > "${workdir}/logs/environment-xdg.log"
 for binary in mcloving-controller mcloving-agent mcloving-cli mcloving-identity-admin; do
   cp "${repo_root}/target/debug/${binary}" "${release_dir}/${binary}"
+  # Keep code, symbols and unwind information; omit only debug sections from
+  # this disposable fixture before its checksums are sealed. The matrix copies
+  # and rehashes these bytes repeatedly. Leave the build outputs untouched.
+  strip --strip-debug "${release_dir}/${binary}"
 done
 (cd "${release_dir}" && sha256sum mcloving-controller mcloving-agent \
   mcloving-cli mcloving-identity-admin > "${workdir}/checksums.sha256")
