@@ -151,9 +151,14 @@ using the same campaign harness that produced the original finding:
 
 | Scenario | Before | After |
 |---|---|---|
-| Controller killed mid-step, agent and step survive | `aborted`, 0 step completions, 2/2 | `succeeded`, 1 step completion, 2/2 |
+| Controller killed mid-step, agent and step survive | `aborted`, 0 step completions, 2/2 | `succeeded`, 1 step completion, 4/4 |
 | Controller and agent both killed | `aborted` in 8.4 s | `aborted` in 8.3 s, unchanged |
 | Cancellation with a live controller | `aborted` | `aborted`, unchanged |
+
+The controller-killed cell was run twice on the fix alone and twice more after
+`JCOMP-002B` was merged in, because that change rewrote much of the same file;
+all four succeeded, in 24.5 to 24.7 s against Jenkins' 25.4 s on the same
+scenario.
 
 `step_starts` is 1 and `step_completions` is 1 in the repaired controller
 scenario: the step ran exactly once. Riding out the outage did not re-run it.
