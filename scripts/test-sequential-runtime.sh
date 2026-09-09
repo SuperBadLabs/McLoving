@@ -32,7 +32,7 @@ run_case store bash scripts/run-verified-rust-test.sh \
   4 sequential-store --require-postgres \
   cargo test --locked -p mcloving-controller-api --test sequential_store -- --nocapture --test-threads=1
 run_case workspace bash scripts/run-verified-rust-test.sh \
-  3 workspace-store --require-postgres \
+  4 workspace-store --require-postgres \
   cargo test --locked -p mcloving-controller-api --test workspace_store -- --nocapture --test-threads=1
 run_case remote bash scripts/run-verified-rust-test.sh \
   11 sequential-remote-work --require-postgres \

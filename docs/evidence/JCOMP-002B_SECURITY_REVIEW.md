@@ -3,9 +3,11 @@
 ## Status and boundary
 
 JCOMP-002B is ACTIVE. This is a review plan and implementation record, not a
-closure receipt. The actual shipped runtime campaign and independent implementation reviews
-have passed. Protected final-head checks, merge and exact-main verification
-remain outstanding. The design is
+closure receipt. The historical shipped runtime campaign passed on `941d473`,
+but a continuation review identified an uncovered operator-reconciliation path.
+The correction requires independent review and a fresh committed-source campaign;
+the historical passing evidence does not verify the revised source. Protected
+final-head checks, merge and exact-main verification remain outstanding. The design is
 `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md`.
 
 The selected internal mode transfers a bounded controller-owned checkpoint
@@ -86,9 +88,11 @@ All four mocked gate-control tests pass after adding the separate three-test
 workspace-store population and expanding the remote population to eleven.
 Each of the three suites independently refuses failed, empty, wrong-sized,
 skipped and ignored outcomes, and every required source target is checked.
-These mocks are control-flow verification only. The contained driver requires
-four sequential-store, three workspace-store and eleven remote tests, with
-eight sequential and five workspace evidence markers; the passing corrected campaign is recorded below.
+These mocks are control-flow verification only. The historical contained driver
+required four sequential-store, three workspace-store and eleven remote tests,
+with eight sequential and five workspace evidence markers; that passing campaign
+is recorded below. The reconciliation correction adds a fourth workspace-store
+test to both runtime gates and their mocked population control.
 
 A read-only inspection of the five new actual-runtime test definitions found
 useful generation/output/owner bindings and identified improvements needed
@@ -127,7 +131,7 @@ check without changing policy. The separate source-acquirer package passed
 under its required AppArmor profile; those source files are unchanged by these
 corrections.
 
-## Corrected committed-source campaign and final review
+## Historical corrected committed-source campaign and review
 
 The fresh contained campaign on exact source
 `941d473144d942824b767eb78744ad27bdf6ac20` passed all four sequential-store,
@@ -175,6 +179,27 @@ records. It independently reran four gate controls and eleven workflow tests;
 all passed. The retained manifest counts and cleanup/nonclaim language matched
 the actual log. No edits or actionable findings were required by that audit.
 These independent reviews do not substitute for protected PR checks.
+
+## Continuation finding: operator reconciliation bypassed workspace publication
+
+The continuation store review found that `finalize_reconciled_attempt` bypassed
+the workspace publication boundary. Operator reconciliation could report a
+workspace-enabled attempt successful without a verified checkpoint, allowing
+downstream work to consume the previous generation. Operator-supplied workspace
+transfer data also lacked the normal publication and summary-normalization path.
+The historical campaign did not exercise this boundary; its passing receipt
+remains evidence only for its recorded scenarios and exact source.
+
+The correction refuses success and operator-supplied workspace transfer data
+for workspace-enabled attempts before replay or mutation. Operators may resolve
+uncertain work as failed or aborted without manufacturing a checkpoint; terminal
+closure retains the last verified generation and receipt and removes live bytes.
+The added workspace-store regression covers refusal, terminal closure and exact
+replay. Both actual runtime gates now require four workspace-store tests.
+
+Independent review and actual execution of this correction are pending. Retain
+the fresh campaign in a new versioned evidence directory after the reviewed
+candidate is committed and clean; do not overwrite `jcomp-002b-workspace-v1`.
 
 ## Evidence required before closure
 

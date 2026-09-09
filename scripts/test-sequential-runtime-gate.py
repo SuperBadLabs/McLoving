@@ -28,7 +28,7 @@ class SequentialGate(unittest.TestCase):
         cargo.write_text('''#!/usr/bin/env python3
 import os, sys
 suite = sys.argv[sys.argv.index("--test") + 1]
-count = {"sequential_store": 4, "workspace_store": 3, "sequential_work": 11}[suite]
+count = {"sequential_store": 4, "workspace_store": 4, "sequential_work": 11}[suite]
 print(f"mocked-suite {suite}")
 mode = os.environ.get("MOCK_MODE", "success") if os.environ.get("MOCK_SUITE", suite) == suite else "success"
 if mode == "failed": sys.exit(9)

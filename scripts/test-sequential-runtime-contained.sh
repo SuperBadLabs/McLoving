@@ -95,7 +95,7 @@ timeout 180 podman run --rm --name "${runner_name}" --pull=never \
   "${MCLOVING_RUST_IMAGE}" bash -c '
     set -euo pipefail
     bash scripts/run-verified-rust-test.sh 4 sequential-store --require-postgres /tmp/mcloving-sequential-target/debug/sequential_store --nocapture --test-threads=1
-    bash scripts/run-verified-rust-test.sh 3 workspace-store --require-postgres /tmp/mcloving-sequential-target/debug/workspace_store --nocapture --test-threads=1
+    bash scripts/run-verified-rust-test.sh 4 workspace-store --require-postgres /tmp/mcloving-sequential-target/debug/workspace_store --nocapture --test-threads=1
     bash scripts/run-verified-rust-test.sh 11 sequential-remote-work --require-postgres /tmp/mcloving-sequential-target/debug/sequential_work --nocapture --test-threads=1
   ' > "${evidence_dir}/runtime.log" 2>&1
 python3 - "${evidence_dir}/runtime.log" <<'PY'
@@ -111,7 +111,7 @@ if len(re.findall(r"^workspace-runtime-evidence ", output, re.M)) != 5:
     raise SystemExit("contained workspace runtime evidence population is incomplete")
 PY
 podman rm -f "${database_name}" > "${evidence_dir}/cleanup.txt"
-printf 'contained-sequential-runtime-ok store=4 workspace=3 remote=11 production_authority=false\n' | tee "${evidence_dir}/result.txt"
+printf 'contained-sequential-runtime-ok store=4 workspace=4 remote=11 production_authority=false\n' | tee "${evidence_dir}/result.txt"
 (
   cd "${evidence_dir}"
   sha256sum source-commit.txt source-tree.txt source.tar images.txt build.log binaries.sha256 database-id.txt runtime.log cleanup.txt result.txt

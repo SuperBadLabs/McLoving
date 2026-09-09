@@ -537,3 +537,142 @@ async fn workspace_failure_and_cancelled_publication_keep_receipts_without_reope
         ));
     }
 }
+
+#[tokio::test]
+async fn workspace_reconciliation_cannot_publish_success_or_transfer_and_closes_without_advancing()
+{
+    for (outcome, expected_status) in [
+        (TerminalOutcome::Failed, "failed"),
+        (TerminalOutcome::Aborted, "aborted"),
+    ] {
+        let Some((store, plain)) = fixture().await else {
+            return;
+        };
+        let plan = plain.with_workspace_transfer().unwrap();
+        let admission = store.admit_sequential_dag(&plan).await.unwrap();
+        let first = running(&store, &plan).await;
+        let seed = grant(&store, &first).await;
+        let snapshot = WorkspaceSnapshot {
+            version: 1,
+            entries: vec![WorkspaceEntry::File {
+                path: "verified.txt".to_owned(),
+                executable: false,
+                contents: b"last verified checkpoint".to_vec(),
+            }],
+        };
+        assert!(
+            finish(&store, &first, summary(&seed, snapshot))
+                .await
+                .unwrap()
+        );
+        let current = running(&store, &plan).await;
+        let input = grant(&store, &current).await;
+        sqlx::query(
+            "UPDATE attempts SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+        )
+        .bind(current.attempt_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            store
+                .requeue_one_expired(current.organization_id)
+                .await
+                .unwrap()
+        );
+        let before = store
+            .sequential_build_result(
+                current.organization_id,
+                plan.dag().project_id,
+                admission.build_id,
+                100,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.status, "reconciliation_required");
+        assert_eq!(before.workspace_generation, 1);
+        assert!(!before.workspace_closed);
+        let transfer = summary(&input, input.snapshot.clone());
+        for (requested, value) in [
+            (TerminalOutcome::Succeeded, json!({"operator": "resolved"})),
+            (TerminalOutcome::Succeeded, transfer.clone()),
+            (outcome, transfer.clone()),
+            (outcome, json!({"requested_summary": transfer})),
+        ] {
+            assert!(
+                !store
+                    .finalize_reconciled_attempt(
+                        current.organization_id,
+                        current.attempt_id,
+                        current.fence,
+                        "workspace-test-operator",
+                        requested,
+                        value,
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(store.claim_next(&claim(&plan)).await.unwrap().is_none());
+            assert_eq!(
+                store
+                    .sequential_build_result(
+                        current.organization_id,
+                        plan.dag().project_id,
+                        admission.build_id,
+                        100,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+        }
+        let terminal = json!({"reason": "uncertain workspace discarded by operator"});
+        for _ in 0..2 {
+            assert!(
+                store
+                    .finalize_reconciled_attempt(
+                        current.organization_id,
+                        current.attempt_id,
+                        current.fence,
+                        "workspace-test-operator",
+                        outcome,
+                        terminal.clone(),
+                    )
+                    .await
+                    .unwrap()
+            );
+            let result = store
+                .sequential_build_result(
+                    current.organization_id,
+                    plan.dag().project_id,
+                    admission.build_id,
+                    100,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.status, expected_status);
+            assert!(result.workspace_closed);
+            assert_eq!(result.workspace_generation, before.workspace_generation);
+            assert_eq!(result.workspace_receipt, before.workspace_receipt);
+            assert!(store.claim_next(&claim(&plan)).await.unwrap().is_none());
+            let raw: Option<Value> =
+                sqlx::query_scalar("SELECT workspace_snapshot FROM builds WHERE id=$1")
+                    .bind(admission.build_id)
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            assert!(raw.is_none());
+            let events: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM build_events WHERE build_id=$1 AND kind='attempt.reconciliation_terminal'",
+            )
+            .bind(admission.build_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(events, 1);
+        }
+    }
+}

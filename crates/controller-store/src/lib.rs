@@ -4426,6 +4426,31 @@ impl Store {
             .bind(format!("mcloving.retry.{attempt_id}"))
             .execute(&mut *tx)
             .await?;
+        // Operator reconciliation cannot verify the output of an uncertain shell.
+        // Workspace builds may be closed as failed/aborted, but may neither publish
+        // a checkpoint nor unlock a successor using the old input generation.
+        let workspace_mode = sqlx::query_scalar::<_, bool>(
+            "SELECT b.workspace_namespace IS NOT NULL
+             FROM attempts AS a
+             JOIN nodes AS n ON n.organization_id = a.organization_id AND n.id = a.node_id
+             JOIN builds AS b ON b.organization_id = n.organization_id AND b.id = n.build_id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
+        if workspace_mode
+            && (outcome == TerminalOutcome::Succeeded
+                || summary.get("workspace_transfer").is_some()
+                || summary
+                    .pointer("/requested_summary/workspace_transfer")
+                    .is_some())
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let exact_replay = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
