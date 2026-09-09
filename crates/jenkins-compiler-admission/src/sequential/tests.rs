@@ -1,0 +1,580 @@
+use super::*;
+use serde_json::Value;
+use std::path::Path;
+
+fn context(source: &[u8]) -> DocumentContext {
+    context_named(source, "fresh-document", "authored-document")
+}
+fn context_named(source: &[u8], id: &str, kind: &str) -> DocumentContext {
+    let value = map(vec![
+        ("document-id", text(id)),
+        ("origin", text("review:independent")),
+        ("origin-kind", keyword(kind)),
+        ("schema", text("mcloving.jenkins.source-document/1")),
+        ("source-sha256", text(&sha256_hex(source))),
+    ]);
+    parse_document_context(&encoded(&value), source).unwrap()
+}
+fn expected<'a>(source: &'a [u8], context: &'a DocumentContext) -> SequentialExpectedAdmission<'a> {
+    SequentialExpectedAdmission {
+        request_id: "test:sequential",
+        source,
+        context,
+    }
+}
+fn program(body: &str) -> Vec<u8> {
+    format!("pipeline {{ agent any; stages {{ stage('Build') {{ steps {{ {body} }} }} }} }}")
+        .into_bytes()
+}
+fn response(source: &[u8], context: &DocumentContext) -> Edn {
+    // Start only from historical authority/profile fixtures, not a worker that
+    // executes source. The test constructs adversarial attributed envelopes.
+    let original = super::super::parse_canonical_response(include_bytes!(
+        "../../tests/fixtures/mig003-golden.edn"
+    ))
+    .unwrap();
+    let Edn::Map(original) = original else {
+        panic!()
+    };
+    let mut fields = vec![
+        ("authority", field(&original, "authority").unwrap().clone()),
+        ("compiler", text(COMPILER)),
+        ("protocol", text(PROTOCOL)),
+    ];
+    match source::classify(source) {
+        Classification::Rejected(code) => fields.extend([
+            ("status", keyword("rejected")),
+            (
+                "diagnostic",
+                map(vec![
+                    ("code", text(code)),
+                    (
+                        "message",
+                        text("request rejected without execution authority"),
+                    ),
+                ]),
+            ),
+        ]),
+        classification => {
+            fields.extend([
+                ("contract-sha256", text(CONTRACT_SHA256)),
+                ("request-id", text("test:sequential")),
+                (
+                    "target-profile",
+                    field(&original, "profile").unwrap().clone(),
+                ),
+                ("source-context", context.value.clone()),
+                (
+                    "source",
+                    map(vec![
+                        ("bytes", Edn::Integer(source.len() as i64)),
+                        ("context-sha256", text(&context.context_sha256())),
+                        ("sha256", text(&sha256_hex(source))),
+                    ]),
+                ),
+            ]);
+            match classification {
+                Classification::Supported(stages) => {
+                    let yaml = pipeline_yaml(context.document_id(), &stages);
+                    let digest = sha256_hex(yaml.as_bytes());
+                    let definition = definition_yaml(context, &digest);
+                    fields.extend([
+                        ("status", keyword("compiled")),
+                        (
+                            "result",
+                            map(vec![
+                                (
+                                    "agent-mapping",
+                                    map(vec![
+                                        ("effect-authority", Edn::Bool(false)),
+                                        ("jenkins-selector", text("any")),
+                                        ("mcloving-platform", text("linux")),
+                                        ("trust-pool", text("migration-deny-authority")),
+                                    ]),
+                                ),
+                                ("pipeline-yaml", text(&yaml)),
+                                ("pipeline-yaml-sha256", text(&digest)),
+                                ("definition-yaml", text(&definition)),
+                                (
+                                    "definition-yaml-sha256",
+                                    text(&sha256_hex(definition.as_bytes())),
+                                ),
+                                (
+                                    "semantic",
+                                    map(vec![
+                                        ("stages", Edn::Integer(stages.len() as i64)),
+                                        (
+                                            "steps",
+                                            Edn::Integer(
+                                                stages
+                                                    .iter()
+                                                    .map(|s| s.scripts.len())
+                                                    .sum::<usize>()
+                                                    as i64,
+                                            ),
+                                        ),
+                                    ]),
+                                ),
+                            ]),
+                        ),
+                    ]);
+                }
+                Classification::Unsupported(code) => fields.extend([
+                    ("status", keyword("unsupported")),
+                    (
+                        "diagnostic",
+                        map(vec![
+                            ("code", text(code)),
+                            (
+                                "message",
+                                text("source is outside the currently admitted compiler subset"),
+                            ),
+                        ]),
+                    ),
+                ]),
+                _ => panic!("test source has no independently classified response"),
+            }
+        }
+    }
+    map(fields)
+}
+fn change(value: &mut Edn, path: &[&str], replacement: Edn) {
+    let Edn::Map(fields) = value else { panic!() };
+    if path.len() == 1 {
+        fields.insert(path[0].to_owned(), replacement);
+    } else {
+        change(fields.get_mut(path[0]).unwrap(), &path[1..], replacement);
+    }
+}
+
+#[test]
+fn protected_manifest_population_and_exact_semantics() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bytes =
+        std::fs::read(base.join("compat/jenkins-worker/fixtures/sequential-v1/manifest.json"))
+            .unwrap();
+    assert_eq!(
+        sha256_hex(&bytes),
+        "654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727"
+    );
+    let manifest: Value = serde_json::from_slice(&bytes).unwrap();
+    let fixtures = manifest["fixtures"].as_array().unwrap();
+    assert_eq!(fixtures.len(), 23);
+    let mut supported = 0;
+    let mut denied = 0;
+    for fixture in fixtures {
+        let id = fixture["id"].as_str().unwrap();
+        let source = std::fs::read(base.join(fixture["source_path"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            sha256_hex(&source),
+            fixture["source_sha256"].as_str().unwrap(),
+            "{id}"
+        );
+        let classification = source::classify(&source);
+        match fixture["expected"]["compilation"].as_str().unwrap() {
+            "supported" => {
+                let Classification::Supported(stages) = &classification else {
+                    panic!("{id}: {classification:?}")
+                };
+                let wanted = fixture["expected"]["stages"].as_array().unwrap();
+                assert_eq!(stages.len(), wanted.len(), "{id}");
+                for (stage, wanted) in stages.iter().zip(wanted) {
+                    assert_eq!(stage.name, wanted["name"].as_str().unwrap(), "{id}");
+                    let scripts: Vec<_> = wanted["steps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|s| s["script_utf8"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(stage.scripts, scripts, "{id}");
+                }
+                supported += 1;
+            }
+            "unsupported" => {
+                assert!(
+                    matches!(classification,Classification::Unsupported(code) if code == fixture["expected"]["diagnostic"].as_str().unwrap()),
+                    "{id}: {classification:?}"
+                );
+                denied += 1;
+            }
+            "rejected" => {
+                assert!(
+                    matches!(classification,Classification::Rejected(code) if code == fixture["expected"]["diagnostic"].as_str().unwrap()),
+                    "{id}: {classification:?}"
+                );
+                denied += 1;
+            }
+            other => panic!("unexpected expectation {other}"),
+        }
+        let ctx = context_named(
+            &source,
+            id,
+            if id == "C052" {
+                "corpus-reference"
+            } else {
+                "authored-document"
+            },
+        );
+        let validated = validate_sequential_response(
+            &encoded(&response(&source, &ctx)),
+            expected(&source, &ctx),
+        )
+        .unwrap();
+        if let SequentialValidatedResponse::Admitted(receipt) = validated {
+            assert!(!receipt.execution_authority);
+            assert_eq!(receipt.state, "disabled");
+        }
+    }
+    assert_eq!((supported, denied), (11, 12));
+}
+
+#[test]
+fn independent_nonallowlisted_literals_and_separators() {
+    for body in [
+        "sh('first'); sh \"second\"",
+        "sh /*ok*/ ('x')\n sh '''multiline\nvalue'''",
+        "sh 'literal $HOME and \\u'",
+        "sh \"\\$HOME\"",
+        "sh '🙂\u{2028}\u{85}\u{7f}'",
+    ] {
+        // Raw odd backslash-u is separately forbidden, including this case.
+        let source = program(body);
+        if body.contains("\\u") {
+            assert_eq!(
+                source::classify(&source),
+                Classification::Unsupported("E_SOURCE_LEXICAL")
+            );
+            continue;
+        }
+        assert!(
+            matches!(source::classify(&source), Classification::Supported(_)),
+            "{body}"
+        );
+        let ctx = context(&source);
+        let receipt = validate_sequential_response(
+            &encoded(&response(&source, &ctx)),
+            expected(&source, &ctx),
+        )
+        .unwrap();
+        assert!(matches!(receipt, SequentialValidatedResponse::Admitted(_)));
+    }
+    for body in [
+        "sh 'a' sh 'b'",
+        "sh 'a'/*\n*/sh 'b'",
+        "sh\n'a'",
+        "this.sh 'a'",
+        "sh('a','b')",
+        "sh 'a' + 'b'",
+    ] {
+        assert!(
+            !matches!(
+                source::classify(&program(body)),
+                Classification::Supported(_)
+            ),
+            "{body}"
+        );
+    }
+}
+#[test]
+fn literal_escape_and_normalization_semantics() {
+    assert_eq!(source::stage_id("A- B"), "a--b");
+    assert_eq!(source::stage_id("A-- B"), "a---b");
+    assert_eq!(source::stage_id("A-  B"), "a--b");
+    assert_eq!(source::stage_id("K"), "");
+    assert_eq!(source::stage_id("É.BUILD_🙂"), ".build_");
+    for quote in ["'", "\"", "'''", "\"\"\""] {
+        for (escape, wanted) in [
+            ("\\\\", "\\"),
+            ("\\'", "'"),
+            ("\\\"", "\""),
+            ("\\$", "$"),
+            ("\\n", "\n"),
+            ("\\r", "\r"),
+            ("\\t", "\t"),
+            ("\\b", "\u{8}"),
+            ("\\f", "\u{c}"),
+        ] {
+            let src = program(&format!("sh {quote}{escape}{quote}"));
+            let Classification::Supported(stages) = source::classify(&src) else {
+                panic!("{quote} {escape}")
+            };
+            assert_eq!(stages[0].scripts, [wanted]);
+        }
+    }
+    let src = program("sh 'a\\\\u0041'");
+    let Classification::Supported(stages) = source::classify(&src) else {
+        panic!()
+    };
+    assert_eq!(stages[0].scripts, ["a\\u0041"]);
+}
+#[test]
+fn source_byte_stage_step_and_aggregate_bounds() {
+    for bytes in [
+        vec![0xff],
+        b"\xef\xbb\xbfpipeline".to_vec(),
+        b"pipeline\r\n".to_vec(),
+        vec![0],
+    ] {
+        assert_eq!(
+            source::classify(&bytes),
+            Classification::Rejected("E_SOURCE_TEXT")
+        );
+    }
+    assert_eq!(
+        source::classify(&vec![0xff; 16385]),
+        Classification::Rejected("E_SOURCE_TOO_LARGE")
+    );
+    for (name, supported) in [
+        ("a".repeat(96), true),
+        ("a".repeat(97), false),
+        ("é".repeat(48) + "a", false),
+    ] {
+        let src = format!(
+            "pipeline {{ agent any; stages {{ stage('{name}') {{ steps {{ sh 'x' }} }} }} }}"
+        );
+        assert_eq!(
+            matches!(
+                source::classify(src.as_bytes()),
+                Classification::Supported(_)
+            ),
+            supported
+        );
+    }
+    let stages = (0..32)
+        .map(|i| format!("stage('s{i}') {{ steps {{ sh 'x' }} }}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    assert!(matches!(
+        source::classify(format!("pipeline {{ agent any; stages {{ {stages} }} }}").as_bytes()),
+        Classification::Supported(_)
+    ));
+    let base = program("sh 'x'");
+    let mut limit = base.clone();
+    limit.resize(16384, b' ');
+    assert!(matches!(
+        source::classify(&limit),
+        Classification::Supported(_)
+    ));
+    limit.push(b' ');
+    assert_eq!(
+        source::classify(&limit),
+        Classification::Rejected("E_SOURCE_TOO_LARGE")
+    );
+    let steps64 = program(&vec!["sh 'x'"; 64].join(";"));
+    assert!(matches!(
+        source::classify(&steps64),
+        Classification::Supported(_)
+    ));
+    assert_eq!(
+        source::classify(&program(&vec!["sh 'x'"; 65].join(";"))),
+        Classification::Unsupported("E_STEP_LIMIT")
+    );
+    assert!(matches!(
+        source::classify(&program(&format!("sh '{}'", "é".repeat(2048)))),
+        Classification::Supported(_)
+    ));
+    assert_eq!(
+        source::classify(&program(&format!("sh '{}'; sh 'x'", "é".repeat(2048)))),
+        Classification::Unsupported("E_STEP_ARGUMENT")
+    );
+    assert_eq!(
+        source::classify(&program(&format!("sh '{}'", "é".repeat(2049)))),
+        Classification::Unsupported("E_STEP_ARGUMENT")
+    );
+}
+#[test]
+fn contexts_and_requests_are_canonical_bound_and_versioned() {
+    let source = program("sh 'ok'");
+    let ctx = context(&source);
+    let request = sequential_request(expected(&source, &ctx)).unwrap();
+    assert!(request.ends_with(b"\n"));
+    let parsed = canonical(&request, 262144, "E_REQUEST_INVALID").unwrap();
+    let Edn::Map(fields) = parsed else { panic!() };
+    expect_string(&fields, "protocol", PROTOCOL).unwrap();
+    expect_string(&fields, "target-contract-sha256", CONTRACT_SHA256).unwrap();
+    for changed in [
+        ctx.canonical[..ctx.canonical.len() - 1].to_vec(),
+        [ctx.canonical.as_slice(), b"\n"].concat(),
+        b"{}\n".to_vec(),
+        vec![b'x'; 2049],
+    ] {
+        assert!(parse_document_context(&changed, &source).is_err());
+    }
+    let other = program("sh 'other'");
+    assert!(sequential_request(expected(&other, &ctx)).is_err());
+    assert!(validate_sequential_response(b"{}\n", expected(&other, &ctx)).is_err());
+    for (key, value) in [
+        ("document-id", text("bad:id")),
+        ("origin-kind", keyword("live-job")),
+        ("origin", text("bad\norigin")),
+        ("source-sha256", text(&"0".repeat(64))),
+        ("extra", Edn::Bool(false)),
+    ] {
+        let mut altered = ctx.value.clone();
+        change(&mut altered, &[key], value);
+        assert!(
+            parse_document_context(&encoded(&altered), &source).is_err(),
+            "{key}"
+        );
+    }
+    let oversized = vec![b'x'; 16385];
+    let bigctx = context(&oversized);
+    assert!(sequential_request(expected(&oversized, &bigctx)).is_ok());
+}
+#[test]
+fn self_consistent_worker_lowering_forgery_is_refused() {
+    let source = program("sh 'first'; sh 'second'");
+    let ctx = context(&source);
+    let original = response(&source, &ctx);
+    for (from, to) in [
+        ("first", "forged"),
+        ("\"-xe\"", "\"-e\""),
+        ("/bin/sh", "/bin/false"),
+        ("name: \"Build\"", "name: \"Changed\""),
+    ] {
+        let mut forged = original.clone();
+        let Edn::Map(root) = &forged else { panic!() };
+        let result = exact_map(
+            field(root, "result").unwrap(),
+            &[
+                "agent-mapping",
+                "definition-yaml",
+                "definition-yaml-sha256",
+                "pipeline-yaml",
+                "pipeline-yaml-sha256",
+                "semantic",
+            ],
+            "test",
+        )
+        .unwrap();
+        let yaml = string_field(result, "pipeline-yaml")
+            .unwrap()
+            .replace(from, to);
+        let digest = sha256_hex(yaml.as_bytes());
+        let definition = definition_yaml(&ctx, &digest);
+        change(&mut forged, &["result", "pipeline-yaml"], text(&yaml));
+        change(
+            &mut forged,
+            &["result", "pipeline-yaml-sha256"],
+            text(&digest),
+        );
+        change(
+            &mut forged,
+            &["result", "definition-yaml"],
+            text(&definition),
+        );
+        change(
+            &mut forged,
+            &["result", "definition-yaml-sha256"],
+            text(&sha256_hex(definition.as_bytes())),
+        );
+        assert!(
+            validate_sequential_response(&encoded(&forged), expected(&source, &ctx)).is_err(),
+            "{from}"
+        );
+    }
+    for (path, value) in [
+        (
+            vec!["result", "agent-mapping", "mcloving-platform"],
+            text("any"),
+        ),
+        (vec!["contract-sha256"], text(&"0".repeat(64))),
+        (vec!["authority", "scheduler"], Edn::Bool(true)),
+        (vec!["source-context", "origin"], text("forged")),
+        (vec!["target-profile", "plugin-count"], Edn::Integer(91)),
+        (vec!["result", "semantic", "steps"], Edn::Integer(1)),
+    ] {
+        let mut forged = original.clone();
+        change(&mut forged, &path, value);
+        assert!(
+            validate_sequential_response(&encoded(&forged), expected(&source, &ctx)).is_err(),
+            "{path:?}"
+        );
+    }
+}
+#[test]
+fn cross_version_missing_lf_and_status_downgrades_fail() {
+    let source = program("sh 'ok'");
+    let ctx = context(&source);
+    let good = encoded(&response(&source, &ctx));
+    assert!(
+        validate_sequential_response(&good[..good.len() - 1], expected(&source, &ctx)).is_err()
+    );
+    assert!(
+        validate_sequential_response(&[good.as_slice(), b"\n"].concat(), expected(&source, &ctx))
+            .is_err()
+    );
+    assert!(
+        validate_sequential_response(
+            include_bytes!("../../tests/fixtures/mig003-golden.edn"),
+            expected(&source, &ctx)
+        )
+        .is_err()
+    );
+    let legacy = super::super::ExpectedAdmission {
+        request_id: "test:sequential",
+        job_id: "fresh-document",
+        job_generation: "generation",
+        source: &source,
+    };
+    assert!(super::super::validate_response(&good, legacy).is_err());
+    for badsource in [program("echo 'outside'"), b"'unterminated".to_vec()] {
+        let badctx = context(&badsource);
+        let denial = response(&badsource, &badctx);
+        assert!(validate_sequential_response(&encoded(&denial), expected(&source, &ctx)).is_err());
+        let mut internal = denial.clone();
+        change(
+            &mut internal,
+            &["diagnostic", "code"],
+            text("E_WORKER_INTERNAL"),
+        );
+        assert!(
+            validate_sequential_response(&encoded(&internal), expected(&badsource, &badctx))
+                .is_err()
+        );
+        let mut wrong = denial;
+        change(
+            &mut wrong,
+            &["diagnostic", "code"],
+            text("E_SOURCE_TOO_LARGE"),
+        );
+        assert!(
+            validate_sequential_response(&encoded(&wrong), expected(&badsource, &badctx)).is_err()
+        );
+    }
+}
+
+#[test]
+fn public_errors_never_echo_untrusted_fields_or_diagnostics() {
+    let source = program("sh 'private-marker'");
+    let ctx = context(&source);
+    let marker = "private-worker-marker";
+    let mut bogus_context = ctx.value.clone();
+    change(&mut bogus_context, &[marker], text(marker));
+    let error = parse_document_context(&encoded(&bogus_context), &source).unwrap_err();
+    assert_eq!(error.code, "E_DOCUMENT_CONTEXT");
+    assert_eq!(error.message, "document context validation failed");
+    assert!(!error.to_string().contains(marker));
+    let good = response(&source, &ctx);
+    for path in [
+        vec![marker],
+        vec!["result", marker],
+        vec!["target-profile", marker],
+        vec!["authority", marker],
+    ] {
+        let mut forged = good.clone();
+        change(&mut forged, &path, text(marker));
+        let error =
+            validate_sequential_response(&encoded(&forged), expected(&source, &ctx)).unwrap_err();
+        assert_eq!(error.message, "sequential response validation failed");
+        assert!(!error.to_string().contains(marker));
+    }
+    let source = program("echo 'excluded'");
+    let ctx = context(&source);
+    let mut forged = response(&source, &ctx);
+    change(&mut forged, &["diagnostic", "code"], text(marker));
+    let error =
+        validate_sequential_response(&encoded(&forged), expected(&source, &ctx)).unwrap_err();
+    assert_eq!(error.code, "E_DIAGNOSTIC_CODE");
+    assert!(!error.to_string().contains(marker));
+}

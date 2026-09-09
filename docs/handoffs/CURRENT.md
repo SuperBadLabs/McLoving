@@ -36,14 +36,19 @@ preregisters expectations only; generalized compilation and paired execution
 remain successor work. This closure update starts the separate JCOMP-002 PR.
 The [syntax contract](../architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md)
 and fixture expectations now have a shared Foundation authoring gate. The
-[review record](../evidence/JCOMP-001_SECURITY_REVIEW.md) distinguishes those
-checks from still-required protected merge and post-merge verification;
-no broader compiler admission or paired execution evidence is claimed.
-The existing exact-source compiler admission is not general syntax support;
+[review record](../evidence/JCOMP-001_SECURITY_REVIEW.md) records the completed
+contract merge and exact post-merge verification. JCOMP-002 retains its own
+review, merge and post-merge gates; the contract receipt claims no broader
+compiler admission or paired execution evidence.
+The legacy exact-source compiler admission is not general syntax support;
 M1 must earn a new versioned differential claim through contained submitted
 jobs, with authored fixtures and original-corpus coverage reported separately.
 
-`JCOMP-002` generalizes compile-only translation and independent admission.
+`JCOMP-002` generalizes compile-only translation and independent admission. Its explicit
+protocol-v2 implementation is under review with a separate disabled logical
+document artifact and immutable worker/admission bindings. The
+[compiler review](../evidence/JCOMP-002_SECURITY_REVIEW.md) records focused and
+contained compilation checks; these do not establish runnable support.
 `JCOMP-002A` then owns real sequential step execution with distinct step/stage
 results and downstream skipping; current product admission rejects more than
 one step per stage. `JCOMP-002B` owns build-workspace lifecycle, continuity, and namespace
