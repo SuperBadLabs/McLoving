@@ -7,8 +7,8 @@ closure receipt. The historical shipped runtime campaign passed on `941d473`,
 but a continuation review identified an uncovered operator-reconciliation path.
 The reconciliation correction passed independent review and a fresh campaign
 at `e4b6fcd`. Subsequent PR review found terminal-reason precedence and schema
-receipt/generation issues; their dispositions and refreshed validation are
-recorded below. Earlier campaigns do not verify later source changes.
+receipt/generation issues; both corrections passed independent review and the
+fresh v3 campaign at `cfe6e4a`. Earlier campaigns do not verify later source changes.
 Protected final-head checks, merge and exact-main verification remain outstanding. The design is
 `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md`.
 
@@ -265,9 +265,38 @@ responsible for the richer receipt structure and digest checks.
 The implementation reviewer independently approved the runtime correction and
 durable-result observation; the runtime reviewer independently approved the
 schema correction and regression. No blocker remains from those bounded reviews.
-A fresh contained campaign on the consolidated clean committed source remains
-pending. Keep v1 and v2 unchanged as historical evidence; retain the next
-campaign as v3.
+The fresh contained campaign executed consolidated clean reviewed source
+`cfe6e4a2c85bd4d71912bdbdf5c3cf42a197623f`, tree
+`55a26771acf2ade911577ac6d60a5b8f41b8a5c1`. All four sequential-store, four
+workspace-store and eleven actual remote-agent tests passed with zero failed,
+ignored or filtered tests, including the new database constraint assertions
+and durable lease-loss observation. All eight sequential and five workspace
+markers were present; the lease-loss marker reports `lease_reason=retained`
+and `capture_error=execution_not_completed`.
+
+The separate [`jcomp-002b-workspace-v3`](jcomp-002b-workspace-v3/README.md)
+inventory preserves v1/v2 unchanged and supersedes their runtime claims for the
+corrected candidate. Its executed controller hash is
+`b41d3cde1f77894f2857a1e470f869697dd88c60f2dab18113a51694a336d12a`;
+the agent hash is
+`2416591bf320905a5b9e6deada3809ec20ed1eb73e0118b3b6b4e2d49e1fdfe0`.
+Its reconstructed source archive hash is
+`6cde4be985cfc5410ebf7bf4f3f4dd909e02bd55e1cb17d5fc4b4194d83237a3`.
+
+The implementation reviewer independently reconstructed the exact archive and
+verified that it contains the named-constraint assertions and bounded durable
+lease-result observation. All ten raw and eleven retained inventory hashes
+passed; all nine retained execution files match the raw campaign. The audit
+verified all 22 binary identity records, eighteen source hashes, nineteen
+source-bound results, thirty stdout records, eight closed cleanup receipts,
+the enhanced lease-loss marker and private database absence. V1/v2 remained
+unchanged, and the v3 manifest/README matched the actual evidence without findings.
+
+The focused agent publication/replay regression and strict agent all-target Clippy passed before this
+campaign. Full protected CI must rerun on the final evidence head; neither the
+prior local Foundation run at `e4b6fcd` nor PR checks on `9f74aac` certify this
+revised source. Protected merge and exact merged-main Foundation/native Windows
+verification remain outstanding.
 
 ## Evidence required before closure
 
