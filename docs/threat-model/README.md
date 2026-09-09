@@ -453,9 +453,10 @@ and permits no model output or local authoring result to become Jenkins evidence
 TM-052's protected checks remain mandatory. Local and hosted Foundation both
 run the shared fixture gate, whose fixed 17-test population rejects missing,
 zero, skipped, and incomplete execution; independent negative controls passed.
-JCOMP-001 remains ACTIVE without closure attribution until protected merge and
-exact post-merge Foundation/native Windows verification support a later closure
-update. The contract's dedicated disposable M1 environments grant no production
+JCOMP-001 closes in this subsequent update after PR #127 merged as
+`533dbff671b5a2d58e4d92339708375601d5b7d2` and exact-main Foundation
+`34306662841` and native Windows `34306662842` passed. The review receipt
+records final head `f78dc5d` and resolution of all three actionable threads. The contract's dedicated disposable M1 environments grant no production
 containment claim; hostile same-UID workload isolation remains SEC-005.
 
 ## Closure attribution
@@ -504,6 +505,7 @@ had never claimed one.
 | HYG-002 | `docs/evidence/HYG-002_SECURITY_REVIEW.md` |
 | IDP-001 | `docs/evidence/IDP-001_SECURITY_REVIEW.md` |
 | INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
+| JCOMP-001 | `docs/evidence/JCOMP-001_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |
