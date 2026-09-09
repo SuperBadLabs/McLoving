@@ -203,7 +203,7 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                         if ch == '$' && quote == '"' {
                             if !dynamic
                                 && chars.get(i + 1) == Some(&'{')
-                                && truncated_interpolation_opener(&chars[i + 2..], triple)
+                                && malformed_interpolation_prefix(&chars[i + 2..], triple)
                             {
                                 return Err(Rejected("E_SOURCE_PARSE"));
                             }
@@ -245,16 +245,19 @@ fn lex(source: &str) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
-fn truncated_interpolation_opener(tail: &[char], triple: bool) -> bool {
-    // This is only the independently verified empty-opener tail family, not
-    // an expression parser. `${"x"}` and even `${}` can be valid Groovy.
+fn malformed_interpolation_prefix(tail: &[char], triple: bool) -> bool {
+    // Only independently verified malformed initial prefixes, not an
+    // expression parser. `${"x"}`, `${}`, and `${;x}` can be valid Groovy.
     // An apparent outer quote here starts a nested expression string; if the
     // entire source suffix contains only structural closers/whitespace, that
     // nested string cannot close. Other dynamic bodies remain outside this
     // predicate, including nested/slashy strings and comments.
     let whitespace = |c: &char| matches!(c, ' ' | '\t' | '\n' | '\u{c}');
     let tail = &tail[tail.iter().take_while(|c| whitespace(c)).count()..];
-    if tail.is_empty() {
+    // No expression-local bracket/parenthesis has opened yet, so these
+    // immediate closers cannot be repaired by any later expression tokens.
+    // A right brace is different: it can close a valid empty interpolation.
+    if tail.is_empty() || matches!(tail.first(), Some(']' | ')')) {
         return true;
     }
     let width = if triple { 3 } else { 1 };

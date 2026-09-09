@@ -106,7 +106,7 @@ preregistered status and code. Expected shell failures are still supported
 compiler inputs; no shell workload was executed in this campaign.
 
 The campaign's SHA-256 is
-`1851ed7e7cec098049995abf898a009bae4f25bb42582a8108ed3010be9014e7`.
+`1031912c20109e7585b20e8ef43bdc094c2d5f5cf9989a9c0c55630f18d854c2`.
 Its 46 response files and 46 receipt files are retained unchanged alongside the
 campaign manifest. Independent digest checks verified every file pair.
 The offline verifier checks the exact 93-file inventory, all record and receipt
@@ -118,7 +118,7 @@ and hosted Foundation run this verification without launching a worker.
 | Binding | SHA-256 |
 |---|---|
 | Immutable compiler image | `0b687a72f8cd99a1c8401796714e5f9867f2288d7aff80bf1fdd22e2ac417232` |
-| Executed admission binary | `01f40fa860b18cef0b3821092f1fffbde37124db911d6e9f31482ac24bcc2ca6` |
+| Executed admission binary | `d2675602b8af22a31e5310b0d24680303c8c33d17e566afc02f8ae2ec18b6f9d` |
 | Syntax contract | `ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe` |
 | Frozen fixture manifest | `654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727` |
 | Target profile | `feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271` |
@@ -150,8 +150,8 @@ binary/image observations above.
 | `crates/jenkins-compiler-admission/src/lib.rs` | `b93456a823c1e6261b515b55716740ec0391ae7982de6b69ef866a711ed3ea78` |
 | `crates/jenkins-compiler-admission/src/main.rs` | `760371421ec57a951a0b865317303ed44ec9eaf96f2fcd2a78e303d89ea133e4` |
 | `crates/jenkins-compiler-admission/src/sequential/mod.rs` | `da5d4e8a617dc7842a7eff611e6a38d8b55a70b5b665585fcff7b77ea3fd3b66` |
-| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `d5d0043966a671ab6228e97e1a56ba33f69ce6f0d2d09483dc000cf27d9bc122` |
-| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `4ce36260c3b7b37fd4eb56ebbc5e5fd7ba724bfd7028e773b0ef084ca84b3700` |
+| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `e3421615eb1d1ccbb1ce08b496cd2321b81b12cb840f83ef8d79da70eed36ecd` |
+| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `ae29e353070ac832e548c88dca5f14ffd502120610c04b13e213a057d24228cd` |
 | `crates/jenkins-compiler-admission/tests/sequential_cli.rs` | `567471b58dc03bbe940924a560109ad3b255035531fcb690ff76e2e2b2498c3b` |
 | `compat/jenkins-worker/Containerfile` | `f20d18163fe38d039b5d1d0ed312422344dd64ff896fea6fa77ef8d170bba3c7` |
 | `compat/jenkins-worker/deps.edn` | `40acc306d5e2cfea912ac1d6e6fbfd31a95d15cb7e34861820783cbaa438c597` |
@@ -160,7 +160,7 @@ binary/image observations above.
 | `compat/jenkins-worker/README.md` | `ad764263a1f387192b085b51294471d1975c0a4a962ed25c11e3b41fb62a98cf` |
 | `docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md` | `882c421c3e751b4f02e1b065650f55aacb69fa687406287bfd5295d7ce07744d` |
 | `scripts/test-jenkins-sequential-compiler.sh` | `fc6ffeb596b03ae1d98bf2f4c6f024ee63f4db847f197ec9693a2e4d629d3f96` |
-| `scripts/test-jenkins-sequential-contained.py` | `6ddb019d47226bf3921cebd728f1ed874448e3269d71ca8393cd8cc097e7aeeb` |
+| `scripts/test-jenkins-sequential-contained.py` | `7a11808761baf202ba04463840bf3ffcf59b3240a04e3c31a062f7dcc0a7d3fc` |
 | `scripts/test-jenkins-sequential-launcher.py` | `52a5597a7cfe9ecf70d6cd454b2fdc509797735a74a6e7b6c6e60b231bdf87d8` |
 | `scripts/test-jenkins-sequential-retained.py` | `65e75b23be201cf1e00fb567c44341b44ae4e089cd31b9a49976e2d20b1ce268` |
 | `.github/workflows/foundation.yml` | `bb77289978b28cdaf3a8fac3347ed0afef2cd7eb11281e5efe0079e292aac52a` |
@@ -295,8 +295,9 @@ Complex quoted/comment interpolation can still disagree with the bounded Rust
 recognizer. Such disagreement is an admission error, not a verified parse
 rejection, unsupported receipt, or compatibility coverage.
 
-A fresh 46-launch fixed campaign with the current binary produced the retained
-93 files above; all 46 worker response bytes match the prior campaign. The
+The historical opener-only campaign used executable `01f40fa860b18cef0b3821092f1fffbde37124db911d6e9f31482ac24bcc2ca6`
+and campaign digest `1851ed7e7cec098049995abf898a009bae4f25bb42582a8108ed3010be9014e7`. It is superseded by the
+initial-closer correction below; all 46 worker response bytes match the prior campaign. The
 worker image, frozen manifest and contract remain unchanged. Twelve additional
 actual isolated controls are preserved with exact sources, canonical contexts,
 responses and trusted receipts under `/tmp/mcloving-jcomp002-interpolation-01`.
@@ -308,3 +309,32 @@ valid empty and nested quoted expressions returned verified
 The shared compiler gate passed: 12 Clojure tests/216 assertions, 11 launcher
 tests, all 16 retained mutation tests and exact 93-file offline verification.
 No source workload was executed and JCOMP-002 remains ACTIVE pending its gates.
+
+
+## Invalid initial interpolation-closer review correction
+
+Codex review of `9fca818` identified `${]}` as a malformed interpolation body
+that had reached dynamic fallback. The same bounded opener check now rejects
+an immediate `]` or `)` after its ASCII whitespace gap; both cannot begin an
+expression. It does not reject valid empty, operator-led, semicolon-separated
+or properly opened nested expressions on that basis.
+
+All 32 package tests and strict all-target Clippy passed. The extended function
+adds 40 fixed parse-envelope controls (two closers, five whitespace prefixes,
+two quote forms and empty/nonempty continuations), plus 26 valid excluded
+operator, semicolon and opened-delimiter controls. Chief and independent
+worker-owner reviews checked this finite boundary against pinned Groovy PARSING.
+The complex-expression admission-disagreement residual above remains unchanged.
+
+The current retained 46-launch campaign uses the executed binary and campaign
+seal listed above. All 46 worker response files match the preceding campaign.
+Fourteen actual supplemental controls are preserved under
+`/tmp/mcloving-jcomp002-interpolation-02`: all prior twelve retained their
+verified outcomes, and double-quoted `${]}` plus triple-quoted `${)}` returned
+verified `rejected/E_SOURCE_PARSE`. Exact sources, canonical contexts, worker
+responses and trusted receipts are retained with campaign digest
+`ae71f9fadde2ca9008f1ca44564be8bff99fb71637bb34ca462878e28d994be3`.
+The shared compiler gate passed 12 Clojure tests/216 assertions, 11 launcher
+tests, all 16 retained mutation tests and exact 93-file offline verification.
+The worker image, contract and fixed manifest are unchanged. No workload was
+executed; JCOMP-002 remains ACTIVE until its required merge and post-main gates.

@@ -893,6 +893,13 @@ fn literal_errors_distinguish_groovy_syntax_from_contract_exclusions() {
         // the apparent outer closer opens a nested expression string with
         // no possible closing quote in the rest of the source.
         for gap in ["", " ", "\t", "\n", "\u{c}"] {
+            for closer in [']', ')'] {
+                for continuation in ["", "x"] {
+                    assert_fixed_parse_rejection(&program(&format!(
+                        "sh {quote}${{{gap}{closer}{continuation}}}{quote}"
+                    )));
+                }
+            }
             for suffix in ["", "\n}}}}", ");", "]"] {
                 let truncated = format!(
                     "pipeline {{ agent any; stages {{ stage('Build') {{ steps {{ sh {quote}${{{gap}{quote}{suffix}"
@@ -906,7 +913,28 @@ fn literal_errors_distinguish_groovy_syntax_from_contract_exclusions() {
             assert_fixed_parse_rejection(&program(&format!("sh {quote}${{{gap}{quote}")));
         }
         for expression in [
-            "", " ", "\"x\"", "'x'", " /x/ ", " /\\q/ ", "[a: 1]", " -> 'x' ", "'''x'''",
+            "",
+            " ",
+            "\"x\"",
+            "'x'",
+            " /x/ ",
+            " /\\q/ ",
+            "[a: 1]",
+            " -> 'x' ",
+            "'''x'''",
+            ";",
+            ";x",
+            "!x",
+            "+x",
+            "-x",
+            "~x",
+            "$",
+            "_",
+            "(1)",
+            "[1]",
+            " { -> 'x' } ",
+            " /]/ ",
+            " ')' ",
         ] {
             let valid_excluded = program(&format!("sh {quote}${{{expression}}}{quote}"));
             assert!(
