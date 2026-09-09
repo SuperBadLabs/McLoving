@@ -7,17 +7,17 @@ Cached Rust image immutable ID:
 a0635962c16d5f26400703edd4317175cf9531f3285d632613f9da227f9c71d1
 
 A disposable stock-tool probe ran with network none, read-only root, dropped
-capabilities, no-new-privileges, user1000:1000, no host mounts and pull never.
-Observed /usr/bin/openssl3.0.20, /usr/bin/python3 3.11.2 and glibc2.36. No source
+capabilities, no-new-privileges, user `1000:1000`, no host mounts and pull never.
+Observed `/usr/bin/openssl` version 3.0.20, `/usr/bin/python3` version 3.11.2 and glibc 2.36. No source
 fixture, controller, agent, database or Jenkins workload ran in that probe.
 
 Readelf of existing host-built controller/agent binaries shows only libgcc_s,
-libm,libc,loader dependencies and controller maximum GLIBC symbol version2.34.
+libm, libc, loader dependencies and controller maximum GLIBC symbol version 2.34.
 This supports using private copied binaries in the cached Debian image; inspect
 new test/controller/agent binaries again after compilation before claiming ABI
-compatibility. Host glibc2.39 alone does not determine actual binary requirements.
+compatibility. Host glibc 2.39 alone does not determine actual binary requirements.
 
-Proposed later local gate: own disposable PostgreSQL17.6-alpine container on
+Proposed later local gate: own disposable PostgreSQL `17.6-alpine` container on
 network none with no published port; runner joins that container's network
 namespace for loopback-only DB access. No external route, host DB, production
 credentials, host workspace or agent identity. Mount only candidate git archive

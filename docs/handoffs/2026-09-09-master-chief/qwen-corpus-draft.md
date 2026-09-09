@@ -2,7 +2,7 @@
 
 Provisional static contract reading only. Not Jenkins validity, Groovy parsing, compiler admission/classification, runtime evidence, or a corpus-wide coverage result. No source was executed or changed.
 
-Service: http://127.0.0.1:8000/v1. /models and response both identify qwen3.8-flash-next (llamacpp). Request cap2,000 output tokens,55-second timeout,temperature0.1,thinking disabled. Observed usage2,712 prompt +1,182 completion tokens. Only the eight public repository source representations below were sent; no private inventory or Jenkins console evidence.
+Service base URL: `http://127.0.0.1:8000/v1`. The model-list endpoint `http://127.0.0.1:8000/v1/models` and the response both identified `qwen3.8-flash-next` (llamacpp). Request cap: 2,000 output tokens; timeout: 55 seconds; temperature: 0.1; thinking disabled. Observed usage: 2,712 prompt + 1,182 completion tokens. Only the eight public repository source representations below were sent; no private inventory or Jenkins console evidence.
 
 Contract: docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md, SHA256 ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe.
 
@@ -116,7 +116,7 @@ Provisional manual shape: **outside_subset**.
 
 ## Review limits and retained drafts
 
-These are deliberately selected nearest-shape examples, not a representative statistical sample. Do not report “1/8 supported” as measured compiler coverage or extrapolate to228. Future compiler classification must read every exact original representation, retain source/redaction/normalization bindings, and use independent worker/Rust agreement under a separate authorized campaign.
+These are deliberately selected nearest-shape examples, not a representative statistical sample. Do not report “1/8 supported” as measured compiler coverage or extrapolate to 228. Future compiler classification must read every exact original representation, retain source/redaction/normalization bindings, and use independent worker/Rust agreement under a separate authorized campaign.
 
 The original raw service transcript was temporary and is not a dependency of this handoff. This preserved note contains the agent-reviewed citations and corrections only. Reverify the model, source digests and citations before reuse.
 
