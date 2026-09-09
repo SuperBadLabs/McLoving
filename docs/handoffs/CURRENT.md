@@ -35,8 +35,10 @@ jobs, with authored fixtures and original-corpus coverage reported separately.
 `JCOMP-002` generalizes compile-only translation and independent admission.
 `JCOMP-002A` then owns real sequential step execution with distinct step/stage
 results and downstream skipping; current product admission rejects more than
-one step per stage. `JCOMP-002B` owns contained build-workspace continuity;
-current workspaces are scoped to each attempt and removed after finalization.
+one step per stage. `JCOMP-002B` owns build-workspace lifecycle, continuity, and namespace
+non-collision in contained fixtures; current workspaces are scoped to each
+attempt and removed after finalization. Hostile same-UID sibling-workspace
+read/write isolation remains `SEC-005`, not an M1 acceptance claim.
 Keep runtime admission guards until runnable support exists. Removing a guard,
 concatenating commands into one shell, or sharing an attempt path cannot satisfy
 these runtime tickets. `JCOMP-003` waits for both and earns the final paired
