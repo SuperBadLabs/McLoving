@@ -37,6 +37,30 @@ class ManifestIntegrity(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate.verify(self.root)
 
+    def test_preregistered_expectation_drift(self):
+        original = self.manifest_path.read_bytes()
+        changes = ['negative-diagnostic', 'stdout', 'workspace-size', 'workspace-digest']
+        for change in changes:
+            with self.subTest(field=change):
+                manifest = json.loads(original)
+                fixtures = manifest['fixtures']
+                if change == 'negative-diagnostic':
+                    next(f for f in fixtures if f['id'] == 'N01')['expected']['diagnostic'] = 'E_DIAGNOSTIC_DRIFT'
+                elif change == 'stdout':
+                    next(f for f in fixtures if f['id'] == 'S01')['expected']['stages'][0]['steps'][0]['stdout_utf8'] = 'unreviewed output'
+                else:
+                    workspace = next(f for f in fixtures if f['expected'].get('workspace_files'))['expected']['workspace_files'][0]
+                    if change == 'workspace-size':
+                        workspace['bytes'] += 1
+                    else:
+                        workspace['sha256'] = '0' * 64
+                self.manifest_path.write_text(json.dumps(manifest))
+                try:
+                    with self.assertRaisesRegex(ValueError, 'preregistered manifest bytes changed'):
+                        validate.verify(self.root)
+                finally:
+                    self.manifest_path.write_bytes(original)
+
     def test_contract_drift(self):
         with (self.root / validate.CONTRACT).open('a') as contract:
             contract.write('\nUnreviewed contract change.\n')

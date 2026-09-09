@@ -12,7 +12,7 @@ import sys
 import unittest
 
 suite = unittest.defaultTestLoader.discover(sys.argv[1], pattern="test_manifest.py")
-expected = 16
+expected = 17
 actual = suite.countTestCases()
 if actual != expected:
     raise SystemExit(f"fixture integrity test population changed: expected {expected}, got {actual}")

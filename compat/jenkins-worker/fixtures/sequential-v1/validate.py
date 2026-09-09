@@ -9,6 +9,7 @@ ASCII_FOLD = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuv
 BASE = PurePosixPath('compat/jenkins-worker/fixtures/sequential-v1')
 CONTRACT = 'docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md'
 CONTRACT_SHA256 = 'ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe'
+MANIFEST_SHA256 = '654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727'
 PROFILE = 'compat/jenkins-worker/profile-v1.properties'
 PROFILE_SHA256 = 'feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271'
 HISTORICAL = 'migration/mario-jenkins-oracle-228/corpus-v1/sources/cinqict_jenkinsdev.Jenkinsfile'
@@ -44,7 +45,8 @@ def pairs(items):
 
 
 def verify(root):
-    manifest = json.loads(read(root, str(BASE / 'manifest.json'), 262144), object_pairs_hook=pairs)
+    manifest_bytes = read(root, str(BASE / 'manifest.json'), 262144)
+    manifest = json.loads(manifest_bytes, object_pairs_hook=pairs)
     require(manifest['schema'] == 'mcloving.jenkins.sequential-contract/1', 'schema changed')
     require(manifest['status'] == 'preregistered-expectations-not-execution-evidence', 'not expectations')
     require(manifest['authority'] == {'production': False, 'imported_job_enabled': False,
@@ -153,6 +155,8 @@ def verify(root):
                     'invalid workspace digest/size')
     actual = {str(BASE / p.name) for p in (root / BASE).glob('*.Jenkinsfile')}
     require(actual == paths - {HISTORICAL}, 'missing or extra authored source')
+    require(hashlib.sha256(manifest_bytes).hexdigest() == MANIFEST_SHA256,
+            'preregistered manifest bytes changed')
     return '23 preregistered fixtures verified: 10 supported, 12 negative, 1 historical; no execution claim'
 
 

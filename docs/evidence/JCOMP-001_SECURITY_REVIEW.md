@@ -23,17 +23,17 @@ file requires the relevant checks and independent review again.
 |---|---|
 | `docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md` | `ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe` |
 | `compat/jenkins-worker/fixtures/sequential-v1/manifest.json` | `654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727` |
-| `compat/jenkins-worker/fixtures/sequential-v1/validate.py` | `6e0da9ca79c8d20d804e207559948cdc48682b348578f0d8ed28552db409ca39` |
-| `compat/jenkins-worker/fixtures/sequential-v1/test_manifest.py` | `c1f900bebf8e3333bb2b6ee67abfe1ace147f88ef298eaac67b4db42606f112f` |
+| `compat/jenkins-worker/fixtures/sequential-v1/validate.py` | `c8f659cf1aaa178a81b2571dd971b790e41ce497d5349f9d0a7e69ae67673f73` |
+| `compat/jenkins-worker/fixtures/sequential-v1/test_manifest.py` | `32da46cc386d55a7ec2da47b6234b9f688bcb794b1cabd67ad6b454ae1189ea3` |
 | `compat/jenkins-worker/fixtures/sequential-v1/check_literals.clj` | `b50b7afd1522cc6748e8a12c9652df67ecd0c27d468a5c408af52b37e251a589` |
-| `scripts/test-jenkins-sequential-contract.sh` | `5a4b23c59dbd56e7dd28776120218976aea171aa927eb945b967bfe2daded2c5` |
+| `scripts/test-jenkins-sequential-contract.sh` | `79a1443a53415dc5b4d06c96671d80520e11bc538e4d9d18d755276dcb61c12a` |
 | `.github/workflows/foundation.yml` | `f0f9fdcebc2237fbae73cc8d04290ba65c1bf72effa447408365f1a80078e279` |
 | `scripts/validate-foundation.sh` | `c98ebafb48aab3d1eb9789b9f3efaa22bfc3ff12a79d8af1ebcbe06b732a767b` |
 | `compat/jenkins-worker/README.md` | `ddc4be667521ba4621d3785df1ad3f6538681f51bbe182b051e75ba73303365e` |
 
 ## Verification and review
 
-The shared read-only authoring gate passed: 23 fixture records, all 16 mutation
+The shared read-only authoring gate passed: 23 fixture records, all 17 mutation
 tests, 11 exact source-stage/script comparisons using the digest-pinned Groovy
 2.4.21 CONVERSION AST, and malformed-quoting rejection. No Jenkinsfile or shell
 was evaluated by this gate. Independently reviewed local shell-snippet drafts
@@ -95,3 +95,19 @@ complete 16-test suite reached the Clojure marker, while removing one test
 the marker. All four runs created zero `__pycache__` directories or `.pyc`
 files. The full shared gate also passed all 16 tests and 11 pinned AST
 comparisons. Independent review found no remaining action items.
+
+Codex review of `2df70ad` identified that negative-fixture diagnostics could
+change without failing the authoring gate. Independent review found the same
+class of drift in supported-output and workspace expectations. The validator
+now pins the complete reviewed manifest bytes, read once, after its existing
+semantic checks. The manifest and contract remain unchanged. A regression
+mutates a negative diagnostic, supported stdout, workspace size and workspace
+digest separately and requires each to fail specifically at the manifest pin;
+the wrapper now requires 17 tests. This freezes the preregistered acceptance
+expectations without treating them as compiler or execution evidence.
+
+Independent review of the final manifest-pin correction found no remaining
+action items and verified all nine content pins. The complete 17-test wrapper
+passed; temporary-copy controls with one test removed (16 remaining), an empty
+module, or a skipped test each failed before the Clojure marker. All four
+control runs created zero bytecode paths with inherited suppression unset.
