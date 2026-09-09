@@ -156,6 +156,17 @@ async fn finish(
         .await
 }
 
+fn assert_workspace_receipt_constraint(error: sqlx::Error) {
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("builds_workspace_receipt_shape")
+    );
+}
+
 #[tokio::test]
 async fn workspace_fenced_transfer_replay_final_receipts_and_cleanup() {
     let Some((store, plain)) = fixture().await else {
@@ -177,6 +188,15 @@ async fn workspace_fenced_transfer_replay_final_receipts_and_cleanup() {
     let seed = grant(&store, &first).await;
     assert_eq!(seed.generation, 0);
     assert!(seed.snapshot.entries.is_empty());
+    // PostgreSQL enforces receipt presence even when a writer bypasses Rust validation.
+    assert_workspace_receipt_constraint(
+        sqlx::query("UPDATE builds SET workspace_receipt=$2 WHERE id=$1")
+            .bind(admission.build_id)
+            .bind(serde_json::to_value(seed.snapshot.receipt().unwrap()).unwrap())
+            .execute(store.pool())
+            .await
+            .unwrap_err(),
+    );
     let snapshot = WorkspaceSnapshot {
         version: 1,
         entries: vec![
@@ -217,6 +237,13 @@ async fn workspace_fenced_transfer_replay_final_receipts_and_cleanup() {
     for generation in 1..=2 {
         let current = running(&store, &plan).await;
         if generation == 1 {
+            assert_workspace_receipt_constraint(
+                sqlx::query("UPDATE builds SET workspace_receipt=NULL WHERE id=$1")
+                    .bind(admission.build_id)
+                    .execute(store.pool())
+                    .await
+                    .unwrap_err(),
+            );
             let original: (i64, Option<Value>, Option<Value>) = sqlx::query_as("SELECT workspace_generation,workspace_snapshot,workspace_receipt FROM builds WHERE id=$1").bind(admission.build_id).fetch_one(store.pool()).await.unwrap();
             let mut bad_receipt = original.2.clone().unwrap();
             bad_receipt["total_bytes"] = json!(0);
@@ -284,7 +311,6 @@ async fn workspace_fenced_transfer_replay_final_receipts_and_cleanup() {
         (65, Some(original.clone())),
         (3, Some(altered_digest)),
         (3, Some(invalid_version)),
-        (3, None),
     ] {
         sqlx::query("UPDATE builds SET workspace_generation=$2,workspace_receipt=$3 WHERE id=$1")
             .bind(admission.build_id)
@@ -311,6 +337,18 @@ async fn workspace_fenced_transfer_replay_final_receipts_and_cleanup() {
         .execute(store.pool())
         .await
         .unwrap();
+    for query in [
+        "UPDATE builds SET workspace_receipt=NULL WHERE id=$1",
+        "UPDATE builds SET workspace_generation=0 WHERE id=$1",
+    ] {
+        assert_workspace_receipt_constraint(
+            sqlx::query(query)
+                .bind(admission.build_id)
+                .execute(store.pool())
+                .await
+                .unwrap_err(),
+        );
+    }
     let original_terminal: Value =
         sqlx::query_scalar("SELECT terminal_summary FROM attempts WHERE id=$1")
             .bind(first.attempt_id)

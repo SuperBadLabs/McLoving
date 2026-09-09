@@ -1272,6 +1272,56 @@ async fn workspace_lease_loss_retains_only_last_verified_checkpoint_and_requires
         &h.root.path().join("workspace"),
         "should-not-survive"
     ));
+    // Inspect the actual durable publication input while the controller is down.
+    // Lease loss must remain the primary reason even though capture is refused.
+    let active = &before.stages[0].steps[1].attempts[0].accounting;
+    let (restore, fence): (i64, i64) = sqlx::query_as(
+        "SELECT restore_epoch, fence FROM attempts WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(h.org)
+    .bind(active.attempt_id)
+    .fetch_one(h.store.pool())
+    .await
+    .unwrap();
+    let token = (u64::from(u32::try_from(restore).unwrap()) << 32)
+        | u64::from(u32::try_from(fence).unwrap());
+    let result_parent = h
+        .root
+        .path()
+        .join("workspace/.agent-results")
+        .join(format!("{}/{}/{token}", h.org, active.attempt_id));
+    let durable: serde_json::Value = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(entries) = std::fs::read_dir(&result_parent) {
+                let results = entries
+                    .map(|entry| entry.unwrap().path().join("result.json"))
+                    .collect::<Vec<_>>();
+                assert!(results.len() <= 1);
+                if let Some(path) = results.first()
+                    && let Ok(bytes) = std::fs::read(path)
+                    && let Ok(result) = serde_json::from_slice(&bytes)
+                {
+                    break result;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("lease-loss durable result was not completely written");
+    assert_eq!(durable["outcome"], "aborted");
+    assert_eq!(durable["termination"], "cancelled");
+    assert!(
+        durable["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("lease_lost_during_execution:")
+    );
+    assert_eq!(
+        durable["workspace_transfer"]["error"],
+        "execution_not_completed"
+    );
+    assert!(durable["workspace_transfer"]["snapshot"].is_null());
     h.controller = controller_command(
         &h.migration_url,
         &h.runtime_url,
@@ -1296,7 +1346,7 @@ async fn workspace_lease_loss_retains_only_last_verified_checkpoint_and_requires
             .all(|s| s.attempts[0].accounting.started_at_unix_ms.is_none())
     );
     println!(
-        "workspace-runtime-evidence lease_loss=reconciliation_required uncertain_writes=not_transferred last_verified_generation=1 successors=not_started"
+        "workspace-runtime-evidence lease_loss=reconciliation_required uncertain_writes=not_transferred last_verified_generation=1 successors=not_started lease_reason=retained capture_error=execution_not_completed"
     );
     h.stop(Some(agent)).await;
 }

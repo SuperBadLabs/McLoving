@@ -5,8 +5,10 @@
 JCOMP-002B is ACTIVE. This is a review plan and implementation record, not a
 closure receipt. The historical shipped runtime campaign passed on `941d473`,
 but a continuation review identified an uncovered operator-reconciliation path.
-The correction passed independent review and a fresh committed-source campaign
-at `e4b6fcd`; the historical passing evidence does not verify the revised source.
+The reconciliation correction passed independent review and a fresh campaign
+at `e4b6fcd`. Subsequent PR review found terminal-reason precedence and schema
+receipt/generation issues; their dispositions and refreshed validation are
+recorded below. Earlier campaigns do not verify later source changes.
 Protected final-head checks, merge and exact-main verification remain outstanding. The design is
 `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md`.
 
@@ -203,7 +205,7 @@ both drivers and the mocked control consistently require four workspace-store
 tests, with the strict population/skip refusal unchanged. The four mocked gate
 tests and shell syntax checks passed before the reviewed source was committed.
 
-## Corrected continuation campaign and validation
+## Historical reconciliation campaign and validation
 
 The fresh contained campaign executed exact reviewed source
 `e4b6fcd9f21bd7bdf54986bff5dab3628942e426`, tree
@@ -239,6 +241,33 @@ distinguishes this Linux validation from native Windows and protected checks.
 The contained campaign above supplies the separate actual PostgreSQL execution
 evidence. Initial sandbox startup errors were diagnostic only; ordinary local
 Podman approvals allowed the unchanged validation commands to run successfully.
+
+## PR review corrections and refreshed validation
+
+Automated PR review identified that workspace capture failure took precedence
+over the lease-loss reason in durable terminal results. A cancelled execution
+could retain its capture error while losing the reason that explains uncertain
+execution and reconciliation. The correction prioritizes the lease-loss reason
+and retains the capture error in the workspace transfer result. Existing unit
+coverage now checks live/replayed terminal publication, and the actual remote
+lease-loss scenario checks the exact fenced durable result before restarting
+the controller. Its marker additionally reports retained lease reason and
+`execution_not_completed` capture error. Test populations remain 4+4+11.
+
+The second automated finding identified a missing database invariant between
+workspace generation and receipt presence. The migration now requires no receipt
+at generation zero and a receipt after generation advances, including closed
+namespaces. The existing real-PostgreSQL lifecycle test attempts invalid initial,
+open and closed states and requires SQLSTATE `23514` with the named
+`builds_workspace_receipt_shape` constraint. Runtime receipt validation remains
+responsible for the richer receipt structure and digest checks.
+
+The implementation reviewer independently approved the runtime correction and
+durable-result observation; the runtime reviewer independently approved the
+schema correction and regression. No blocker remains from those bounded reviews.
+A fresh contained campaign on the consolidated clean committed source remains
+pending. Keep v1 and v2 unchanged as historical evidence; retain the next
+campaign as v3.
 
 ## Evidence required before closure
 

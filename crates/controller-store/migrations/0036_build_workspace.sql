@@ -13,6 +13,9 @@ ALTER TABLE builds
             AND ((workspace_closed AND workspace_snapshot IS NULL)
                  OR (NOT workspace_closed AND workspace_snapshot IS NOT NULL)))
     ),
+    ADD CONSTRAINT builds_workspace_receipt_shape CHECK (
+        (workspace_generation = 0) = (workspace_receipt IS NULL)
+    ),
     ADD CONSTRAINT builds_workspace_snapshot_bound CHECK (
         workspace_snapshot IS NULL OR octet_length(workspace_snapshot::text) <= 65536
     );

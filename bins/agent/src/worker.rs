@@ -1325,7 +1325,9 @@ async fn run_assignment(
                 outcome: terminal,
                 exit_code: outcome.exit_code,
                 termination: termination_name(outcome.termination),
-                reason: workspace_failure.as_deref().or(lease_loss.as_deref()),
+                // Keep the authority-loss cause primary; capture refusal remains
+                // independently recorded in workspace_transfer.error.
+                reason: lease_loss.as_deref().or(workspace_failure.as_deref()),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
             },
@@ -2671,7 +2673,7 @@ mod tests {
             version: 1,
             entries: Vec::new(),
         };
-        for capture_failure in [false, true] {
+        for (capture_failure, lease_loss) in [(false, false), (true, false), (true, true)] {
             let transfer = WorkspaceTransferResult {
                 version: 1,
                 organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
@@ -2680,12 +2682,19 @@ mod tests {
                 generation: 0,
                 input_digest: snapshot.digest().unwrap(),
                 snapshot: (!capture_failure).then_some(snapshot.clone()),
-                error: capture_failure.then_some("workspace_unsupported_entry".to_owned()),
+                error: capture_failure.then_some(
+                    if lease_loss {
+                        "execution_not_completed"
+                    } else {
+                        "workspace_unsupported_entry"
+                    }
+                    .to_owned(),
+                ),
             };
             let durable = json!({
-                "outcome": if capture_failure { "failed" } else { "succeeded" },
-                "exit_code": 0, "termination": "exited",
-                "reason": capture_failure.then_some("workspace_capture_failed:workspace_unsupported_entry"),
+                "outcome": if lease_loss { "aborted" } else if capture_failure { "failed" } else { "succeeded" },
+                "exit_code": 0, "termination": if lease_loss { "cancelled" } else { "exited" },
+                "reason": if lease_loss { Some("lease_lost_during_execution:renewal_timeout") } else { capture_failure.then_some("workspace_capture_failed:workspace_unsupported_entry") },
                 "completion_protocol": "work", "cancellation_outcome": null,
                 "workspace_transfer": transfer,
             });
@@ -2698,7 +2707,7 @@ mod tests {
             let summary: serde_json::Value = serde_json::from_slice(&initial).unwrap();
             assert_eq!(summary["workspace_transfer"], durable["workspace_transfer"]);
             assert_eq!(summary["exit_code"], 0);
-            assert_eq!(summary["termination"], "exited");
+            assert_eq!(summary["termination"], durable["termination"]);
             assert_eq!(summary["result_sha256"], hex(&digest));
             if capture_failure {
                 assert_eq!(summary["reason"], durable["reason"]);
