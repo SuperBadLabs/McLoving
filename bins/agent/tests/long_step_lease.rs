@@ -10,6 +10,18 @@
 //! records `lease_lost_during_execution` in its durable result and on stderr,
 //! the replayed terminal summary carries the same named reason, and the agent
 //! resumes claiming later work without a wrecked journal.
+//!
+//! AGENT-007 gates: authority is not withdrawn by an answer that never came.
+//!
+//! Gates three and four deny the NETWORK rather than the renewal -- the
+//! controller process is killed outright while the step's own process keeps
+//! running -- because that is the shape of an ordinary upgrade, and because a
+//! renewal the controller REFUSES and a renewal it never ANSWERS were
+//! previously the same code path. Gate three requires an outage shorter than
+//! the held lease to change nothing about the build. Gate four requires an
+//! outage longer than it to cancel, under a cause distinct from every answered
+//! refusal, and -- the point of the ticket -- no sooner than the lease itself
+//! runs out.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -52,6 +64,20 @@ stages:
           program: /bin/sh
           args: [-c, "sleep 45"]
           timeout_seconds: 55
+"#;
+
+/// A step that outlives a controller restart taken while it runs.
+const OUTAGE_SURVIVOR_PIPELINE: &str = r#"
+version: 1
+name: outage-survivor
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "sleep 12; printf 'survived-controller-restart\n'"]
+          timeout_seconds: 60
 "#;
 
 const RECOVERY_PROOF_PIPELINE: &str = r#"
@@ -237,6 +263,200 @@ async fn deliberately_blocked_renewal_cancels_the_step_with_named_diagnostics() 
 
     stop(&mut agent).await;
     stop(&mut controller).await;
+}
+
+/// AGENT-007 gate three. The controller dies mid-step and comes back inside
+/// the lease the agent already holds. Nothing about the build may change: the
+/// step keeps running on authority nobody withdrew, and the outage leaves no
+/// mark on the outcome.
+#[tokio::test]
+async fn a_controller_outage_shorter_than_the_lease_leaves_the_step_running() {
+    let Some(harness) = Harness::from_environment("outage-short").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller("30", None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    let stderr_path = harness.directory.path().join("agent-stderr.log");
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create agent stderr capture");
+    let mut agent = harness
+        .agent_command("30")
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped remote agent");
+
+    let admission = harness
+        .submit(&client, "outage-short-e2e", OUTAGE_SURVIVOR_PIPELINE)
+        .await;
+    wait_until_running(&harness, admission).await;
+
+    // The outage. The step's own process is untouched; only the controller
+    // goes away, exactly as it does during an upgrade.
+    stop(&mut controller).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    controller = harness.spawn_controller("30", None);
+    wait_until_listening(&client, harness.organization_id).await;
+
+    let status = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if let Ok(status) = client
+                .status(harness.organization_id, harness.project_id, admission)
+                .await
+            {
+                assert_ne!(
+                    status.attempt_status.as_str(),
+                    "reconciliation_required",
+                    "a survivable outage must not park the attempt: {status:?}"
+                );
+                if matches!(status.status.as_str(), "succeeded" | "failed" | "aborted") {
+                    break status;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("work across a controller outage completes within bound");
+    assert_eq!(
+        status.status, "succeeded",
+        "a controller outage inside the held lease must not kill the step: {status:?}"
+    );
+    assert_eq!(status.attempt_status, "succeeded");
+
+    let logs = client
+        .logs(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("read outage-survivor logs");
+    assert!(
+        logs.iter().any(|log| log.stream == "stdout"
+            && log.text.as_deref() == Some("survived-controller-restart\n")),
+        "the step's output must survive the outage: {logs:?}"
+    );
+    assert_eq!(
+        harness.count_events(admission, "attempt.terminal").await,
+        1,
+        "exactly one logical terminal outcome across the outage"
+    );
+    for silent_expiry in ["attempt.lease_expired", "attempt.lease_renewal_rejected"] {
+        assert_eq!(
+            harness.count_events(admission, silent_expiry).await,
+            0,
+            "an outage inside the lease withdraws nothing: unexpected {silent_expiry}"
+        );
+    }
+
+    // The mechanism, not just the outcome: the agent must have SEEN the
+    // renewals fail and chosen to keep going, then seen the controller return.
+    // Asserting only on success would pass just as well if the outage had
+    // somehow never reached the renewal task.
+    let stderr = std::fs::read_to_string(&stderr_path).expect("read agent stderr capture");
+    assert!(
+        stderr.contains("renewal_unanswered:"),
+        "the renewal task must have observed the outage: {stderr}"
+    );
+    assert!(
+        stderr.contains("renewal_answered_again:"),
+        "the renewal task must have recovered on the same lease: {stderr}"
+    );
+    assert!(
+        !stderr.contains("lease_lost_during_execution"),
+        "an outage inside the held lease must lose no authority: {stderr}"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut controller).await;
+}
+
+/// AGENT-007 gate four. The controller does not come back. The step must be
+/// cancelled -- authority really is gone once the lease lapses -- under a cause
+/// distinct from every answered refusal, and NOT before the lease it held ran
+/// out. The timing assertion is the ticket: cancelling promptly is the defect.
+#[tokio::test]
+async fn a_controller_outage_longer_than_the_lease_cancels_only_when_it_lapses() {
+    const LEASE_SECONDS: u64 = 10;
+    let Some(harness) = Harness::from_environment("outage-long").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller(&LEASE_SECONDS.to_string(), None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    let stderr_path = harness.directory.path().join("agent-stderr.log");
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create agent stderr capture");
+    let mut agent = harness
+        .agent_command(&LEASE_SECONDS.to_string())
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped remote agent");
+
+    let admission = harness
+        .submit(&client, "outage-long-e2e", BLOCKED_RENEWAL_PIPELINE)
+        .await;
+    wait_until_running(&harness, admission).await;
+
+    // The controller's OWN record of when this lease stops covering the work,
+    // read straight from the database so it survives the controller. Renewals
+    // are still running as this is read, so the instant it returns is at or
+    // before the real one -- which makes the ordering assertion below strict.
+    let reclaimable_from = harness.lease_expiry_unix_seconds(admission).await;
+    let outage_began = tokio::time::Instant::now();
+    stop(&mut controller).await;
+
+    let loss = tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            if let Some(line) = stderr
+                .lines()
+                .find(|line| line.contains("lease_lost_during_execution:"))
+            {
+                break (line.to_owned(), outage_began.elapsed());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("an unreachable controller must eventually cost the lease");
+    let (line, waited) = loss;
+
+    assert!(
+        line.contains("lease_lost_during_execution: renewal_unanswered_until_expiry"),
+        "a lease lost to an unreachable controller must not be named as a refusal \
+         the controller never made: {line}"
+    );
+    // The defect this ticket fixes cancelled here on the FIRST failed renewal,
+    // which at a one-second cadence lands about a second into the outage.
+    assert!(
+        waited >= Duration::from_secs(5),
+        "the step was cancelled after {waited:?}, long before the {LEASE_SECONDS}s \
+         lease it held could lapse; an unanswered renewal is not lost authority"
+    );
+    // And it must not outlive the lease either: past it the controller may
+    // already have requeued the attempt.
+    assert!(
+        waited <= Duration::from_secs(LEASE_SECONDS + 5),
+        "the step outlived its own lease by {waited:?}"
+    );
+
+    // And the retry cannot race reclamation. `requeue_one_expired` may hand
+    // this attempt to another runtime once `lease_expires_at <=
+    // clock_timestamp()`; the agent must therefore have stopped at or before
+    // that instant, never after it. Both sides of the comparison are
+    // conservative against the agent: the expiry was read before the last
+    // renewals raised it, and the loss is timestamped when the test SAW the
+    // line rather than when the agent wrote it.
+    let stopped_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("host clock is after the epoch")
+        .as_secs_f64();
+    assert!(
+        stopped_at <= reclaimable_from,
+        "the agent kept the step alive {:.3}s past the instant the controller \
+         could reclaim the attempt",
+        stopped_at - reclaimable_from
+    );
+
+    stop(&mut agent).await;
 }
 
 struct Harness {
@@ -433,6 +653,23 @@ impl Harness {
             .build_id
     }
 
+    /// The controller's own `lease_expires_at` for this build's attempt, as a
+    /// Unix instant. Read from the database rather than through the controller
+    /// so it stays readable while the controller is dead.
+    async fn lease_expiry_unix_seconds(&self, build_id: Uuid) -> f64 {
+        sqlx::query_scalar::<_, f64>(
+            "SELECT EXTRACT(EPOCH FROM a.lease_expires_at)::double precision
+             FROM attempts AS a
+             JOIN nodes AS n ON n.id = a.node_id
+             WHERE n.build_id = $1
+               AND a.lease_expires_at IS NOT NULL",
+        )
+        .bind(build_id)
+        .fetch_one(&self.pool)
+        .await
+        .expect("read the attempt lease expiry")
+    }
+
     async fn count_events(&self, build_id: Uuid, kind: &str) -> i64 {
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*)
@@ -461,6 +698,27 @@ async fn wait_until_listening(client: &Client, organization_id: Uuid) {
     })
     .await
     .expect("controller listens within bound");
+}
+
+/// Waits until the step's own process is running, so an outage opened next
+/// lands on a live execution inside a lease term that has only just begun.
+///
+/// `lease_owner` is NOT the signal: it is set when the attempt is OFFERED,
+/// which is before the agent has accepted the work and started renewing it.
+/// Killing the controller there tests the accept path rather than the renewal
+/// path, and the attempt then sits leased-but-unaccepted until its claim lease
+/// expires -- measured, on the first run of these gates.
+async fn wait_until_running(harness: &Harness, build_id: Uuid) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if harness.count_events(build_id, "attempt.running").await > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the remote agent starts the step within bound");
 }
 
 async fn stop(child: &mut Child) {

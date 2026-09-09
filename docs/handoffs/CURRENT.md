@@ -88,10 +88,10 @@ below for the current or any future head.
 
 The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`; `EXEC-005` additionally waits for `JCOMP-003`.
-`GROOVY-001`, `HYG-003` and `AGENT-007` retain their pending parallel lanes.
-M1 keeps the current compile-only architecture; an interpreter port requires
-a separate decision and ticket. Shared contract or documentation boundaries
-serialize.
+`GROOVY-001` and `HYG-003` retain their pending parallel lanes; `AGENT-007`
+closed its lease-survival lane. M1 keeps the current compile-only
+architecture; an interpreter port requires a separate decision and ticket.
+Shared contract or documentation boundaries serialize.
 
 Use independent subagents for compiler/admission inspection and differential
 fixture design. Verify HeMan's Qwen model and connectivity before assigning
@@ -117,10 +117,10 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   continuing on a successor head, evaluate the standing successor-head verification gate against
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
-- `GROOVY-001`, `HYG-003` and `AGENT-007` are also `PENDING`. Each is a
-  standalone `PARALLEL` lane and none of them occupies the dispatch slot.
-  Read the board rather than this list for the full set; that is the point of
-  the bullet above.
+- `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
+  `PARALLEL` lane and neither occupies the dispatch slot. Read the board
+  rather than this list for the full set; that is the point of the bullet
+  above.
 - Protected-main Foundation, native Windows, and Release Builder runs are green
   at the authoring baseline. All eight required contexts remain bound to GitHub
   Actions app id `15368`.

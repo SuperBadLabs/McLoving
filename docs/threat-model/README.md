@@ -522,6 +522,7 @@ had never claimed one.
 | Ticket | Evidence |
 |---|---|
 | ADMIN-001 | `docs/evidence/ADMIN-001_SECURITY_REVIEW.md` |
+| AGENT-007 | `docs/evidence/AGENT-007_SECURITY_REVIEW.md` |
 | AUTHZ-001 | `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md` |
 | CANARY-000 | `docs/evidence/CANARY-000_SECURITY_REVIEW.md` |
 | CI-002 | `docs/evidence/CI-002_SECURITY_REVIEW.md` |

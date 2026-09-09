@@ -178,15 +178,65 @@ fn renewal_rejection_cause(cause: &str) -> &'static str {
     }
 }
 
-/// Classifies a renewal RPC rejection status: a stale-session fencing
-/// rejection is named as such rather than as a transport failure.
+/// Classifies a renewal status the controller actually ANSWERED with: a
+/// stale-session fencing rejection is named as such, and every other answered
+/// refusal is the generic rejection. A status the agent merely failed to get an
+/// answer to never reaches this function -- see [`renewal_went_unanswered`].
 fn renewal_status_cause(status: &tonic::Status) -> &'static str {
     if status.code() == tonic::Code::FailedPrecondition
         && status.message().contains("stale agent session epoch")
     {
         "renewal_session_stale"
     } else {
-        "renewal_transport_failure"
+        "renewal_refused"
+    }
+}
+
+/// Did this renewal fail to produce a usable answer, rather than carry one?
+///
+/// Only an answer can withdraw authority. Unreachability cannot: the lease the
+/// agent already holds stands until it expires, and the controller cannot
+/// requeue the attempt before then -- `requeue_one_expired` reclaims only a
+/// lease whose `lease_expires_at` has passed, and the renewal statement itself
+/// requires an unexpired one. Treating the two alike killed a running step on
+/// the first failed renewal RPC while 296 seconds of a 300-second lease
+/// remained, which is `AGENT-007`.
+///
+/// The predicate is deliberately the SAME one every other authority-bearing RPC
+/// in this file already uses, so the renewal task cannot disagree with the log
+/// publication and start-work paths about which statuses are worth another ask.
+/// Those paths are bounded by `authority_lost`, which this task owns; this one
+/// is bounded by the lease itself.
+fn renewal_went_unanswered(status: &tonic::Status) -> bool {
+    retryable_authority_transition(status)
+}
+
+/// How often an unanswered renewal is retried: at least once a second, so a
+/// controller that comes back from a short restart is noticed promptly, and
+/// never more often than the agent's own renewal cadence, which the
+/// configuration already forbids from being zero.
+fn renewal_retry_interval(renewal_interval: Duration) -> Duration {
+    renewal_interval.min(Duration::from_secs(1))
+}
+
+/// When to ask again after a renewal produced no answer, or `None` once the
+/// lease the agent holds has run out.
+///
+/// This is the whole bound on the retry. `lease_deadline` is the agent's own
+/// conservative estimate of its lease expiry -- the term's start instant, taken
+/// before the RPC that opened it was sent, plus the lease window less the
+/// codebase's one-second margin -- so it always falls before the instant the
+/// controller could reclaim the attempt. A retry never waits past it, and the
+/// step never outlives it.
+fn next_renewal_retry(
+    now: tokio::time::Instant,
+    lease_deadline: tokio::time::Instant,
+    retry_interval: Duration,
+) -> Option<tokio::time::Instant> {
+    if now >= lease_deadline {
+        None
+    } else {
+        Some((now + retry_interval).min(lease_deadline))
     }
 }
 
@@ -1573,46 +1623,85 @@ async fn renew_lease(
     } = control;
     let mut lease_started_at = lease_started_at;
     let mut lease_window = lease_window;
+    let retry_interval = renewal_retry_interval(renewal_interval);
     loop {
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             () = tokio::time::sleep_until(lease_started_at + renewal_interval) => {}
         }
-        let deadline = lease_started_at + lease_rpc_budget(lease_window);
-        let renewal = tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            result = tokio::time::timeout_at(
-                deadline,
-                client.renew_work_lease(WorkLeaseRenewal {
-                    authority: Some(authority.clone()),
-                    lease_seconds,
-                }),
-            ) => result,
-        };
-        // A stop request makes any concurrent renewal failure moot: the
-        // attempt is already finalized and the session must not be torn down
-        // over a lease this task was told to release. The failure arms below
-        // re-check because the select above is unbiased and the RPC may have
-        // failed in the same poll that observed the stop.
-        let receipt = match renewal {
-            Err(_) => {
-                if stop.is_cancelled() {
-                    return Ok(());
+        // Past this instant the agent must assume its lease has lapsed and the
+        // controller may already have requeued the attempt, so it bounds both
+        // the renewal RPC and every retry of it.
+        let lease_deadline = lease_started_at + lease_rpc_budget(lease_window);
+        let mut unanswered: u64 = 0;
+        let receipt = loop {
+            let renewal = tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                result = tokio::time::timeout_at(
+                    lease_deadline,
+                    client.renew_work_lease(WorkLeaseRenewal {
+                        authority: Some(authority.clone()),
+                        lease_seconds,
+                    }),
+                ) => result,
+            };
+            // A stop request makes any concurrent renewal failure moot: the
+            // attempt is already finalized and the session must not be torn
+            // down over a lease this task was told to release. The failure arms
+            // below re-check because the select above is unbiased and the RPC
+            // may have failed in the same poll that observed the stop.
+            match renewal {
+                Ok(Ok(response)) => {
+                    if unanswered > 0 {
+                        eprintln!(
+                            "renewal_answered_again: the controller answered after \
+                             {unanswered} unanswered attempt(s); the step kept running \
+                             on the lease it already held"
+                        );
+                    }
+                    break response.into_inner();
                 }
-                record_lease_loss(&loss_reason, "renewal_timeout");
+                Ok(Err(error)) => {
+                    if stop.is_cancelled() {
+                        return Ok(());
+                    }
+                    if !renewal_went_unanswered(&error) {
+                        record_lease_loss(&loss_reason, renewal_status_cause(&error));
+                        execution_cancellation.cancel();
+                        authority_lost.cancel();
+                        return Err(error.into());
+                    }
+                    if unanswered == 0 {
+                        eprintln!(
+                            "renewal_unanswered: {}: {}; authority is not withdrawn by \
+                             an answer that never arrived, so the step keeps running \
+                             and the renewal is retried every {retry_interval:?} until \
+                             the held lease lapses",
+                            error.code(),
+                            error.message(),
+                        );
+                    }
+                    unanswered = unanswered.saturating_add(1);
+                }
+                // The RPC itself consumed what was left of the lease.
+                Err(_) => {
+                    if stop.is_cancelled() {
+                        return Ok(());
+                    }
+                    unanswered = unanswered.saturating_add(1);
+                }
+            }
+            let Some(retry_at) =
+                next_renewal_retry(tokio::time::Instant::now(), lease_deadline, retry_interval)
+            else {
+                record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
                 return Err(AgentError::LeaseRenewalTimeout);
-            }
-            Ok(Ok(response)) => response.into_inner(),
-            Ok(Err(error)) => {
-                if stop.is_cancelled() {
-                    return Ok(());
-                }
-                record_lease_loss(&loss_reason, renewal_status_cause(&error));
-                execution_cancellation.cancel();
-                authority_lost.cancel();
-                return Err(error.into());
+            };
+            tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                () = tokio::time::sleep_until(retry_at) => {}
             }
         };
         match ensure_session(receipt.session_epoch, authority.session_epoch) {
@@ -2803,6 +2892,107 @@ mod tests {
             Duration::from_secs(29)
         );
         assert_eq!(lease_rpc_budget(Duration::from_millis(500)), Duration::ZERO);
+    }
+
+    /// AGENT-007. Only an ANSWER can withdraw authority. Every status the
+    /// controller's own renewal handler can return is treated as an answer and
+    /// cancels the step; a status that means the ask never landed is retried.
+    #[test]
+    fn only_an_answered_renewal_withdraws_authority() {
+        for answered in [
+            tonic::Status::failed_precondition("stale agent session epoch for agent x"),
+            tonic::Status::failed_precondition("attempt is not leased"),
+            tonic::Status::permission_denied("agent is not in the trust pool"),
+            tonic::Status::unauthenticated("client certificate is unknown"),
+            tonic::Status::not_found("attempt does not exist"),
+            tonic::Status::invalid_argument("lease_seconds must be between 5 and 300"),
+        ] {
+            assert!(
+                !renewal_went_unanswered(&answered),
+                "{answered:?} is an answer from the controller and must cancel the step"
+            );
+        }
+        for unanswered in [
+            tonic::Status::unavailable("tcp connect error: Connection refused"),
+            tonic::Status::deadline_exceeded("no reply"),
+            tonic::Status::cancelled("connection closed mid-call"),
+            tonic::Status::unknown("h2 protocol error"),
+            tonic::Status::internal("controller store is unavailable"),
+        ] {
+            assert!(
+                renewal_went_unanswered(&unanswered),
+                "{unanswered:?} withdraws no authority and must be retried"
+            );
+        }
+    }
+
+    /// AGENT-007. The stale-session fencing rejection keeps its own name, and
+    /// every other answered refusal is named as a refusal rather than -- as it
+    /// was before this ticket -- as a transport failure it is not.
+    #[test]
+    fn an_answered_refusal_is_named_as_one() {
+        assert_eq!(
+            renewal_status_cause(&tonic::Status::failed_precondition(
+                "stale agent session epoch for agent x"
+            )),
+            "renewal_session_stale"
+        );
+        assert_eq!(
+            renewal_status_cause(&tonic::Status::permission_denied("not in trust pool")),
+            "renewal_refused"
+        );
+    }
+
+    /// AGENT-007. The retry cadence is bounded on both sides: never slower than
+    /// one second, so a controller back from a short restart is found promptly,
+    /// and never faster than the agent's own renewal interval.
+    #[test]
+    fn the_renewal_retry_cadence_is_bounded_on_both_sides() {
+        assert_eq!(
+            renewal_retry_interval(Duration::from_secs(5)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            renewal_retry_interval(Duration::from_millis(200)),
+            Duration::from_millis(200)
+        );
+    }
+
+    /// AGENT-007. The lease the agent already holds is the whole bound on the
+    /// retry: no wait reaches past it, and at it the retry stops so the step is
+    /// cancelled rather than outliving the authority that covered it.
+    #[test]
+    fn a_renewal_retry_never_outlives_the_held_lease() {
+        let now = tokio::time::Instant::now();
+        let deadline = now + Duration::from_secs(10);
+        assert_eq!(
+            next_renewal_retry(now, deadline, Duration::from_secs(1)),
+            Some(now + Duration::from_secs(1)),
+            "an ordinary retry waits the cadence"
+        );
+        assert_eq!(
+            next_renewal_retry(
+                now + Duration::from_millis(9_500),
+                deadline,
+                Duration::from_secs(1)
+            ),
+            Some(deadline),
+            "a retry that would wait past the lease is pulled back to it"
+        );
+        assert_eq!(
+            next_renewal_retry(deadline, deadline, Duration::from_secs(1)),
+            None,
+            "at the lease deadline the step is cancelled, not retried"
+        );
+        assert_eq!(
+            next_renewal_retry(
+                deadline + Duration::from_secs(1),
+                deadline,
+                Duration::from_secs(1)
+            ),
+            None,
+            "past the lease deadline the step is cancelled, not retried"
+        );
     }
 
     #[tokio::test]
