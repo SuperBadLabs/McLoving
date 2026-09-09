@@ -230,8 +230,11 @@ impl AgentConfig {
         if poll_milliseconds == 0
             || renewal_milliseconds == 0
             || termination_grace_milliseconds == 0
-            || renewal_milliseconds.saturating_add(termination_grace_milliseconds)
-                >= u64::from(lease_seconds.saturating_sub(1)) * 1_000
+            || Duration::from_millis(renewal_milliseconds)
+                >= worker::execution_lease_budget(
+                    Duration::from_secs(u64::from(lease_seconds)),
+                    Duration::from_millis(termination_grace_milliseconds),
+                )
         {
             return Err(AgentError::InvalidConfig(
                 "agent polling, renewal, or termination timing",
@@ -776,6 +779,24 @@ async fn send_reconciliation(
                     return Err(AgentError::StaleSession);
                 }
                 let phase = recovered_cancellation_phase(outcome, receipt.disposition)?;
+                if [
+                    CancellationDisposition::RetireStale as i32,
+                    CancellationDisposition::DischargeRecovered as i32,
+                ]
+                .contains(&receipt.disposition)
+                {
+                    // Both replies explicitly refuse this recovered authority.
+                    // Which reply applies depends on whether the journal already
+                    // proves containment, not on a different fencing guarantee.
+                    eprintln!(
+                        "recovered_fence_refused: {:?} {}/{} fence {}",
+                        CancellationDisposition::try_from(receipt.disposition)
+                            .expect("recovered disposition was validated"),
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                    );
+                }
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
@@ -1417,7 +1438,6 @@ mod tests {
                 "agent polling, renewal, or termination timing"
             ))
         ));
-
         // AGENT-007, from review. The termination grace is spent INSIDE the
         // lease: cancelling signals the group and waits it out before
         // `SIGKILL`. A cadence that fits on its own but not once the grace is
@@ -1457,6 +1477,32 @@ mod tests {
         assert_eq!(defaults.lease_seconds, 30);
         assert_eq!(defaults.lease_renewal_interval, Duration::from_secs(5));
         assert_eq!(defaults.termination_grace, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn configuration_reserves_grace_before_renewal_deadline() {
+        for (grace_ms, renewal_ms, valid) in [
+            ("2000", "5000", true),
+            ("24000", "5000", false),
+            ("24000", "4999", true),
+            ("29000", "1", false),
+            ("18446744073709551615", "1", false),
+        ] {
+            let mut input = values();
+            input.insert(
+                "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS".into(),
+                grace_ms.into(),
+            );
+            input.insert(
+                "MCLOVING_AGENT_RENEW_MILLISECONDS".into(),
+                renewal_ms.into(),
+            );
+            assert_eq!(
+                AgentConfig::from_values(&input).is_ok(),
+                valid,
+                "grace={grace_ms}, renewal={renewal_ms}"
+            );
+        }
     }
 
     #[test]

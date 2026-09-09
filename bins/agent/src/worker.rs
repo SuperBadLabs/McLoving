@@ -195,11 +195,6 @@ struct LeaseRenewalControl {
     /// the instant the attempt becomes reclaimable.
     lease_started_at: tokio::time::Instant,
     lease_window: Duration,
-    /// Reserved out of the term because cancelling is not stopping: the
-    /// executor signals the group, waits this long, and only then sends
-    /// `SIGKILL`. A deadline that reserved only the one-second margin left a
-    /// workload that ignores `SIGTERM` executing past the instant the attempt
-    /// becomes reclaimable.
     termination_grace: Duration,
     execution_cancellation: CancellationToken,
     authority_lost: CancellationToken,
@@ -271,15 +266,10 @@ fn renewal_retry_interval(renewal_interval: Duration) -> Duration {
     renewal_interval.min(Duration::from_secs(1))
 }
 
-/// When to ask again after a renewal produced no answer, or `None` once the
-/// lease the agent holds has run out.
-///
-/// This is the whole bound on the retry. `lease_deadline` is the agent's own
-/// conservative estimate of its lease expiry -- the term's start instant, taken
-/// before the RPC that opened it was sent, plus the lease window less the
-/// codebase's one-second margin -- so it always falls before the instant the
-/// controller could reclaim the attempt. A retry never waits past it, and the
-/// step never outlives it.
+/// When to ask again after an unanswered renewal, or `None` at the execution
+/// cancellation deadline. Its request-start anchor reserves the complete
+/// termination grace plus one second before controller expiry. Cancellation
+/// begins at this deadline; observed process quiescence is a separate gate.
 fn next_renewal_retry(
     now: tokio::time::Instant,
     lease_deadline: tokio::time::Instant,
@@ -442,7 +432,7 @@ pub(super) async fn recover_finalizations(
                 renewal_interval: recovery_renewal_interval(config.lease_renewal_interval),
                 lease_started_at,
                 lease_window,
-                termination_grace: config.termination_grace,
+                termination_grace: Duration::ZERO,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -943,7 +933,7 @@ async fn refuse_unsupported_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
-            termination_grace: config.termination_grace,
+            termination_grace: Duration::ZERO,
             execution_cancellation,
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -1006,7 +996,7 @@ async fn run_assignment(
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
     features: SessionFeatures,
-    claimed_no_later_than: tokio::time::Instant,
+    _claimed_no_later_than: tokio::time::Instant,
     assignment: ValidatedAssignment,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -1032,46 +1022,31 @@ async fn run_assignment(
     let accept_cancellation = receipt.cancellation_requested;
     require_work_receipt(receipt, session_epoch)?;
     let accepted_at = tokio::time::Instant::now();
-    // With accept-carries-lease-state-v1 the accept receipt already answers
-    // what the serialized renewal below existed to ask — live authority and
-    // committed cancellation, read under the accepting transaction's row
-    // lock — so no renewal happens here at all. The claim-time lease keeps
-    // its window minus the offer-to-accept latency, the periodic renewal
-    // task re-arms it on its ordinary cadence (the configuration invariant
-    // that the renewal interval sits well inside the lease window covers
-    // that gap), and the fence keeps the pathological remainder correct.
-    // Without the feature the receipt's field is default-false noise from an
-    // older controller, so the explicit round trip stays.
-    //
-    // Each arm also yields the instant the live term is anchored to, because
-    // ACCEPTING DOES NOT EXTEND THE LEASE: the store stamps `lease_expires_at`
-    // at the claim and re-stamps it only on renewal. Where no renewal happened
-    // the term is still the claim's, so the anchor is the instant before the
-    // poll that carried it; where the serialized renewal did happen the term is
-    // that renewal's, and the anchor is the instant before it was sent.
-    let (cancellation_requested, lease_started_at) = if features.accept_lease_state
-        && !accept_consumed_claim_lease(
-            claimed_no_later_than,
-            lease_window,
-            accepted_at,
-            config.lease_renewal_interval,
-        ) {
-        (accept_cancellation, claimed_no_later_than)
-    } else {
-        let lease = lease_deadline_rpc(
-            accepted_at + lease_rpc_budget(lease_window),
-            client.renew_work_lease(WorkLeaseRenewal {
-                authority: Some(assignment.authority.clone()),
-                lease_seconds: config.lease_seconds,
-            }),
-        )
-        .await?;
-        ensure_session(lease.session_epoch, session_epoch)?;
-        if !lease.accepted {
-            return Err(AgentError::StaleAuthority);
-        }
-        (lease.cancellation_requested, accepted_at)
-    };
+    // Acceptance does not renew the controller's claim term or report its
+    // duration. Before spawning, obtain a term with the explicitly requested
+    // duration; agent/controller defaults need not match. This deliberately
+    // retains one serialized RPC even when folded acceptance is negotiated.
+    // Request-start anchoring and the shortened timeout ensure a delayed
+    // response cannot leave a process starting without termination reserve.
+    let lease_started_at = accepted_at;
+    let lease = lease_deadline_rpc(
+        lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace),
+        client.renew_work_lease(WorkLeaseRenewal {
+            authority: Some(assignment.authority.clone()),
+            lease_seconds: config.lease_seconds,
+        }),
+    )
+    .await?;
+    ensure_session(lease.session_epoch, session_epoch)?;
+    if !lease.accepted {
+        return Err(AgentError::StaleAuthority);
+    }
+    if tokio::time::Instant::now()
+        >= lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace)
+    {
+        return Err(AgentError::LeaseRenewalTimeout);
+    }
+    let cancellation_requested = accept_cancellation || lease.cancellation_requested;
     if cancellation_requested {
         let lease_stop = CancellationToken::new();
         let execution_cancellation = CancellationToken::new();
@@ -1085,7 +1060,7 @@ async fn run_assignment(
                 renewal_interval: config.lease_renewal_interval,
                 lease_started_at,
                 lease_window,
-                termination_grace: config.termination_grace,
+                termination_grace: Duration::ZERO,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -1338,8 +1313,16 @@ async fn run_assignment(
                         authority: &assignment.authority,
                         workspace: &assignment.workspace,
                         session_epoch,
-                        outcome: WorkOutcome::Failed,
+                        outcome: if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
+                            WorkOutcome::Aborted
+                        } else {
+                            WorkOutcome::Failed
+                        },
                         reason: match &error {
+                            ExecutionError::CancelledBeforeSpawn => lease_loss_reason
+                                .get()
+                                .map(|cause| format!("lease_lost_during_execution:{cause}"))
+                                .unwrap_or_else(|| "cancelled_before_process_spawn".to_owned()),
                             ExecutionError::WorkspaceTransfer(_) => {
                                 format!("workspace_seed_failed:{error}")
                             }
@@ -1753,16 +1736,23 @@ async fn renew_lease(
     let mut lease_window = lease_window;
     let retry_interval = renewal_retry_interval(renewal_interval);
     loop {
-        tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep_until(lease_started_at + renewal_interval) => {}
-        }
-        // Past this instant the agent must assume its lease has lapsed and the
-        // controller may already have requeued the attempt, so it bounds both
-        // the renewal RPC and every retry of it -- less the termination grace,
-        // because the workload has to be STOPPED by then, not just told to.
+        // Start cancellation early enough to finish graceful termination and
+        // send SIGKILL before reclamation. The wake itself must obey this bound:
+        // a long cadence must not sleep through the reserved termination time.
         let lease_deadline =
             lease_cancellation_deadline(lease_started_at, lease_window, termination_grace);
+        tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            () = tokio::time::sleep_until(
+                (lease_started_at + renewal_interval).min(lease_deadline)
+            ) => {}
+        }
+        if tokio::time::Instant::now() >= lease_deadline {
+            record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
+            execution_cancellation.cancel();
+            authority_lost.cancel();
+            return Err(AgentError::LeaseRenewalTimeout);
+        }
         let mut unanswered: u64 = 0;
         // Carried out of the loop with the receipt: the term a successful
         // renewal opens is measured from the moment THAT request left, so the
@@ -1894,28 +1884,26 @@ fn accept_consumed_claim_lease(
         < accepted_at + renewal_interval
 }
 
-pub(super) fn lease_rpc_budget(lease_window: Duration) -> Duration {
-    lease_window.saturating_sub(Duration::from_secs(1))
+pub(super) fn execution_lease_budget(
+    lease_window: Duration,
+    termination_grace: Duration,
+) -> Duration {
+    lease_rpc_budget(lease_window).saturating_sub(termination_grace)
 }
 
-/// The instant a lease term must have STOPPED the workload by, which is not the
-/// instant it may decide to.
-///
-/// Cancelling an execution signals the process group and waits the configured
-/// termination grace before `SIGKILL`, so a workload that ignores `SIGTERM`
-/// keeps running for that whole grace after the decision. Reserving only the
-/// one-second RPC margin therefore left it executing past the instant
-/// `requeue_one_expired` may hand the attempt to another runtime, which is the
-/// duplication this ticket's retry would otherwise have made routine rather
-/// than incidental. The agent's configuration refuses a renewal interval that
-/// does not fit inside what is left, so this never collapses below the first
-/// renewal.
+/// Cancellation must begin with the complete termination grace still inside
+/// the term. This is the cancellation deadline, not proof of process death;
+/// the shipped-runtime gate independently observes quiescence before expiry.
 fn lease_cancellation_deadline(
     lease_started_at: tokio::time::Instant,
     lease_window: Duration,
     termination_grace: Duration,
 ) -> tokio::time::Instant {
-    lease_started_at + lease_rpc_budget(lease_window).saturating_sub(termination_grace)
+    lease_started_at + execution_lease_budget(lease_window, termination_grace)
+}
+
+pub(super) fn lease_rpc_budget(lease_window: Duration) -> Duration {
+    lease_window.saturating_sub(Duration::from_secs(1))
 }
 
 async fn lease_window_rpc<T>(
@@ -3177,6 +3165,26 @@ mod tests {
     }
 
     #[test]
+    fn execution_budget_reserves_entire_grace_and_rejects_exhausted_windows() {
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(30), Duration::from_secs(2)),
+            Duration::from_secs(27)
+        );
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(10), Duration::from_secs(4)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(5), Duration::from_secs(4)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(5), Duration::MAX),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn lease_rpc_budget_expires_before_the_controller_lease() {
         assert_eq!(
             lease_rpc_budget(Duration::from_secs(30)),
@@ -3251,7 +3259,7 @@ mod tests {
         );
         assert!(
             lease_cancellation_deadline(start, window, grace) + grace <= start + window,
-            "a workload signalled at the deadline is dead before the lease expires"
+            "the configured termination reserve fits before lease expiry"
         );
         // A grace wider than the whole window cannot go negative; the renewal
         // then has no room at all, which the agent configuration refuses.

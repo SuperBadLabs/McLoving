@@ -92,7 +92,8 @@ below for the current or any future head.
 The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`; `EXEC-005` additionally waits for `JCOMP-003`.
 `GROOVY-001` and `HYG-003` retain their pending parallel lanes; `AGENT-007`
-closed its lease-survival lane. M1 keeps the current compile-only
+is ACTIVE in its lease-survival lane and must merge with exact-main verification
+before JCOMP-003 collects paired-runtime evidence. M1 keeps the current compile-only
 architecture; an interpreter port requires a separate decision and ticket.
 Shared contract or documentation boundaries serialize.
 

@@ -20,8 +20,8 @@
 //! previously the same code path. Gate three requires an outage shorter than
 //! the held lease to change nothing about the build. Gate four requires an
 //! outage longer than it to cancel, under a cause distinct from every answered
-//! refusal, and -- the point of the ticket -- no sooner than the lease itself
-//! runs out.
+//! refusal, reserving termination grace before expiry while surviving a
+//! nontrivial outage instead of cancelling on the first unanswered renewal.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,21 @@ stages:
           program: /bin/sh
           args: [-c, "sleep 45"]
           timeout_seconds: 55
+"#;
+
+/// Both the shell and its child inherit SIGTERM ignored. Only actual process
+/// termination, rather than a cancellation log, can establish quiescence.
+const TERM_RESISTANT_PIPELINE: &str = r#"
+version: 1
+name: term-resistant
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "trap '' TERM; sleep 45 & printf '%s %s\\n' $$ $! > process-identities; wait"]
+          timeout_seconds: 60
 "#;
 
 /// A step that outlives a controller restart taken while it runs.
@@ -134,7 +149,10 @@ async fn shipped_agent_holds_lease_across_a_step_longer_than_three_lease_terms()
         "long step must succeed under concurrent lease renewal: {status:?}"
     );
     assert_eq!(status.attempt_status, "succeeded");
-    assert_eq!(status.lease_owner.as_deref(), Some("long-step-agent"));
+    assert_eq!(
+        status.lease_owner.as_deref(),
+        Some(harness.agent_id.as_str())
+    );
 
     let logs = client
         .logs(harness.organization_id, harness.project_id, admission)
@@ -370,38 +388,39 @@ async fn a_controller_outage_shorter_than_the_lease_leaves_the_step_running() {
 
 /// AGENT-007 gate four. The controller does not come back. The step must be
 /// cancelled -- authority really is gone once the lease lapses -- under a cause
-/// distinct from every answered refusal, and NOT before the lease it held ran
-/// out. The timing assertion is the ticket: cancelling promptly is the defect.
+/// distinct from every answered refusal. Graceful termination must finish
+/// before expiry; cancelling on the first unanswered renewal is the defect.
 #[tokio::test]
 async fn a_controller_outage_longer_than_the_lease_cancels_only_when_it_lapses() {
     const LEASE_SECONDS: u64 = 10;
     let Some(harness) = Harness::from_environment("outage-long").await else {
         return;
     };
-    let mut controller = harness.spawn_controller(&LEASE_SECONDS.to_string(), None);
+    // Initial claims use the controller's shorter term. The explicit pre-spawn
+    // renewal must establish the agent's ten-second term before execution.
+    let mut controller = harness.spawn_controller("5", None);
     let client = harness.client();
     wait_until_listening(&client, harness.organization_id).await;
     let stderr_path = harness.directory.path().join("agent-stderr.log");
     let stderr_file = std::fs::File::create(&stderr_path).expect("create agent stderr capture");
     let mut agent = harness
         .agent_command(&LEASE_SECONDS.to_string())
+        .env("MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS", "2000")
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped remote agent");
 
     let admission = harness
-        .submit(&client, "outage-long-e2e", BLOCKED_RENEWAL_PIPELINE)
+        .submit(&client, "outage-long-e2e", TERM_RESISTANT_PIPELINE)
         .await;
     wait_until_running(&harness, admission).await;
+    let processes = wait_for_process_identities(&harness.workspace).await;
 
-    // The controller's OWN record of when this lease stops covering the work,
-    // read straight from the database so it survives the controller. Renewals
-    // are still running as this is read, so the instant it returns is at or
-    // before the real one -- which makes the ordering assertion below strict.
-    let reclaimable_from = harness.lease_expiry_unix_seconds(admission).await;
     let outage_began = tokio::time::Instant::now();
     stop(&mut controller).await;
+    // The controller is stopped, so this authoritative expiry cannot move.
+    let reclaimable_from = harness.lease_expiry_unix_seconds(admission).await;
 
     let loss = tokio::time::timeout(Duration::from_secs(40), async {
         loop {
@@ -438,23 +457,9 @@ async fn a_controller_outage_longer_than_the_lease_cancels_only_when_it_lapses()
         "the step outlived its own lease by {waited:?}"
     );
 
-    // And the retry cannot race reclamation. `requeue_one_expired` may hand
-    // this attempt to another runtime once `lease_expires_at <=
-    // clock_timestamp()`; the agent must therefore have stopped at or before
-    // that instant, never after it. Both sides of the comparison are
-    // conservative against the agent: the expiry was read before the last
-    // renewals raised it, and the loss is timestamped when the test SAW the
-    // line rather than when the agent wrote it.
-    let stopped_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("host clock is after the epoch")
-        .as_secs_f64();
-    assert!(
-        stopped_at <= reclaimable_from,
-        "the agent kept the step alive {:.3}s past the instant the controller \
-         could reclaim the attempt",
-        stopped_at - reclaimable_from
-    );
+    // The diagnostic above precedes cancellation. Independently observe the
+    // TERM-resistant leader AND child gone; a logged intent is not process exit.
+    assert_processes_stop_before_expiry(&processes, reclaimable_from).await;
 
     stop(&mut agent).await;
 }
@@ -477,19 +482,22 @@ async fn a_reclaimed_attempt_fences_out_the_agent_that_lost_it() {
     let stderr_file = std::fs::File::create(&stderr_path).expect("create agent stderr capture");
     let mut agent = harness
         .agent_command(&LEASE_SECONDS.to_string())
+        .env("MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS", "4000")
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped remote agent");
 
     let admission = harness
-        .submit(&client, "reclaim-e2e", BLOCKED_RENEWAL_PIPELINE)
+        .submit(&client, "reclaim-e2e", TERM_RESISTANT_PIPELINE)
         .await;
     wait_until_running(&harness, admission).await;
+    let processes = wait_for_process_identities(&harness.workspace).await;
     let lost_fence = harness.attempt_fence(admission).await;
 
     // The outage outlives the lease, so the agent gives up under its own name.
     stop(&mut controller).await;
+    let reclaimable_from = harness.lease_expiry_unix_seconds(admission).await;
     tokio::time::timeout(Duration::from_secs(40), async {
         loop {
             let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
@@ -502,6 +510,10 @@ async fn a_reclaimed_attempt_fences_out_the_agent_that_lost_it() {
     .await
     .expect("an unreachable controller must eventually cost the lease");
 
+    assert_processes_stop_before_expiry(&processes, reclaimable_from).await;
+
+    // Only after its actual workload has stopped may the original runtime
+    // go away; killing the agent earlier could orphan an executing child.
     // The original runtime goes away entirely, journal and all, so the relief
     // agent is unambiguously the one that picks the work up.
     stop(&mut agent).await;
@@ -534,6 +546,11 @@ async fn a_reclaimed_attempt_fences_out_the_agent_that_lost_it() {
          {claimed_fence} is not greater than {lost_fence}"
     );
 
+    let relief_processes =
+        wait_for_process_identities(&harness.directory.path().join("relief-workspace")).await;
+    assert_eq!(relief_processes.len(), 2);
+    assert!(processes.iter().all(|process| !process.still_exists()));
+
     // And now the agent that lost it comes back, still holding the old fence.
     let returning_stderr_path = harness.directory.path().join("agent-returned-stderr.log");
     let returning_stderr =
@@ -544,7 +561,17 @@ async fn a_reclaimed_attempt_fences_out_the_agent_that_lost_it() {
         .kill_on_drop(true)
         .spawn()
         .expect("restart the agent that lost the lease");
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let stderr = std::fs::read_to_string(&returning_stderr_path).unwrap_or_default();
+            if has_named_recovered_refusal(&stderr) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("returning agent must observe the named discharge, not a fixed sleep");
 
     let status = client
         .status(harness.organization_id, harness.project_id, admission)
@@ -567,21 +594,160 @@ async fn a_reclaimed_attempt_fences_out_the_agent_that_lost_it() {
 
     // Named, not merely absent. The returning agent is refused by the fence and
     // told so: the controller answers its recovered-attempt report with the
-    // `EXEC-003` discharge disposition, and the agent records the refusal rather
-    // than retrying its lost authority or parking the lane. A gate that only
+    // `EXEC-003` stale-retirement or discharge disposition, according to the
+    // journal's durable containment proof. Both explicitly refuse the old
+    // authority rather than retrying it or parking the lane. A gate that only
     // observed that nothing bad happened would pass just as well if the agent
     // had never come back at all.
     let returning_stderr =
         std::fs::read_to_string(&returning_stderr_path).expect("read returning agent stderr");
     assert!(
-        returning_stderr.contains("fenced authority is disowned"),
+        has_named_recovered_refusal(&returning_stderr),
         "the returning agent must be told its authority was fenced out, and record \
          it: {returning_stderr}"
     );
 
+    client
+        .cancel(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("cancel relief workload before stopping its agent");
+    assert_processes_stop_before_expiry(
+        &relief_processes,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + 15.0,
+    )
+    .await;
     stop(&mut returned).await;
     stop(&mut relief).await;
     stop(&mut controller).await;
+}
+
+fn has_named_recovered_refusal(stderr: &str) -> bool {
+    stderr.contains("recovered_fence_refused: RetireStale")
+        || stderr.contains("recovered_fence_refused: DischargeRecovered")
+}
+
+// Linux /proc includes a non-reusable birth identity, so a recycled PID cannot
+// supply false liveness or make unrelated work part of this test's observation.
+#[derive(Debug)]
+struct ProcessIdentity {
+    pid: u32,
+    start_ticks: String,
+}
+
+impl ProcessIdentity {
+    fn read(pid: u32) -> Option<Self> {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("cannot inspect process {pid}: {error}"),
+        };
+        let fields: Vec<_> = stat
+            .rsplit_once(") ")
+            .expect("kernel process stat has command delimiter")
+            .1
+            .split_whitespace()
+            .collect();
+        Some(Self {
+            pid,
+            start_ticks: fields
+                .get(19)
+                .expect("kernel process stat has birth time")
+                .to_string(),
+        })
+    }
+
+    fn still_exists(&self) -> bool {
+        Self::read(self.pid).is_some_and(|current| current.start_ticks == self.start_ticks)
+    }
+}
+
+struct ProcessGuard(Vec<ProcessIdentity>);
+
+impl std::ops::Deref for ProcessGuard {
+    type Target = [ProcessIdentity];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        // Cleanup only, never proof: guard fixture processes on assertion unwind.
+        // Do not signal a reused PID; failed inspection refuses that action.
+        #[cfg(unix)]
+        for process in &self.0 {
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", process.pid))
+                && let Some((_, fields)) = stat.rsplit_once(") ")
+                && fields.split_whitespace().nth(19) == Some(process.start_ticks.as_str())
+                && let Ok(pid) = i32::try_from(process.pid)
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+}
+
+fn find_process_marker(root: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let kind = entry.file_type().ok()?;
+        if kind.is_file() && entry.file_name() == "process-identities" {
+            return Some(entry.path());
+        }
+        if kind.is_dir()
+            && let Some(found) = find_process_marker(&entry.path())
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+async fn wait_for_process_identities(workspace: &Path) -> ProcessGuard {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(marker) = find_process_marker(workspace)
+                && let Ok(raw) = std::fs::read_to_string(marker)
+            {
+                let processes: Vec<_> = raw
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse().ok().and_then(ProcessIdentity::read))
+                    .collect();
+                if processes.len() == 2 {
+                    assert_ne!(processes[0].pid, processes[1].pid);
+                    return ProcessGuard(processes);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("actual TERM-resistant shell and child must identify themselves")
+}
+
+async fn assert_processes_stop_before_expiry(processes: &[ProcessIdentity], expiry: f64) {
+    loop {
+        let all_gone = processes.iter().all(|process| !process.still_exists());
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("host clock is after epoch")
+            .as_secs_f64();
+        assert!(
+            observed_at < expiry,
+            "actual workload did not demonstrably stop before database lease expiry: {processes:?}"
+        );
+        if all_gone {
+            eprintln!("workload_quiescent_at={observed_at:.6} database_expiry={expiry:.6}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 struct Harness {
@@ -643,8 +809,11 @@ impl Harness {
             .expect("create test project");
 
         let directory = tempfile::tempdir().expect("test root");
-        let agent_id = format!("{label}-agent");
-        let relief_agent_id = format!("{label}-relief-agent");
+        // Agent sessions are globally keyed by agent ID, not organization.
+        // Repeated campaigns against one database must not share a session.
+        let run_id = Uuid::new_v4();
+        let agent_id = format!("agent-{run_id}");
+        let relief_agent_id = format!("relief-{run_id}");
         let tls = create_mtls(
             directory.path(),
             organization_id,
@@ -1058,13 +1227,15 @@ fn sign(csr: &Path, certificate: &Path, extensions: &Path, ca_certificate: &Path
 }
 
 fn openssl<const N: usize>(arguments: [&str; N]) {
-    let status = StdCommand::new("openssl")
+    let output = StdCommand::new("openssl")
         .args(arguments)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .expect("run openssl");
-    assert!(status.success(), "openssl command failed");
+    assert!(
+        output.status.success(),
+        "openssl command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn path(value: &Path) -> &str {

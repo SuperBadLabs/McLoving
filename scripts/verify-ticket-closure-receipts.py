@@ -358,7 +358,6 @@ MINIMUM_TICKET_ROWS = 116
 # both retire a closure obligation that nothing else records.
 CLOSED_TICKETS = frozenset({
     "ADMIN-001", "AGENT-001", "AGENT-002", "AGENT-003", "AGENT-004",
-    "AGENT-007",
     "AGENT-005", "AGENT-006", "ALPHA-001", "API-002", "ARCH-001",
     "ARCH-002", "AUDIT-001", "AUTHZ-001", "CACHE-001", "CANARY-000",
     "CI-001", "CI-002", "CI-003", "CI-004", "CONSUMER-001", "CTRL-001", "CTRL-002", "CTRL-003",

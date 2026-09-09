@@ -2,6 +2,11 @@
 
 Date: 2026-09-09
 
+Status: **ACTIVE**. This is an implementation/review record. Protected final-head
+checks, independent final review, normal merge and exact-main Foundation/native
+Windows verification remain required before closure. Earlier measurements below
+identify historical candidates; they do not certify the subsequent corrections.
+
 `AGENT-007` makes the agent ride out a controller outage its own lease already
 covers. This receipt records what was reviewed, what was measured, what is
 proved by which gate, and what residual risk is accepted.
@@ -36,7 +41,7 @@ accepted residual risk that "remains fail-closed and operator-visible". It was
 fail-closed and it was visible; what it was not is necessary. This ticket
 retires that residual.
 
-## What shipped
+## Candidate implementation (historical observations)
 
 One distinction, applied in one place.
 
@@ -69,42 +74,60 @@ publication and start-work paths. One vocabulary now covers all of them: those
 paths are bounded by `authority_lost`, and the renewal task is bounded by the
 lease.
 
-## Why retrying cannot duplicate work
+## Termination reserve correction under review
 
-The whole safety argument is the bound, and it is structural rather than
-statistical.
+Review of candidate `79107ee` found that its one-second margin bounded only the
+cancellation signal, while Unix termination waits configured grace before SIGKILL.
+Default grace is two seconds. Its gate timestamped a log emitted before the token
+was cancelled; that observation did not prove process death. The former universal
+no-duplication claim is withdrawn. Historical measurements remain below.
 
-The controller can hand this attempt to another runtime only through
-`requeue_one_expired`, whose predicate is `lease_expires_at <=
-clock_timestamp()`; the renewal statement in the same store requires
-`lease_expires_at > clock_timestamp()`. While the lease stands, nothing else
-can take the attempt. The agent's retry deadline is
-`lease_started_at + lease_rpc_budget(lease_window)` — a term start taken
-BEFORE the RPC that opened it was sent, plus the window less this codebase's
-one-second margin — so it falls strictly before the instant the controller
-could reclaim. `next_renewal_retry` never returns an instant past it and
-returns `None` at it.
+The correction reserves the entire configured termination grace plus one second
+in the executing renewal deadline and clamps the periodic wake to that deadline.
+Configuration must leave a positive usable interval before that reserve. Each
+runnable assignment explicitly renews before spawning to establish the requested
+term duration, since acceptance does not extend or report the controller's claim
+lease. This adds one RPC even with folded acceptance negotiated; unsupported processless
+refusals retain folded acceptance. Request-start anchoring and the shortened
+acceptance-renewal timeout prevent a delayed receipt from manufacturing time.
+The executor checks cancellation immediately before spawning, and Windows also
+checks before resuming its suspended process; a native test cancels inside the
+spawn hook and requires both absent workload output and terminated suspended child. Already-cancelled work is refused
+without an executable workload and maps to a processless aborted outcome.
 
-Two properties follow, and both are gated rather than asserted: the step never
-outlives the lease that covered it, and the agent has stopped before the
-controller could reclaim. The second is measured against the controller's own
-`lease_expires_at`, read from the database so it survives the controller.
+The corrected gates use a TERM-ignoring shell and descendant, default two-second
+and configured four-second grace. They identify actual PIDs and Linux birth times,
+read expiry from PostgreSQL after stopping the controller, and require both
+process identities absent before expiry. Inspection errors fail the proof; the
+absence timestamp follows inspection. Reclamation then requires a higher-fence
+relief runtime to actually start, with the original workload already gone.
+The returning runtime must report the actual validated `RetireStale` or
+`DischargeRecovered` reply under `recovered_fence_refused`; which reply is
+appropriate depends on the journal's durable containment proof. The old
+`fenced authority is disowned` diagnostic was conditional on local
+`ReconciliationRequired`, making its use as a universal return gate racy.
+The original diagnostic is retained, and no protocol or state transition changes.
+Fixture cleanup guards target only observed identities, including assertion
+unwind, and relief work is cancelled and observed quiescent before agent stop.
 
-Agent sessions are a database table, so a session epoch survives a controller
-process restart; that is what lets a renewal after the outage be accepted at
-all, and it is pre-existing rather than introduced here.
+These are bounded Linux process-supervision observations, not hard real-time
+promises under arbitrary host scheduling, uninterruptible kernel I/O or hostile
+same-UID interference. SEC-005 containment remains separate. Validation results
+for the corrected source will be recorded after execution; historical green
+checks below do not verify this correction.
 
 ## What a controller cancellation costs during an outage
 
-A cancellation the controller issues while it is unreachable now reaches the
-agent up to one lease later than it did before this change, because the agent
-learns of cancellation through a renewal receipt. This is not a new contract:
+A cancellation the controller issues while it is unreachable is learned through
+a later renewal receipt; if none arrives, the agent begins termination at the
+reserved execution deadline. Its delay remains bounded by the held term, with
+termination grace reserved before expiry rather than added after it. This is not a new contract:
 the store already resolves a cancellation whose lease expired through
 `requeue_one_expired`'s `cancellation_lease_expired` path, so cancellation
 taking until lease expiry was already a state the controller handles. The
 `cancel` scenario with a live controller is unaffected and still converges.
 
-## What is proved, and by which gate
+## Historical gate observations before the termination-reserve correction
 
 Two integration gates were added to `bins/agent/tests/long_step_lease.rs`.
 Both deny the NETWORK — the controller process is killed outright while the
@@ -137,8 +160,10 @@ denying the renewal exercises the answered path this ticket does not change.
 Four unit tests cover the pure decisions: which statuses are answers, how an
 answered refusal is named, the retry cadence bound, and the retry deadline.
 
-Every check is mutation-proved. Each mutation below was applied to a clean tree
-and turned exactly the named test red, and no other:
+The earlier candidate reported the following mutation runs. They predate the
+termination-reserve correction; the timing-log assertion was insufficient to
+prove process death and is replaced above. These historical observations do
+not certify the current source:
 
 | Mutation | Red |
 |---|---|
@@ -149,8 +174,6 @@ and turned exactly the named test red, and no other:
 | The retry cadence loses its one-second cap | `the_renewal_retry_cadence_is_bounded_on_both_sides` |
 | The retry deadline drops the one-second margin | gate four's reclamation-ordering assertion, by 124 ms |
 | `next_renewal_retry` drops the lease bound (again, against gate five) | gate five, which then never sees the lease lost and times out at 40 s |
-| The deadline stops reserving the termination grace | `the_termination_grace_is_reserved_inside_the_lease` |
-| The configuration rule stops counting the grace | `configuration_is_strict_and_does_not_embed_tls_material` |
 
 The reverted-tree run is the strongest of these: it reproduces the campaign's
 finding exactly, gate three failing with `"aborted"` and a terminal summary of
@@ -215,43 +238,6 @@ instead is the arithmetic, as an executable test
 the numbers stop supporting the reasoning, plus the reasoning recorded at both
 call sites.
 
-## A third defect, also from review: cancelling is not stopping
-
-The deadline reserved the one-second RPC margin and nothing else. But cancelling
-an execution does not stop it: `terminate_and_prove_group_empty` in
-`crates/agent-runtime/src/executor/unix.rs` signals the process group with
-`SIGTERM`, sleeps the configured termination grace, and only then sends
-`SIGKILL`. A workload that ignores `SIGTERM` therefore kept executing for that
-whole grace AFTER the agent decided to cancel — at the shipped default, two
-seconds past a deadline one second before expiry, so a full second past the
-instant `requeue_one_expired` may hand the attempt to another runtime. The
-setting has no upper bound, so the overrun is as large as an operator makes it.
-
-This was reachable before the ticket only by accident, when a refused renewal
-happened to land near expiry. The retry is what puts the cancellation
-deliberately at the end of the lease every time, which is what turns an
-incidental window into a structural one, so it is this ticket's to close.
-
-The term now reserves the grace as well as the margin:
-`lease_cancellation_deadline` subtracts both, so a workload signalled at the
-deadline is dead before the lease expires even if it ignores `SIGTERM`. `SIGKILL`
-cannot be ignored, so the executor's later bounded waits — for the leader to be
-reaped, and for anchored descendants — are reaping time rather than time the
-workload is still executing, and are not reserved.
-
-Reserving the grace could otherwise leave no room for the renewal itself, so the
-agent's configuration now refuses one where the renewal cadence plus the grace
-does not fit inside the lease. The shipped defaults — a 30-second lease, a
-5-second cadence, a 2-second grace — sit far inside it, and every configuration
-in this repository was checked against the new rule before it landed: the
-Windows persistent-agent lane (5 s, 500 ms, 250 ms), the deploy example, and
-every test harness all fit. Both halves are mutation-proved: dropping the
-reservation turns `the_termination_grace_is_reserved_inside_the_lease` red, and
-dropping it from the configuration rule turns
-`configuration_is_strict_and_does_not_embed_tls_material` red. That test also
-asserts the accepting case, so the rule refuses a configuration rather than a
-cadence.
-
 ## One harness defect found and fixed here
 
 The first draft of both gates waited for `lease_owner` before killing the
@@ -272,7 +258,7 @@ another agent after fencing", which owns this boundary, and against the
 cancellation and reconciliation boundaries the renewal task participates in.
 
 No register row changes and no new row is required. The change adds no
-authority, no protocol field, no schema, no configuration, and no trust
+authority, no protocol field, no schema, and no trust
 relationship. It narrows when the agent CEASES to use authority it already
 holds, and narrows it towards, never past, the instant the controller's own
 predicate would let that authority be taken away. The fencing checks
@@ -311,22 +297,75 @@ database is failing for up to one lease term.
 A cancellation issued during an outage lands up to one lease later, as recorded
 above.
 
-The first lease term is granted by the controller for the CONTROLLER's
-`MCLOVING_LEASE_SECONDS`, while the agent measures that term against its own
-`MCLOVING_AGENT_LEASE_SECONDS`; every later term is the agent's own value,
-because the renewal request carries it. Where an operator configures the agent
-a longer lease than the controller grants, the first term's deadline overshoots
-by the difference. Both default to 30 seconds, the anchor fix above removes the
-other half of the same error, and closing it properly needs either a protocol
-field carrying the authoritative expiry or a configuration invariant — both
-outside this ticket. It is recorded here so it is not rediscovered as a
-surprise.
+The first-term controller/agent lease-length mismatch found in `79107ee` is
+corrected for runnable assignments by explicit pre-spawn renewal. Gate four
+uses a five-second controller claim and ten-second agent term to exercise this
+boundary. Unsupported processless refusals spawn no workload and retain the
+folded acceptance path. Configuration now rejects a renewal cadence that
+cannot leave the configured termination reserve.
 
 The lease deadline is computed from the agent's monotonic clock against a
 controller expiry stamped from the database clock. The one-second margin
-absorbs the round trip and ordinary skew; it does not absorb a pathological
-clock. That margin predates this ticket and is unchanged by it.
+is additional to request-start anchoring and termination grace; it does not
+absorb a pathological clock or unbounded host scheduling delays. That margin predates this ticket and is unchanged by it.
 
 The measured Jenkins comparison that motivated this work is exploratory: its
 arms have no sealed provenance, and it is input to this ticket rather than a
 receipt for it. Nothing here grants production or Jenkins authority.
+
+## Working-source correction validation
+
+These observations describe the uncommitted correction based on PR132 head
+`79107eeda8a02ceddad52329c9b677986f2474a7`; they do not invent an executing
+commit or substitute for final exact-head CI. The chief retains raw logs,
+source patches and SHA-256 inventory in the local mission evidence directory.
+
+The agent's 63 unit tests, the new Unix already-cancelled spawn regression,
+focused agent/runtime clippy with warnings denied, formatting, and the four
+board/closure verifiers and parser tests passed. The board remains at 116
+tickets, 90 DONE, 26 remaining, 35 receipted, 34 reviewed and historical debt
+37. AGENT-007 remains ACTIVE without closure attribution.
+
+An initial five-test real PostgreSQL controller/agent run passed. A subsequent
+run passed both actual-process death checks but failed the old returned-agent
+diagnostic assertion. Repeated runs also exposed globally reused session IDs;
+adding UUIDs exposed OpenSSL's common-name length limit. The final harness uses
+short independent UUID identities and waits for the actual validated recovery
+reply. Source inspection establishes the old diagnostic's dependency on local
+reconciliation outcome; session reuse alone was not proven to cause its failure.
+Those failed runs are retained rather than relabeled as successful evidence.
+
+The final isolated five-test run passed in 57.23 seconds, including actual
+leader/descendant quiescence about 0.99 seconds before stored expiry for both
+two-second and four-second grace, the five-second controller/ten-second agent
+term mismatch, explicit recovery refusal and relief cleanup. Removing only the
+active execution grace reserve made the actual-process expiry gate fail as
+expected (exit 101). The corrected working-source patch SHA-256 is
+`0e887e4e7679da1ac6bc5726427effca2786b873debdda935f65ccff4deaddba`;
+the mutation patch SHA-256 is
+`c7768647dfdffc2710b6329e31fdfe03b83696f22ea69d9132c9691b1fdab12b`.
+Both apply to the stated base and are retained with the raw logs. The final
+isolated run also fixed a hardcoded old agent-name assertion exposed by UUID
+identities; its earlier failed run remains retained. The new Windows
+suspended-child test remains pending actual native execution; a Linux compile
+or source review does not certify it.
+
+## Reconciliation with the concurrent PR correction
+
+The integration is based on author head
+`83a70538d74eb609e7fed1a50e13f829f639f86c`, which independently added
+termination-grace reservation and configuration checks. It retains the author's
+named `lease_cancellation_deadline` helper and focused grace/configuration
+regressions, using the same shared budget arithmetic as configuration and
+pre-spawn admission. Processless replay/refusal controls reserve zero process
+termination grace because no workload runs; their finite authority window is
+unchanged. The actual-death, initial-term, pre-spawn cancellation, recovery
+diagnostic and truthful ACTIVE bookkeeping corrections supplement that commit.
+The isolated working-source observations above are inputs to review, not
+exact-head validation of this reconciled source.
+
+The reconciled working source passed 64 agent unit tests (including the author's
+retained grace test), focused agent/runtime clippy with warnings denied, and all
+four board/closure verifiers and parser suites. An independent reviewer found no
+actionable issue in either the isolated correction or its integration delta.
+Full Foundation and actual native Windows remain required on the final head.
