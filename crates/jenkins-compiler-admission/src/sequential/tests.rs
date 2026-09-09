@@ -578,3 +578,141 @@ fn public_errors_never_echo_untrusted_fields_or_diagnostics() {
     assert_eq!(error.code, "E_DIAGNOSTIC_CODE");
     assert!(!error.to_string().contains(marker));
 }
+
+#[test]
+fn recognized_dsl_truncation_is_a_verified_parse_rejection() {
+    // Every item ends at a known DSL token boundary inside an opened block or
+    // argument. No suffix executes: this checks source recognition only.
+    let prefixes = [
+        "pipeline {",
+        "pipeline { agent",
+        "pipeline { agent any",
+        "pipeline { agent any;",
+        "pipeline { agent any; stages",
+        "pipeline { agent any; stages {",
+        "pipeline { agent any; stages { stage",
+        "pipeline { agent any; stages { stage(",
+        "pipeline { agent any; stages { stage('Build'",
+        "pipeline { agent any; stages { stage('Build')",
+        "pipeline { agent any; stages { stage('Build') {",
+        "pipeline { agent any; stages { stage('Build') { steps",
+        "pipeline { agent any; stages { stage('Build') { steps {",
+        "pipeline { agent any; stages { stage('Build') { steps { sh",
+        "pipeline { agent any; stages { stage('Build') { steps { sh(",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok'",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok')",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok') }",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok') } }",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok') } } }",
+    ];
+    // Fixed minimal worker parse-rejection envelope. It does not derive its
+    // status/code from the recognizer being tested.
+    let legacy = super::super::parse_canonical_response(include_bytes!(
+        "../../tests/fixtures/mig003-golden.edn"
+    ))
+    .unwrap();
+    let Edn::Map(legacy) = legacy else { panic!() };
+    let parse_rejection = encoded(&map(vec![
+        ("authority", field(&legacy, "authority").unwrap().clone()),
+        ("compiler", text(COMPILER)),
+        ("protocol", text(PROTOCOL)),
+        ("status", keyword("rejected")),
+        (
+            "diagnostic",
+            map(vec![
+                ("code", text("E_SOURCE_PARSE")),
+                (
+                    "message",
+                    text("request rejected without execution authority"),
+                ),
+            ]),
+        ),
+    ]));
+    for prefix in prefixes {
+        for suffix in [
+            "",
+            " ",
+            "\n",
+            " /* complete comment */",
+            " // terminal comment",
+            ";",
+            "\n;;\n",
+        ] {
+            let source = format!("{prefix}{suffix}");
+            assert_eq!(
+                source::classify(source.as_bytes()),
+                Classification::Rejected("E_SOURCE_PARSE"),
+                "{source:?}"
+            );
+            let ctx = context(source.as_bytes());
+            assert_eq!(
+                validate_sequential_response(&parse_rejection, expected(source.as_bytes(), &ctx))
+                    .unwrap(),
+                SequentialValidatedResponse::Rejected {
+                    code: "E_SOURCE_PARSE".to_owned()
+                }
+            );
+        }
+    }
+    let complete = format!("{} }}", prefixes.last().unwrap());
+    assert!(matches!(
+        source::classify(complete.as_bytes()),
+        Classification::Supported(_)
+    ));
+}
+
+#[test]
+fn eof_rule_does_not_guess_outside_subset_groovy_or_delimiters_in_literals() {
+    // Outside forms without a completely recognized DSL prefix remain
+    // unsupported/unclassified; this is not a full Groovy syntax checker.
+    for source in [
+        "",
+        "pipeline",
+        "pipeline \n /* comment */",
+        "node {}",
+        "unknown('x')",
+        "pipeline()",
+        "def x = '{'",
+        "pipeline { unsupported(",
+    ] {
+        assert!(
+            !matches!(
+                source::classify(source.as_bytes()),
+                Classification::Rejected("E_SOURCE_PARSE")
+            ),
+            "{source:?}"
+        );
+    }
+    for body in [
+        "sh '{ ('",
+        "sh ') }'",
+        "sh 'ok' /* { ( */",
+        "sh 'ok' // } )\n",
+    ] {
+        assert!(
+            matches!(
+                source::classify(&program(body)),
+                Classification::Supported(_)
+            ),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn mismatched_closers_and_nested_outside_forms_never_admit() {
+    for source in [
+        "pipeline { agent any; stages { stage('Build'} { steps { sh 'ok' } } } }",
+        "pipeline { agent any; stages { stage('Build') { steps { sh('ok'} } } }",
+        "pipeline { agent any; stages { stage('Build') { steps { if (true) { sh 'ok' } } } } }",
+        "pipeline { agent any; stages { stage('Build') { steps { script { sh 'ok' } } } } }",
+    ] {
+        assert!(
+            !matches!(
+                source::classify(source.as_bytes()),
+                Classification::Supported(_)
+            ),
+            "{source:?}"
+        );
+    }
+}

@@ -78,7 +78,7 @@ compiler admission or Jenkins evidence and is not an oracle for this receipt.
 
 ## Focused verification
 
-- The complete admission package passed 26 tests, including legacy library,
+- The complete admission package passed 29 tests, including legacy library,
   snapshot and golden tests, new source/context/forgery checks, and four actual
   CLI integration tests. Strict Clippy passed for all package targets.
 - The new Clojure suite passed 12 tests and 216 assertions, covering all 23
@@ -106,7 +106,7 @@ preregistered status and code. Expected shell failures are still supported
 compiler inputs; no shell workload was executed in this campaign.
 
 The campaign's SHA-256 is
-`0c7644e0d8cbebcef2feb9084f16d90bec45572ca1405894cfb208028d791651`.
+`c61ca0604fe4b5c1e3744ce4539a70f713bc834069f3631c08be7b038f93c503`.
 Its 46 response files and 46 receipt files are retained unchanged alongside the
 campaign manifest. Independent digest checks verified every file pair.
 The offline verifier checks the exact 93-file inventory, all record and receipt
@@ -118,7 +118,7 @@ and hosted Foundation run this verification without launching a worker.
 | Binding | SHA-256 |
 |---|---|
 | Immutable compiler image | `0b687a72f8cd99a1c8401796714e5f9867f2288d7aff80bf1fdd22e2ac417232` |
-| Executed admission binary | `193db38b76687262ab9aa61ef7fe86466596eb1b99a093f8f8a2982d0bf9f232` |
+| Executed admission binary | `18dd2c2b375666d27106b22caf44ecf93f3152cf8e21d72b4641cab77eb52097` |
 | Syntax contract | `ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe` |
 | Frozen fixture manifest | `654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727` |
 | Target profile | `feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271` |
@@ -150,8 +150,8 @@ binary/image observations above.
 | `crates/jenkins-compiler-admission/src/lib.rs` | `b93456a823c1e6261b515b55716740ec0391ae7982de6b69ef866a711ed3ea78` |
 | `crates/jenkins-compiler-admission/src/main.rs` | `760371421ec57a951a0b865317303ed44ec9eaf96f2fcd2a78e303d89ea133e4` |
 | `crates/jenkins-compiler-admission/src/sequential/mod.rs` | `da5d4e8a617dc7842a7eff611e6a38d8b55a70b5b665585fcff7b77ea3fd3b66` |
-| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `8eae6dc41123f27b05413810f1b12951a11820121ce496c5f82b1448b6a6d6ea` |
-| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `7f76bca9c1d42234ef33530b0450af0b9e393d196306125d08e582051d252d12` |
+| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `50af486975ecea6e35f706e86605c349345ebac76f3c3922699895d9866d5a52` |
+| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `311d582659ddcff5a385b4b43eec8f7bef4b9e1d15060dfb7c3eeb152cd97cb9` |
 | `crates/jenkins-compiler-admission/tests/sequential_cli.rs` | `567471b58dc03bbe940924a560109ad3b255035531fcb690ff76e2e2b2498c3b` |
 | `compat/jenkins-worker/Containerfile` | `f20d18163fe38d039b5d1d0ed312422344dd64ff896fea6fa77ef8d170bba3c7` |
 | `compat/jenkins-worker/deps.edn` | `40acc306d5e2cfea912ac1d6e6fbfd31a95d15cb7e34861820783cbaa438c597` |
@@ -160,7 +160,7 @@ binary/image observations above.
 | `compat/jenkins-worker/README.md` | `ad764263a1f387192b085b51294471d1975c0a4a962ed25c11e3b41fb62a98cf` |
 | `docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md` | `882c421c3e751b4f02e1b065650f55aacb69fa687406287bfd5295d7ce07744d` |
 | `scripts/test-jenkins-sequential-compiler.sh` | `fc6ffeb596b03ae1d98bf2f4c6f024ee63f4db847f197ec9693a2e4d629d3f96` |
-| `scripts/test-jenkins-sequential-contained.py` | `6e8b5915d95a4b5b6dc6e971b42658e9367721b7e2a4c0333c1e86a48e0504f5` |
+| `scripts/test-jenkins-sequential-contained.py` | `9b69308c632d94eb2bc5552a0d7ea5abde9d474675d7a69d716838e3b4bfde0a` |
 | `scripts/test-jenkins-sequential-launcher.py` | `52a5597a7cfe9ecf70d6cd454b2fdc509797735a74a6e7b6c6e60b231bdf87d8` |
 | `scripts/test-jenkins-sequential-retained.py` | `65e75b23be201cf1e00fb567c44341b44ae4e089cd31b9a49976e2d20b1ce268` |
 | `.github/workflows/foundation.yml` | `bb77289978b28cdaf3a8fac3347ed0afef2cd7eb11281e5efe0079e292aac52a` |
@@ -176,10 +176,12 @@ binary/image observations above.
 | `compat/jenkins-worker/test/mcloving/compat/sequential_test_runner.clj` | `cd6fe8df3c0087811883bef824af65f7ad3b8c5abc10def1561ae17727b93df3` |
 
 
-After adding offline verification, the final harness repeated all 46 live
-compilations with the same immutable image and hardened admission binary.
-All 93 generated files were byte-identical to the retained campaign; the
-campaign digest above remains unchanged. No source workload was executed.
+After adding offline verification, the pre-EOF-correction harness repeated all
+46 live compilations with the same immutable image and then-current hardened
+admission binary. All 93 generated files matched the earlier campaign
+`0c7644e0d8cbebcef2feb9084f16d90bec45572ca1405894cfb208028d791651`.
+This is a historical observation superseded by the missing-delimiter
+correction below. No source workload was executed.
 
 ## PR implementation review correction
 
@@ -188,8 +190,46 @@ source/context snapshots, request bytes and copied admission executable. The
 launcher now removes those files and its private admission receipt explicitly
 before the existing whole-directory cleanup. All eleven mocked launcher tests
 passed, including failure and cleanup paths. A fresh 46-launch contained
-campaign using the same pinned image and admission executable reproduced all
-93 retained files byte-for-byte; the reviewed campaign digest is unchanged.
+pre-EOF-correction campaign using the same pinned image and then-current
+admission executable reproduced all 93 files of the earlier `0c7644e0` campaign
+byte-for-byte. The later missing-delimiter correction below supersedes that
+executed-binary observation.
 Independent chief and worker-owner review found no remaining action items in
 this bounded cleanup correction. JCOMP-002 remains ACTIVE pending protected
 merge and exact post-merge verification.
+
+## Missing-delimiter review correction
+
+Codex review of `542b54f` identified a disagreement for recognized source
+truncated before its final required closing delimiter: the worker rejected
+`E_SOURCE_PARSE`, while Rust classified it unsupported. Rust now tracks
+delimiters consumed while recognizing the supported grammar and maps a parser
+failure at the end of that recognized prefix to the same parse rejection.
+Unknown grammar and mismatched/nonfinal tokens retain their fail-closed
+classification boundaries; this does not claim a general Groovy parser.
+
+The final Rust package passed 29 tests. The added regressions include 20
+recognized EOF prefixes across seven suffixes (140 cases), literal/comment
+delimiter controls, and mismatched/nested outside-subset refusal. Independent
+worker-owner checking used the pinned Groovy PARSING phase for 150 cases;
+chief and worker-owner review found no remaining action items.
+
+A fresh 46-launch campaign used the corrected executable and replaced the
+pre-merge retained campaign above. All original fixture outcomes and worker
+response bytes remain unchanged; trusted receipts now bind the corrected
+executable. The earlier campaign with binary
+`193db38b76687262ab9aa61ef7fe86466596eb1b99a093f8f8a2982d0bf9f232`
+and campaign digest
+`0c7644e0d8cbebcef2feb9084f16d90bec45572ca1405894cfb208028d791651`
+is a historical pre-correction observation, preserved in temporary campaign
+directories, and does not stand in for the current executed-binary evidence.
+
+Six additional actual isolated launches tested missing one through four final
+closing braces and missing-root-brace variants with trailing line/block
+comments. Every worker response was independently accepted only as
+`rejected/E_SOURCE_PARSE`, with exact source/context and implementation
+bindings. Temporary source, canonical context, response and trusted receipt
+files are preserved under `/tmp/mcloving-jcomp002-eof-01`; its supplemental
+campaign digest is
+`d9039c6db24d711bd020fe04754fdc64c348c81610430e50fc2328131bd8dffc`.
+The frozen 23-fixture manifest is unchanged and no shell workload was executed.

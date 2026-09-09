@@ -39,15 +39,27 @@ pub(super) fn classify(bytes: &[u8]) -> Classification {
         Ok(v) => v,
         Err(e) => return e,
     };
-    match (Parser {
+    let mut parser = Parser {
         tokens,
         cursor: 0,
         steps: 0,
         script_bytes: 0,
-    })
-    .pipeline()
-    {
+        open_delimiters: 0,
+    };
+    match parser.pipeline() {
         Ok(stages) => Classification::Supported(stages),
+        // Only delimiters consumed by the recognized DSL contribute here.
+        // Reaching EOF inside such an open block/argument is independently
+        // known malformed syntax, even if the local expectation was a word
+        // or separator. Do not guess Groovy syntax for unconsumed constructs.
+        Err(_)
+            if parser.open_delimiters > 0
+                && parser.tokens[parser.cursor..]
+                    .iter()
+                    .all(|token| matches!(token, Token::Lf | Token::Punct(';'))) =>
+        {
+            Rejected("E_SOURCE_PARSE")
+        }
         Err(e) => e,
     }
 }
@@ -180,6 +192,7 @@ struct Parser {
     cursor: usize,
     steps: usize,
     script_bytes: usize,
+    open_delimiters: usize,
 }
 impl Parser {
     fn peek(&self) -> Option<&Token> {
@@ -187,6 +200,13 @@ impl Parser {
     }
     fn take(&mut self, token: &Token) -> bool {
         if self.peek() == Some(token) {
+            match token {
+                Token::Punct('{' | '(') => self.open_delimiters += 1,
+                Token::Punct('}' | ')') => {
+                    self.open_delimiters = self.open_delimiters.saturating_sub(1);
+                }
+                _ => {}
+            }
             self.cursor += 1;
             true
         } else {
