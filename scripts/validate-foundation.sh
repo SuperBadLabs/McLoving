@@ -124,6 +124,7 @@ java -cp "${tlaplus_jar}" tlc2.TLC \
   cd "${repo_root}/compat/jenkins-worker"
   timeout 60 clojure -M:test
   ./test-plugin-directory.sh
+  "${repo_root}/scripts/test-jenkins-sequential-contract.sh"
 )
 
 podman run --rm \

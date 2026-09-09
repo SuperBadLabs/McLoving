@@ -21,13 +21,18 @@ authority, closes no ticket, and does not relax
 
 The owner selected broader pipeline support with Linux sequential Declarative
 pipelines and literal shell steps as the first milestone. The selected slot is
-now solely `JCOMP-001` (`PENDING`). The serialized dispatch is `JCOMP-001` ->
+now solely `JCOMP-001` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
 `JCOMP-002` -> `JCOMP-002A` -> `JCOMP-002B` -> `JCOMP-003`, with one standalone
 PR per ticket. The [board](../EXECUTION_BOARD.md) holds their complete acceptance
 criteria; no successor starts before its predecessor is protected-main merged
 and verified. Once started, a ticket remains `ACTIVE` until its required review,
 closure evidence, protected merge, and post-merge verification are complete.
 A passing implementation check or draft artifact alone cannot close it.
+The [syntax contract](../architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md)
+and fixture expectations now have a shared Foundation authoring gate. The
+[review record](../evidence/JCOMP-001_SECURITY_REVIEW.md) distinguishes those
+checks from still-required protected merge and post-merge verification;
+no broader compiler admission or paired execution evidence is claimed.
 The existing exact-source compiler admission is not general syntax support;
 M1 must earn a new versioned differential claim through contained submitted
 jobs, with authored fixtures and original-corpus coverage reported separately.
@@ -77,8 +82,8 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   count copied into this file is stale on the next ticket. As an observation
   rather than a current-state claim: on 2026-09-08 the reorganized local board
   reported 112 tickets with 26 remaining, and 86 done with the admitted, ratcheted 37-item debt.
-- `JCOMP-001` is the selected dispatch ticket and remains `PENDING`. Before
-  starting it, evaluate the standing successor-head verification gate against
+- `JCOMP-001` is the selected dispatch ticket and is `ACTIVE`. Before
+  continuing on a successor head, evaluate the standing successor-head verification gate against
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
 - `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
