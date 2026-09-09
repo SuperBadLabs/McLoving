@@ -186,6 +186,13 @@ struct DurableResult<'a> {
 struct LeaseRenewalControl {
     lease_seconds: u32,
     renewal_interval: Duration,
+    /// The last instant the agent KNOWS preceded the controller stamping this
+    /// term's `lease_expires_at` -- the moment the request that opened the term
+    /// left, never the moment its answer came back. The controller stamps the
+    /// expiry while the request is in flight, so an anchor taken on receipt is
+    /// later than the controller's own by the round trip, and a round trip
+    /// longer than the one-second margin would put the agent's deadline AFTER
+    /// the instant the attempt becomes reclaimable.
     lease_started_at: tokio::time::Instant,
     lease_window: Duration,
     execution_cancellation: CancellationToken,
@@ -886,21 +893,23 @@ async fn refuse_unsupported_assignment(
         lease_window_rpc(lease_window, client.accept_work(refusal.authority.clone())).await?;
     let accept_cancellation = receipt.cancellation_requested;
     require_work_receipt(receipt, session_epoch)?;
-    let lease_started_at = tokio::time::Instant::now();
-    // Folded exactly like the runnable path: the accept receipt answers the
-    // serialized renewal's questions when accept-carries-lease-state-v1 was
-    // negotiated, and the periodic renewal task covers the lease from here.
-    let cancellation_requested = if features.accept_lease_state
+    let accepted_at = tokio::time::Instant::now();
+    // Folded exactly like the runnable path, and anchored the same way: the
+    // accept receipt answers the serialized renewal's questions when
+    // accept-carries-lease-state-v1 was negotiated, the periodic renewal task
+    // covers the lease from here, and the arm that did not renew is still on
+    // the claim's own term because accepting does not extend it.
+    let (cancellation_requested, lease_started_at) = if features.accept_lease_state
         && !accept_consumed_claim_lease(
             claimed_no_later_than,
             lease_window,
-            lease_started_at,
+            accepted_at,
             config.lease_renewal_interval,
         ) {
-        accept_cancellation
+        (accept_cancellation, claimed_no_later_than)
     } else {
         let lease = lease_deadline_rpc(
-            lease_started_at + lease_rpc_budget(lease_window),
+            accepted_at + lease_rpc_budget(lease_window),
             client.renew_work_lease(WorkLeaseRenewal {
                 authority: Some(refusal.authority.clone()),
                 lease_seconds: config.lease_seconds,
@@ -911,7 +920,7 @@ async fn refuse_unsupported_assignment(
         if !lease.accepted {
             return Err(AgentError::StaleAuthority);
         }
-        lease.cancellation_requested
+        (lease.cancellation_requested, accepted_at)
     };
     let lease_stop = CancellationToken::new();
     // No process will ever spawn for this refusal, so execution cancellation
@@ -1014,7 +1023,7 @@ async fn run_assignment(
     .await?;
     let accept_cancellation = receipt.cancellation_requested;
     require_work_receipt(receipt, session_epoch)?;
-    let lease_started_at = tokio::time::Instant::now();
+    let accepted_at = tokio::time::Instant::now();
     // With accept-carries-lease-state-v1 the accept receipt already answers
     // what the serialized renewal below existed to ask — live authority and
     // committed cancellation, read under the accepting transaction's row
@@ -1025,17 +1034,24 @@ async fn run_assignment(
     // that gap), and the fence keeps the pathological remainder correct.
     // Without the feature the receipt's field is default-false noise from an
     // older controller, so the explicit round trip stays.
-    let cancellation_requested = if features.accept_lease_state
+    //
+    // Each arm also yields the instant the live term is anchored to, because
+    // ACCEPTING DOES NOT EXTEND THE LEASE: the store stamps `lease_expires_at`
+    // at the claim and re-stamps it only on renewal. Where no renewal happened
+    // the term is still the claim's, so the anchor is the instant before the
+    // poll that carried it; where the serialized renewal did happen the term is
+    // that renewal's, and the anchor is the instant before it was sent.
+    let (cancellation_requested, lease_started_at) = if features.accept_lease_state
         && !accept_consumed_claim_lease(
             claimed_no_later_than,
             lease_window,
-            lease_started_at,
+            accepted_at,
             config.lease_renewal_interval,
         ) {
-        accept_cancellation
+        (accept_cancellation, claimed_no_later_than)
     } else {
         let lease = lease_deadline_rpc(
-            lease_started_at + lease_rpc_budget(lease_window),
+            accepted_at + lease_rpc_budget(lease_window),
             client.renew_work_lease(WorkLeaseRenewal {
                 authority: Some(assignment.authority.clone()),
                 lease_seconds: config.lease_seconds,
@@ -1046,7 +1062,7 @@ async fn run_assignment(
         if !lease.accepted {
             return Err(AgentError::StaleAuthority);
         }
-        lease.cancellation_requested
+        (lease.cancellation_requested, accepted_at)
     };
     if cancellation_requested {
         let lease_stop = CancellationToken::new();
@@ -1735,7 +1751,12 @@ async fn renew_lease(
         // the renewal RPC and every retry of it.
         let lease_deadline = lease_started_at + lease_rpc_budget(lease_window);
         let mut unanswered: u64 = 0;
-        let receipt = loop {
+        // Carried out of the loop with the receipt: the term a successful
+        // renewal opens is measured from the moment THAT request left, so the
+        // agent's deadline stays before the controller's stamp however slow the
+        // round trip is.
+        let (receipt, request_sent_at) = loop {
+            let request_sent_at = tokio::time::Instant::now();
             let renewal = tokio::select! {
                 () = stop.cancelled() => return Ok(()),
                 result = tokio::time::timeout_at(
@@ -1760,7 +1781,7 @@ async fn renew_lease(
                              on the lease it already held"
                         );
                     }
-                    break response.into_inner();
+                    break (response.into_inner(), request_sent_at);
                 }
                 Ok(Err(error)) => {
                     if stop.is_cancelled() {
@@ -1836,7 +1857,7 @@ async fn renew_lease(
             let _ = loss_reason.set(CONTROLLER_CANCELLATION_TRIGGER);
             execution_cancellation.cancel();
         }
-        lease_started_at = tokio::time::Instant::now();
+        lease_started_at = request_sent_at;
         lease_window = Duration::from_secs(u64::from(lease_seconds));
     }
 }
@@ -3177,6 +3198,37 @@ mod tests {
         assert_eq!(
             renewal_status_cause(&tonic::Status::permission_denied("not in trust pool")),
             "renewal_refused"
+        );
+    }
+
+    /// AGENT-007, from review. A lease term must be anchored at the instant its
+    /// request LEFT, never at the instant its answer arrived. The controller
+    /// stamps `lease_expires_at` while the request is in flight, so a round trip
+    /// longer than the one-second margin makes a receipt-time anchor put the
+    /// agent's deadline AFTER the attempt becomes reclaimable -- and the retry
+    /// this ticket adds would then run the step into that window.
+    ///
+    /// This test is the arithmetic, not a mutation gate on the call sites: the
+    /// anchor is a call-site choice, and no test here can fail if a call site
+    /// picks the wrong instant. That limit is stated in the closure receipt
+    /// rather than papered over.
+    #[test]
+    fn a_lease_term_anchored_on_receipt_can_outlive_the_controller() {
+        let window = Duration::from_secs(30);
+        let sent = tokio::time::Instant::now();
+        // The controller stamps its expiry somewhere inside the round trip.
+        let processed = sent + Duration::from_millis(400);
+        let answered = sent + Duration::from_millis(2_400);
+        let controller_expiry = processed + window;
+
+        assert!(
+            sent + lease_rpc_budget(window) <= controller_expiry,
+            "anchoring at the send instant must never reach the controller's expiry"
+        );
+        assert!(
+            answered + lease_rpc_budget(window) > controller_expiry,
+            "anchoring on receipt overruns it as soon as the round trip exceeds \
+             the one-second margin, which is why the anchor is the send instant"
         );
     }
 

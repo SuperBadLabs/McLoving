@@ -124,6 +124,15 @@ denying the renewal exercises the answered path this ticket does not change.
   into a ten-second lease — the defect cancelled at about one second — and no
   later than the lease itself, and finishes at or before the controller's
   recorded `lease_expires_at`.
+- Gate five, added on review: what happens on the far side of that instant.
+  The controller returns only after the lease has lapsed, a SECOND enrolled
+  runtime claims the requeued attempt at a higher fence, and the original agent
+  then comes back with its journal still holding the work at the fence it lost.
+  It must move nothing — same fence, same lease owner, no terminal event — and
+  it must be told why: its recovered-attempt report is answered with the
+  `EXEC-003` discharge disposition and it records `fenced authority is
+  disowned`. Asserting only that nothing bad happened would pass equally well
+  if the agent had never come back at all.
 
 Four unit tests cover the pure decisions: which statuses are answers, how an
 answered refusal is named, the retry cadence bound, and the retry deadline.
@@ -139,6 +148,7 @@ and turned exactly the named test red, and no other:
 | An answered refusal keeps the old `renewal_transport_failure` name | `an_answered_refusal_is_named_as_one` |
 | The retry cadence loses its one-second cap | `the_renewal_retry_cadence_is_bounded_on_both_sides` |
 | The retry deadline drops the one-second margin | gate four's reclamation-ordering assertion, by 124 ms |
+| `next_renewal_retry` drops the lease bound (again, against gate five) | gate five, which then never sees the lease lost and times out at 40 s |
 
 The reverted-tree run is the strongest of these: it reproduces the campaign's
 finding exactly, gate three failing with `"aborted"` and a terminal summary of
@@ -162,6 +172,46 @@ scenario.
 
 `step_starts` is 1 and `step_completions` is 1 in the repaired controller
 scenario: the step ran exactly once. Riding out the outage did not re-run it.
+
+## A second defect, found by review, in the anchor the bound rests on
+
+The retry's whole safety argument is that the agent's deadline falls before the
+controller's `lease_expires_at`. Review found the anchor that deadline is
+measured from was not conservative enough to guarantee it.
+
+The controller stamps `lease_expires_at` while a request is IN FLIGHT —
+measured in `crates/controller-store/src/scheduler.rs`, at the claim and again
+on each renewal, and **never on accept**. The agent was re-anchoring each term
+at the instant the ANSWER arrived. Anchoring on receipt puts the agent's
+deadline later than the controller's by the round trip, so a round trip longer
+than the one-second margin makes the deadline fall AFTER the attempt becomes
+reclaimable. Before this ticket that gap was mostly theoretical because a
+failed renewal cancelled at once; the retry is exactly what turns it into
+running time.
+
+Two anchors moved. Each renewed term is now measured from the instant its own
+request left, carried out of the retry loop with the receipt. And because
+accepting does not extend the lease, the accept path now anchors on the branch
+that actually re-stamped it: where the negotiated accept receipt answered
+without a renewal, the term is still the claim's and the anchor is
+`claimed_no_later_than` — captured before the poll RPC was sent, which the
+codebase's own `accept_consumed_claim_lease` already treats as the true claim
+anchor; where the serialized renewal did run, the anchor is the instant before
+that RPC.
+
+`recover_finalizations` already took its anchor before its renewal RPC and is
+unchanged.
+
+**This one is not mutation-proved, and that is stated rather than papered
+over.** The anchor is a call-site choice, so no unit test here fails if a call
+site picks the wrong instant, and the integration ordering assertion only
+catches it when a round trip exceeds one second — which it does not on this
+host or on a CI runner. Injecting that latency would need a controller test
+hook, which is a controller change this ticket excludes. What is committed
+instead is the arithmetic, as an executable test
+(`a_lease_term_anchored_on_receipt_can_outlive_the_controller`) that fails if
+the numbers stop supporting the reasoning, plus the reasoning recorded at both
+call sites.
 
 ## One harness defect found and fixed here
 
@@ -221,6 +271,17 @@ database is failing for up to one lease term.
 
 A cancellation issued during an outage lands up to one lease later, as recorded
 above.
+
+The first lease term is granted by the controller for the CONTROLLER's
+`MCLOVING_LEASE_SECONDS`, while the agent measures that term against its own
+`MCLOVING_AGENT_LEASE_SECONDS`; every later term is the agent's own value,
+because the renewal request carries it. Where an operator configures the agent
+a longer lease than the controller grants, the first term's deadline overshoots
+by the difference. Both default to 30 seconds, the anchor fix above removes the
+other half of the same error, and closing it properly needs either a protocol
+field carrying the authoritative expiry or a configuration invariant — both
+outside this ticket. It is recorded here so it is not rediscovered as a
+surprise.
 
 The lease deadline is computed from the agent's monotonic clock against a
 controller expiry stamped from the database clock. The one-second margin

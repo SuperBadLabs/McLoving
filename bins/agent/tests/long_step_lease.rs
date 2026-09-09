@@ -459,8 +459,134 @@ async fn a_controller_outage_longer_than_the_lease_cancels_only_when_it_lapses()
     stop(&mut agent).await;
 }
 
+/// AGENT-007 gate five, from review. Gate four proves the agent stops before
+/// the attempt becomes reclaimable; this proves what happens on the other side
+/// of that instant. The controller comes back only after the lease has lapsed,
+/// a SECOND runtime claims the requeued attempt, and the original agent then
+/// returns with its journal still holding the work at the fence it lost.
+#[tokio::test]
+async fn a_reclaimed_attempt_fences_out_the_agent_that_lost_it() {
+    const LEASE_SECONDS: u64 = 10;
+    let Some(harness) = Harness::from_environment("reclaim").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller(&LEASE_SECONDS.to_string(), None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    let stderr_path = harness.directory.path().join("agent-stderr.log");
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create agent stderr capture");
+    let mut agent = harness
+        .agent_command(&LEASE_SECONDS.to_string())
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped remote agent");
+
+    let admission = harness
+        .submit(&client, "reclaim-e2e", BLOCKED_RENEWAL_PIPELINE)
+        .await;
+    wait_until_running(&harness, admission).await;
+    let lost_fence = harness.attempt_fence(admission).await;
+
+    // The outage outlives the lease, so the agent gives up under its own name.
+    stop(&mut controller).await;
+    tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            if stderr.contains("lease_lost_during_execution: renewal_unanswered_until_expiry") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("an unreachable controller must eventually cost the lease");
+
+    // The original runtime goes away entirely, journal and all, so the relief
+    // agent is unambiguously the one that picks the work up.
+    stop(&mut agent).await;
+    controller = harness.spawn_controller(&LEASE_SECONDS.to_string(), None);
+    wait_until_listening(&client, harness.organization_id).await;
+    let mut relief = harness
+        .relief_agent_command(&LEASE_SECONDS.to_string())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the relief remote agent");
+
+    let claimed_fence = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Ok(status) = client
+                .status(harness.organization_id, harness.project_id, admission)
+                .await
+                && status.lease_owner.as_deref() == Some(harness.relief_agent_id.as_str())
+                && status.fence > lost_fence
+            {
+                break status.fence;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the expired attempt is requeued and claimed by another runtime");
+    assert!(
+        claimed_fence > lost_fence,
+        "reclamation must advance the fence past the one the first agent held: \
+         {claimed_fence} is not greater than {lost_fence}"
+    );
+
+    // And now the agent that lost it comes back, still holding the old fence.
+    let returning_stderr_path = harness.directory.path().join("agent-returned-stderr.log");
+    let returning_stderr =
+        std::fs::File::create(&returning_stderr_path).expect("create returning stderr capture");
+    let mut returned = harness
+        .agent_command(&LEASE_SECONDS.to_string())
+        .stderr(Stdio::from(returning_stderr))
+        .kill_on_drop(true)
+        .spawn()
+        .expect("restart the agent that lost the lease");
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let status = client
+        .status(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("read build status after the first agent returned");
+    assert_eq!(
+        status.fence, claimed_fence,
+        "the returning agent must not have moved the attempt: {status:?}"
+    );
+    assert_eq!(
+        status.lease_owner.as_deref(),
+        Some(harness.relief_agent_id.as_str()),
+        "the attempt must still belong to the runtime that claimed it: {status:?}"
+    );
+    assert_eq!(
+        harness.count_events(admission, "attempt.terminal").await,
+        0,
+        "the returning agent published a terminal outcome for work it had lost"
+    );
+
+    // Named, not merely absent. The returning agent is refused by the fence and
+    // told so: the controller answers its recovered-attempt report with the
+    // `EXEC-003` discharge disposition, and the agent records the refusal rather
+    // than retrying its lost authority or parking the lane. A gate that only
+    // observed that nothing bad happened would pass just as well if the agent
+    // had never come back at all.
+    let returning_stderr =
+        std::fs::read_to_string(&returning_stderr_path).expect("read returning agent stderr");
+    assert!(
+        returning_stderr.contains("fenced authority is disowned"),
+        "the returning agent must be told its authority was fenced out, and record \
+         it: {returning_stderr}"
+    );
+
+    stop(&mut returned).await;
+    stop(&mut relief).await;
+    stop(&mut controller).await;
+}
+
 struct Harness {
     agent_id: String,
+    relief_agent_id: String,
     pool: PgPool,
     migration_url: String,
     runtime_url: String,
@@ -518,11 +644,20 @@ impl Harness {
 
         let directory = tempfile::tempdir().expect("test root");
         let agent_id = format!("{label}-agent");
-        let tls = create_mtls(directory.path(), organization_id, &agent_id);
+        let relief_agent_id = format!("{label}-relief-agent");
+        let tls = create_mtls(
+            directory.path(),
+            organization_id,
+            &agent_id,
+            &relief_agent_id,
+        );
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).expect("create remote workspace root");
+        std::fs::create_dir(directory.path().join("relief-workspace"))
+            .expect("create relief workspace root");
         Some(Self {
             agent_id,
+            relief_agent_id,
             pool,
             migration_url,
             runtime_url,
@@ -622,6 +757,29 @@ impl Harness {
         command
     }
 
+    /// A second, separately enrolled runtime with its own identity, journal and
+    /// workspace root. Used where an attempt one agent lost must be claimed by
+    /// somebody else.
+    fn relief_agent_command(&self, lease_seconds: &str) -> Command {
+        let mut command = self.agent_command(lease_seconds);
+        command
+            .env("MCLOVING_AGENT_ID", &self.relief_agent_id)
+            .env(
+                "MCLOVING_AGENT_CERTIFICATE_PATH",
+                &self.tls.relief_certificate,
+            )
+            .env("MCLOVING_AGENT_PRIVATE_KEY_PATH", &self.tls.relief_key)
+            .env(
+                "MCLOVING_AGENT_JOURNAL_PATH",
+                self.directory.path().join("relief-agent.db"),
+            )
+            .env(
+                "MCLOVING_AGENT_WORKSPACE_ROOT",
+                self.directory.path().join("relief-workspace"),
+            );
+        command
+    }
+
     async fn submit(&self, client: &Client, slug: &str, pipeline: &str) -> Uuid {
         let pipeline_id = Uuid::new_v4();
         client
@@ -651,6 +809,21 @@ impl Harness {
             .await
             .expect("submit test work")
             .build_id
+    }
+
+    /// The fence the build's attempt currently carries. Reclamation advances
+    /// it, which is what fences out the runtime that held the old one.
+    async fn attempt_fence(&self, build_id: Uuid) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT a.fence
+             FROM attempts AS a
+             JOIN nodes AS n ON n.id = a.node_id
+             WHERE n.build_id = $1",
+        )
+        .bind(build_id)
+        .fetch_one(&self.pool)
+        .await
+        .expect("read the attempt fence")
     }
 
     /// The controller's own `lease_expires_at` for this build's attempt, as a
@@ -740,10 +913,20 @@ struct MtlsFiles {
     server_key: PathBuf,
     agent_certificate: PathBuf,
     agent_key: PathBuf,
+    /// A second enrolled identity, for the gate that needs another runtime to
+    /// claim an attempt the first one lost. Enrolled for every harness rather
+    /// than conditionally, so the bindings file has one shape.
+    relief_certificate: PathBuf,
+    relief_key: PathBuf,
     bindings: PathBuf,
 }
 
-fn create_mtls(root: &Path, organization_id: Uuid, agent_id: &str) -> MtlsFiles {
+fn create_mtls(
+    root: &Path,
+    organization_id: Uuid,
+    agent_id: &str,
+    relief_agent_id: &str,
+) -> MtlsFiles {
     let ca_certificate = root.join("ca.pem");
     let ca_key = root.join("ca-key.pem");
     openssl([
@@ -792,58 +975,64 @@ fn create_mtls(root: &Path, organization_id: Uuid, agent_id: &str) -> MtlsFiles 
         &ca_key,
     );
 
-    let agent_key = root.join("agent-key.pem");
-    let agent_csr = root.join("agent.csr");
-    let agent_certificate = root.join("agent.pem");
     let agent_extensions = root.join("agent.ext");
     std::fs::write(&agent_extensions, "extendedKeyUsage=clientAuth\n")
         .expect("write agent extensions");
-    openssl([
-        "req",
-        "-new",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-subj",
-        &format!("/CN={agent_id}"),
-        "-keyout",
-        path(&agent_key),
-        "-out",
-        path(&agent_csr),
-    ]);
-    sign(
-        &agent_csr,
-        &agent_certificate,
-        &agent_extensions,
-        &ca_certificate,
-        &ca_key,
-    );
-    let agent_der = root.join("agent.der");
-    openssl([
-        "x509",
-        "-in",
-        path(&agent_certificate),
-        "-outform",
-        "DER",
-        "-out",
-        path(&agent_der),
-    ]);
-    let digest: [u8; 32] = Sha256::digest(std::fs::read(agent_der).expect("read agent DER")).into();
-    let bindings = root.join("identity-bindings.txt");
-    std::fs::write(
-        &bindings,
-        format!(
-            "{} {agent_id} trusted-linux {organization_id}\n",
+    let mut bindings_rows = String::new();
+    let mut enrolled = Vec::new();
+    for (slug, id) in [("agent", agent_id), ("relief", relief_agent_id)] {
+        let key = root.join(format!("{slug}-key.pem"));
+        let csr = root.join(format!("{slug}.csr"));
+        let certificate = root.join(format!("{slug}.pem"));
+        openssl([
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            &format!("/CN={id}"),
+            "-keyout",
+            path(&key),
+            "-out",
+            path(&csr),
+        ]);
+        sign(
+            &csr,
+            &certificate,
+            &agent_extensions,
+            &ca_certificate,
+            &ca_key,
+        );
+        let der = root.join(format!("{slug}.der"));
+        openssl([
+            "x509",
+            "-in",
+            path(&certificate),
+            "-outform",
+            "DER",
+            "-out",
+            path(&der),
+        ]);
+        let digest: [u8; 32] = Sha256::digest(std::fs::read(der).expect("read agent DER")).into();
+        bindings_rows.push_str(&format!(
+            "{} {id} trusted-linux {organization_id}\n",
             hex(&digest)
-        ),
-    )
-    .expect("write identity binding");
+        ));
+        enrolled.push((certificate, key));
+    }
+    let bindings = root.join("identity-bindings.txt");
+    std::fs::write(&bindings, bindings_rows).expect("write identity bindings");
+    let (relief_certificate, relief_key) = enrolled.pop().expect("relief identity");
+    let (agent_certificate, agent_key) = enrolled.pop().expect("primary identity");
     MtlsFiles {
         ca_certificate,
         server_certificate,
         server_key,
         agent_certificate,
         agent_key,
+        relief_certificate,
+        relief_key,
         bindings,
     }
 }
