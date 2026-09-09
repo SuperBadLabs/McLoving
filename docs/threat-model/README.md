@@ -97,7 +97,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-017 | Database restore resurrects old authority | New recovery epoch and full agent reconciliation | Catastrophic restore drill | OPS/ARCH | Lost agent journals |
 | TM-018 | Log/artifact volume exhausts controller or agent disk or memory | 64 MiB attempt-log and 64 KiB result quotas, bounded two-pass streaming, explicit backpressure | Oversize rejection, streaming digest-mismatch, disk-full, and quota war tests | OPS/AGENT | Operator misconfiguration |
 | TM-019 | Approval is reused after pipeline or artifact changes | Approval binds build, IR, artifact, environment, action | Stale-approval negative tests | SEC/UX | Approver account compromise |
-| TM-020 | Compatibility worker executes untrusted Groovy, forges compiler output, or imports mutable/secret-bearing authority | Groovy is parsed only to a CONVERSION-phase AST and never evaluated; exact-source/profile/compiler binding; no secrets/network/DB/agent/controller access; rootless read-only limits and all-false authority ledger; separate disabled state record; independent Rust canonical-EDN, strict-YAML, canonical-IR, provenance, authority, state, host-path, and secret-substitution validation | Deterministic exact-oracle compile; sandbox/mount/symlink/limit/environment authority-negative gates; malformed/noncanonical/profile/authority/state/host-path/secret adversarial worker-output tests; working-tree marker scan | COMPAT/SEC | JVM/container escape or a jointly flawed worker and independent validator |
+| TM-020 | Compatibility worker executes untrusted Groovy, forges compiler output, or imports mutable/secret-bearing authority | Groovy is never evaluated; v1 retains exact-source admission, while v2 performs bounded PARSING and original-source recognition before CONVERSION and requires independent Rust source-to-output agreement; exact source/context/profile/contract/compiler binding; no secrets/network/DB/agent/controller access; rootless read-only limits and all-false authority ledger; separate disabled state record; independent Rust canonical-EDN, strict-YAML, canonical-IR, provenance, authority, state, host-path, and secret-substitution validation | Deterministic exact-oracle and declared sequential-fixture compilation; sandbox/mount/symlink/limit/environment authority-negative gates; malformed/noncanonical/profile/authority/state/host-path/secret adversarial worker-output tests; working-tree marker scan | COMPAT/SEC | JVM/container escape or a jointly flawed worker and independent validator |
 | TM-026 | A floating or substituted Jenkins step/plugin mapping silently falls back, reads an undeclared host input, or turns a compile-only construct into execution or external-effect authority | Versioned strict-YAML catalog; exact plugin/profile/corpus/source/target bindings; detached byte and semantic lock; deny-unknown schema; explicit unsupported policy; all-false authority; connector-only production effects; unearned local-input/shared-resource/cache semantics are not admitted | Mapping-catalog golden, strict-YAML, bundle, authority, policy, profile/plugin/corpus substitution, unknown-field, and coverage-inflation tests; sealed successor corpus | COMPAT/SEC | Only one literal `sh` mapping is earned; execution equivalence, local input, shared resources, cache behavior, and production effects remain uncertified |
 | TM-027 | An attacker substitutes an OIDC provider, redirect, key, subject, group claim, code, state, nonce, or replayed token to obtain or retain another principal's authority | Tenant/provider-keyed exact configuration and JWKS generations/digests; HTTPS-only production endpoints; exact redirect allowlist; authorization code with PKCE S256; one-time state, nonce, ID-token and refresh evidence; strict issuer/audience/signature/time/subject/group validation; immutable external-subject and source-provenance binding; group and lifecycle generation fencing; absolute refresh deadline; refresh-reuse family revocation | Contained generated-key OIDC end-to-end test, malformed/substituted/replayed state and token tests, real PostgreSQL cross-tenant/group/lifecycle/refresh/logout tests, OpenAPI route contract, independent security and restore receipt in `docs/evidence/IDP-001_SECURITY_REVIEW.md` | IDP/SEC | Compromised target identity provider, trusted migration operator, or browser endpoint remains authoritative within its granted scope |
 | TM-028 | Service credential rotation, lifecycle administration, or legacy-human migration silently preserves stale authority or rebinds identity | Digest-exact generation idempotence; atomic old-generation revocation; audited offline migration-role admin binary; compare-and-swap lifecycle transitions; one-way trigger-guarded legacy provenance binding; tenant RLS and immediate generation fencing | Same-generation substitution and next-generation rotation tests, revocation/authentication denial, strict admin-input tests, legacy quarantine/binding/activation test, audit-chain verification, identity-specific logical restore canary | IDP/SEC | Migration-role database compromise can administer identities and requires independent operational controls |
@@ -453,10 +453,36 @@ and permits no model output or local authoring result to become Jenkins evidence
 TM-052's protected checks remain mandatory. Local and hosted Foundation both
 run the shared fixture gate, whose fixed 17-test population rejects missing,
 zero, skipped, and incomplete execution; independent negative controls passed.
-JCOMP-001 remains ACTIVE without closure attribution until protected merge and
-exact post-merge Foundation/native Windows verification support a later closure
-update. The contract's dedicated disposable M1 environments grant no production
+JCOMP-001 closes in this subsequent update after PR #127 merged as
+`533dbff671b5a2d58e4d92339708375601d5b7d2` and exact-main Foundation
+`34306662841` and native Windows `34306662842` passed. The review receipt
+records final head `f78dc5d` and resolution of all three actionable threads. The contract's dedicated disposable M1 environments grant no production
 containment claim; hostile same-UID workload isolation remains SEC-005.
+
+## JCOMP-002 sequential compiler review
+
+JCOMP-002 adds the explicit internal protocol-v2 compiler and Rust admission
+boundary described in `docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md`.
+TM-008 retains source, response, process and container resource bounds. TM-020
+now requires independent recognition of original source semantics, exact
+canonical lowering and typed IR checks, caller context binding, and a separate
+disabled logical-definition artifact. Existing v1 admission and imported job
+state remain unchanged. Groovy is parsed but never evaluated.
+
+The launcher snapshots source and context once, uses a private copy of the
+admission executable, and launches a caller-pinned immutable worker image.
+Trusted receipts bind both implementation digests outside the worker. Failed
+or disagreeing classifications cannot become corpus coverage. The contained
+compiler campaign executes no workload shell and contacts no controller or
+agent. Runtime execution, workspace continuity and paired evidence remain
+separate successor tickets; hostile same-UID isolation remains SEC-005.
+
+TM-052's local and hosted Foundation gates include the closed Clojure and
+mocked-launcher suites; Rust boundary and CLI tests remain in workspace CI.
+The active review is `docs/evidence/JCOMP-002_SECURITY_REVIEW.md`. JCOMP-002
+remains ACTIVE until independent review, protected merge and exact post-merge
+verification permit a subsequent closure update; it has no closure attribution
+in this change.
 
 ## Closure attribution
 
@@ -504,6 +530,7 @@ had never claimed one.
 | HYG-002 | `docs/evidence/HYG-002_SECURITY_REVIEW.md` |
 | IDP-001 | `docs/evidence/IDP-001_SECURITY_REVIEW.md` |
 | INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
+| JCOMP-001 | `docs/evidence/JCOMP-001_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |

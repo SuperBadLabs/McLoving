@@ -353,6 +353,7 @@ jobs:
           timeout 60 clojure -M:test
           ./test-plugin-directory.sh
           ../../scripts/test-jenkins-sequential-contract.sh
+          ../../scripts/test-jenkins-sequential-compiler.sh
 
   formal:
     name: Formal model

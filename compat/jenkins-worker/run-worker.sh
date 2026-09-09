@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Version 2 has explicit implementation pins and separate document provenance.
+# Dispatch before legacy parsing so all existing operations retain their bytes.
+if [[ "${1:-}" == "compile-sequential" ]]; then
+  exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/run-sequential-worker.sh" "$@"
+fi
+
 usage() {
   echo "usage: $0 probe REQUEST_ID | compile SOURCE REQUEST_ID JOB_ID JOB_GENERATION" >&2
   exit 64

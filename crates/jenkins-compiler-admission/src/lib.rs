@@ -4,6 +4,8 @@
 //! its canonical EDN envelope, reparses strict YAML, recompiles and validates
 //! Pipeline IR, and validates the separate disabled operational-state record.
 
+pub mod sequential;
+
 use std::collections::BTreeMap;
 use std::fmt;
 

@@ -47,7 +47,7 @@
   [code]
   (throw (ex-info "worker request rejected" {:code code})))
 
-(defn read-request!
+(defn read-request-with-bytes!
   [^InputStream input]
   (let [output (ByteArrayOutputStream.)
         buffer (byte-array 8192)]
@@ -72,7 +72,7 @@
                     (fail! "E_REQUEST_EMPTY"))
                   (when-not (= ::eof trailing)
                     (fail! "E_REQUEST_TRAILING"))
-                  request))
+                  {:request request :bytes bytes}))
               (catch clojure.lang.ExceptionInfo exception
                 (throw exception))
               (catch Throwable _
@@ -82,6 +82,11 @@
               (fail! "E_REQUEST_TOO_LARGE"))
             (.write output buffer 0 read-count)
             (recur next-total)))))))
+
+(defn read-request!
+  "Legacy parsed-value API; retains its original permissive encoding behavior."
+  [input]
+  (:request (read-request-with-bytes! input)))
 
 (defn- exact-keys!
   [request expected]
@@ -115,6 +120,10 @@
               (some #(not (contains? allowed-environment %)) keys))
       (fail! "E_ENV_AUTHORITY"))
     (sort keys)))
+
+(defn validate-environment!
+  "Shared deny-authority check; legacy behavior is unchanged."
+  [] (environment-safe!))
 
 (defn- read-source-bytes!
   [path]

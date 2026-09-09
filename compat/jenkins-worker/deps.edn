@@ -3,6 +3,10 @@
  :aliases
  {:foundation
   {:extra-deps {org.codehaus.groovy/groovy-all {:mvn/version "2.4.21"}}}
+  :sequential-test
+  {:extra-deps {org.codehaus.groovy/groovy-all {:mvn/version "2.4.21"}}
+   :extra-paths ["test"]
+   :main-opts ["-m" "mcloving.compat.sequential-test-runner"]}
   :test
   {:extra-deps {org.codehaus.groovy/groovy-all {:mvn/version "2.4.21"}}
    :extra-paths ["test"]

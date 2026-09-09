@@ -2,9 +2,9 @@
 
 ## Status and scope
 
-Implementation under review. JCOMP-001 is ACTIVE;
-protected-head checks, protected merge and exact post-merge Foundation/native
-Windows verification must complete before a subsequent closure update.
+JCOMP-001 is DONE. Protected-head checks, protected merge and exact
+post-merge Foundation/native Windows verification completed; this subsequent
+closure update records those observed facts.
 This receipt does not claim new compiler admission or execution compatibility.
 
 The versioned sequential Declarative contract preregisters ten authored
@@ -16,7 +16,8 @@ Historical migration and differential receipts are unchanged.
 
 ## Reviewed content
 
-These hashes bind the local authoring checks below. Any change to a covered
+These hashes bind the local authoring checks below at reviewed implementation
+`f78dc5d481416f06ffe7fe448297fcbb34a15dbe` and its identical merged tree. Any change to a covered
 file requires the relevant checks and independent review again.
 
 | File | SHA-256 |
@@ -111,3 +112,30 @@ action items and verified all nine content pins. The complete 17-test wrapper
 passed; temporary-copy controls with one test removed (16 remaining), an empty
 module, or a skipped test each failed before the Clojure marker. All four
 control runs created zero bytecode paths with inherited suppression unset.
+
+
+## Protected merge and earned closure
+
+Final reviewed head `f78dc5d481416f06ffe7fe448297fcbb34a15dbe` passed
+all eight GitHub Actions app-15368 required contexts: Rust, Dependencies and
+licenses, Secret scan, Architecture records, Formal model, Controller PostgreSQL,
+Foundation, and Windows. Independent exact-head review found no remaining
+items; fresh automated review completed, and all three actionable review
+threads were fixed and resolved before merge. Strict synchronization, admin
+enforcement, conversation resolution and linear history remained enabled;
+force-push and deletion remained disabled. No admin bypass was used.
+
+PR #127 guarded squash-merged at 2026-09-09 03:19:15 UTC as
+`533dbff671b5a2d58e4d92339708375601d5b7d2`. Its tree
+`62a9a0d82f5070113dc584ad2fdfddb437673e56` matches the reviewed head.
+Exact post-merge [Foundation](https://github.com/SuperBadLabs/McLoving/actions/runs/34306662841)
+passed all 13 jobs, ending at 03:38:39 UTC after 19m21s.
+Exact post-merge [Windows Agent](https://github.com/SuperBadLabs/McLoving/actions/runs/34306662842)
+passed all three jobs in 4m48s; the actual native agent job `102324695046`
+ran from 03:19:30 to 03:23:55 UTC. Both workflows report the exact merge SHA.
+
+This earned closure covers the syntax/profile contract, frozen authored
+expectations, and authoring-integrity gate. It adds no generalized source
+admission, runnable pipeline, corpus reclassification, or execution-equivalence
+claim. JCOMP-002 remains a separate implementation ticket. Historical receipt
+and threat-attribution debt remain unchanged at 37 items.

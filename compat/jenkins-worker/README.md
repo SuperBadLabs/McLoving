@@ -77,3 +77,34 @@ compiler and plugin-directory tests. It neither evaluates fixture source nor
 executes Jenkins or product jobs. Generalized compilation and independent Rust
 source-to-output validation belong to JCOMP-002; step execution and workspace
 lifecycle are separate prerequisites before the final JCOMP-003 campaign.
+
+## Sequential compiler v2
+
+JCOMP-002 adds the internal `compile-sequential` lane described in
+[`JENKINS_SEQUENTIAL_COMPILER_V2.md`](../../docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md).
+It accepts the declared syntax independently of fixture membership, while Rust
+rederives the source semantics and verifies the complete lowering. The output
+includes a disabled logical document artifact; existing imported job records
+and protocol-v1 behavior remain unchanged. Runtime support and paired Jenkins
+execution remain later tickets.
+
+Build a separate local image using `build-image.sh SNAPSHOT_ROOT IMAGE` and
+retain the existing default v1 tag. Set `MCLOVING_JENKINS_WORKER_IMAGE` to
+the new image tag (the v2 default is `localhost/mcloving/jenkins-compiler-worker:sequential-v2`).
+Set `MCLOVING_JENKINS_SEQUENTIAL_WORKER_IMAGE_SHA256` to its immutable 64-digit image
+ID and `MCLOVING_JENKINS_ADMISSION_BIN` to the built Rust admission executable.
+Invoke `run-worker.sh compile-sequential SOURCE REQUEST_ID DOCUMENT_CONTEXT`.
+The context must use the exact canonical EDN encoding documented above, including
+sorted fields, comma-space separators and one final LF. Origins are caller
+attribution, never paths or URLs to fetch.
+
+`scripts/test-jenkins-sequential-compiler.sh` runs the Clojure compiler tests and
+mocked launcher boundary checks in local and hosted Foundation. Rust admission
+and CLI tests run in the workspace test gate. The separate contained fixture
+harness uses the actual pinned image and Rust executable for two deterministic
+compilations of each frozen fixture; it executes no pipeline shell workload.
+
+The same shared compiler gate also verifies the retained 93-file compilation
+campaign offline and runs its 16 mutation tests. To verify it directly, run
+`python3 -B scripts/test-jenkins-sequential-contained.py --verify-retained docs/evidence/jcomp-002-compiler-v2`
+from the repository root. This reads frozen receipts; it does not start containers.

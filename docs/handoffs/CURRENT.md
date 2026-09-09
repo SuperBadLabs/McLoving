@@ -21,23 +21,34 @@ authority, closes no ticket, and does not relax
 
 The owner selected broader pipeline support with Linux sequential Declarative
 pipelines and literal shell steps as the first milestone. The selected slot is
-now solely `JCOMP-001` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
+now solely `JCOMP-002` (`ACTIVE`). The serialized dispatch is `JCOMP-001` ->
 `JCOMP-002` -> `JCOMP-002A` -> `JCOMP-002B` -> `JCOMP-003`, with one standalone
 PR per ticket. The [board](../EXECUTION_BOARD.md) holds their complete acceptance
 criteria; no successor starts before its predecessor is protected-main merged
 and verified. Once started, a ticket remains `ACTIVE` until its required review,
 closure evidence, protected merge, and post-merge verification are complete.
 A passing implementation check or draft artifact alone cannot close it.
+
+JCOMP-001 closed after PR #127 merged as
+`533dbff671b5a2d58e4d92339708375601d5b7d2` and exact-main Foundation
+`34306662841` and native Windows `34306662842` succeeded. The contract
+preregisters expectations only; generalized compilation and paired execution
+remain successor work. This closure update starts the separate JCOMP-002 PR.
 The [syntax contract](../architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md)
 and fixture expectations now have a shared Foundation authoring gate. The
-[review record](../evidence/JCOMP-001_SECURITY_REVIEW.md) distinguishes those
-checks from still-required protected merge and post-merge verification;
-no broader compiler admission or paired execution evidence is claimed.
-The existing exact-source compiler admission is not general syntax support;
+[review record](../evidence/JCOMP-001_SECURITY_REVIEW.md) records the completed
+contract merge and exact post-merge verification. JCOMP-002 retains its own
+review, merge and post-merge gates; the contract receipt claims no broader
+compiler admission or paired execution evidence.
+The legacy exact-source compiler admission is not general syntax support;
 M1 must earn a new versioned differential claim through contained submitted
 jobs, with authored fixtures and original-corpus coverage reported separately.
 
-`JCOMP-002` generalizes compile-only translation and independent admission.
+`JCOMP-002` generalizes compile-only translation and independent admission. Its explicit
+protocol-v2 implementation is under review with a separate disabled logical
+document artifact and immutable worker/admission bindings. The
+[compiler review](../evidence/JCOMP-002_SECURITY_REVIEW.md) records focused and
+contained compilation checks; these do not establish runnable support.
 `JCOMP-002A` then owns real sequential step execution with distinct step/stage
 results and downstream skipping; current product admission rejects more than
 one step per stage. `JCOMP-002B` owns build-workspace lifecycle, continuity, and namespace
@@ -82,7 +93,7 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   count copied into this file is stale on the next ticket. As an observation
   rather than a current-state claim: on 2026-09-08 the reorganized local board
   reported 112 tickets with 26 remaining, and 86 done with the admitted, ratcheted 37-item debt.
-- `JCOMP-001` is the selected dispatch ticket and is `ACTIVE`. Before
+- `JCOMP-002` is the selected dispatch ticket and is `ACTIVE`. Before
   continuing on a successor head, evaluate the standing successor-head verification gate against
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
@@ -120,7 +131,8 @@ first container must be prevented from masking the remainder, and the
 source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 The September 8 priority replaces the thaw's `EXEC-005` selection with
-`JCOMP-001`; its foundation predecessors are `MIG-003` and `DIFF-001`.
+the Jenkins compatibility chain. `JCOMP-001` is now verified complete and
+`JCOMP-002` is selected; its dependency is that earned contract closure.
 Before starting, refresh protected main, open PRs, alerts and protection,
 run the board/closure and full Foundation gates, and observe the condition
 below against the head that is current when you read this. Use a fresh
