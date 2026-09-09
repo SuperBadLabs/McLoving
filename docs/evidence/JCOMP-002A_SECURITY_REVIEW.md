@@ -74,6 +74,37 @@ contained evidence. Building inside the pinned Rust image produced controller
 binaries needing at most glibc 2.34. The final local driver builds from a clean
 committed archive before running copied binaries in the private test namespace.
 
+## Final focused campaign
+
+The [retained campaign](jcomp-002a-runtime-v1/campaign.json) binds source
+`68a7487d2ef177a3ccbd0bffe98a5c846fa76020`, tree
+`8124410e459d19c5997a1c839aa999943177a178`. It passed four PostgreSQL tests and
+six real shipped-controller/agent tests with zero failures, ignored or skipped
+cases. The refined session test first opens a valid probe session, then proves
+that epoch is rejected after the actual worker enrolls again; the store test
+also refuses the previously offered fence after a valid pre-start requeue.
+The rollback test faults the second node insert and verifies no build, node or
+attempt remains. Snapshot readers run concurrently with cancellation, retry
+and finalization. The actual-agent retry test reruns only the failed step,
+preserving earlier successes, original admission IDs and skipped placeholders.
+
+| Executed artifact | SHA-256 |
+|---|---|
+| Controller | `5bcdb9017edf6aa8f837346a6993b1985056fd959ee92610693d325a3dc70883` |
+| Remote agent | `cefc50979bb2ac39f506f2cd33c79737af9533ca324fef2df1b566f9d5b83670` |
+| Store test executable | `d11be54192aba8981cf3405bd44515e7531818cd214d64737b534f627f85a494` |
+| Remote test executable | `f5c87d69e4d2c8f4f8013198fe7c93a16fc353f23dcfe98acd8e8a82b2e616b1` |
+
+The complete local Foundation gate passed on `7630600` using the documented
+CI split, including all boundary suites and the final validation sentinel;
+the source-acquirer package passed separately under its required AppArmor
+profile. Five planner tests, the projection aggregation unit test, strict
+all-target Clippy for affected packages, four mocked gate controls, all 11
+workflow aggregate tests, and the 49/78 board/closure suites passed. The later
+stale-session/fence refinement changed tests only, passed focused Clippy, and
+regenerated the complete contained campaign above. Protected PR and exact-main
+checks remain separate obligations.
+
 ## Evidence required for closure
 
 Retain the final committed source/tree, source archive, runner/database image

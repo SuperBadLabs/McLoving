@@ -1,0 +1,1 @@
+contained-sequential-runtime-ok store=4 remote=6 production_authority=false
