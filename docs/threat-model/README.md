@@ -479,10 +479,12 @@ separate successor tickets; hostile same-UID isolation remains SEC-005.
 
 TM-052's local and hosted Foundation gates include the closed Clojure and
 mocked-launcher suites; Rust boundary and CLI tests remain in workspace CI.
-The active review is `docs/evidence/JCOMP-002_SECURITY_REVIEW.md`. JCOMP-002
-remains ACTIVE until independent review, protected merge and exact post-merge
-verification permit a subsequent closure update; it has no closure attribution
-in this change.
+The completed review is `docs/evidence/JCOMP-002_SECURITY_REVIEW.md`. This
+subsequent update records closure after PR #128 merged as `904fd1f`, with tree
+`26240208f51f6028bf6bb6e619a2dcd5d19555f0` matching final reviewed head
+`3d9ca5f`, and exact-main Foundation `34317917356` and native Windows
+`34317917395` succeeded. Receipt and retained-evidence review confirm the
+compile-only boundary and residuals above; no runtime claim is added.
 
 ## Closure attribution
 
@@ -531,6 +533,7 @@ had never claimed one.
 | IDP-001 | `docs/evidence/IDP-001_SECURITY_REVIEW.md` |
 | INPUT-001 | `docs/evidence/INPUT-001_SECURITY_REVIEW.md` |
 | JCOMP-001 | `docs/evidence/JCOMP-001_SECURITY_REVIEW.md` |
+| JCOMP-002 | `docs/evidence/JCOMP-002_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |

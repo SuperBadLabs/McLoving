@@ -2,9 +2,9 @@
 
 ## Status and bounded claim
 
-JCOMP-002 is ACTIVE. This receipt records focused and contained compilation
-checks; protected PR checks, independent exact-head review, merge and exact
-post-merge verification remain required before a subsequent closure update.
+JCOMP-002 is DONE. This subsequent closure update records the protected merge
+and successful exact-main checks below. Earlier ACTIVE statements in the
+chronological review sections remain historical observations.
 It grants no runtime, production or Jenkins workload-execution authority.
 
 The additive protocol-v2 implementation accepts the declared Linux sequential
@@ -338,3 +338,45 @@ The shared compiler gate passed 12 Clojure tests/216 assertions, 11 launcher
 tests, all 16 retained mutation tests and exact 93-file offline verification.
 The worker image, contract and fixed manifest are unchanged. No workload was
 executed; JCOMP-002 remains ACTIVE until its required merge and post-main gates.
+
+
+## Earned closure recorded 2026-09-09
+
+PR #128 merged at 2026-09-09 06:10:33 UTC as
+`904fd1fed083cd17a6fc371e0a300c3696d93483`, GitHub signature verified with
+reason `valid`. Tree `26240208f51f6028bf6bb6e619a2dcd5d19555f0` matches final
+reviewed head `3d9ca5faf8bb01ba264ab07821d5b0a644a1d95b`. The preserved
+[handoff snapshot](../handoffs/2026-09-09-master-chief/verification-snapshot.json)
+records completed exact-main runs. The accompanying handoff records all eight
+required PR checks and six resolved actionable review threads:
+
+- [Foundation 34317917356](https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356): all 13 jobs succeeded.
+- [Windows Agent 34317917395](https://github.com/SuperBadLabs/McLoving/actions/runs/34317917395): all three jobs succeeded, including actual native agent execution.
+
+The new chief independently read the receipt and its bounded claims, checked
+all 29 implementation source SHA-256 bindings, verified the handoff inventory,
+and passed all 16 retained-evidence mutation tests. Live GitHub readback
+confirmed the merge, final reviewed head, and both successful runs. The
+compiler supplement is now durable under the dated handoff; historical
+references to temporary campaigns above do not imply their continued custody.
+
+The successor custody head is `09b6c537896be2592cd1b4012659b38940577932`.
+Its Foundation `34342349617` and Windows Agent `34342349592`, including the
+native Windows agent job, were observed successful before successor work.
+Protection still requires all eight checks bound to app 15368. No open PRs
+were present. Two unchanged open Dependabot records concern the same moderate
+`GHSA-h395-gr6q-cpjc` advisory; this closure does not resolve them. Code scanning
+returned HTTP 404 with no analysis, and secret scanning returned HTTP 404 with
+the feature disabled. Neither response establishes an empty alert population.
+
+Local successor-baseline validation completed in the documented CI split: the
+full Foundation script with source-acquirer separately assigned passed to its
+final success sentinel, and the complete source-acquirer package passed under
+`aa-exec -p mcloving-source-acquirer` with all 20 contained-source tests. The
+initial unsplit invocation failed the documented missing-profile readiness
+checks; it is not counted as a passing gate. Board/closure checks and their
+49/78 tests passed. Closure totals are 115 tickets, 89 DONE, 26 remaining,
+34 receipted, 33 attributed reviews, unchanged historical debt 37.
+
+This closes compilation/admission only. Runtime steps, workspace continuity,
+paired Jenkins execution and original-corpus reclassification remain unearned.
