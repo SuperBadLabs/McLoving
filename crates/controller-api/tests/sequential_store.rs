@@ -530,6 +530,21 @@ async fn expired_prestart_requeues_but_started_sequential_work_requires_reconcil
     let active = running(&store, &plan).await;
     assert_eq!(active.attempt_id, offered.attempt_id);
     assert_eq!(active.fence, offered.fence + 1);
+    assert!(
+        !store
+            .finalize_attempt(
+                active.organization_id,
+                active.attempt_id,
+                offered.fence,
+                active.restore_epoch,
+                &active.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({})
+            )
+            .await
+            .unwrap()
+    );
+
     sqlx::query(
         "UPDATE attempts SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
     )

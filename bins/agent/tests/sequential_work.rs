@@ -475,6 +475,12 @@ async fn owner_cancellation_before_start_and_during_actual_process() {
                 && step.attempts[0].logs.is_empty()
                 && step.attempts[0].accounting.started_at_unix_ms.is_none())
     );
+    // Establish an earlier valid session before the actual worker enrolls again.
+    let probe = tokio::time::timeout(Duration::from_secs(15), h.agent().arg("probe").status())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(probe.success());
     let mut input = scripts(None);
     input[0].push_str("; printf started > process-started; sleep 30");
     let (_, active) = h.admit(&input).await;
@@ -493,10 +499,11 @@ async fn owner_cancellation_before_start_and_during_actual_process() {
         .await
         .unwrap()
         .unwrap();
+    assert!(session > 1);
     for (fence, epoch, session) in [
         (attempt.fence + 1, restore, session),
         (attempt.fence, restore + 1, session),
-        (attempt.fence, restore, session + 1),
+        (attempt.fence, restore, session - 1),
     ] {
         assert!(
             !h.store
