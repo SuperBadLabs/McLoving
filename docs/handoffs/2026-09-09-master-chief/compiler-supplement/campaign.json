@@ -1,0 +1,149 @@
+{
+  "schema": "mcloving.jenkins.sequential-parse-regression/1",
+  "cases": 14,
+  "worker_image_sha256": "0b687a72f8cd99a1c8401796714e5f9867f2288d7aff80bf1fdd22e2ac417232",
+  "admission_binary_sha256": "d2675602b8af22a31e5310b0d24680303c8c33d17e566afc02f8ae2ec18b6f9d",
+  "execution_authority": false,
+  "records": [
+    {
+      "case": "PARSE01",
+      "description": "mismatched stage argument closer",
+      "source_sha256": "182b39aa722093105bda89d6323c542635afa3e4b80aed781d16b9e6f553fe98",
+      "context_sha256": "b7386cb80f7426b8893f93e583f0290b9643244e6c257f778fbfaab544077a90",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "d8d650cc5708502ecb9d8fed2b4f193e4d2c471e0bd6d8d9705a785702099963",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "PARSE02",
+      "description": "mismatched root closer",
+      "source_sha256": "5196400204ec6edc1475ff5ce51231a18868a7c68d3b263ca603dd3b78455bb3",
+      "context_sha256": "621c67189e9fb0697c13b844648f673096931c2bd99786bddb4e872306c912dd",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "3473f691d6e8a15110e1787eb6774023a04ec5be2e80a726f04e7e08aa74658b",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "PARSE03",
+      "description": "malformed Unicode hex",
+      "source_sha256": "380686d22de303e4b5862bb8bc7cc716d12ef4b22f7672c8c732a48b4a2fa23e",
+      "context_sha256": "a845a456f2a01604a5358d73207179bab1c3848c45ea9a18a56259b9a0d9d019",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "2b44b7134a029ced50033c72248a9eb6a42852833cd3b6c2463f9e28bb54ee43",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "PARSE04",
+      "description": "short Unicode escape",
+      "source_sha256": "2b09a0c3d4591d1cf9808251d07772f914469f67e1efa7bd25fde169a52d90a3",
+      "context_sha256": "568575cc63546ac05bc3b6781e7592cd73057b10470fc343c6ad8d43fbdc0f63",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "fb2fc999105a104f3b51cc2ac08765893e1906e27612b7b8653c8d8afa4008c9",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "PARSE05",
+      "description": "malformed Unicode in line comment",
+      "source_sha256": "044d7fc9849f45a94108ecd6ed30d43593453ad2cbfd141939d1ca2d90331f8b",
+      "context_sha256": "1b09a122e98d2e4aad4304b51a31d44fd021a9fc5ce99af07b39f8b600aa4e8f",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "1e8299fd8b114a42db57163ff5f5891cf658e61dc7ef8267448488bfc23e614e",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "PARSE06",
+      "description": "valid excluded Unicode escape",
+      "source_sha256": "14ccf86ddc7c6e4a2c0e41b4ff62626ac8d225f5529182812310326d2ae438cd",
+      "context_sha256": "75c51ca544031e92e1cb887448d85d71628545af6f3aa0701f6d49b482398aba",
+      "response_sha256": "a4c99584c7a78e7d1fc07b2274ef22dcc5cadbc2c60020cf9650968784a6e8f2",
+      "receipt_sha256": "a33d49e42e836074b2769ccea109065d95fe18b7deb5733e96782ff7ffc7f7db",
+      "status": "unsupported",
+      "code": "E_SOURCE_LEXICAL"
+    },
+    {
+      "case": "PARSE07",
+      "description": "unknown quoted escape",
+      "source_sha256": "2cfbf4cabc741a96245ca133c5439a9effd0d53679bbdb3542f6eec8f88db876",
+      "context_sha256": "f497112f634bfd56f4d9c062501bf32b59f7428056ea1740ae61c41017440f70",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "20b73abd28196df362f9f9ac8e33493caf83197bb9ae429fab83102128c85e8b",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "PARSE08",
+      "description": "valid excluded octal escape",
+      "source_sha256": "130e0c1e148c4b9768403bc6cb97e8eeb92650136a6d4729a564bcd08225269b",
+      "context_sha256": "9ed7e81e2ffb13f95aaec05acc995360bb287252699a23655454256990866b8e",
+      "response_sha256": "c8e5c51224cf2b5b1e7d582b33da2e672c0dd364383891801ba0765b2acbe392",
+      "receipt_sha256": "a4caa985b1be6acd357e1eba52dd5c0184ab815acc45562ad34de1fd1f92ac61",
+      "status": "unsupported",
+      "code": "E_SOURCE_LEXICAL"
+    },
+    {
+      "case": "INTERP01",
+      "description": "malformed double quoted interpolation opener",
+      "source_sha256": "4f7e87527381ed58ae0962e5bba7b1ee2ba0337dda09e799f12ce06bc3827a2a",
+      "context_sha256": "c66e22927350fa8e3b842e2c7996e6d2963d46c3a28c65c75a3bc82dcacbe6c5",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "9dcc16bfeb8325985643c77f06b437570a2947e776e011a44c8096645954a166",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "INTERP02",
+      "description": "malformed triple quoted interpolation opener",
+      "source_sha256": "fb0a410e93d8d64043afdb9287842b4fd26d86e92c8174064b700a29d3743c04",
+      "context_sha256": "1856053d874298ac115945ff3ea21a58c1984911d5694c5d305f39317c5c647a",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "d4d14e33456df35dc14c7d935e1197a13894f9a65220523742a1ec0238ac8ec8",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "INTERP03",
+      "description": "valid empty excluded interpolation",
+      "source_sha256": "105f46cdbbeaf68d88fb8187fc3b42b36518b8888649acebf742b531de3d84db",
+      "context_sha256": "eb810a69fe4aa9fc325bc9368e6993d43d5d843b407c3298424b9c743c5d3203",
+      "response_sha256": "7136e4e1b764a8348c768a58786b30da57e6bf9e965b1c1131cd4e1f6eaf27d8",
+      "receipt_sha256": "cdf0b1b75d15c4b5d660abc54e229d6f6c12d996e99cedc55c28722f772c9dc2",
+      "status": "unsupported",
+      "code": "E_STEP_DYNAMIC"
+    },
+    {
+      "case": "INTERP04",
+      "description": "valid nested quoted excluded interpolation",
+      "source_sha256": "5e6e6fed5fd009a46bab2bedb35245f47d93472e7224f261883816ca4a631714",
+      "context_sha256": "b15b8f2ea8d7481d2c2f3efed71bfe8bac1a97ffc720539209e01cdc647c7e35",
+      "response_sha256": "f2fc1957c363c1fa98eb7af8770f1cdfec9c07e45272d51a4666dd844e3e80df",
+      "receipt_sha256": "cd35a3e37824f8bdc19219b9bea96a93b4b10747b7c97f65dcafa4c60b7c3a3d",
+      "status": "unsupported",
+      "code": "E_STEP_DYNAMIC"
+    },
+    {
+      "case": "INTERP05",
+      "description": "impossible initial square closer in double interpolation",
+      "source_sha256": "89389c0ae8eddaba48e6342451605e438bbd260210508933e9320349ab18feb9",
+      "context_sha256": "fd09396d2993618b8d6fa7c68064690afd150c3092a1aea50b45290314a00fab",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "8d7dfab67dc4a02c2d1b495619ef160c0addc7887c38b1a63e194dcaef60ffb9",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    },
+    {
+      "case": "INTERP06",
+      "description": "impossible initial round closer in triple interpolation",
+      "source_sha256": "081dbd65925bd4eac3f37a23d032112be09b760f54c8e3ddfcdb934e459c5e4a",
+      "context_sha256": "a99432dea074346b1841741c7ca166afe06c693c3f67ba910f2011ef80ba7385",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt_sha256": "b88f14c6fe441734490c75c8d303b45593808643e1a2ffea095927f05574a4a6",
+      "status": "rejected",
+      "code": "E_SOURCE_PARSE"
+    }
+  ]
+}

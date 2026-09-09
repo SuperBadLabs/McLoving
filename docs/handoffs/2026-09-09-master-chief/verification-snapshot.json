@@ -1,0 +1,188 @@
+{
+  "schema": "mcloving.chief-handoff-observation/1",
+  "observed_at": "2026-09-09T10:16:35.986350+00:00",
+  "repository": "SuperBadLabs/McLoving",
+  "merge_sha": "904fd1fed083cd17a6fc371e0a300c3696d93483",
+  "reviewed_head": "3d9ca5faf8bb01ba264ab07821d5b0a644a1d95b",
+  "tree_sha": "26240208f51f6028bf6bb6e619a2dcd5d19555f0",
+  "commit_verification": {
+    "verified": true,
+    "reason": "valid"
+  },
+  "runs": [
+    {
+      "id": 34317917356,
+      "name": "Foundation",
+      "head_sha": "904fd1fed083cd17a6fc371e0a300c3696d93483",
+      "head_branch": "main",
+      "event": "push",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-09T06:10:36Z",
+      "updated_at": "2026-09-09T06:30:55Z",
+      "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356",
+      "jobs": [
+        {
+          "id": 102357955526,
+          "name": "Rust lint",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:13:03Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955526"
+        },
+        {
+          "id": 102357955637,
+          "name": "Architecture records",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:11:12Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955637"
+        },
+        {
+          "id": 102357955675,
+          "name": "Rust workspace tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:14:42Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955675"
+        },
+        {
+          "id": 102357955732,
+          "name": "Secret scan",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:11:04Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955732"
+        },
+        {
+          "id": 102357955744,
+          "name": "Rust boundary suites",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:40Z",
+          "completed_at": "2026-09-09T06:14:18Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955744"
+        },
+        {
+          "id": 102357955828,
+          "name": "Formal model",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:10:47Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955828"
+        },
+        {
+          "id": 102357955830,
+          "name": "Dependencies and licenses",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:11:15Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955830"
+        },
+        {
+          "id": 102357955872,
+          "name": "Backup and restore",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:41Z",
+          "completed_at": "2026-09-09T06:12:19Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955872"
+        },
+        {
+          "id": 102357955888,
+          "name": "Deployment lane",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:40Z",
+          "completed_at": "2026-09-09T06:30:46Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955888"
+        },
+        {
+          "id": 102357955893,
+          "name": "Controller PostgreSQL",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:16:19Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357955893"
+        },
+        {
+          "id": 102357956098,
+          "name": "Rust source-acquirer suite",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:39Z",
+          "completed_at": "2026-09-09T06:12:47Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102357956098"
+        },
+        {
+          "id": 102358842880,
+          "name": "Rust",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:14:47Z",
+          "completed_at": "2026-09-09T06:14:51Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102358842880"
+        },
+        {
+          "id": 102362468894,
+          "name": "Foundation",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:30:49Z",
+          "completed_at": "2026-09-09T06:30:55Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917356/job/102362468894"
+        }
+      ]
+    },
+    {
+      "id": 34317917395,
+      "name": "Windows Agent",
+      "head_sha": "904fd1fed083cd17a6fc371e0a300c3696d93483",
+      "head_branch": "main",
+      "event": "push",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-09T06:10:36Z",
+      "updated_at": "2026-09-09T06:15:54Z",
+      "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917395",
+      "jobs": [
+        {
+          "id": 102357955048,
+          "name": "Classify Windows impact",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:40Z",
+          "completed_at": "2026-09-09T06:10:47Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917395/job/102357955048"
+        },
+        {
+          "id": 102357996610,
+          "name": "Windows agent",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:10:52Z",
+          "completed_at": "2026-09-09T06:15:44Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917395/job/102357996610"
+        },
+        {
+          "id": 102359072540,
+          "name": "Windows",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-09T06:15:48Z",
+          "completed_at": "2026-09-09T06:15:54Z",
+          "html_url": "https://github.com/SuperBadLabs/McLoving/actions/runs/34317917395/job/102359072540"
+        }
+      ]
+    }
+  ]
+}
