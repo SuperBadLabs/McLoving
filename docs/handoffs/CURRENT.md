@@ -1,9 +1,18 @@
 # Current custodian handoff
 
-The current dated handoff is
-[`2026-09-06-freeze-thaw.md`](2026-09-06-freeze-thaw.md). The preceding handoff
-is [`2026-09-01-september-freeze.md`](2026-09-01-september-freeze.md), whose
-snapshot below remains accurate for the September baseline.
+The current dated handoff is the
+[September 9 Master Chief bundle](2026-09-09-master-chief/README.md), including a
+[next-chief briefing](2026-09-09-master-chief/NEXT_CHIEF.md), verified checkpoint,
+durable compiler supplement and reviewed runtime design. The earlier
+[September 6 thaw](2026-09-06-freeze-thaw.md) and
+[September 1 freeze](2026-09-01-september-freeze.md) remain historical records.
+
+On September 9, PR #128 merged as `904fd1f`; exact-main Foundation
+`34317917356` and actual native Windows `34317917395` succeeded. JCOMP-002
+remains ACTIVE on the board pending its earned closure update. The next chief
+records that transition before starting JCOMP-002A. This handoff publication
+closes no ticket and starts no runtime implementation. Refresh current-main
+custody before acting; these observations verify only the named merge.
 
 **The September code freeze is LIFTED.** The owner lifted it on 2026-09-06,
 ahead of its 2026-09-30 expiry, and the six-step thaw procedure was executed in
@@ -45,7 +54,8 @@ M1 must earn a new versioned differential claim through contained submitted
 jobs, with authored fixtures and original-corpus coverage reported separately.
 
 `JCOMP-002` generalizes compile-only translation and independent admission. Its explicit
-protocol-v2 implementation is under review with a separate disabled logical
+protocol-v2 implementation is merged and post-main verified, pending board
+closure, with a separate disabled logical
 document artifact and immutable worker/admission bindings. The
 [compiler review](../evidence/JCOMP-002_SECURITY_REVIEW.md) records focused and
 contained compilation checks; these do not establish runnable support.
