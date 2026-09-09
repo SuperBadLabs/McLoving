@@ -889,6 +889,63 @@ fn literal_errors_distinguish_groovy_syntax_from_contract_exclusions() {
         }
     }
     for quote in ["\"", "\"\"\""] {
+        // Pinned Groovy PARSING independently rejects this finite family:
+        // the apparent outer closer opens a nested expression string with
+        // no possible closing quote in the rest of the source.
+        for gap in ["", " ", "\t", "\n", "\u{c}"] {
+            for suffix in ["", "\n}}}}", ");", "]"] {
+                let truncated = format!(
+                    "pipeline {{ agent any; stages {{ stage('Build') {{ steps {{ sh {quote}${{{gap}{quote}{suffix}"
+                );
+                assert_fixed_parse_rejection(truncated.as_bytes());
+            }
+            let truncated = format!(
+                "pipeline {{ agent any; stages {{ stage('Build') {{ steps {{ sh {quote}${{{gap}"
+            );
+            assert_fixed_parse_rejection(truncated.as_bytes());
+            assert_fixed_parse_rejection(&program(&format!("sh {quote}${{{gap}{quote}")));
+        }
+        for expression in [
+            "", " ", "\"x\"", "'x'", " /x/ ", " /\\q/ ", "[a: 1]", " -> 'x' ", "'''x'''",
+        ] {
+            let valid_excluded = program(&format!("sh {quote}${{{expression}}}{quote}"));
+            assert!(
+                matches!(
+                    source::classify(&valid_excluded),
+                    Classification::Unsupported(_) | Classification::Unclassified
+                ),
+                "valid excluded interpolation must not be admitted or called malformed: {valid_excluded:?}"
+            );
+        }
+        // These valid complex expressions remain outside this recognizer;
+        // the existing lexer can disagree with Groovy after an inner quote.
+        // This correction must not grant them execution or claim parity.
+        for expression in [" /* \" */ 'x' ", "\"\"\"x\"\"\""] {
+            let complex = program(&format!("sh {quote}${{{expression}}}{quote}"));
+            assert!(!matches!(
+                source::classify(&complex),
+                Classification::Supported(_)
+            ));
+            // An attributed unsupported response must not become a verified
+            // parse rejection merely because the provisional lexer disagrees.
+            let ctx = context(&complex);
+            let baseline = program("sh \"${foo}\"");
+            let mut wire = response(&baseline, &context(&baseline));
+            change(&mut wire, &["source-context"], ctx.value.clone());
+            change(
+                &mut wire,
+                &["source"],
+                map(vec![
+                    ("bytes", Edn::Integer(complex.len() as i64)),
+                    ("context-sha256", text(&ctx.context_sha256())),
+                    ("sha256", text(&sha256_hex(&complex))),
+                ]),
+            );
+            assert!(matches!(
+                validate_sequential_response(&encoded(&wire), expected(&complex, &ctx)),
+                Err(_) | Ok(SequentialValidatedResponse::Unsupported { .. })
+            ));
+        }
         for tail in ["", " ", "1", "-", "?"] {
             assert_fixed_parse_rejection(&program(&format!("sh {quote}${tail}{quote}")));
         }

@@ -201,6 +201,12 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                             });
                         }
                         if ch == '$' && quote == '"' {
+                            if !dynamic
+                                && chars.get(i + 1) == Some(&'{')
+                                && truncated_interpolation_opener(&chars[i + 2..], triple)
+                            {
+                                return Err(Rejected("E_SOURCE_PARSE"));
+                            }
                             // Only known-invalid ASCII tails in the ordinary
                             // literal portion; do not interpret expression bodies.
                             if !dynamic
@@ -237,6 +243,26 @@ fn lex(source: &str) -> Result<Vec<Token>> {
         }
     }
     Ok(tokens)
+}
+
+fn truncated_interpolation_opener(tail: &[char], triple: bool) -> bool {
+    // This is only the independently verified empty-opener tail family, not
+    // an expression parser. `${"x"}` and even `${}` can be valid Groovy.
+    // An apparent outer quote here starts a nested expression string; if the
+    // entire source suffix contains only structural closers/whitespace, that
+    // nested string cannot close. Other dynamic bodies remain outside this
+    // predicate, including nested/slashy strings and comments.
+    let whitespace = |c: &char| matches!(c, ' ' | '\t' | '\n' | '\u{c}');
+    let tail = &tail[tail.iter().take_while(|c| whitespace(c)).count()..];
+    if tail.is_empty() {
+        return true;
+    }
+    let width = if triple { 3 } else { 1 };
+    tail.get(..width)
+        .is_some_and(|quote| quote.iter().all(|c| *c == '"'))
+        && tail[width..]
+            .iter()
+            .all(|c| whitespace(c) || matches!(c, '}' | ')' | ']' | ';'))
 }
 
 pub(super) fn stage_id(name: &str) -> String {

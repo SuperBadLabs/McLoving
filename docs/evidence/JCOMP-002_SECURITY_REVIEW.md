@@ -106,7 +106,7 @@ preregistered status and code. Expected shell failures are still supported
 compiler inputs; no shell workload was executed in this campaign.
 
 The campaign's SHA-256 is
-`3fa61b9cdb5c1fe6c771cba048bc74e0df5d9e9aba8e58308520e074c1d0937a`.
+`1851ed7e7cec098049995abf898a009bae4f25bb42582a8108ed3010be9014e7`.
 Its 46 response files and 46 receipt files are retained unchanged alongside the
 campaign manifest. Independent digest checks verified every file pair.
 The offline verifier checks the exact 93-file inventory, all record and receipt
@@ -118,7 +118,7 @@ and hosted Foundation run this verification without launching a worker.
 | Binding | SHA-256 |
 |---|---|
 | Immutable compiler image | `0b687a72f8cd99a1c8401796714e5f9867f2288d7aff80bf1fdd22e2ac417232` |
-| Executed admission binary | `8fca69f093cc62c73f71b54a96237a9327aa794f6cf3401cf0dd77d9183711d9` |
+| Executed admission binary | `01f40fa860b18cef0b3821092f1fffbde37124db911d6e9f31482ac24bcc2ca6` |
 | Syntax contract | `ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe` |
 | Frozen fixture manifest | `654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727` |
 | Target profile | `feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271` |
@@ -150,8 +150,8 @@ binary/image observations above.
 | `crates/jenkins-compiler-admission/src/lib.rs` | `b93456a823c1e6261b515b55716740ec0391ae7982de6b69ef866a711ed3ea78` |
 | `crates/jenkins-compiler-admission/src/main.rs` | `760371421ec57a951a0b865317303ed44ec9eaf96f2fcd2a78e303d89ea133e4` |
 | `crates/jenkins-compiler-admission/src/sequential/mod.rs` | `da5d4e8a617dc7842a7eff611e6a38d8b55a70b5b665585fcff7b77ea3fd3b66` |
-| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `84ae7df8ce6315702da9f614eb19209676adc1c504359ce5d45b43badadfed3a` |
-| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `48b34f1d65fe413d14f9d44fb637bff5cfa15db5d7b2875bad92adee02084de1` |
+| `crates/jenkins-compiler-admission/src/sequential/source.rs` | `d5d0043966a671ab6228e97e1a56ba33f69ce6f0d2d09483dc000cf27d9bc122` |
+| `crates/jenkins-compiler-admission/src/sequential/tests.rs` | `4ce36260c3b7b37fd4eb56ebbc5e5fd7ba724bfd7028e773b0ef084ca84b3700` |
 | `crates/jenkins-compiler-admission/tests/sequential_cli.rs` | `567471b58dc03bbe940924a560109ad3b255035531fcb690ff76e2e2b2498c3b` |
 | `compat/jenkins-worker/Containerfile` | `f20d18163fe38d039b5d1d0ed312422344dd64ff896fea6fa77ef8d170bba3c7` |
 | `compat/jenkins-worker/deps.edn` | `40acc306d5e2cfea912ac1d6e6fbfd31a95d15cb7e34861820783cbaa438c597` |
@@ -160,7 +160,7 @@ binary/image observations above.
 | `compat/jenkins-worker/README.md` | `ad764263a1f387192b085b51294471d1975c0a4a962ed25c11e3b41fb62a98cf` |
 | `docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md` | `882c421c3e751b4f02e1b065650f55aacb69fa687406287bfd5295d7ce07744d` |
 | `scripts/test-jenkins-sequential-compiler.sh` | `fc6ffeb596b03ae1d98bf2f4c6f024ee63f4db847f197ec9693a2e4d629d3f96` |
-| `scripts/test-jenkins-sequential-contained.py` | `37b4b854883fbcdc0da4623a3050e94a21ff19651662232d4e3b2afa74d8744b` |
+| `scripts/test-jenkins-sequential-contained.py` | `6ddb019d47226bf3921cebd728f1ed874448e3269d71ca8393cd8cc097e7aeeb` |
 | `scripts/test-jenkins-sequential-launcher.py` | `52a5597a7cfe9ecf70d6cd454b2fdc509797735a74a6e7b6c6e60b231bdf87d8` |
 | `scripts/test-jenkins-sequential-retained.py` | `65e75b23be201cf1e00fb567c44341b44ae4e089cd31b9a49976e2d20b1ce268` |
 | `.github/workflows/foundation.yml` | `bb77289978b28cdaf3a8fac3347ed0afef2cd7eb11281e5efe0079e292aac52a` |
@@ -245,19 +245,20 @@ unsupported. The recognizer now compares closing delimiters against the exact
 openers consumed within its recognized grammar. Unicode preprocessing checks
 hex length/content before classifying well-formed excluded escapes. Literal
 syntax checks distinguish independently verified malformed printable-ASCII
-escapes from valid excluded octal/line-continuation forms. Ambiguous dynamic
-bodies, non-ASCII escapes and unverified control forms remain unclassified;
-they cannot earn a successful unsupported or parse-rejection receipt without
-independent agreement. This is not a general Groovy syntax validator.
+escapes from valid excluded octal/line-continuation forms. Non-ASCII escapes and unverified control forms retain conservative refusal
+boundaries. Some complex dynamic expressions can produce a provisional local
+classification that disagrees with Groovy; public validation then fails. Neither
+local guesses nor admission errors earn unsupported or parse-rejection coverage. This is not a general Groovy syntax validator.
 
-The final package passed 32 tests and strict all-target Clippy. The literal
+The pre-interpolation-correction package passed 32 tests and strict all-target Clippy. The literal
 regressions include 388 ASCII/physical-whitespace cases across four quote forms
 and 16 non-ASCII/control cases, alongside the earlier 140 EOF cases and new
 mismatched-delimiter/Unicode regressions. Chief and independent worker-owner
 review checked the production boundary against pinned Groovy PARSING controls.
 
-A fresh 46-launch fixed campaign with the final executable produced the current
-retained evidence above. All 46 worker response files remain byte-identical to
+A historical 46-launch fixed campaign used executable `8fca69f093cc62c73f71b54a96237a9327aa794f6cf3401cf0dd77d9183711d9`
+and campaign digest `3fa61b9cdb5c1fe6c771cba048bc74e0df5d9e9aba8e58308520e074c1d0937a`. The interpolation correction below
+supersedes that executed-binary observation. All 46 worker response files remain byte-identical to
 the earlier campaigns; the observed executable and trusted-receipt digests are
 updated. Offline verification, all sixteen retained-evidence mutation tests,
 and the shared compiler gate passed. The worker image, syntax contract and
@@ -273,5 +274,37 @@ Valid excluded Unicode and octal controls returned verified
 digest is
 `8614a8562b7d8f0838ea5c64e1ceb7e7fb50adbe11532e34e5dcf249f6ed2d19`.
 Earlier supplemental observations remain in their original temporary directories
-and are not substituted for these final-executable results. No workload shell
+and are not substituted for the current executable results above. No workload shell
 was executed and no new corpus-coverage claim is made.
+
+
+## Malformed-interpolation review correction
+
+Codex review of `846f2a6` identified a malformed interpolation opener that
+Groovy rejected during PARSING but Rust had provisionally classified dynamic.
+A finite check now recognizes a first `${` opener followed by an ASCII gap and
+EOF, or the outer quote delimiter with only whitespace/closing punctuation.
+It does not parse arbitrary interpolation expressions or admit new syntax.
+
+The package still passes 32 tests and strict all-target Clippy. The extended
+regression function includes 60 malformed opener cases, 18 straightforward
+valid excluded expression controls, and four complex valid controls whose
+public validation must return an error or Unsupported, never Admitted/Rejected.
+Independent pinned Groovy checks accepted all 22 exact valid controls.
+Complex quoted/comment interpolation can still disagree with the bounded Rust
+recognizer. Such disagreement is an admission error, not a verified parse
+rejection, unsupported receipt, or compatibility coverage.
+
+A fresh 46-launch fixed campaign with the current binary produced the retained
+93 files above; all 46 worker response bytes match the prior campaign. The
+worker image, frozen manifest and contract remain unchanged. Twelve additional
+actual isolated controls are preserved with exact sources, canonical contexts,
+responses and trusted receipts under `/tmp/mcloving-jcomp002-interpolation-01`.
+The prior eight delimiter/literal controls retained their outcomes. Malformed
+double/triple interpolation openers returned verified `rejected/E_SOURCE_PARSE`;
+valid empty and nested quoted expressions returned verified
+`unsupported/E_STEP_DYNAMIC`. Its campaign digest is
+`cf66ee4e66072348091dcb9224bff6555ecee9762ede7d6693603519346da60a`.
+The shared compiler gate passed: 12 Clojure tests/216 assertions, 11 launcher
+tests, all 16 retained mutation tests and exact 93-file offline verification.
+No source workload was executed and JCOMP-002 remains ACTIVE pending its gates.
