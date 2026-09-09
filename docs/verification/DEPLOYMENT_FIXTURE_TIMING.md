@@ -121,9 +121,57 @@ identical stripped smoke runs varied from 13m58s to 10m59s. Runner load,
 setup/queue time, and filesystem effects contribute. No systemd optimization
 or production-performance improvement is claimed.
 
-CI-004 implementation acceptance now has complete corrected-head evidence.
-The ticket remains ACTIVE until final-head checks, independent review,
-protected merge, and post-merge verification complete. Passing implementation
-tests does not earn closed-ticket attribution or satisfy downstream ticket
-dependencies. These receipts bind the unchanged implementation content, not
-an untested future metadata head.
+Those corrected-head implementation results did not by themselves earn
+closed-ticket attribution or satisfy downstream dependencies. The final
+review correction kept CI-004 ACTIVE until protected merge and exact
+post-merge verification. That completed sequence is recorded next.
+
+## Final head and verified protected-main closure
+
+[PR #125](https://github.com/SuperBadLabs/McLoving/pull/125) merged exact final
+head `7ff7d726632cb1f0ee128b78a5cb92ec5432839a` as protected-main commit
+`1d81127c7913a92a43402e377eb62289897356e0` at 2026-09-09 00:02:38 UTC.
+The final head corrected the premature DONE status identified in review;
+CI-004 remained ACTIVE during merge and while post-merge gates ran.
+
+Final-head [Foundation run 34292013621](https://github.com/SuperBadLabs/McLoving/actions/runs/34292013621)
+and [classified Windows run 34292013546](https://github.com/SuperBadLabs/McLoving/actions/runs/34292013546)
+passed before the guarded, exact-head squash merge. Fresh protection and
+paginated review checks are described in `docs/evidence/CI-004_SECURITY_REVIEW.md`.
+The smoke-script and Foundation-workflow bytes match the successful
+corrected-head tests.
+
+On exact merged commit 1d81127,
+[Foundation run 34293282546](https://github.com/SuperBadLabs/McLoving/actions/runs/34293282546)
+and [native Windows run 34293282632](https://github.com/SuperBadLabs/McLoving/actions/runs/34293282632)
+both passed. Native Windows agent job `102284330767` actually executed for
+4m56s, including debug and release service/crash-recovery gates; it was not a
+classified skip. The deployment smoke and controlled-systemd gates both passed
+in Foundation job `102284301764`.
+
+| Observed hosted duration | Corrected candidate 3880043 | Final PR head 7ff7d72 | Merged main 1d81127 |
+|---|---|---|---|
+| Smoke step | 10m59s | 10m05s | 15m02s |
+| Controlled-systemd step (unchanged) | 2m30s | 2m25s | 3m15s |
+| Complete deployment job | 15m17s | 15m07s | 19m26s |
+| Foundation run start to aggregate completion | 15m32s | 15m45s | 19m39s |
+
+For final PR head 7ff7d72, smoke ran September 8 23:47:42–23:57:47 UTC,
+systemd 23:58:03–September 9 00:00:28, and the deployment job
+23:45:24–00:00:31. Foundation started 23:44:55 and its aggregate completed
+00:00:40. For merged main on September 9, smoke ran 00:03:29–00:18:31,
+systemd 00:18:52–00:22:07, deployment 00:02:44–00:22:10, and Foundation
+00:02:40–00:22:19.
+
+The protected-main observation is 19m39s, not the corrected candidate's
+15m32s. Against the adjacent 22m48s baseline, that is an observed 3m09s
+(13.8%) shorter workflow, while the final PR observation was faster again.
+The unchanged systemd step also varied. These runs demonstrate successful
+validation and substantial variability; they do not establish a guaranteed
+32% improvement, a systemd optimization, or production performance gains.
+
+Protected merge and exact-main Foundation/native-Windows success now provide
+CI-004's previously outstanding closure evidence. Later bookkeeping commits
+must still pass their own review and checks; these receipts identify the
+already merged and verified implementation rather than asserting success for
+an unknown future head.

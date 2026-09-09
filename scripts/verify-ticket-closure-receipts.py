@@ -345,7 +345,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 113
+MINIMUM_TICKET_ROWS = 115
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
@@ -356,7 +356,7 @@ CLOSED_TICKETS = frozenset({
     "ADMIN-001", "AGENT-001", "AGENT-002", "AGENT-003", "AGENT-004",
     "AGENT-005", "AGENT-006", "ALPHA-001", "API-002", "ARCH-001",
     "ARCH-002", "AUDIT-001", "AUTHZ-001", "CACHE-001", "CANARY-000",
-    "CI-001", "CI-002", "CI-003", "CONSUMER-001", "CTRL-001", "CTRL-002", "CTRL-003",
+    "CI-001", "CI-002", "CI-003", "CI-004", "CONSUMER-001", "CTRL-001", "CTRL-002", "CTRL-003",
     "CTRL-004", "DEP-001", "DEPLOY-001", "DEPLOY-003", "DEPLOY-004", "DIFF-001",
     "DIFF-002",
     "DIFF-003",
