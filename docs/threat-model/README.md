@@ -439,6 +439,25 @@ merged as `1d81127c7913a92a43402e377eb62289897356e0`. Exact post-merge
 Foundation `34293282546` and native Windows Agent `34293282632` passed.
 CI-004 now closes on those observed receipts; no production authority is granted.
 
+## JCOMP-001 preregistered contract review
+
+The syntax/profile/fixture and comparison contract is reviewed in
+`docs/evidence/JCOMP-001_SECURITY_REVIEW.md`. TM-008's compiler resource bounds
+and TM-020's isolated, parse-only worker and independent Rust admission remain
+unchanged; future generalized admission must independently bind source semantics
+to output. This change adds repository-owned expectation data and a read-only
+Groovy CONVERSION authoring check, not a new untrusted-input execution service.
+The contract separates authored fixtures from the 228-source historical corpus
+and permits no model output or local authoring result to become Jenkins evidence.
+
+TM-052's protected checks remain mandatory. Local and hosted Foundation both
+run the shared fixture gate, whose fixed 17-test population rejects missing,
+zero, skipped, and incomplete execution; independent negative controls passed.
+JCOMP-001 remains ACTIVE without closure attribution until protected merge and
+exact post-merge Foundation/native Windows verification support a later closure
+update. The contract's dedicated disposable M1 environments grant no production
+containment claim; hostile same-UID workload isolation remains SEC-005.
+
 ## Closure attribution
 
 Machine-readable, and read by `scripts/verify-ticket-closure-receipts.py` as the

@@ -60,3 +60,20 @@ clojure -M:test
   corpus-052-cinqict_jenkinsdev \
   e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97
 ```
+
+## Sequential Declarative milestone contract
+
+The [JCOMP-001 contract](../../docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md)
+and [fixture manifest](fixtures/sequential-v1/manifest.json) preregister a broader
+sequential literal-shell subset. They do not broaden the v1 worker admission
+above or establish Jenkins/McLoving execution parity. The ten authored supported
+expectations, twelve negative expectations, historical corpus-052 regression,
+and original 228-source corpus remain separate populations.
+
+From the repository root, run `scripts/test-jenkins-sequential-contract.sh` for
+the read-only integrity, complete mutation-suite, and pinned Groovy literal
+checks. Both local and hosted Foundation run this gate alongside the existing
+compiler and plugin-directory tests. It neither evaluates fixture source nor
+executes Jenkins or product jobs. Generalized compilation and independent Rust
+source-to-output validation belong to JCOMP-002; step execution and workspace
+lifecycle are separate prerequisites before the final JCOMP-003 campaign.
