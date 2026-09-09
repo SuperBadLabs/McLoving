@@ -3,8 +3,9 @@
 ## Status and boundary
 
 JCOMP-002B is ACTIVE. This is a review plan and implementation record, not a
-closure receipt. The actual shipped runtime campaign, final independent review,
-protected merge and exact-main verification remain outstanding. The design is
+closure receipt. The actual shipped runtime campaign and independent implementation reviews
+have passed. Protected final-head checks, merge and exact-main verification
+remain outstanding. The design is
 `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md`.
 
 The selected internal mode transfers a bounded controller-owned checkpoint
@@ -87,8 +88,7 @@ Each of the three suites independently refuses failed, empty, wrong-sized,
 skipped and ignored outcomes, and every required source target is checked.
 These mocks are control-flow verification only. The contained driver requires
 four sequential-store, three workspace-store and eleven remote tests, with
-eight sequential and five workspace evidence markers; its actual campaign
-has not yet supplied passing evidence for this candidate.
+eight sequential and five workspace evidence markers; the passing corrected campaign is recorded below.
 
 A read-only inspection of the five new actual-runtime test definitions found
 useful generation/output/owner bindings and identified improvements needed
@@ -100,8 +100,8 @@ spools, observe a private cancellation marker outside deleted workspaces,
 execute a transferred tool and inspect its executable bit, and observe an
 empty directory in a later stage. They wait for both agent sessions before
 admission and include actual exit-7 failure with captured file receipts.
-Focused strict Clippy passes; actual execution of this corrected candidate
-remains the next verification obligation.
+Focused strict Clippy passes; the corrected candidate passed actual execution
+as recorded below.
 
 ## Development campaign correction
 
@@ -119,13 +119,62 @@ actual exit/termination, reason and original result digest; legacy summary
 shapes remain unchanged. New regression coverage checks the actual builder
 for success, capture failure and identical replay. All 56 agent library tests
 and strict all-target Clippy pass, and the store reviewer independently
-inspected both publication paths. A fresh contained campaign remains required.
+inspected both publication paths. The fresh campaign below verifies the fix.
 
 The initial full Foundation gate also refused an unversioned new local domain
 dependency. Adding its exact `=0.0.0` version passes the pinned dependency-ban
 check without changing policy. The separate source-acquirer package passed
 under its required AppArmor profile; those source files are unchanged by these
 corrections.
+
+## Corrected committed-source campaign and final review
+
+The fresh contained campaign on exact source
+`941d473144d942824b767eb78744ad27bdf6ac20` passed all four sequential-store,
+three workspace-store and eleven actual remote-agent tests, with zero failed,
+ignored or skipped tests. All eight predecessor and five workspace evidence
+markers were present. The retained
+[`jcomp-002b-workspace-v1`](jcomp-002b-workspace-v1/README.md) inventory binds
+source/tree/archive, pinned images, all five executable hashes, complete build
+and runtime logs, database identity and successful disposable cleanup.
+
+The controller hash is
+`f78ce4a2ea046f0a08ff91a8fcd8049e345fa2ee2c9afa4592ff5958a358e73a`;
+the corrected agent hash is
+`fa7abc7c60b98572916999639885034adf73ef40e1de0410ad83851786b5e5aa`.
+The actual tests verify different-agent placement and controller restart,
+terminal-commit crash/replay after namespace closure, four fresh shells,
+file-content/binary/executable/empty-directory continuity, concurrently admitted
+builds with distinct state, exact workspace and result-spool path removal,
+pre-start and active cancellation, oversized/symlink capture refusal, retained
+exit-7 evidence and no transfer of uncertain writes after started lease loss.
+The lease-loss case retains the last verified generation pending reconciliation;
+it does not claim whole-build terminal cleanup.
+
+Full local Foundation validation passed on this corrected source using the
+September handoff's documented source-acquirer split: the workspace test command
+excluded only that package, which separately passed under its required
+`mcloving-source-acquirer` AppArmor profile. Repository validation policy and
+workflow commands were not weakened. Four mocked gate-control tests and eleven
+workflow contract tests pass; these remain distinct from actual execution.
+
+The runtime author independently reviewed the domain/store/controller changes;
+the store author independently reviewed agent/runtime/controller and the gate
+changes at `5152089`, then independently reviewed the final publication fix at
+exact `941d473144d942824b767eb78744ad27bdf6ac20`. The latter review explicitly
+checked live/replay equivalence, verified durable digest, malformed-transfer
+refusal, bytes-free store normalization, cancellation-substituted summaries and
+replay before checkpoint mutation. No actionable blocker remained. The separate
+schema/gate reviewer ran domain tests and inspected actual-test assertions;
+strengthened cleanup and metadata checks were included in the passing campaign.
+The independent retained-evidence audit reconstructed the committed source
+archive and verified all eleven inventory hashes, all eighteen source hashes,
+nineteen source-bound result records, thirty stdout records, eight closed
+cleanup receipts, and eleven controller plus eleven agent executable identity
+records. It independently reran four gate controls and eleven workflow tests;
+all passed. The retained manifest counts and cleanup/nonclaim language matched
+the actual log. No edits or actionable findings were required by that audit.
+These independent reviews do not substitute for protected PR checks.
 
 ## Evidence required before closure
 
