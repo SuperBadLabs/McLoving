@@ -65,7 +65,8 @@ cleanup() {
     fi
   done
   rm -f -- "$OUTPUT" "$ERROR_OUTPUT" "$OUTPUT_PIPE" "$ERROR_PIPE" "$CID_FILE" \
-    "$SOURCE_SNAPSHOT"
+    "$SOURCE_SNAPSHOT" "$CONTEXT_SNAPSHOT" "$REQUEST_FILE" "$ADMISSION_BIN" \
+    "$WORK_DIR/admission-receipt"
   rm -rf -- "$WORK_DIR"
 }
 trap cleanup EXIT

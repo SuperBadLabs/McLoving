@@ -156,7 +156,7 @@ binary/image observations above.
 | `compat/jenkins-worker/Containerfile` | `f20d18163fe38d039b5d1d0ed312422344dd64ff896fea6fa77ef8d170bba3c7` |
 | `compat/jenkins-worker/deps.edn` | `40acc306d5e2cfea912ac1d6e6fbfd31a95d15cb7e34861820783cbaa438c597` |
 | `compat/jenkins-worker/run-worker.sh` | `04a58a89a79856ff6b2c95c7aecbffe6df153b70178d0dfc6bfb6e2410c20b82` |
-| `compat/jenkins-worker/run-sequential-worker.sh` | `4d928e7e89b427df12c74919c09ea962f8c73eb30cb9509825dd79f6426f8de1` |
+| `compat/jenkins-worker/run-sequential-worker.sh` | `b336b9fb038c22ab495c5175dc8aeab4497d6dfeecd84490959f073606976dbf` |
 | `compat/jenkins-worker/README.md` | `ad764263a1f387192b085b51294471d1975c0a4a962ed25c11e3b41fb62a98cf` |
 | `docs/architecture/JENKINS_SEQUENTIAL_COMPILER_V2.md` | `882c421c3e751b4f02e1b065650f55aacb69fa687406287bfd5295d7ce07744d` |
 | `scripts/test-jenkins-sequential-compiler.sh` | `fc6ffeb596b03ae1d98bf2f4c6f024ee63f4db847f197ec9693a2e4d629d3f96` |
@@ -180,3 +180,16 @@ After adding offline verification, the final harness repeated all 46 live
 compilations with the same immutable image and hardened admission binary.
 All 93 generated files were byte-identical to the retained campaign; the
 campaign digest above remains unchanged. No source workload was executed.
+
+## PR implementation review correction
+
+Copilot review of `5e15f6c` requested symmetric explicit cleanup of the private
+source/context snapshots, request bytes and copied admission executable. The
+launcher now removes those files and its private admission receipt explicitly
+before the existing whole-directory cleanup. All eleven mocked launcher tests
+passed, including failure and cleanup paths. A fresh 46-launch contained
+campaign using the same pinned image and admission executable reproduced all
+93 retained files byte-for-byte; the reviewed campaign digest is unchanged.
+Independent chief and worker-owner review found no remaining action items in
+this bounded cleanup correction. JCOMP-002 remains ACTIVE pending protected
+merge and exact post-merge verification.
