@@ -775,6 +775,7 @@ impl AgentControl for ControllerAgentService {
             RECOVERED_DISCHARGE_FEATURE.to_owned(),
             ACCEPT_LEASE_STATE_FEATURE.to_owned(),
             INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
+            mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -1066,16 +1067,22 @@ impl AgentControl for ControllerAgentService {
                 "lease_seconds must be between 5 and 300",
             ));
         }
-        let (capabilities, long_poll_negotiated) = self
+        let (mut capabilities, long_poll_negotiated, workspace_transfer_negotiated) = self
             .store
-            .agent_session_capabilities_and_feature(
+            .agent_session_capabilities_and_features(
                 &request.agent_id,
                 request.session_epoch,
                 LONG_POLL_WORK_DELIVERY_FEATURE,
+                mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE,
             )
             .await
             .map_err(internal_store_error)?
             .ok_or_else(|| stale_session_status(&self.session_churn, &request.agent_id))?;
+        if !workspace_transfer_negotiated {
+            capabilities.retain(|capability| {
+                capability != mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY
+            });
+        }
         // Subscribe before the first claim query. PostgreSQL notifications are
         // hints and may be coalesced, but this ordering prevents the ordinary
         // check-then-sleep race within one healthy controller process.
@@ -1587,6 +1594,13 @@ async fn try_assign_work(
         fence_token: encode_authority_token(claim.restore_epoch, claim.fence)?,
         payload_digest: Sha256::digest(&execution_spec_json).to_vec(),
         execution_spec_json,
+        workspace_transfer_json: execution
+            .workspace_transfer
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| Status::internal(format!("serialize workspace grant: {error}")))?
+            .unwrap_or_default(),
     }))
 }
 
@@ -2067,6 +2081,11 @@ impl EmbeddedWorker {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !capabilities.iter().any(|capability| capability
+                == mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY),
+            "workspace transfer requires the negotiated remote Linux agent"
+        );
         let disabled = match classify_embedded_worker_capabilities(&capabilities).context(
             "MCLOVING_AGENT_CAPABILITIES violates the capability vocabulary \
              (docs/architecture/CAPABILITY_VOCABULARY_V1.md)",

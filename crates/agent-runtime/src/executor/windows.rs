@@ -71,6 +71,11 @@ where
                 .ok_or(ExecutionError::UnboundedCredentialOutput)?,
         )
     };
+    if request.workspace_seed.is_some() {
+        return Err(ExecutionError::WorkspaceTransfer(
+            "unsupported_platform".to_owned(),
+        ));
+    }
     let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
@@ -208,6 +213,7 @@ where
     sync_directory(&workspace)?;
 
     Ok(ExecutionOutcome {
+        workspace_snapshot: None,
         termination,
         exit_code: status.code(),
         process_id,
@@ -495,6 +501,7 @@ mod tests {
         arguments: Vec<OsString>,
     ) -> ExecutionRequest {
         ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode,

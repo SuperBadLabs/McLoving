@@ -1372,6 +1372,7 @@ name = "mcloving-agent-runtime"
 version = "0.0.0"
 dependencies = [
  "aho-corasick",
+ "mcloving-domain",
  "mcloving-windows-job",
  "nix",
  "rusqlite",
@@ -1573,6 +1574,10 @@ name = "mcloving-domain"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

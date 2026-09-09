@@ -67,6 +67,13 @@ where
         return Err(ExecutionError::UnsupportedMode(request.mode));
     }
     validate_redactions(redactions)?;
+    if request.workspace_seed.is_some()
+        && (!cfg!(target_os = "linux") || !request.environment.is_empty() || !redactions.is_empty())
+    {
+        return Err(ExecutionError::WorkspaceTransfer(
+            "unsupported_platform_or_environment".to_owned(),
+        ));
+    }
     let capture_limit = if redactions.is_empty() {
         None
     } else {
@@ -80,6 +87,11 @@ where
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
+    let workspace_control = File::open(&workspace)?;
+    if let Some(seed) = &request.workspace_seed {
+        super::workspace_transfer::seed(&workspace, seed)
+            .map_err(ExecutionError::WorkspaceTransfer)?;
+    }
     let spool = workspace.join("spool");
     tokio::fs::create_dir(&spool).await?;
     // Keep handles to every agent-owned directory before untrusted code starts.
@@ -250,7 +262,14 @@ where
         &[spool.clone(), workspace.clone()],
     )?;
 
+    let workspace_snapshot = request.workspace_seed.as_ref().map(|_| {
+        if termination.0 != Termination::Exited {
+            return Err("execution_not_completed".to_owned());
+        }
+        super::workspace_transfer::capture(&workspace, &workspace_control)
+    });
     Ok(ExecutionOutcome {
+        workspace_snapshot,
         termination: termination.0,
         exit_code: termination.1.code(),
         process_id,
@@ -827,6 +846,7 @@ mod tests {
 
     fn request(root: &Path, workspace: &str, timeout: Duration) -> ExecutionRequest {
         ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode: ExecutionMode::Direct,
@@ -844,6 +864,7 @@ mod tests {
 
     fn resistant_request(root: &Path, workspace: &str) -> ExecutionRequest {
         ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode: ExecutionMode::Direct,
@@ -1057,6 +1078,7 @@ mod tests {
     async fn successful_exit_preserves_output_and_digest() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/success"),
             mode: ExecutionMode::Direct,
@@ -1081,6 +1103,7 @@ mod tests {
     async fn normal_execution_is_not_capped_by_the_containment_wait() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/long-running-success"),
             mode: ExecutionMode::Direct,
@@ -1110,6 +1133,7 @@ mod tests {
     async fn workload_cannot_revoke_agent_access_to_log_spools() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/revoked-spool-mode"),
             mode: ExecutionMode::Direct,
@@ -1140,6 +1164,7 @@ mod tests {
         assert!(std::env::var_os("HOME").is_some());
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/environment"),
             mode: ExecutionMode::Direct,
@@ -1173,6 +1198,7 @@ mod tests {
     async fn successful_leader_exit_stabilizes_inherited_log_handles() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/inherited-handle"),
             mode: ExecutionMode::Direct,
@@ -1214,6 +1240,7 @@ mod tests {
     async fn output_limit_terminates_and_caps_the_durable_spool() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/quota"),
             mode: ExecutionMode::Direct,
@@ -1237,6 +1264,7 @@ mod tests {
     async fn renamed_spool_cannot_evade_the_output_quota() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/renamed-log"),
             mode: ExecutionMode::Direct,
@@ -1276,6 +1304,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("existing")).unwrap();
         let existing = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("existing"),
             mode: ExecutionMode::Direct,
@@ -1293,6 +1322,7 @@ mod tests {
 
         std::os::unix::fs::symlink("/tmp", root.path().join("linked")).unwrap();
         let linked = ExecutionRequest {
+            workspace_seed: None,
             workspace: PathBuf::from("linked/escape"),
             ..existing
         };
@@ -1313,6 +1343,7 @@ mod tests {
         std::fs::write(outside.join("sentinel"), "outside").unwrap();
 
         let request = ExecutionRequest {
+            workspace_seed: None,
             workspace_root: workspace_root.clone(),
             workspace: PathBuf::from("org/replaced-root"),
             mode: ExecutionMode::Direct,
