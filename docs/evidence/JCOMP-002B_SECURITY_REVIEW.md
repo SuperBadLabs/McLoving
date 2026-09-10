@@ -2,14 +2,14 @@
 
 ## Status and boundary
 
-JCOMP-002B is ACTIVE. This is a review plan and implementation record, not a
-closure receipt. The historical shipped runtime campaign passed on `941d473`,
+JCOMP-002B is DONE on the exact-source closure evidence below. The implementation
+and historical review record remain preserved. The historical shipped runtime campaign passed on `941d473`,
 but a continuation review identified an uncovered operator-reconciliation path.
 The reconciliation correction passed independent review and a fresh campaign
 at `e4b6fcd`. Subsequent PR review found terminal-reason precedence and schema
 receipt/generation issues; both corrections passed independent review and the
 fresh v3 campaign at `cfe6e4a`. Earlier campaigns do not verify later source changes.
-Protected final-head checks, merge and exact-main verification remain outstanding. The design is
+The previously outstanding protected final-head checks, merge and exact-main verification are recorded below. The design is
 `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md`.
 
 The selected internal mode transfers a bounded controller-owned checkpoint
@@ -298,7 +298,7 @@ prior local Foundation run at `e4b6fcd` nor PR checks on `9f74aac` certify this
 revised source. Protected merge and exact merged-main Foundation/native Windows
 verification remain outstanding.
 
-## Evidence required before closure
+## Historical closure prerequisites (satisfied by the earned closure below)
 
 Run the actual shipped controller/agent through cross-step/stage continuity,
 fresh shells, distinct-build namespaces and placement transfer, supported file
@@ -330,3 +330,9 @@ fixture acceptance and original-corpus coverage remain unearned until the
 appropriate actual campaigns pass; JCOMP-003 owns the paired claim and separate
 228-source report. No production, deployment, canary, cutover or release
 authority is granted.
+
+## Earned closure, September 10
+
+PR #131 normally merged as `49c7e3346529babc131b318a5cf4091e4194db8d`; tree `c5098e0651f2c2a054a6ad4da644e150f73ee70a` equals reviewed head `d206fb51d7dee4370c570c5cf3a030968166ca29`. The retained premerge receipt passed, and the final postmerge receipt reports verified with no failures or pending gates. Exact-main Foundation `34411625710` attempt 2 and actual native Windows `34411625740` succeeded. The earlier observer-expiry failure and successful rerun remain separately recorded; a rerun does not erase the initial failure. The source-qualified v1/v2/v3 campaigns and later review corrections above remain historical rather than being relabeled as execution on the final head.
+
+Receipt anchors: September 9 next-chief `receipts/pr131-premerge.json` SHA256 `682b5723af1f55d477fe2bed73533f5373897d713c1f3d8a4813df2310b908aa`; `receipts/pr131-postmerge.json` SHA256 `b022f1ae4607a2da341af241e8de810894053eb11e282e38960b3eba3ea72d2e`. This closes only bounded contained workspace-transfer implementation. JCOMP-003 paired equivalence and original-corpus evidence remain unearned; the residual boundaries above remain unchanged.

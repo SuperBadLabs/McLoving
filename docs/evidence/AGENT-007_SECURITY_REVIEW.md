@@ -2,9 +2,9 @@
 
 Date: 2026-09-09
 
-Status: **ACTIVE**. This is an implementation/review record. Protected final-head
+Status: **DONE** on the corrected-source closure receipts below. Protected final-head
 checks, independent final review, normal merge and exact-main Foundation/native
-Windows verification remain required before closure. Earlier measurements below
+Windows execution are recorded there. Earlier measurements below
 identify historical candidates; they do not certify the subsequent corrections.
 
 `AGENT-007` makes the agent ride out a controller outage its own lease already
@@ -453,3 +453,11 @@ unanswered-expiry cancellation. A late-window peer returning immediate
 Unavailable replies also requires a bounded request count. The existing healthy
 200ms response test and ordinary stalled/recovery tests remain. Source review and new exact-source
 local/CI evidence must bind this correction rather than the earlier candidate.
+
+## Earned closure, September 10
+
+The response-budget correction was independently reviewed at `6cdf3fe038c74ac22dd304a77650c37b79d985a5`, tree `87e91865c4d3d2822a1d6d269772a82e6bdefc6d`, parent `c1d3f883f894805c289e23faa693609ae7f62835` on protected base `5cd305d227e909be95fa838088f7429b75cb6601`. The new independent receipt reviews the short-term response/retry reserve correction on the reconciled source. Historical `e016d3017acb81227d3dcc6b351ee5bc4c20d18a` and `c1d3f883f894805c289e23faa693609ae7f62835` reviews do not certify this later change. Normal protected merge `44f0498fbdf3a59434176e9d09a52e1260336260` matches that reviewed tree. Final app-bound protected checks, unchanged protection, exact-main Foundation `34440051467` and actual native Windows `34440051470` are bound by `43d5150504d8be9a2122cd4249fa6842d280f311c9f2a7622eafb628ddf7b05e`. Native execution includes the required agent and executor tests, not merely a green aggregate.
+
+Fresh local candidate verification passed 72 agent unit tests including all eight real tonic renewal regressions, focused clippy, three actual remote-work gates (22 tenant transactions against the unchanged 25 limit) and five actual controller/agent lease gates. Restoring the old one-second response allowance failed the new short-budget recovery regression as intended. Historical combined Foundation and 31 separately profiled source-acquirer passes bind earlier `c1d3f883f894805c289e23faa693609ae7f62835`, not this revised head. Those historical receipts retain the initial destination-observer doctest failure caused by overlapping container/host cache use and the serialized successful continuation from that boundary. Receipt `61dc1b9f05182f59ad0ae4908e7975860f9800a00738c7d9e3f4f16325893579` binds exact source, logs and binaries. The historical cadence-timeout and grace-removal mutations retain their original source qualifications; neither is claimed as a newly executed mutation. PR #132's 33-transaction exact-main failure remains retained.
+
+The held cancellation deadline reserves the full configured termination grace and one-second margin. Only validated request-start anchored renewal receipts extend authority; answered refusals still cancel immediately. TM-003 and the existing cancellation/reconciliation boundaries were reviewed without broadening fencing or protocol authority. No agent-death resume, hostile same-UID containment, Windows workspace transfer, production authority or sealed Jenkins parity is earned. JCOMP-003 must still freeze and review its own exact execution source and run its separate campaigns.

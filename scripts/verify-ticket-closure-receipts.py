@@ -363,7 +363,7 @@ MINIMUM_TICKET_ROWS = 124
 # both retire a closure obligation that nothing else records.
 CLOSED_TICKETS = frozenset({
     "ADMIN-001", "AGENT-001", "AGENT-002", "AGENT-003", "AGENT-004",
-    "AGENT-005", "AGENT-006", "ALPHA-001", "API-002", "ARCH-001",
+    "AGENT-005", "AGENT-006", "AGENT-007", "ALPHA-001", "API-002", "ARCH-001",
     "ARCH-002", "AUDIT-001", "AUTHZ-001", "CACHE-001", "CANARY-000",
     "CI-001", "CI-002", "CI-003", "CI-004", "CONSUMER-001", "CTRL-001", "CTRL-002", "CTRL-003",
     "CTRL-004", "DEP-001", "DEPLOY-001", "DEPLOY-003", "DEPLOY-004", "DIFF-001",
@@ -375,7 +375,7 @@ CLOSED_TICKETS = frozenset({
     # fixes are its acceptance, and its own row went DONE in the same change.
     "FOUND-002", "HYG-001", "HYG-002", "IDP-001", "INPUT-001", "INV-001",
     "INV-002", "INV-003", "INV-004", "IR-001", "IR-002", "IR-003",
-    "IR-004", "JCOMP-001", "JCOMP-002", "JCOMP-002A", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
+    "IR-004", "JCOMP-001", "JCOMP-002", "JCOMP-002A", "JCOMP-002B", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
     "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
     "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",
