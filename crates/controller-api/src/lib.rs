@@ -6267,12 +6267,32 @@ impl Client {
         project_id: Uuid,
         request: &SubmissionRequest,
     ) -> Result<ValidationResponse, ClientError> {
+        self.validate_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            DEFAULT_PLATFORM,
+            DEFAULT_TRUST_POOL,
+            request,
+        )
+        .await
+    }
+
+    pub async fn validate_pipeline_on_platform_in_pool(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        platform: &str,
+        trust_pool: &str,
+        request: &SubmissionRequest,
+    ) -> Result<ValidationResponse, ClientError> {
         self.send(
             self.inner
                 .post(format!(
                     "{}/pipelines/validate",
                     self.project_url(organization_id, project_id)
                 ))
+                .header(PLATFORM_HEADER, platform)
+                .header(TRUST_POOL_HEADER, trust_pool)
                 .json(request),
         )
         .await
@@ -6284,12 +6304,32 @@ impl Client {
         project_id: Uuid,
         request: &SubmissionRequest,
     ) -> Result<PipelinePlanResponse, ClientError> {
+        self.plan_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            DEFAULT_PLATFORM,
+            DEFAULT_TRUST_POOL,
+            request,
+        )
+        .await
+    }
+
+    pub async fn plan_pipeline_on_platform_in_pool(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        platform: &str,
+        trust_pool: &str,
+        request: &SubmissionRequest,
+    ) -> Result<PipelinePlanResponse, ClientError> {
         self.send(
             self.inner
                 .post(format!(
                     "{}/pipelines/plan",
                     self.project_url(organization_id, project_id)
                 ))
+                .header(PLATFORM_HEADER, platform)
+                .header(TRUST_POOL_HEADER, trust_pool)
                 .json(request),
         )
         .await
@@ -6303,6 +6343,29 @@ impl Client {
         expected_revision: i64,
         request: &PipelineUpsertRequest,
     ) -> Result<PipelineRecord, ClientError> {
+        self.put_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
+            expected_revision,
+            DEFAULT_PLATFORM,
+            DEFAULT_TRUST_POOL,
+            request,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_pipeline_on_platform_in_pool(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+        expected_revision: i64,
+        platform: &str,
+        trust_pool: &str,
+        request: &PipelineUpsertRequest,
+    ) -> Result<PipelineRecord, ClientError> {
         self.send(
             self.inner
                 .put(format!(
@@ -6310,6 +6373,8 @@ impl Client {
                     self.project_url(organization_id, project_id)
                 ))
                 .header(header::IF_MATCH, format!("\"{expected_revision}\""))
+                .header(PLATFORM_HEADER, platform)
+                .header(TRUST_POOL_HEADER, trust_pool)
                 .json(request),
         )
         .await

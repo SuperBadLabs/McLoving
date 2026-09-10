@@ -105,6 +105,8 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
         output: OutputMode::Json,
         command: Command::Apply {
             pipeline_id,
+            trust_pool: "trusted-linux".to_owned(),
+            platform: "linux".to_owned(),
             slug: "replacement-job".to_owned(),
             expected_revision: 7,
             pipeline: pipeline.clone(),
@@ -211,6 +213,8 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
         command: Command::Validate {
             pipeline: pipeline.clone(),
             pipeline_id: None,
+            trust_pool: "trusted-linux".to_owned(),
+            platform: "linux".to_owned(),
             parameters: vec!["count=3".to_owned()],
         },
     })

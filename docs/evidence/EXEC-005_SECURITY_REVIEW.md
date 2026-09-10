@@ -60,6 +60,14 @@ ineligible journal entry. The matching agent then completed that same attempt
 while the other agent remained live. Focused capability tests additionally
 cover mapping-digest and operation mismatches.
 
+The client-context audit then found that CLI validate, plan and apply could
+not select a nondefault trust pool. All three now expose the same trust-pool
+and platform options as submit, and scoped Rust client methods transmit both
+existing admission headers while preserving legacy method signatures/defaults.
+Actual HTTP tests cover default Linux, custom-pool Linux, explicit Windows
+transport, pipeline scope, apply revision/slug/parameters and malformed platform
+refusal. Windows transport coverage does not grant Windows cache admission.
+
 ## Verification scope
 
 Focused verification covers agent scope/payload mutations, sealed original-path

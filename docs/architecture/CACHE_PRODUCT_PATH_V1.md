@@ -42,6 +42,13 @@ Catalogs do not promise hot revocation: changing them requires service restart.
 The CLI accepts `validate pipeline.yaml --pipeline-id <uuid>` and
 `plan pipeline.yaml --pipeline-id <uuid>` to send the required scope through
 the same public API. Process-only validation/planning can omit that option.
+Validate, plan and apply also accept `--trust-pool` (default `trusted-linux`)
+and `--platform` (default `linux`), matching submit's admission context. A
+custom Linux mapping needs its matching pool on all four commands. Apply uses
+its pipeline UUID path and revision precondition but does not save platform or
+pool as submission defaults; repeat the intended options on submit. Sending
+`--platform windows` makes that context explicit and does not enable cache
+execution there: the server still refuses unsupported Windows cache intents.
 
 The agent loads `MCLOVING_AGENT_CACHE_BINDINGS_PATH` with exact raw-byte
 `MCLOVING_AGENT_CACHE_BINDINGS_SHA256`. The file is owner-private, single-link,
