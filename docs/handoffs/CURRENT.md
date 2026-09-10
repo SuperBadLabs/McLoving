@@ -130,7 +130,9 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
 - `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
   `PARALLEL` lane and neither occupies the dispatch slot. `UI-002` through
   `UI-009` are `PENDING` too, as one serial web-interface lane; `UI-002`
-  earns a browser-journey claim `UI-001` already made and cannot support,
+  earns the unsupported browser-journey claim with only necessary minimal
+  served-client repairs, retaining initial failures separately from the accepted
+  repaired baseline; it adds no redesign, route, CSP or authorization change.
   `UI-003` decides a threat boundary rather than implementing one, and the
   six after it are implementation behind that decision. Read the board
   rather than this list for the full set; that is the point of the bullet
