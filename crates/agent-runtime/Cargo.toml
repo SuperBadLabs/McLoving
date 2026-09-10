@@ -31,6 +31,9 @@ rustix = { version = "=1.1.4", features = ["process"] }
 [target.'cfg(windows)'.dependencies]
 mcloving-windows-job = { version = "0.0.0", path = "../windows-job" }
 
+[target.'cfg(windows)'.dev-dependencies]
+mcloving-windows-job = { version = "0.0.0", path = "../windows-job", features = ["test-process-observer"] }
+
 [dev-dependencies]
 tempfile = "=3.27.0"
 

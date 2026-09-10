@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+mcloving-cache = { version = "0.0.0", path = "../../crates/cache" }
+base64 = "=0.22.1"
 mcloving-agent-protocol = { version = "0.0.0", path = "../../crates/agent-protocol" }
 mcloving-agent-runtime = { version = "0.0.0", path = "../../crates/agent-runtime" }
 mcloving-domain = { version = "0.0.0", path = "../../crates/domain" }
@@ -29,7 +31,7 @@ uuid = { version = "=1.18.1", features = ["v4"] }
 windows-services = "=0.26.1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "=0.31.3", features = ["signal"] }
+nix = { version = "=0.31.3", features = ["signal", "fs", "user"] }
 
 [dev-dependencies]
 mcloving-pipeline-ir = { version = "0.0.0", path = "../../crates/pipeline-ir" }

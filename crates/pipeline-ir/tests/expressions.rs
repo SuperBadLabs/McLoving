@@ -386,7 +386,9 @@ impl ProcessStepExt for mcloving_pipeline_ir::Step {
     fn into_process(self) -> mcloving_pipeline_ir::ProcessStep {
         match self {
             Self::Process(process) => process,
-            Self::ConnectorIntent(_) => panic!("fixture contains only process steps"),
+            Self::ConnectorIntent(_) | Self::CacheIntent(_) => {
+                panic!("fixture contains only process steps")
+            }
         }
     }
 }

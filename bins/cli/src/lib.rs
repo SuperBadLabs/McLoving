@@ -58,17 +58,53 @@ pub struct Arguments {
 pub enum Command {
     Validate {
         pipeline: PathBuf,
+        /// Authoritative pipeline scope for operator-mapped helper intents.
+        #[arg(long)]
+        pipeline_id: Option<Uuid>,
+        #[arg(long, default_value = "trusted-linux")]
+        trust_pool: String,
+        #[arg(
+            long,
+            default_value = mcloving_domain::capability::DEFAULT_PLATFORM,
+            value_parser = clap::builder::PossibleValuesParser::new(
+                mcloving_domain::capability::SUPPORTED_PLATFORMS
+            )
+        )]
+        platform: String,
         #[arg(long = "parameter", value_name = "NAME=JSON")]
         parameters: Vec<String>,
     },
     Plan {
         pipeline: PathBuf,
+        /// Authoritative pipeline scope for operator-mapped helper intents.
+        #[arg(long)]
+        pipeline_id: Option<Uuid>,
+        #[arg(long, default_value = "trusted-linux")]
+        trust_pool: String,
+        #[arg(
+            long,
+            default_value = mcloving_domain::capability::DEFAULT_PLATFORM,
+            value_parser = clap::builder::PossibleValuesParser::new(
+                mcloving_domain::capability::SUPPORTED_PLATFORMS
+            )
+        )]
+        platform: String,
         #[arg(long = "parameter", value_name = "NAME=JSON")]
         parameters: Vec<String>,
     },
     /// Create or converge a pipeline through the authenticated public v1 API.
     Apply {
         pipeline_id: Uuid,
+        #[arg(long, default_value = "trusted-linux")]
+        trust_pool: String,
+        #[arg(
+            long,
+            default_value = mcloving_domain::capability::DEFAULT_PLATFORM,
+            value_parser = clap::builder::PossibleValuesParser::new(
+                mcloving_domain::capability::SUPPORTED_PLATFORMS
+            )
+        )]
+        platform: String,
         #[arg(long)]
         slug: String,
         #[arg(long)]
@@ -242,14 +278,19 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
     let output = match &arguments.command {
         Command::Validate {
             pipeline,
+            pipeline_id,
+            trust_pool,
+            platform,
             parameters,
         } => {
-            let request = submission_request(pipeline, parameters).await?;
+            let request = submission_request(pipeline, *pipeline_id, parameters).await?;
             to_value(
                 client
-                    .validate_pipeline(
+                    .validate_pipeline_on_platform_in_pool(
                         arguments.organization,
                         required_project(arguments.project)?,
+                        platform,
+                        trust_pool,
                         &request,
                     )
                     .await?,
@@ -257,14 +298,19 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
         }
         Command::Plan {
             pipeline,
+            pipeline_id,
+            trust_pool,
+            platform,
             parameters,
         } => {
-            let request = submission_request(pipeline, parameters).await?;
+            let request = submission_request(pipeline, *pipeline_id, parameters).await?;
             to_value(
                 client
-                    .plan_pipeline(
+                    .plan_pipeline_on_platform_in_pool(
                         arguments.organization,
                         required_project(arguments.project)?,
+                        platform,
+                        trust_pool,
                         &request,
                     )
                     .await?,
@@ -272,6 +318,8 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
         }
         Command::Apply {
             pipeline_id,
+            trust_pool,
+            platform,
             slug,
             expected_revision,
             pipeline,
@@ -283,11 +331,13 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
             let source = read_pipeline_source(pipeline).await?;
             to_value(
                 client
-                    .put_pipeline(
+                    .put_pipeline_on_platform_in_pool(
                         arguments.organization,
                         required_project(arguments.project)?,
                         *pipeline_id,
                         *expected_revision,
+                        platform,
+                        trust_pool,
                         &PipelineUpsertRequest {
                             slug: slug.clone(),
                             source,
@@ -585,10 +635,15 @@ pub fn render(mode: OutputMode, output: CommandOutput) -> Result<String> {
     }
 }
 
-async fn submission_request(path: &PathBuf, parameters: &[String]) -> Result<SubmissionRequest> {
+async fn submission_request(
+    path: &PathBuf,
+    pipeline_id: Option<Uuid>,
+    parameters: &[String],
+) -> Result<SubmissionRequest> {
     let source = read_pipeline_source(path).await?;
     Ok(SubmissionRequest {
         source,
+        pipeline_id,
         parameters: parse_parameters(parameters)?,
     })
 }

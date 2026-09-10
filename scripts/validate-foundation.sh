@@ -100,6 +100,7 @@ python3 -I "${repo_root}/scripts/test-workflow-aggregate.py"
 python3 -I "${repo_root}/scripts/test-sequential-runtime-gate.py"
 bash "${repo_root}/scripts/verify-jenkins-sequential-retained.sh"
 bash -n "${repo_root}/scripts/run-verified-rust-test.sh"
+bash -n "${repo_root}/scripts/test-cache-product.sh"
 bash -n "${repo_root}/scripts/validate-external-shadow-apparmor.sh"
 unset GLOBIGNORE
 shopt -u failglob

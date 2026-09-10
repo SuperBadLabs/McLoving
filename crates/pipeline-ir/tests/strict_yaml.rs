@@ -213,7 +213,9 @@ stages:
         .iter()
         .map(|step| match step {
             Step::Process(process) => process.mode,
-            Step::ConnectorIntent(_) => panic!("fixture contains only process steps"),
+            Step::ConnectorIntent(_) | Step::CacheIntent(_) => {
+                panic!("fixture contains only process steps")
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(

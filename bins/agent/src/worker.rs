@@ -28,6 +28,7 @@ use mcloving_agent_runtime::{
     SpoolEntry,
 };
 use mcloving_domain::ConnectorIntentSpec;
+use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
 use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
 use serde::Deserialize;
 use serde_json::json;
@@ -138,6 +139,7 @@ enum ProcessMode {
 }
 
 struct ValidatedAssignment {
+    cache: Option<(CacheIntentSpec, CacheWorkContext)>,
     workspace_grant: Option<WorkspaceGrant>,
     authority: WorkAuthority,
     workspace: PathBuf,
@@ -653,7 +655,29 @@ fn validate_assignment(
         .as_slice()
         .try_into()
         .map_err(|_| AgentError::InvalidAssignment("payload digest is not SHA-256".to_owned()))?;
-    let calculated: [u8; 32] = Sha256::digest(&assignment.execution_spec_json).into();
+    let cache_context = CacheWorkContext {
+        organization_id: assignment.organization_id.clone(),
+        project_id: assignment.project_id.clone(),
+        pipeline_id: assignment.pipeline_id.clone(),
+        build_id: assignment.build_id.clone(),
+        node_id: assignment.node_id.clone(),
+        attempt_id: assignment.attempt_id.clone(),
+        fence_token: assignment.fence_token,
+    };
+    let cache_version =
+        serde_json::from_slice::<serde_json::Value>(&assignment.execution_spec_json)
+            .ok()
+            .is_some_and(|value| {
+                value.get("version").and_then(serde_json::Value::as_u64) == Some(3)
+            });
+    let calculated: [u8; 32] = if cache_version {
+        cache_context.validate().map_err(|_| {
+            AgentError::InvalidAssignment("cache work context is invalid".to_owned())
+        })?;
+        cache_assignment_digest(&assignment.execution_spec_json, &cache_context)
+    } else {
+        Sha256::digest(&assignment.execution_spec_json).into()
+    };
     if payload_digest != calculated {
         return Err(AgentError::InvalidAssignment(
             "execution payload digest does not match".to_owned(),
@@ -706,12 +730,46 @@ fn validate_assignment(
                     }));
                 }
                 AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                    cache: None,
                     workspace_grant,
                     authority,
                     workspace,
                     payload_digest,
                     process,
                 }))
+            }
+            SpecClassification::Cache(intent) => {
+                if !cfg!(target_os = "linux")
+                    || config.cache_bindings.is_none()
+                    || workspace_grant.is_some()
+                {
+                    AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                        authority,
+                        workspace,
+                        payload_digest,
+                        detail:
+                            "cache runtime binding unavailable or workspace transfer unsupported"
+                                .to_owned(),
+                    })
+                } else {
+                    let process = ProcessSpec {
+                        kind: "cache_intent".to_owned(),
+                        mode: ProcessMode::Direct,
+                        program: String::new(),
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        credentials: Vec::new(),
+                        timeout_seconds: Some(intent.timeout_seconds),
+                    };
+                    AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                        cache: Some((intent, cache_context)),
+                        workspace_grant,
+                        authority,
+                        workspace,
+                        payload_digest,
+                        process,
+                    }))
+                }
             }
             SpecClassification::ForAnotherRuntime(reason) => {
                 AssignmentDisposition::ForAnotherRuntime(reason)
@@ -730,6 +788,7 @@ fn validate_assignment(
 
 /// What this agent can make of a digest-verified execution payload.
 enum SpecClassification {
+    Cache(CacheIntentSpec),
     Process(ProcessSpec),
     ForAnotherRuntime(&'static str),
     Unsupported(String),
@@ -780,6 +839,36 @@ fn connector_intent_payload(execution_spec_json: &[u8]) -> bool {
 }
 
 fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
+    if serde_json::from_slice::<serde_json::Value>(execution_spec_json)
+        .ok()
+        .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(3))
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Envelope {
+            version: u16,
+            steps: Vec<CacheStep>,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum CacheStep {
+            CacheIntent(CacheIntentSpec),
+        }
+        let decoded = mcloving_cache::parse_json_no_duplicates::<Envelope>(execution_spec_json);
+        return match decoded {
+            Ok(mut envelope) if envelope.version == 3 && envelope.steps.len() == 1 => {
+                let Some(CacheStep::CacheIntent(intent)) = envelope.steps.pop() else {
+                    unreachable!()
+                };
+                if intent.validate().is_ok() {
+                    SpecClassification::Cache(intent)
+                } else {
+                    SpecClassification::Unsupported("invalid cache intent".to_owned())
+                }
+            }
+            _ => SpecClassification::Unsupported("invalid cache execution envelope".to_owned()),
+        };
+    }
     if connector_intent_payload(execution_spec_json) {
         return SpecClassification::ForAnotherRuntime(
             "connector-intent work requires a controller-owned effect runtime",
@@ -1112,7 +1201,51 @@ async fn run_assignment(
             loss_reason: lease_loss_reason.clone(),
         },
     ));
-    let process = assignment.process;
+    let prepared_cache = match assignment
+        .cache
+        .as_ref()
+        .map(|(intent, context)| {
+            crate::cache::prepare(config, intent, context, &assignment.payload_digest)
+        })
+        .transpose()
+    {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            let result = finalize_without_process(
+                config,
+                client,
+                &mut journal,
+                ProcesslessCompletion {
+                    authority: &assignment.authority,
+                    workspace: &assignment.workspace,
+                    session_epoch,
+                    outcome: WorkOutcome::Failed,
+                    reason: "cache_binding_rejected".to_owned(),
+                },
+                AuthorityRpcControl {
+                    authority_lost: &authority_lost,
+                    stop: &stop,
+                    lease_window,
+                },
+            )
+            .await;
+            lease_stop.cancel();
+            let renewal = lease_task.await.map_err(|error| {
+                AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+            })?;
+            result?;
+            return renewal;
+        }
+    };
+    let mut process = assignment.process;
+    if let Some(prepared) = &prepared_cache {
+        process.program = prepared.program.to_string_lossy().into_owned();
+        process.args = prepared
+            .arguments
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+    }
     let credentials = if process.credentials.is_empty() {
         Vec::new()
     } else {
@@ -1233,40 +1366,46 @@ async fn run_assignment(
             .into_iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
-        output_limit_bytes: Some(MAX_ATTEMPT_OUTPUT_BYTES),
+        output_limit_bytes: Some(
+            prepared_cache
+                .as_ref()
+                .map_or(MAX_ATTEMPT_OUTPUT_BYTES, |cache| cache.output_limit),
+        ),
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
-    let execution = execute_with_spawn_hook_and_redactions(
+    let on_spawn = |process_id| {
+        let process_birth_identity = process_birth_identity_for(process_id)
+            .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
+        match process_birth_identity {
+            Some(identity) => journal.transition_with_process_identity(
+                &organization,
+                &attempt,
+                fence,
+                session_epoch,
+                AttemptPhase::Running,
+                ProcessIdentity {
+                    process_id,
+                    birth_identity: &identity,
+                },
+            ),
+            None => journal.transition(
+                &organization,
+                &attempt,
+                fence,
+                session_epoch,
+                AttemptPhase::Running,
+                Some(process_id),
+            ),
+        }
+        .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
+    };
+    let execution = execute_prepared(
         &request,
         execution_cancellation.clone(),
         &execution_environment.redactions,
-        |process_id| {
-            let process_birth_identity = process_birth_identity_for(process_id)
-                .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
-            match process_birth_identity {
-                Some(identity) => journal.transition_with_process_identity(
-                    &organization,
-                    &attempt,
-                    fence,
-                    session_epoch,
-                    AttemptPhase::Running,
-                    ProcessIdentity {
-                        process_id,
-                        birth_identity: &identity,
-                    },
-                ),
-                None => journal.transition(
-                    &organization,
-                    &attempt,
-                    fence,
-                    session_epoch,
-                    AttemptPhase::Running,
-                    Some(process_id),
-                ),
-            }
-            .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
-        },
+        prepared_cache.as_ref(),
+        on_spawn,
     )
     .await;
     let completion_result: Result<(), AgentError> = async {
@@ -1339,6 +1478,13 @@ async fn run_assignment(
                 .await;
             }
         };
+        #[cfg(debug_assertions)]
+        if prepared_cache.is_some()
+            && outcome.private_response_accepted == Some(true)
+            && std::env::var("MCLOVING_TEST_CRASH_AFTER_HELPER_RECEIPT").as_deref() == Ok("1")
+        {
+            std::process::exit(87);
+        }
         validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
         let mut terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
@@ -1346,6 +1492,11 @@ async fn run_assignment(
             Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
             Termination::Exited => WorkOutcome::Failed,
         };
+        let helper_failure =
+            (outcome.private_response_accepted == Some(false)).then_some("cache_response_rejected");
+        if helper_failure.is_some() && terminal == WorkOutcome::Succeeded {
+            terminal = WorkOutcome::Failed;
+        }
         let workspace_transfer = assignment.workspace_grant.as_ref().map(|grant| {
             let (snapshot, error) = match outcome.workspace_snapshot.clone() {
                 Some(Ok(snapshot)) => (Some(snapshot), None),
@@ -1387,7 +1538,10 @@ async fn run_assignment(
                 termination: termination_name(outcome.termination),
                 // Keep the authority-loss cause primary; capture refusal remains
                 // independently recorded in workspace_transfer.error.
-                reason: lease_loss.as_deref().or(workspace_failure.as_deref()),
+                reason: lease_loss
+                    .as_deref()
+                    .or(workspace_failure.as_deref())
+                    .or(helper_failure),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
             },
@@ -2803,6 +2957,7 @@ mod tests {
 
     fn config() -> AgentConfig {
         AgentConfig {
+            cache_bindings: None,
             agent_id: "agent-1".to_owned(),
             trust_pool: "trusted".to_owned(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
@@ -2824,6 +2979,8 @@ mod tests {
 
     fn assignment(spec: &[u8]) -> WorkAssignment {
         WorkAssignment {
+            project_id: String::new(),
+            pipeline_id: String::new(),
             workspace_transfer_json: Vec::new(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
             build_id: "00000000-0000-0000-0000-000000000124".to_owned(),
@@ -2832,6 +2989,52 @@ mod tests {
             fence_token: (7_u64 << 32) | 9,
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
+        }
+    }
+
+    #[test]
+    fn cache_context_substitution_is_rejected_before_runnable_assignment() {
+        let spec=serde_json::to_vec(&json!({"version":3,"steps":[{"kind":"cache_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"operation":"read","logical_key_sha256":"b".repeat(64),"input_sha256":"c".repeat(64),"timeout_seconds":10}]})).unwrap();
+        let mut offer = assignment(&spec);
+        offer.project_id = "00000000-0000-0000-0000-000000000127".to_owned();
+        offer.pipeline_id = "00000000-0000-0000-0000-000000000128".to_owned();
+        let context = CacheWorkContext {
+            organization_id: offer.organization_id.clone(),
+            project_id: offer.project_id.clone(),
+            pipeline_id: offer.pipeline_id.clone(),
+            build_id: offer.build_id.clone(),
+            node_id: offer.node_id.clone(),
+            attempt_id: offer.attempt_id.clone(),
+            fence_token: offer.fence_token,
+        };
+        offer.payload_digest = cache_assignment_digest(&spec, &context).to_vec();
+        let mut configured = config();
+        configured.cache_bindings = Some(crate::cache::CacheBindings {
+            schema_version: "mcloving.agent-cache-bindings/v1".into(),
+            mappings: Vec::new(),
+        });
+        #[cfg(target_os = "linux")]
+        assert!(matches!(
+            validate_assignment(&configured, 4, offer.clone()).unwrap(),
+            AssignmentDisposition::Runnable(_)
+        ));
+        for index in 0..8 {
+            let mut changed = offer.clone();
+            let replacement = "00000000-0000-0000-0000-000000000129".to_owned();
+            match index {
+                0 => changed.organization_id = replacement,
+                1 => changed.project_id = replacement,
+                2 => changed.pipeline_id = replacement,
+                3 => changed.build_id = replacement,
+                4 => changed.node_id = replacement,
+                5 => changed.attempt_id = replacement,
+                6 => changed.fence_token += 1,
+                _ => changed.execution_spec_json.push(b' '),
+            }
+            assert!(
+                validate_assignment(&configured, 4, changed).is_err(),
+                "context field {index}"
+            );
         }
     }
 
@@ -4284,3 +4487,34 @@ mod tests {
 
 #[cfg(test)]
 mod renewal_tests;
+
+async fn execute_prepared<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    redactions: &[Vec<u8>],
+    cache: Option<&crate::cache::PreparedCache>,
+    on_spawn: F,
+) -> Result<mcloving_agent_runtime::executor::ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(u32) -> Result<(), ExecutionError>,
+{
+    #[cfg(target_os = "linux")]
+    if let Some(cache) = cache {
+        let transform = |stdout: &[u8], stderr: &[u8]| cache.transform(stdout, stderr);
+        return mcloving_agent_runtime::executor::execute_with_spawn_hook_and_private_io(
+            request,
+            cancellation,
+            mcloving_agent_runtime::executor::PrivateExecutionIo {
+                request: &cache.request,
+                transform: &transform,
+            },
+            on_spawn,
+        )
+        .await;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if cache.is_some() {
+        return Err(ExecutionError::InvalidPrivateIo);
+    }
+    execute_with_spawn_hook_and_redactions(request, cancellation, redactions, on_spawn).await
+}

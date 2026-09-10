@@ -583,7 +583,8 @@ fn expansion_digest_binds_exact_component_even_for_equal_concrete_steps() {
 fn process_arg(step: &mcloving_pipeline_ir::Step) -> &str {
     match step {
         mcloving_pipeline_ir::Step::Process(process) => &process.args[0],
-        mcloving_pipeline_ir::Step::ConnectorIntent(_) => {
+        mcloving_pipeline_ir::Step::ConnectorIntent(_)
+        | mcloving_pipeline_ir::Step::CacheIntent(_) => {
             panic!("fixture contains only process steps")
         }
     }

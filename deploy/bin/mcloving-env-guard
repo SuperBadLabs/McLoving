@@ -487,4 +487,18 @@ if [[ ${#class_state[@]} -gt 0 ]]; then
   require_secured_paths "${class_state[@]}"
 fi
 
+# Cache bindings pin private executable/configuration authority. The agent
+# requires this exact deployment file to be immutable, single-link and owned
+# by its service account; the generic secret class alone also accepts 0600.
+if [[ "${service}" == agent ]]; then
+  contract_into cache_bindings_path MCLOVING_AGENT_CACHE_BINDINGS_PATH
+  if [[ -n "${cache_bindings_path}" ]]; then
+    cache_bindings_metadata="$(stat -Lc '%a %u %h' -- "${cache_bindings_path}")"
+    [[ "${cache_bindings_metadata}" == "400 ${EUID} 1" ]] ||
+      fail "MCLOVING_AGENT_CACHE_BINDINGS_PATH requires mode 400, service owner and one link (${cache_bindings_path})"
+    [[ "$(realpath -e -- "${cache_bindings_path}")" == "${cache_bindings_path}" ]] ||
+      fail "MCLOVING_AGENT_CACHE_BINDINGS_PATH requires a canonical path without symlink components (${cache_bindings_path})"
+  fi
+fi
+
 echo "mcloving-env-guard[${service}]: contract satisfied (${env_file})"

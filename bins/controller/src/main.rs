@@ -23,9 +23,9 @@ use mcloving_agent_protocol::{
     WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
-    ApiState, ConnectorMappingCatalog, InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS,
-    MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
-    MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
+    ApiState, CacheMappingCatalog, ConnectorMappingCatalog, InsecureLoopbackPolicy,
+    MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
+    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
     let connector_mapping_catalog = connector_mapping_catalog_from_environment()?;
+    let cache_mapping_catalog = cache_mapping_catalog_from_environment()?;
     validate_effect_mapping_configuration(
         worker.config.effect_plan.as_ref().map(|plan| {
             (
@@ -207,6 +208,11 @@ async fn main() -> Result<()> {
         state = state
             .with_connector_mapping_catalog(catalog)
             .context("configure connector mapping admission catalog")?;
+    }
+    if let Some(catalog) = cache_mapping_catalog {
+        state = state
+            .with_cache_mapping_catalog(catalog)
+            .context("configure cache mapping admission catalog")?;
     }
     if let Some(oidc) = &oidc {
         state = state
@@ -1586,7 +1592,12 @@ async fn try_assign_work(
         .ok_or_else(|| Status::aborted("claimed work lost fenced authority"))?;
     let execution_spec_json = serde_json::to_vec(&execution.execution_spec)
         .map_err(|error| Status::internal(format!("serialize execution spec: {error}")))?;
-    Ok(Some(WorkAssignment {
+    let mut assignment = WorkAssignment {
+        project_id: execution.project_id.to_string(),
+        pipeline_id: execution
+            .pipeline_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
         organization_id: claim.organization_id.to_string(),
         build_id: claim.build_id.to_string(),
         node_id: claim.node_id.to_string(),
@@ -1601,7 +1612,69 @@ async fn try_assign_work(
             .transpose()
             .map_err(|error| Status::internal(format!("serialize workspace grant: {error}")))?
             .unwrap_or_default(),
-    }))
+    };
+    if execution
+        .execution_spec
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(3)
+    {
+        assignment.payload_digest = cache_work_assignment_digest(&assignment)?.to_vec();
+    }
+    Ok(Some(assignment))
+}
+
+fn cache_work_assignment_digest(assignment: &WorkAssignment) -> Result<[u8; 32], Status> {
+    use mcloving_domain::cache_intent::{
+        CacheIntentSpec, CacheWorkContext, cache_assignment_digest,
+    };
+    let value: serde_json::Value = serde_json::from_slice(&assignment.execution_spec_json)
+        .map_err(|_| Status::failed_precondition("invalid cache execution spec"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Status::failed_precondition("invalid cache execution spec"))?;
+    if object.len() != 2 || value["version"].as_u64() != Some(3) {
+        return Err(Status::failed_precondition(
+            "invalid cache spec version or fields",
+        ));
+    }
+    let steps = value["steps"]
+        .as_array()
+        .filter(|steps| steps.len() == 1)
+        .ok_or_else(|| Status::failed_precondition("invalid cache step count"))?;
+    let mut step = steps[0]
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Status::failed_precondition("invalid cache step"))?;
+    if step
+        .remove("kind")
+        .and_then(|kind| kind.as_str().map(str::to_owned))
+        .as_deref()
+        != Some("cache_intent")
+    {
+        return Err(Status::failed_precondition("invalid cache step kind"));
+    }
+    let intent: CacheIntentSpec = serde_json::from_value(serde_json::Value::Object(step))
+        .map_err(|_| Status::failed_precondition("invalid cache intent"))?;
+    intent
+        .validate()
+        .map_err(|_| Status::failed_precondition("invalid bounded cache intent"))?;
+    let context = CacheWorkContext {
+        organization_id: assignment.organization_id.clone(),
+        project_id: assignment.project_id.clone(),
+        pipeline_id: assignment.pipeline_id.clone(),
+        build_id: assignment.build_id.clone(),
+        node_id: assignment.node_id.clone(),
+        attempt_id: assignment.attempt_id.clone(),
+        fence_token: assignment.fence_token,
+    };
+    context
+        .validate()
+        .map_err(|_| Status::failed_precondition("invalid cache work authority"))?;
+    Ok(cache_assignment_digest(
+        &assignment.execution_spec_json,
+        &context,
+    ))
 }
 
 async fn wait_for_work_wakeup(
@@ -2317,6 +2390,81 @@ fn effect_plan_from_environment() -> Result<Option<EffectExecutionPlan>> {
         .map(Some)
 }
 
+fn cache_mapping_catalog_from_environment() -> Result<Option<CacheMappingCatalog>> {
+    let path = match std::env::var("MCLOVING_CACHE_MAPPING_CATALOG") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_CACHE_MAPPING_CATALOG must not be empty"),
+        Err(std::env::VarError::NotPresent) => {
+            if std::env::var_os("MCLOVING_CACHE_MAPPING_CATALOG_SHA256").is_some() {
+                bail!("cache catalog digest requires catalog path");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read cache mapping catalog path"),
+    };
+    let expected = required("MCLOVING_CACHE_MAPPING_CATALOG_SHA256")?;
+    load_cache_mapping_catalog(&path, &expected).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn load_cache_mapping_catalog(
+    path: &std::path::Path,
+    expected: &str,
+) -> Result<CacheMappingCatalog> {
+    use std::io::Read as _;
+    if !path.is_absolute() || !mcloving_domain::cache_intent::canonical_sha256(expected) {
+        bail!("cache catalog needs absolute path and canonical SHA-256");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .context("open pinned cache mapping catalog")?;
+    let metadata = file.metadata().context("inspect opened cache catalog")?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("cache catalog must be bounded regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o022 != 0 {
+            bail!("cache catalog must not be writable by group or other users");
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .context("read opened cache catalog")?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("cache catalog grew beyond bound");
+    }
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        bail!("cache catalog digest mismatch");
+    }
+    let catalog: CacheMappingCatalog =
+        mcloving_external_connector::parse_json_no_duplicates(&bytes)
+            .context("parse strict cache catalog")?;
+    catalog.validate().context("validate cache catalog")?;
+    Ok(catalog)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_cache_mapping_catalog(
+    _path: &std::path::Path,
+    _expected: &str,
+) -> Result<CacheMappingCatalog> {
+    bail!("cache catalog is supported only on Linux controllers")
+}
+
 fn connector_mapping_catalog_from_environment() -> Result<Option<ConnectorMappingCatalog>> {
     let path = match std::env::var("MCLOVING_EFFECT_MAPPING_CATALOG") {
         Ok(path) if !path.is_empty() => PathBuf::from(path),
@@ -2833,5 +2981,73 @@ mod tests {
                 false,
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_intent_tests {
+    use super::*;
+    fn assignment() -> WorkAssignment {
+        let id = |v| Uuid::from_u128(v).to_string();
+        WorkAssignment {organization_id:id(1),project_id:id(2),pipeline_id:id(3),build_id:id(4),node_id:id(5),attempt_id:id(6),fence_token:1,execution_spec_json:serde_json::to_vec(&serde_json::json!({"version":3,"steps":[{"kind":"cache_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"operation":"read","logical_key_sha256":"b".repeat(64),"input_sha256":"c".repeat(64),"timeout_seconds":30}]})).unwrap(),payload_digest:Vec::new(),workspace_transfer_json:Vec::new()}
+    }
+    #[test]
+    fn cache_wire_digest_requires_complete_authority_and_exact_typed_payload() {
+        let a = assignment();
+        let digest = cache_work_assignment_digest(&a).unwrap();
+        for n in 0..7 {
+            let mut changed = a.clone();
+            let replacement = Uuid::from_u128(99).to_string();
+            match n {
+                0 => changed.organization_id = replacement,
+                1 => changed.project_id = replacement,
+                2 => changed.pipeline_id = replacement,
+                3 => changed.build_id = replacement,
+                4 => changed.node_id = replacement,
+                5 => changed.attempt_id = replacement,
+                _ => changed.fence_token += 1,
+            };
+            assert_ne!(digest, cache_work_assignment_digest(&changed).unwrap());
+        }
+        let mut missing = a.clone();
+        missing.pipeline_id.clear();
+        assert!(cache_work_assignment_digest(&missing).is_err());
+        for (field, value) in [
+            ("kind", serde_json::json!("process")),
+            ("program", serde_json::json!("/bin/true")),
+            ("timeout_seconds", serde_json::json!(61)),
+        ] {
+            let mut changed = a.clone();
+            let mut spec: serde_json::Value =
+                serde_json::from_slice(&changed.execution_spec_json).unwrap();
+            spec["steps"][0][field] = value;
+            changed.execution_spec_json = serde_json::to_vec(&spec).unwrap();
+            assert!(cache_work_assignment_digest(&changed).is_err());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_catalog_loader_reads_one_pinned_regular_file_and_refuses_unsafe_paths() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.json");
+        let bytes=serde_json::to_vec(&serde_json::json!({"schema_version":"mcloving.cache-mapping-catalog/v1","profile":"contained","generation":1,"mappings":[{"mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"organization_id":Uuid::from_u128(1).to_string(),"project_id":Uuid::from_u128(2).to_string(),"pipeline_id":Uuid::from_u128(3).to_string(),"trust_pool":"contained","allowed_operations":["read"]}]})).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        load_cache_mapping_catalog(&path, &digest).unwrap();
+        assert!(load_cache_mapping_catalog(&path, &"0".repeat(64)).is_err());
+        let link = root.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(load_cache_mapping_catalog(&link, &digest).is_err());
+        assert!(load_cache_mapping_catalog(root.path(), &digest).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(load_cache_mapping_catalog(&path, &digest).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(load_cache_mapping_catalog(&path, &digest).is_err());
     }
 }

@@ -50,6 +50,52 @@ use windows_sys::Win32::System::Threading::{
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
+/// Read-only, identity-stable observation for native containment tests.
+/// The held kernel handle cannot be redirected by subsequent PID reuse.
+#[cfg(feature = "test-process-observer")]
+pub struct ProcessObserver {
+    process: OwnedHandle,
+}
+
+#[cfg(feature = "test-process-observer")]
+impl ProcessObserver {
+    pub fn open(process_id: u32) -> Result<Self, JobError> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: OpenProcess accepts a numeric PID and returns a fresh owned
+        // handle. Rights only permit waiting/querying; inheritance is disabled.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                process_id,
+            )
+        };
+        Ok(Self {
+            process: OwnedHandle::new(handle, "OpenProcess observer")?,
+        })
+    }
+
+    pub fn try_wait(&self) -> Result<Option<ExitStatus>, JobError> {
+        // SAFETY: this observer owns the live handle; zero timeout only reads
+        // its signaled state and never waits for or mutates the process.
+        match unsafe { WaitForSingleObject(self.process.handle, 0) } {
+            WAIT_TIMEOUT => return Ok(None),
+            WAIT_OBJECT_0 => {}
+            WAIT_FAILED => return Err(JobError::last("WaitForSingleObject observer")),
+            _ => return Err(JobError::invalid("WaitForSingleObject observer result")),
+        }
+        let mut code = 0;
+        // SAFETY: handle remains owned and code is writable. Query only after
+        // signaled state, so an actual exit code 259 cannot mean still running.
+        if unsafe { GetExitCodeProcess(self.process.handle, &raw mut code) } == 0 {
+            return Err(JobError::last("GetExitCodeProcess observer"));
+        }
+        Ok(Some(ExitStatus::from_raw(code)))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JobError {
     operation: &'static str,
