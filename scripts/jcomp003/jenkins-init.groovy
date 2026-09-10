@@ -49,7 +49,10 @@ def inventory = { java.nio.file.Path root ->
 }
 Thread.start('jcomp003-contained-observer') {
   try {
-    while (j.getInitLevel().toString() != 'COMPLETED') { Thread.sleep(100) }
+    def initializationDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
+    while (j.getInitLevel() != hudson.init.InitMilestone.COMPLETED &&
+           System.nanoTime() < initializationDeadline) { Thread.sleep(100) }
+    assert j.getInitLevel() == hudson.init.InitMilestone.COMPLETED: 'Jenkins initialization did not complete'
     def approval = new File('/tmp/jcomp-boundary-approved')
     def approvalDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
     while (!approval.exists() && System.nanoTime() < approvalDeadline) { Thread.sleep(100) }
