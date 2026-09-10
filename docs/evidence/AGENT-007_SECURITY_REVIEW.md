@@ -369,3 +369,29 @@ retained grace test), focused agent/runtime clippy with warnings denied, and all
 four board/closure verifiers and parser suites. An independent reviewer found no
 actionable issue in either the isolated correction or its integration delta.
 Full Foundation and actual native Windows remain required on the final head.
+
+## Pending-response correction after e9f257f review
+
+The `e9f257f` candidate passed local Foundation and the separately profiled
+source-acquirer suite; its native Windows CI also executed both newly added
+cancellation tests successfully. Those observations bind that historical head.
+A subsequent independent P1 review found a renewal RPC could remain pending
+until the entire held cancellation deadline, preventing another ask from
+observing controller recovery. Those green checks did not cover this case.
+
+Each periodic renewal RPC now expires at the earlier of its request-start time
+plus the retry interval and the unchanged held cancellation deadline. Time
+spent awaiting that RPC counts toward the retry cadence; timeout does not add
+another full sleep. Only a validated successful receipt establishes a new term.
+Deadline-exhaustion branches honor a concurrent stop of already-finalized work,
+consistent with the existing failure paths.
+
+Two real tonic transport tests call the production renewal loop. One peer
+leaves its first HTTP/2 request unanswered and accepts its next request; the test
+requires that next request before the original deadline and preserved authority
+after that deadline. The other peer leaves every response pending and requires
+multiple requests, eventual cancellation at the original bound, the distinct
+unanswered-expiry cause, and no request after that bound. These are transport
+regressions, separate from the five actual PostgreSQL/controller/agent gates;
+they do not claim actual process containment by themselves. Final corrected-head
+local and protected CI evidence must be earned separately before closure.

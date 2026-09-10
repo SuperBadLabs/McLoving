@@ -1748,6 +1748,9 @@ async fn renew_lease(
             ) => {}
         }
         if tokio::time::Instant::now() >= lease_deadline {
+            if stop.is_cancelled() {
+                return Ok(());
+            }
             record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
             execution_cancellation.cancel();
             authority_lost.cancel();
@@ -1760,10 +1763,23 @@ async fn renew_lease(
         // round trip is.
         let (receipt, request_sent_at) = loop {
             let request_sent_at = tokio::time::Instant::now();
+            if request_sent_at >= lease_deadline {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
+                record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
+                execution_cancellation.cancel();
+                authority_lost.cancel();
+                return Err(AgentError::LeaseRenewalTimeout);
+            }
+            // A connected peer may keep one RPC pending through its outage.
+            // Bound each ask independently so it cannot consume the entire
+            // held term and prevent a later request from observing recovery.
+            let rpc_deadline = (request_sent_at + retry_interval).min(lease_deadline);
             let renewal = tokio::select! {
                 () = stop.cancelled() => return Ok(()),
                 result = tokio::time::timeout_at(
-                    lease_deadline,
+                    rpc_deadline,
                     client.renew_work_lease(WorkLeaseRenewal {
                         authority: Some(authority.clone()),
                         lease_seconds,
@@ -1808,17 +1824,28 @@ async fn renew_lease(
                     }
                     unanswered = unanswered.saturating_add(1);
                 }
-                // The RPC itself consumed what was left of the lease.
+                // Only this ask expired; the unchanged term deadline below
+                // decides whether any authority remains for another request.
                 Err(_) => {
                     if stop.is_cancelled() {
                         return Ok(());
                     }
+                    if unanswered == 0 {
+                        eprintln!(
+                            "renewal_unanswered: RPC timed out; retrying within the held lease"
+                        );
+                    }
                     unanswered = unanswered.saturating_add(1);
                 }
             }
-            let Some(retry_at) =
-                next_renewal_retry(tokio::time::Instant::now(), lease_deadline, retry_interval)
-            else {
+            let now = tokio::time::Instant::now();
+            // Count time spent awaiting the RPC toward the cadence. A timed-out
+            // ask must not incur another whole interval before the next ask.
+            let retry_delay = (request_sent_at + retry_interval).saturating_duration_since(now);
+            let Some(retry_at) = next_renewal_retry(now, lease_deadline, retry_delay) else {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
                 record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
@@ -4243,3 +4270,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod renewal_tests;
