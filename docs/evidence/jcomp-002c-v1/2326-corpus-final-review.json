@@ -1,0 +1,96 @@
+{
+  "schema": "mcloving.independent-corpus-review/1",
+  "reviewer": "root/gates_review",
+  "source_head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+  "campaign_sha256": "172cc8c7e429e63159464ee9efc3ca7b92185975a8fe5bc8b0a1c158e01997c2",
+  "compiler_subset_archive_sha256": "c8409fc7f392863e4f87795d37a2e901addbdef5d1c262c899357d882a6d080e",
+  "full_build_archive_sha256": "52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9",
+  "tool_sha256": "0b8462cb2b5993017fb30716c0c5a3739ecdd37b5cc2426c2849714e71c7f64c",
+  "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "inventory_files": 457,
+  "independent_rust_replays": 228,
+  "summary": {
+    "population": 228,
+    "exact_original_representations": 226,
+    "retained_redacted_representations": 2,
+    "counts": {
+      "admitted": 1,
+      "unsupported": 216,
+      "rejected": 11,
+      "unverified": 0
+    },
+    "reasons": [
+      {
+        "status": "admitted",
+        "code": null,
+        "count": 1
+      },
+      {
+        "status": "rejected",
+        "code": "E_SOURCE_PARSE",
+        "count": 2
+      },
+      {
+        "status": "rejected",
+        "code": "E_SOURCE_TEXT",
+        "count": 4
+      },
+      {
+        "status": "rejected",
+        "code": "E_SOURCE_TOO_LARGE",
+        "count": 5
+      },
+      {
+        "status": "unsupported",
+        "code": "E_AGENT_UNSUPPORTED",
+        "count": 10
+      },
+      {
+        "status": "unsupported",
+        "code": "E_DECLARATIVE_ROOT",
+        "count": 123
+      },
+      {
+        "status": "unsupported",
+        "code": "E_DIRECTIVE_UNSUPPORTED",
+        "count": 22
+      },
+      {
+        "status": "unsupported",
+        "code": "E_SOURCE_LEXICAL",
+        "count": 44
+      },
+      {
+        "status": "unsupported",
+        "code": "E_STAGE_BODY",
+        "count": 4
+      },
+      {
+        "status": "unsupported",
+        "code": "E_STEP_UNSUPPORTED",
+        "count": 13
+      }
+    ],
+    "classification_complete": true,
+    "workload_executions": 0,
+    "execution_equivalence_claim": false,
+    "production_eligibility_claim": false
+  },
+  "only_changed_historical_classifications": [
+    18,
+    19,
+    23,
+    65,
+    160,
+    162
+  ],
+  "all_six_now_source_derived_unsupported_lexical": true,
+  "authored46_review_sha256": "b06bec8cc98b4683f123f95e801d1365dc78bf42d9fa2cc742787b6fe01b997d",
+  "build_review_sha256": "73c97c3e24e873b345c27374e1cba43531c3b21b8e7990cdcbafcb124b9374dc",
+  "source_review_sha256": "e52e5e301bdb8e4881542e32dcf96038f9c780bb5693decf0c78c18098bb50cb",
+  "judgment": "approved-for-publication-subject-to-protected-PR-and-exact-main-gates",
+  "limitations": [
+    "Compile-only corpus classification; no Jenkins/product execution equivalence or production eligibility claim.",
+    "226 exact originals and 2 previously retained redacted representations; no source reconstruction claim."
+  ]
+}

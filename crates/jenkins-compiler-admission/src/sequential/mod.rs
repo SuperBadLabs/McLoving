@@ -13,7 +13,7 @@ use source::{Classification, Stage};
 pub const PROTOCOL: &str = "mcloving.jenkins.compiler/2";
 pub const COMPILER: &str = "mcloving-jenkins-compiler-worker/2";
 pub const CONTRACT_SHA256: &str =
-    "ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe";
+    "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41";
 pub const MAX_SOURCE_BYTES: usize = 16_384;
 pub const MAX_CONTEXT_BYTES: usize = 2_048;
 const TRANSPORT_SOURCE_BYTES: usize = 262_144;

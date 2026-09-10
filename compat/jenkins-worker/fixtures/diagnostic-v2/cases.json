@@ -1,0 +1,104 @@
+[
+  {
+    "id": "slashy_windows",
+    "source": "node { bat(/\"%HOME%\\bin\\mvn\" test/) }",
+    "status": "unsupported",
+    "code": "E_SOURCE_LEXICAL"
+  },
+  {
+    "id": "slashy_dynamic",
+    "source": "pipeline { agent any; stages { stage('Build') { steps { bat(/\"${home}\\bin\\mvn\" test/) } } } }",
+    "status": "unsupported",
+    "code": "E_SOURCE_LEXICAL"
+  },
+  {
+    "id": "flat_gstring_continuation",
+    "source": "def x = \"\"\"${namespace} \\\n next\"\"\"",
+    "status": "unsupported",
+    "code": "E_SOURCE_LEXICAL"
+  },
+  {
+    "id": "flat_property_continuation",
+    "source": "def x = \"\"\"${env.NAME} \\\n next\"\"\"",
+    "status": "unsupported",
+    "code": "E_SOURCE_LEXICAL"
+  },
+  {
+    "id": "excluded_before_bad_closer",
+    "source": "pipeline { tools {} stages {} } }\ndef x = '''a \\\n b'''",
+    "status": "unsupported",
+    "code": "E_SOURCE_LEXICAL"
+  },
+  {
+    "id": "excluded_before_placeholder",
+    "source": "def x = <placeholder>\ndef y = '''a \\\n b'''",
+    "status": "unsupported",
+    "code": "E_SOURCE_LEXICAL"
+  },
+  {
+    "id": "ordinary_invalid_escape",
+    "source": "pipeline { agent any; stages { stage('Build') { steps { sh '\\m' } } } }",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "eligible_missing_closer",
+    "source": "pipeline { agent any; stages { stage('Build') { steps { sh 'ok' } } }",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "unicode_malformed_after_excluded",
+    "source": "// \\u0041 \\uu00ZZ\npipeline {}",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "ordinary_dangling_escape",
+    "source": "pipeline { agent any; stages { stage('Build') { steps { sh 'bad\\",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_dollar_before_continuation",
+    "source": "def x = \"\"\"bad$ \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_digit_before_continuation",
+    "source": "def x = \"\"\"bad$1 \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_question_before_continuation",
+    "source": "def x = \"\"\"bad$? \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_hyphen_before_continuation",
+    "source": "def x = \"\"\"bad$- \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_tab_before_continuation",
+    "source": "def x = \"\"\"bad$\t \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_paren_before_continuation",
+    "source": "def x = \"\"\"bad${) \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_bracket_before_continuation",
+    "source": "def x = \"\"\"bad${] \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  }
+]

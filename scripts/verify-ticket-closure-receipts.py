@@ -354,7 +354,9 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # it, taken over the `AGENT-007` raise rather than instead of it. All eight
 # join the same product-hardening table, so EXPECTED_TABLES still does not
 # move.
-MINIMUM_TICKET_ROWS = 124
+# 124 -> 125 on 2026-09-10 for the bounded JCOMP-002C diagnostic correction.
+# The ticket joins an existing table; no closure exemption or debt change.
+MINIMUM_TICKET_ROWS = 125
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
@@ -363,7 +365,7 @@ MINIMUM_TICKET_ROWS = 124
 # both retire a closure obligation that nothing else records.
 CLOSED_TICKETS = frozenset({
     "ADMIN-001", "AGENT-001", "AGENT-002", "AGENT-003", "AGENT-004",
-    "AGENT-005", "AGENT-006", "ALPHA-001", "API-002", "ARCH-001",
+    "AGENT-005", "AGENT-006", "AGENT-007", "ALPHA-001", "API-002", "ARCH-001",
     "ARCH-002", "AUDIT-001", "AUTHZ-001", "CACHE-001", "CANARY-000",
     "CI-001", "CI-002", "CI-003", "CI-004", "CONSUMER-001", "CTRL-001", "CTRL-002", "CTRL-003",
     "CTRL-004", "DEP-001", "DEPLOY-001", "DEPLOY-003", "DEPLOY-004", "DIFF-001",
@@ -375,7 +377,7 @@ CLOSED_TICKETS = frozenset({
     # fixes are its acceptance, and its own row went DONE in the same change.
     "FOUND-002", "HYG-001", "HYG-002", "IDP-001", "INPUT-001", "INV-001",
     "INV-002", "INV-003", "INV-004", "IR-001", "IR-002", "IR-003",
-    "IR-004", "JCOMP-001", "JCOMP-002", "JCOMP-002A", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
+    "IR-004", "JCOMP-001", "JCOMP-002", "JCOMP-002A", "JCOMP-002B", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
     "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
     "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",

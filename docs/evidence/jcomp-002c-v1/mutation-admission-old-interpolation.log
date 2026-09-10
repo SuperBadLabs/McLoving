@@ -1,0 +1,56 @@
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling typenum v1.20.1
+   Compiling thiserror v2.0.17
+   Compiling arraydeque v0.5.1
+   Compiling cpufeatures v0.2.17
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.145
+   Compiling memchr v2.8.3
+   Compiling ryu v1.0.23
+   Compiling itoa v1.0.18
+   Compiling generic-array v0.14.7
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling syn v2.0.119
+   Compiling thiserror-impl v2.0.17
+   Compiling saphyr-parser v0.0.11
+   Compiling mcloving-pipeline-ir v0.0.0 (/tmp/mcloving-jcomp002c-mutation-2326/crates/pipeline-ir)
+   Compiling mcloving-jenkins-compiler-admission v0.0.0 (/tmp/mcloving-jcomp002c-mutation-2326/crates/jenkins-compiler-admission)
+warning: function `flat_interpolation_end` is never used
+   --> crates/jenkins-compiler-admission/src/sequential/source.rs:269:4
+    |
+269 | fn flat_interpolation_end(chars: &[char], start: usize) -> Option<usize> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `mcloving-jenkins-compiler-admission` (lib) generated 1 warning
+warning: `mcloving-jenkins-compiler-admission` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.87s
+     Running unittests src/lib.rs (target/debug/deps/mcloving_jenkins_compiler_admission-081e09f1f8ebfe61)
+
+running 1 test
+test sequential::tests::explicit_diagnostic_precedence_refuses_forged_status_and_code ... FAILED
+
+failures:
+
+---- sequential::tests::explicit_diagnostic_precedence_refuses_forged_status_and_code stdout ----
+
+thread 'sequential::tests::explicit_diagnostic_precedence_refuses_forged_status_and_code' (2940067) panicked at crates/jenkins-compiler-admission/src/sequential/tests.rs:1011:30:
+"flat_gstring_continuation": Unclassified
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sequential::tests::explicit_diagnostic_precedence_refuses_forged_status_and_code
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p mcloving-jenkins-compiler-admission --lib`

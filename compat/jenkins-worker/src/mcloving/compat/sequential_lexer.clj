@@ -25,10 +25,35 @@
     id))
 
 (def escapes {\\ \\ \' \' \" \" \$ \$ \n \newline \r \return \t \tab \b \backspace \f \formfeed})
+(defn malformed-interpolation-prefix? [tail triple]
+  ;; Match only known-invalid initial prefixes, not expression bodies. Empty
+  ;; ${}, nested strings, comments and uncertain expressions are not guessed.
+  (let [whitespace #{\space \tab \newline \formfeed}
+        tail (drop-while whitespace tail)
+        width (if triple 3 1)]
+    (or (empty? tail)
+        (#{\] \)} (first tail))
+        (and (= width (count (take width tail)))
+             (every? #(= \" %) (take width tail))
+             (every? #(or (whitespace %) (#{\} \) \] \;} %))
+                     (drop width tail))))))
+
 (defn tokens [^String source]
   ;; Groovy consumes Unicode escapes before comments; inspect original runs.
-  (doseq [[_ run] (re-seq #"(\\+)u" source)]
-    (when (odd? (count run)) (fail! "E_SOURCE_LEXICAL")))
+  (let [excluded (atom false)]
+    ;; Inspect every raw introducer before returning lexical exclusion: an
+    ;; earlier valid Unicode escape must not hide a later malformed one.
+    (loop [offset 0]
+      (when-let [[match run _] (first (re-seq #"(\\+)(u+)" (subs source offset)))]
+        (let [start (.indexOf source ^String match offset)
+              end (+ start (count match))]
+          (when (odd? (count run))
+            (when-not (and (<= (+ end 4) (count source))
+                           (re-matches #"[0-9a-fA-F]{4}" (subs source end (+ end 4))))
+              (fail! "E_SOURCE_PARSE"))
+            (reset! excluded true))
+          (recur end))))
+    (when @excluded (fail! "E_SOURCE_LEXICAL")))
   (let [n (count source)
         at (fn [i] (when (< i n) (.charAt source i)))
         starts (fn [i s] (.startsWith source ^String s i))]
@@ -43,6 +68,11 @@
             (starts i "/*")
             (if-let [end (str/index-of source "*/" (+ i 2))]
               (recur (+ end 2) out) (fail! "E_SOURCE_PARSE"))
+            ;; A slash beginning a parenthesized argument is excluded before
+            ;; interior quotes can be mistaken for ordinary string literals.
+            ;; This is a lexical boundary, not a full Groovy validity claim.
+            (and (= c \/) (= \( (:kind (last (remove #(= :lf (:kind %)) out)))))
+            (fail! "E_SOURCE_LEXICAL")
             (#{\{ \} \( \) \;} c) (recur (inc i) (conj out {:kind c}))
             (or (= c \') (= c \"))
             (let [triple (starts i (apply str (repeat 3 c)))
@@ -54,12 +84,30 @@
                       (starts j delim) [(+ j (count delim)) (str value) dynamic]
                       (= (at j) \\)
                       (let [e (at (inc j))]
-                        (when-not (contains? escapes e) (fail! "E_SOURCE_LEXICAL"))
+                        (when-not (contains? escapes e)
+                          (fail! (if (or (nil? e) (and (not dynamic) e
+                                          (or (= e \tab) (<= 32 (int e) 126))
+                                          (not (<= (int \0) (int e) (int \7)))))
+                                   "E_SOURCE_PARSE" "E_SOURCE_LEXICAL")))
                         (.append value ^char (get escapes e))
                         (recur (+ j 2) value dynamic))
                       (and (not triple) (= (at j) \newline)) (fail! "E_SOURCE_PARSE")
-                      :else (do (.append value ^char (at j))
-                                (recur (inc j) value (or dynamic (and (= c \") (= (at j) \$)))))))]
+                      :else (do
+                              ;; Inspect the first interpolation prefix while
+                              ;; still in an ordinary literal segment, before
+                              ;; a later exclusion can mask its known error.
+                              (when (and (not dynamic) (= c \") (= (at j) \$))
+                                (let [next-char (at (inc j))]
+                                  (when (or (and (= next-char \{)
+                                                 (malformed-interpolation-prefix?
+                                                   (subs source (+ j 2)) triple))
+                                            (and next-char
+                                                 (or (<= (int \0) (int next-char) (int \9))
+                                                     (#{\space \tab \newline \formfeed \- \? \"}
+                                                      next-char))))
+                                    (fail! "E_SOURCE_PARSE"))))
+                              (.append value ^char (at j))
+                              (recur (inc j) value (or dynamic (and (= c \") (= (at j) \$)))))))]
               (recur next-i (conj out {:kind :string :value value :dynamic dynamic})))
             (or (<= (int \a) (int c) (int \z)) (<= (int \A) (int c) (int \Z)) (= c \_))
             (let [end (loop [j (inc i)]

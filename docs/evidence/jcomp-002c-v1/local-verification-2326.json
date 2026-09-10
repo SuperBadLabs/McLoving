@@ -1,0 +1,185 @@
+{
+  "schema": "mcloving.jcomp002c-local-verification/1",
+  "completed_utc": "2026-09-10T06:34:53.720112+00:00",
+  "source": {
+    "head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+    "tree": "035210fe048f45604119f796a18b47070006bff9",
+    "source_archive_sha256": "52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9",
+    "contract_v2_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+    "worker_image_sha256": "8380567bcea6319ad204adfa1c319d715a0233f451cb7bf7ddce837f874949d0",
+    "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+    "build_artifacts_verified": 11,
+    "external_corpus_tool_original_sha256": "88b90a66d6d4f3db5ee91d954180a9fac1e4cb0559c26c8950679d759ece2239",
+    "external_corpus_tool_sha256": "0b8462cb2b5993017fb30716c0c5a3739ecdd37b5cc2426c2849714e71c7f64c",
+    "external_tool_changes": "Only root path bound to clean classifier checkout and current V2 contract hash. Same original population, launcher and genuine admission checks; compile-only no workloads."
+  },
+  "clojure": {
+    "tests": 13,
+    "assertions": 257,
+    "failures": 0,
+    "errors": 0,
+    "log_sha256": "2b50e19162c8cb714d8f75da69bf8aab5ceee22deb2ea6e2f66e77eb9d554db8"
+  },
+  "rust": {
+    "unit_tests": 18,
+    "binary_unit_tests": 4,
+    "integration_tests": 12,
+    "total_tests": 34,
+    "failed": 0,
+    "test_log_sha256": "ffcf4f587b1a6e0e38c96ffb56d3d082bbe2a859722e32f41c43beffde529707",
+    "clippy_warnings_as_errors": "passed",
+    "clippy_log_sha256": "f9bde70671c1d4a5e36413a7d390695b292cf616eee49f39359cbbbe915aed9c"
+  },
+  "mutations": [
+    {
+      "mutation": "remove worker lexical preflight before Groovy parse",
+      "exit": 1,
+      "observed_assertion_failures": 4,
+      "log_sha256": "cf6946732857801cc60a19662d85c37893fce500ffc9aee0f290e8c1c90d356a"
+    },
+    {
+      "mutation": "remove Rust flat interpolation boundary recognition",
+      "exit": 101,
+      "observed": "flat_gstring_continuation becomes Unclassified",
+      "log_sha256": "58a6a4fd7a7c36d46b7ffb4955fa82aaff89754e6c1ccf099e5682d5165f7844"
+    }
+  ],
+  "authored": {
+    "fixtures": 23,
+    "isolated_runs": 46,
+    "positive_fixtures": 11,
+    "positive_qualification": "10 authored plus C052 historical",
+    "negative_fixtures": 12,
+    "campaign_sha256": "292ff5bab314058cbc6cdf5ed83cdc12fb00e8cb55a004b259028d10f4719954",
+    "verification_sha256": "b06bec8cc98b4683f123f95e801d1365dc78bf42d9fa2cc742787b6fe01b997d",
+    "independent_replays": 46,
+    "fixture_status_reason_pipeline_yaml_and_semantic_ir_unchanged": true,
+    "definition_hash_qualification": "V2 contract binding changes disabled definition bytes; independent admission verifies reconstruction."
+  },
+  "original_corpus": {
+    "campaign_sha256": "172cc8c7e429e63159464ee9efc3ca7b92185975a8fe5bc8b0a1c158e01997c2",
+    "verification_log_sha256": "71cf49c70cc26d85a1192e511739761591cde2ca7b18554209311d915fb23c89",
+    "summary": {
+      "population": 228,
+      "exact_original_representations": 226,
+      "retained_redacted_representations": 2,
+      "counts": {
+        "admitted": 1,
+        "unsupported": 216,
+        "rejected": 11,
+        "unverified": 0
+      },
+      "reasons": [
+        {
+          "status": "admitted",
+          "code": null,
+          "count": 1
+        },
+        {
+          "status": "rejected",
+          "code": "E_SOURCE_PARSE",
+          "count": 2
+        },
+        {
+          "status": "rejected",
+          "code": "E_SOURCE_TEXT",
+          "count": 4
+        },
+        {
+          "status": "rejected",
+          "code": "E_SOURCE_TOO_LARGE",
+          "count": 5
+        },
+        {
+          "status": "unsupported",
+          "code": "E_AGENT_UNSUPPORTED",
+          "count": 10
+        },
+        {
+          "status": "unsupported",
+          "code": "E_DECLARATIVE_ROOT",
+          "count": 123
+        },
+        {
+          "status": "unsupported",
+          "code": "E_DIRECTIVE_UNSUPPORTED",
+          "count": 22
+        },
+        {
+          "status": "unsupported",
+          "code": "E_SOURCE_LEXICAL",
+          "count": 44
+        },
+        {
+          "status": "unsupported",
+          "code": "E_STAGE_BODY",
+          "count": 4
+        },
+        {
+          "status": "unsupported",
+          "code": "E_STEP_UNSUPPORTED",
+          "count": 13
+        }
+      ],
+      "classification_complete": true,
+      "workload_executions": 0,
+      "execution_equivalence_claim": false,
+      "production_eligibility_claim": false
+    },
+    "independent_replays": 228,
+    "same228_original_identities": true,
+    "changed_classifications": [
+      {
+        "number": 18,
+        "old_status": "unverified",
+        "old_code": "E_SOURCE_CLASSIFICATION",
+        "new_status": "unsupported",
+        "new_code": "E_SOURCE_LEXICAL"
+      },
+      {
+        "number": 19,
+        "old_status": "unverified",
+        "old_code": "E_SOURCE_CLASSIFICATION",
+        "new_status": "unsupported",
+        "new_code": "E_SOURCE_LEXICAL"
+      },
+      {
+        "number": 23,
+        "old_status": "unverified",
+        "old_code": "E_SOURCE_CLASSIFICATION",
+        "new_status": "unsupported",
+        "new_code": "E_SOURCE_LEXICAL"
+      },
+      {
+        "number": 65,
+        "old_status": "unverified",
+        "old_code": "E_SOURCE_CLASSIFICATION",
+        "new_status": "unsupported",
+        "new_code": "E_SOURCE_LEXICAL"
+      },
+      {
+        "number": 160,
+        "old_status": "unverified",
+        "old_code": "E_SOURCE_CLASSIFICATION",
+        "new_status": "unsupported",
+        "new_code": "E_SOURCE_LEXICAL"
+      },
+      {
+        "number": 162,
+        "old_status": "unverified",
+        "old_code": "E_SOURCE_CLASSIFICATION",
+        "new_status": "unsupported",
+        "new_code": "E_SOURCE_LEXICAL"
+      }
+    ],
+    "six_verified_sha256": "1056b76cc28d32a63e23c6ca266888d16b0312d56ab367f9f0704ee150e87352"
+  },
+  "runtime_workloads_executed": 0,
+  "protected_status": "PR and exact-main gates pending; ticket ACTIVE; this compiler-only validation does not close JCOMP-003.",
+  "intermediate_evidence_qualification": [
+    "Initial Clojure command from wrong directory did not run the intended suite.",
+    "First reduced suite passed all assertions but runner population expected12; updated to13 before commit.",
+    "Intermediate lexer cleanup introduced a syntax error; fixed before commit and final tests.",
+    "Initial historical comparison was overstrict about disabled definition hash, which embeds the new contract; preserved helper and corrected comparison scope."
+  ]
+}

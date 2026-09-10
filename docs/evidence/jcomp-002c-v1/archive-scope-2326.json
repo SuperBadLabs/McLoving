@@ -1,0 +1,21 @@
+{
+  "source_head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+  "full_build_archive_command": [
+    "git",
+    "archive",
+    "HEAD"
+  ],
+  "full_build_archive_sha256": "52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9",
+  "corpus_compiler_subset_archive_command": [
+    "git",
+    "archive",
+    "HEAD",
+    "compat/jenkins-worker",
+    "crates/jenkins-compiler-admission",
+    "crates/pipeline-ir",
+    "Cargo.toml",
+    "Cargo.lock"
+  ],
+  "corpus_compiler_subset_archive_sha256": "c8409fc7f392863e4f87795d37a2e901addbdef5d1c262c899357d882a6d080e",
+  "qualification": "Different deterministic Git archive representations of the same exact clean source commit; both independently reconstructed and matched. Neither archive substitutes for the other."
+}

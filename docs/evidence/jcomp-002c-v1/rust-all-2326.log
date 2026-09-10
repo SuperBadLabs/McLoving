@@ -1,0 +1,66 @@
+   Compiling mcloving-jenkins-compiler-admission v0.0.0 (/tmp/mcloving-chief-classifier-0910/crates/jenkins-compiler-admission)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (target/debug/deps/mcloving_jenkins_compiler_admission-081e09f1f8ebfe61)
+
+running 18 tests
+test sequential::tests::eof_rule_does_not_guess_outside_subset_groovy_or_delimiters_in_literals ... ok
+test sequential::tests::mismatched_closers_and_nested_outside_forms_never_admit ... ok
+test tests::canonical_edn_round_trips_and_rejects_presentation_drift ... ok
+test tests::edn_parser_rejects_duplicates_tags_lists_and_trailing_data ... ok
+test sequential::tests::literal_escape_and_normalization_semantics ... ok
+test sequential::tests::uncertain_nested_interpolation_does_not_borrow_lexical_denial ... ok
+test sequential::tests::recognized_mismatched_closers_are_verified_parse_rejections ... ok
+test sequential::tests::public_errors_never_echo_untrusted_fields_or_diagnostics ... ok
+test sequential::tests::cross_version_missing_lf_and_status_downgrades_fail ... ok
+test sequential::tests::source_byte_stage_step_and_aggregate_bounds ... ok
+test sequential::tests::contexts_and_requests_are_canonical_bound_and_versioned ... ok
+test sequential::tests::independent_nonallowlisted_literals_and_separators ... ok
+test sequential::tests::self_consistent_worker_lowering_forgery_is_refused ... ok
+test sequential::tests::explicit_diagnostic_precedence_refuses_forged_status_and_code ... ok
+test sequential::tests::raw_unicode_preflight_distinguishes_malformed_from_valid_excluded_spelling ... ok
+test sequential::tests::recognized_dsl_truncation_is_a_verified_parse_rejection ... ok
+test sequential::tests::protected_manifest_population_and_exact_semantics ... ok
+test sequential::tests::literal_errors_distinguish_groovy_syntax_from_contract_exclusions ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/main.rs (target/debug/deps/mcloving_jenkins_compiler_admission-b225b13ec79d1031)
+
+running 4 tests
+test tests::sequential_operations_reject_wrong_argument_shapes ... ok
+test tests::admission_inputs_are_regular_and_bounded ... ok
+test tests::admission_inputs_reject_symlinks ... ok
+test tests::sequential_snapshot_errors_are_named_without_input_paths ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/golden.rs (target/debug/deps/golden-f75e41725cc5c601)
+
+running 8 tests
+test alternate_edn_whitespace_cannot_bypass_compiled_admission ... ok
+test exact_admitted_case_cannot_be_downgraded_to_a_denial_status ... ok
+test undeclared_worker_diagnostics_fail_closed ... ok
+test caller_source_and_job_generation_are_not_worker_controlled ... ok
+test exact_worker_fixture_is_independently_admitted ... ok
+test authority_profile_state_and_canonical_substitution_fail_closed ... ok
+test every_compile_status_is_independently_validated ... ok
+test self_consistent_malicious_yaml_is_still_reparsed_and_rejected ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sequential_cli.rs (target/debug/deps/sequential_cli-4905e6c546316df8)
+
+running 4 tests
+test sequential_request_cli_emits_canonical_versioned_bytes ... ok
+test sequential_cli_rejects_bad_context_without_response_or_receipt ... ok
+test legacy_snapshot_and_golden_admission_cli_remain_unchanged ... ok
+test sequential_snapshot_cli_is_bounded_and_wrong_arity_never_uses_legacy_dispatch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests mcloving_jenkins_compiler_admission
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

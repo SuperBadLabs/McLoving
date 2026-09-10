@@ -1,0 +1,11 @@
+{
+  "source_head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+  "source_tree": "035210fe048f45604119f796a18b47070006bff9",
+  "full_source_archive_sha256": "52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9",
+  "bundle_sha256": "b86936d13b7e2103a0307af8bfca68c333060ec7b405328164dd6001feb4e970",
+  "required_protected_base": "44f0498fbdf3a59434176e9d09a52e1260336260",
+  "bundle_tip_ref": "HEAD",
+  "recovery_verified": "Fresh isolated bare repository received protected base then bundle; recovered commit/tree and full Git archive hash exactly match tested source.",
+  "recovery_command": "git fetch /absolute/path/source-2326.bundle HEAD:refs/heads/recovered-jcomp002c-source",
+  "qualification": "Incremental source only. Requires protected base44f objects. Does not contain worker image, admission executable or omitted full raw response inventories; no additional execution or complete offline campaign replay claim."
+}

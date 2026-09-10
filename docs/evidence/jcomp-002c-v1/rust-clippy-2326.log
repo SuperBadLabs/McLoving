@@ -1,0 +1,20 @@
+    Checking typenum v1.20.1
+    Checking cfg-if v1.0.4
+    Checking arraydeque v0.5.1
+    Checking cpufeatures v0.2.17
+    Checking memchr v2.8.3
+    Checking itoa v1.0.18
+    Checking ryu v1.0.23
+    Checking libc v0.2.189
+    Checking serde_core v1.0.228
+    Checking thiserror v2.0.17
+    Checking saphyr-parser v0.0.11
+    Checking generic-array v0.14.7
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking sha2 v0.10.9
+    Checking mcloving-pipeline-ir v0.0.0 (/tmp/mcloving-chief-classifier-0910/crates/pipeline-ir)
+    Checking mcloving-jenkins-compiler-admission v0.0.0 (/tmp/mcloving-chief-classifier-0910/crates/jenkins-compiler-admission)
+    Checking serde_json v1.0.145
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.40s

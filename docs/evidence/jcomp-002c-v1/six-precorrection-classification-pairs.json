@@ -1,0 +1,44 @@
+[
+  {
+    "number": 18,
+    "worker_status": "unsupported",
+    "worker_code": "E_SOURCE_LEXICAL",
+    "rust_classification": "Unclassified",
+    "actual_admission_exit": 1
+  },
+  {
+    "number": 19,
+    "worker_status": "unsupported",
+    "worker_code": "E_SOURCE_LEXICAL",
+    "rust_classification": "Unclassified",
+    "actual_admission_exit": 1
+  },
+  {
+    "number": 23,
+    "worker_status": "rejected",
+    "worker_code": "E_SOURCE_PARSE",
+    "rust_classification": "Unsupported(\"E_SOURCE_LEXICAL\")",
+    "actual_admission_exit": 1
+  },
+  {
+    "number": 65,
+    "worker_status": "unsupported",
+    "worker_code": "E_SOURCE_LEXICAL",
+    "rust_classification": "Unclassified",
+    "actual_admission_exit": 1
+  },
+  {
+    "number": 160,
+    "worker_status": "unsupported",
+    "worker_code": "E_SOURCE_LEXICAL",
+    "rust_classification": "Rejected(\"E_SOURCE_PARSE\")",
+    "actual_admission_exit": 1
+  },
+  {
+    "number": 162,
+    "worker_status": "rejected",
+    "worker_code": "E_SOURCE_PARSE",
+    "rust_classification": "Unsupported(\"E_SOURCE_LEXICAL\")",
+    "actual_admission_exit": 1
+  }
+]

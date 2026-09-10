@@ -503,10 +503,10 @@ All eight final-head app-bound checks passed; exact-main Foundation
 `34351767851` and actual native Windows `34351767843` succeeded. The receipt
 records the bounded independent audit and retained-source/evidence bindings.
 
-## JCOMP-002B contained workspace transfer review (active)
+## JCOMP-002B contained workspace transfer review (completed)
 
 The candidate design `docs/architecture/BUILD_WORKSPACE_TRANSFER_V1.md` and
-active record `docs/evidence/JCOMP-002B_SECURITY_REVIEW.md` cover the new
+completed record `docs/evidence/JCOMP-002B_SECURITY_REVIEW.md` cover the new
 internal checkpoint-transfer mode. A controller-owned unique build namespace,
 monotonic generation, typed bounded snapshot and digest bind the input to each
 fresh attempt workspace. Completion must retain existing session/restore/fence
@@ -519,11 +519,19 @@ reconciliation-required. Manual retries are refused for this mode.
 Affected boundaries are TM-001, TM-003, TM-005, TM-006, TM-007, TM-008, TM-009,
 TM-011, TM-016, TM-017, TM-018, TM-022, TM-023, TM-024, TM-038 and TM-052.
 Focused unit and PostgreSQL observations are recorded separately from the
-still-required actual shipped-runtime campaign. The transfer byte bounds do
+source-qualified actual shipped-runtime campaigns and final exact-main verification. The transfer byte bounds do
 not impose a production filesystem quota, ordinary file transfer cannot identify
 workload-written secrets, and hostile same-UID sibling access remains SEC-005.
-JCOMP-003 retains paired Jenkins and original-corpus claims. JCOMP-002B is ACTIVE
-with no closure attribution or production authority.
+JCOMP-003 retains paired Jenkins and original-corpus claims. JCOMP-002B closes
+only contained transfer implementation on the exact-source receipts; no production authority is granted.
+
+## AGENT-007 bounded renewal outage review (completed)
+
+`docs/evidence/AGENT-007_SECURITY_REVIEW.md` records the corrected-source review and closure evidence for TM-003 and the existing cancellation/reconciliation boundaries. Unanswered renewal replies preserve only already-held authority; answered refusals still cancel immediately, and validated request-start anchored receipts alone advance the term. The response allowance is fixed per renewal cycle to the smaller of one second and half the initially remaining cancellation budget; retry cadence is capped by that fixed allowance, and each ask remains bounded by the held deadline, which reserves configured termination grace and a margin. Actual controller/agent gates and native Windows execution support the bounded implementation claim. No protocol or fencing authority changes. Host scheduling and process-supervision assumptions, hostile same-UID containment under SEC-005, agent-death recovery and JCOMP-003 paired evidence remain outside this closure. Existing threat rows were reviewed and need no semantic change because their ownership and enforcement boundaries are unchanged.
+
+## JCOMP-002C negative diagnostic correction (active)
+
+`docs/evidence/JCOMP-002C_SECURITY_REVIEW.md` records the six original-source compiler/admission disagreements and the bounded correction acceptance for TM-008 and TM-020. Independent negative diagnostic agreement must be earned from original bytes; unknown or unproved forms remain unverified. Lexical exclusion does not certify whole-source Groovy validity. Potentially admitted documents still require full parsing, bounded lexical/AST agreement and independent Rust output validation. The correction adds no runnable syntax, runtime effect or production authority. Independent review of exact candidate `2326a63` verified the bounded source change, build pins, 46 preregistered fixture admission replays and all 228 historical corpus classifications (1 admitted, 216 unsupported, 11 rejected, zero unverified; 226 exact originals plus two retained redacted representations). Ten reduced regressions and two failing mutations support the diagnostic boundary. The retained security review qualifies the tested source and bounded public evidence. Protected merge and exact-main verification remain pending; no JCOMP-002C closure attribution is recorded yet.
 
 ## Closure attribution
 
@@ -574,6 +582,8 @@ had never claimed one.
 | JCOMP-001 | `docs/evidence/JCOMP-001_SECURITY_REVIEW.md` |
 | JCOMP-002 | `docs/evidence/JCOMP-002_SECURITY_REVIEW.md` |
 | JCOMP-002A | `docs/evidence/JCOMP-002A_SECURITY_REVIEW.md` |
+| JCOMP-002B | `docs/evidence/JCOMP-002B_SECURITY_REVIEW.md` |
+| AGENT-007 | `docs/evidence/AGENT-007_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |
@@ -591,3 +601,5 @@ the affected scope, owner, review date, and user-visible limitation.
 Threat-model review is required for changes to authentication, authorization,
 protocols, persistence, execution, secrets, connectors, agent pools, supply
 chain, or deployment boundaries.
+
+PR #135 follow-up review identified an earlier malformed interpolation prefix hidden by a later lexical exclusion. The bounded Clojure precheck now follows the existing independent Rust proof before entering dynamic syntax; unknown nested expressions are not guessed. Original `2326a63` receipts remain historical, and fresh exact-source evidence plus protected verification are required for the follow-up. The V2 contract and runtime authority are unchanged; no closure attribution is added.
