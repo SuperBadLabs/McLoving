@@ -1,4 +1,6 @@
 use std::io::Write as _;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use base64::Engine as _;
@@ -309,4 +311,293 @@ fn config_rejects_a_frame_too_small_for_a_committed_receipt_batch() {
         load_config(&config_path),
         Err(CacheError::InvalidConfig)
     ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sealed_actual_cache_uses_running_bytes_and_config_pin_precedes_state_open() {
+    use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
+    use std::os::fd::AsRawFd as _;
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_mcloving-cache")).unwrap();
+    let fd = nix::sys::memfd::memfd_create(
+        "cache-actual-sealed-test",
+        nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
+    )
+    .unwrap();
+    let mut sealed = std::fs::File::from(fd);
+    sealed.write_all(&binary).unwrap();
+    fcntl(
+        &sealed,
+        FcntlArg::F_ADD_SEALS(
+            SealFlag::F_SEAL_SEAL
+                | SealFlag::F_SEAL_SHRINK
+                | SealFlag::F_SEAL_GROW
+                | SealFlag::F_SEAL_WRITE,
+        ),
+    )
+    .unwrap();
+    fcntl(&sealed, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+    let program = format!("/proc/self/fd/{}", sealed.as_raw_fd());
+    for substituted in [false, true] {
+        let root = private_temp();
+        let key = [42u8; 32];
+        let (config, request) = fixture(&root, &binary, &key);
+        let (config_path, key_path) = write_fixture(&root, &config, &key);
+        let expected = if substituted {
+            "f".repeat(64)
+        } else {
+            mcloving_cache::configuration_sha256(&config).unwrap()
+        };
+        let mut child = Command::new(&program)
+            .args([
+                "--config",
+                &config_path,
+                "--receipt-key",
+                &key_path,
+                "--expected-config-sha256",
+                &expected,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if !substituted {
+            let mut stdin = child.stdin.take().unwrap();
+            writeln!(stdin,"{}",json!({"operation":"read","caller_id":"reader","caller_trust_class":"trusted","key":request})).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.success(), !substituted);
+        assert!(output.stderr.is_empty());
+        if substituted {
+            assert!(output.stdout.is_empty());
+            assert!(!Path::new(&config.database_path).exists());
+        } else {
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["outcome"], "miss");
+            assert_eq!(
+                response["receipts"][0]["event"]["implementation_sha256"],
+                digest(&binary)
+            );
+        }
+    }
+}
+
+#[test]
+fn pure_client_authenticates_all_receipts_and_rejects_content_or_scope_substitution() {
+    use mcloving_cache::{CacheCommand, CacheStore, Clock, SystemClock, verify_operation_response};
+    let root = private_temp();
+    let key = [43u8; 32];
+    let (config, request) = fixture(&root, b"binary", &key);
+    let store = CacheStore::open(config.clone(), key.to_vec()).unwrap();
+    let start = SystemClock.now_unix_ms().unwrap();
+    let command = CacheCommand::Publish {
+        caller_id: "writer".into(),
+        caller_trust_class: "trusted".into(),
+        key: request.clone(),
+        content_base64: BASE64.encode(b"private"),
+    };
+    let response = command.execute(&store, "operator");
+    let mut frame = serde_json::to_vec(&response).unwrap();
+    frame.push(b'\n');
+    let now = SystemClock.now_unix_ms().unwrap();
+    let verify = |bytes: &[u8]| {
+        verify_operation_response(
+            &config,
+            &key,
+            "writer",
+            "trusted",
+            &request,
+            Some(b"private"),
+            bytes,
+            start,
+            now,
+        )
+    };
+    assert_eq!(verify(&frame).unwrap().outcome, "published");
+    for field in ["signature", "event_sha256"] {
+        let mut v: Value = serde_json::from_slice(&frame).unwrap();
+        v["receipts"][0][field] = json!("substituted");
+        let mut bytes = serde_json::to_vec(&v).unwrap();
+        bytes.push(b'\n');
+        assert!(verify(&bytes).is_err());
+    }
+    let mut wrong = request.clone();
+    wrong.logical_key_sha256 = "f".repeat(64);
+    assert!(
+        verify_operation_response(
+            &config,
+            &key,
+            "writer",
+            "trusted",
+            &wrong,
+            Some(b"private"),
+            &frame,
+            start,
+            now
+        )
+        .is_err()
+    );
+    assert!(
+        verify_operation_response(
+            &config,
+            &key,
+            "writer",
+            "trusted",
+            &request,
+            Some(b"different"),
+            &frame,
+            start,
+            now
+        )
+        .is_err()
+    );
+    let mut trailing = frame.clone();
+    trailing.extend_from_slice(b"{}\n");
+    assert!(verify(&trailing).is_err());
+    let mut unknown: Value = serde_json::from_slice(&frame).unwrap();
+    unknown["extra"] = json!(true);
+    let mut bytes = serde_json::to_vec(&unknown).unwrap();
+    bytes.push(b'\n');
+    assert!(verify(&bytes).is_err());
+    let duplicate = String::from_utf8(frame.clone()).unwrap().replacen(
+        "\"status\":",
+        "\"status\":\"published\",\"status\":",
+        1,
+    );
+    assert!(verify(duplicate.as_bytes()).is_err());
+    let read = CacheCommand::Read {
+        caller_id: "reader".into(),
+        caller_trust_class: "trusted".into(),
+        key: request.clone(),
+    }
+    .execute(&store, "operator");
+    let mut read_value = serde_json::to_value(read).unwrap();
+    let mut read_frame = serde_json::to_vec(&read_value).unwrap();
+    read_frame.push(b'\n');
+    assert_eq!(
+        verify_operation_response(
+            &config,
+            &key,
+            "reader",
+            "trusted",
+            &request,
+            None,
+            &read_frame,
+            start,
+            SystemClock.now_unix_ms().unwrap()
+        )
+        .unwrap()
+        .outcome,
+        "hit"
+    );
+    read_value["content_base64"] = json!(BASE64.encode(b"forged"));
+    let mut bad = serde_json::to_vec(&read_value).unwrap();
+    bad.push(b'\n');
+    assert!(
+        verify_operation_response(
+            &config,
+            &key,
+            "reader",
+            "trusted",
+            &request,
+            None,
+            &bad,
+            start,
+            SystemClock.now_unix_ms().unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn pure_client_checks_principal_time_outcome_and_every_multi_receipt_link() {
+    use mcloving_cache::{CacheCommand, CacheStore, Clock, SystemClock, verify_operation_response};
+    let root = private_temp();
+    let key = [44u8; 32];
+    let (mut config, mut request) = fixture(&root, b"binary", &key);
+    config.policies[0].max_entries = 4;
+    request.generation_sha256 = derive_generation_sha256(&config).unwrap();
+    let store = CacheStore::open(config.clone(), key.to_vec()).unwrap();
+    for index in 0..3 {
+        request.logical_key_sha256 = digest(format!("prior-{index}").as_bytes());
+        store
+            .publish("writer", "trusted", &request, &[index; 20])
+            .unwrap();
+    }
+    request.logical_key_sha256 = digest(b"large-entry");
+    let publication = [9u8; 32];
+    let start = SystemClock.now_unix_ms().unwrap();
+    let response = CacheCommand::Publish {
+        caller_id: "writer".into(),
+        caller_trust_class: "trusted".into(),
+        key: request.clone(),
+        content_base64: BASE64.encode(publication),
+    }
+    .execute(&store, "operator");
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["receipts"].as_array().unwrap().len(), 3);
+    let encode = |value: &Value| {
+        let mut bytes = serde_json::to_vec(value).unwrap();
+        bytes.push(b'\n');
+        bytes
+    };
+    let frame = encode(&value);
+    let now = SystemClock.now_unix_ms().unwrap();
+    let verify = |bytes: &[u8]| {
+        verify_operation_response(
+            &config,
+            &key,
+            "writer",
+            "trusted",
+            &request,
+            Some(&publication),
+            bytes,
+            start,
+            now,
+        )
+    };
+    assert!(verify(&frame).unwrap().succeeded);
+    for (caller, trust) in [("reader", "trusted"), ("writer", "untrusted")] {
+        assert!(
+            verify_operation_response(
+                &config,
+                &key,
+                caller,
+                trust,
+                &request,
+                Some(&publication),
+                &frame,
+                start,
+                now
+            )
+            .is_err()
+        );
+    }
+    let mut wrong = value.clone();
+    wrong["outcome"] = json!("replay");
+    assert!(verify(&encode(&wrong)).is_err());
+    let observed = value["receipts"][0]["event"]["observed_at_unix_ms"]
+        .as_i64()
+        .unwrap();
+    assert!(
+        verify_operation_response(
+            &config,
+            &key,
+            "writer",
+            "trusted",
+            &request,
+            Some(&publication),
+            &frame,
+            observed + 1,
+            observed + 2
+        )
+        .is_err()
+    );
+    let mut reversed = value.clone();
+    reversed["receipts"].as_array_mut().unwrap().swap(0, 1);
+    assert!(verify(&encode(&reversed)).is_err());
+    let mut gap = value;
+    gap["receipts"].as_array_mut().unwrap().remove(1);
+    assert!(verify(&encode(&gap)).is_err());
 }

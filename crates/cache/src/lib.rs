@@ -13,7 +13,10 @@ pub use standalone::{
     CacheCommand, CacheResponse, FrameReadError, load_config, read_bounded_frame,
     read_private_receipt_key, serialized_response_fits_frame, sha256_file, write_response,
 };
-pub use store::{CacheError, CacheStore, Clock, SystemClock, derive_generation_sha256};
+pub use store::{
+    CacheError, CacheStore, Clock, SystemClock, VerifiedCacheOperation, configuration_sha256,
+    derive_generation_sha256, validate_operation_request, verify_operation_response,
+};
 pub use strict_json::parse_json_no_duplicates;
 
 pub const PROTOCOL_VERSION: &str = "mcloving.cache/v1";

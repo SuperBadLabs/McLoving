@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub mod cache;
 mod worker;
 
 use mcloving_agent_protocol::wire;
@@ -46,6 +47,7 @@ const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
+    pub cache_bindings: Option<cache::CacheBindings>,
     pub agent_id: String,
     pub trust_pool: String,
     pub organization_id: String,
@@ -241,6 +243,17 @@ impl AgentConfig {
             ));
         }
         Ok(Self {
+            cache_bindings: match values.get("MCLOVING_AGENT_CACHE_BINDINGS_PATH") {
+                Some(path) if cfg!(target_os = "linux") => Some(cache::load_bindings(
+                    Path::new(path),
+                    &required("MCLOVING_AGENT_CACHE_BINDINGS_SHA256")?,
+                )?),
+                Some(_) => return Err(AgentError::InvalidConfig("cache helpers require Linux")),
+                None if values.contains_key("MCLOVING_AGENT_CACHE_BINDINGS_SHA256") => {
+                    return Err(AgentError::InvalidConfig("cache bindings path missing"));
+                }
+                None => None,
+            },
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
             organization_id: required("MCLOVING_AGENT_ORGANIZATION_ID")?,
@@ -513,7 +526,11 @@ async fn open_session(
                 ]),
             }),
             trust_pool: config.trust_pool.clone(),
-            capabilities: session_capabilities(),
+            capabilities: {
+                let mut values = session_capabilities();
+                values.extend(cache::scheduling_capabilities(config)?);
+                values
+            },
         };
         let response = tokio::select! {
             () = stop.cancelled() => return Err(AgentError::Stopped),

@@ -11,7 +11,7 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3};
+use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -132,6 +132,14 @@ pub struct Stage {
 pub enum Step {
     Process(ProcessStep),
     ConnectorIntent(ConnectorIntentStep),
+    CacheIntent(CacheIntentStep),
+}
+
+/// A literal bounded cache intent; authority is resolved by deployment catalogs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheIntentStep {
+    pub intent: mcloving_domain::cache_intent::CacheIntentSpec,
+    pub source_span: SourceSpan,
 }
 
 /// A deployment-resolved external-effect intent. It deliberately contains no
@@ -297,7 +305,15 @@ pub fn compile_strict_yaml_with_parameters(
             |step| matches!(step, Step::Process(process) if process.mode != ProcessMode::Direct),
         )
     });
-    let schema = if has_connector_intent {
+    let has_cache_intent = stages.iter().any(|stage| {
+        stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::CacheIntent(_)))
+    });
+    let schema = if has_cache_intent {
+        IR_V1_4
+    } else if has_connector_intent {
         IR_V1_3
     } else if has_explicit_shell_mode {
         IR_V1_2
@@ -594,26 +610,66 @@ fn compile_steps(
             let mut step = MappingView::new(node, &path)?;
             let process = step.take("process");
             let connector_intent = step.take("connector_intent");
+            let cache_intent = step.take("cache_intent");
             step.finish()?;
-            match (process, connector_intent) {
-                (Some(process), None) => {
+            match (process, connector_intent, cache_intent) {
+                (Some(process), None, None) => {
                     compile_process(process, &path, step_span, parameters, expressions)
                         .map(Step::Process)
                 }
-                (None, Some(intent)) => {
+                (None, Some(intent), None) => {
                     compile_connector_intent(intent, &path, step_span).map(Step::ConnectorIntent)
                 }
-                (None, None) => Err(CompileError::schema(
+                (None, None, Some(intent)) => {
+                    compile_cache_intent(intent, &path, step_span).map(Step::CacheIntent)
+                }
+                _ => Err(CompileError::schema(
                     &path,
-                    "exactly one of process or connector_intent is required",
-                )),
-                (Some(_), Some(_)) => Err(CompileError::schema(
-                    &path,
-                    "process and connector_intent are mutually exclusive",
+                    "exactly one of process, connector_intent or cache_intent is required",
                 )),
             }
         })
         .collect()
+}
+
+fn compile_cache_intent(
+    node: SpannedValue,
+    step_path: &str,
+    source_span: SourceSpan,
+) -> Result<CacheIntentStep, CompileError> {
+    use mcloving_domain::cache_intent::{CacheIntentSpec, CacheOperation};
+    let path = format!("{step_path}.cache_intent");
+    let mut view = MappingView::new(node, &path)?;
+    let mapping_id = view.required_string("mapping_id")?;
+    let mapping_digest = view.required_string("mapping_digest")?;
+    let operation = match view.required_string("operation")?.as_str() {
+        "read" => CacheOperation::Read,
+        "publish" => CacheOperation::Publish,
+        _ => return Err(CompileError::schema(&path, "unsupported cache operation")),
+    };
+    let logical_key_sha256 = view.required_string("logical_key_sha256")?;
+    let input_sha256 = view.required_string("input_sha256")?;
+    let content_base64 = view.optional_string("content_base64")?;
+    let timeout_seconds = view
+        .optional_u64("timeout_seconds")?
+        .ok_or_else(|| CompileError::schema(&path, "cache timeout is required"))?;
+    view.finish()?;
+    let intent = CacheIntentSpec {
+        mapping_id,
+        mapping_digest,
+        operation,
+        logical_key_sha256,
+        input_sha256,
+        content_base64,
+        timeout_seconds,
+    };
+    intent
+        .validate()
+        .map_err(|error| CompileError::schema(&path, error.to_string()))?;
+    Ok(CacheIntentStep {
+        intent,
+        source_span,
+    })
 }
 
 fn compile_connector_intent(
@@ -811,10 +867,13 @@ fn compile_resolved_string(
 
 /// Validate a Pipeline IR object without consulting its YAML source.
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
-    if !matches!(pipeline.schema, IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3) {
+    if !matches!(
+        pipeline.schema,
+        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4
+    ) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 through v1.3 are accepted",
+            "only Pipeline IR v1.0 through v1.4 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -865,12 +924,20 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
         if stage
             .steps
             .iter()
-            .any(|step| matches!(step, Step::ConnectorIntent(_)))
+            .any(|step| matches!(step, Step::ConnectorIntent(_) | Step::CacheIntent(_)))
             && stage.steps.len() != 1
         {
             return Err(IrValidationError::new(
                 format!("{path}.steps"),
-                "a connector-intent stage must contain exactly one connector intent",
+                if stage
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, Step::ConnectorIntent(_)))
+                {
+                    "a connector-intent stage must contain exactly one connector intent"
+                } else {
+                    "a cache-intent stage must contain exactly one cache intent"
+                },
             ));
         }
         total_steps = total_steps.saturating_add(stage.steps.len());
@@ -932,6 +999,19 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                             value,
                         )?;
                     }
+                }
+                Step::CacheIntent(cache) => {
+                    let base = format!("{path}.steps[{step_index}].cache_intent");
+                    if pipeline.schema.minor < IR_V1_4.minor {
+                        return Err(IrValidationError::new(
+                            &base,
+                            "cache intents require Pipeline IR v1.4",
+                        ));
+                    }
+                    cache
+                        .intent
+                        .validate()
+                        .map_err(|error| IrValidationError::new(&base, error.to_string()))?;
                 }
                 Step::ConnectorIntent(intent) => {
                     let base = format!("{path}.steps[{step_index}].connector_intent");

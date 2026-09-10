@@ -450,8 +450,8 @@ require_secret_files() {
 # "follow": the binary opens through the pathname (fs::read,
 # read_to_string, store/journal opens), so symlinks are legal and the
 # resolved target chain is what the walk judges. "nofollow": the binary
-# inspects with symlink_metadata() and refuses every symlink -- today the
-# two effect variables -- so the guard refuses the link itself, lstat-based,
+# refuses leaf symlinks through metadata checks or no-follow opens (the
+# effect and cache catalogs), so the guard refuses the link itself, lstat-based,
 # before any generic class check follows it.
 #
 # EXPECTED-KIND is the same parity principle applied to NODE TYPE: "file"
@@ -494,15 +494,19 @@ deployment_contract_path_variables() {
         "trust follow MCLOVING_AGENT_SERVER_CERT_PATH file" \
         "trust follow MCLOVING_AGENT_CLIENT_CA_PATH file" \
         "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG file" \
+        "trust nofollow MCLOVING_CACHE_MAPPING_CATALOG file" \
         "state follow MCLOVING_OBJECT_ROOT directory" \
         "state follow MCLOVING_WORKSPACE_ROOT directory" \
         "state follow MCLOVING_AGENT_JOURNAL file"
       ;;
     agent)
+      # Cache bindings are optional owner-private immutable configuration;
+      # the guard additionally enforces their exact mode/owner/link contract.
       # The session receipt is an optional durable output the agent writes;
       # state-class like the journal, absence legal before first use.
       printf '%s\n' \
         "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH file" \
+        "secret nofollow MCLOVING_AGENT_CACHE_BINDINGS_PATH file" \
         "trust follow MCLOVING_CONTROLLER_CA_PATH file" \
         "trust follow MCLOVING_AGENT_CERTIFICATE_PATH file" \
         "state follow MCLOVING_AGENT_WORKSPACE_ROOT directory" \

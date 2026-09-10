@@ -32,7 +32,10 @@ use unix::{
     open_workspace_root as platform_open_workspace_root,
 };
 #[cfg(unix)]
-pub use unix::{execute, execute_with_spawn_hook, execute_with_spawn_hook_and_redactions};
+pub use unix::{
+    execute, execute_with_spawn_hook, execute_with_spawn_hook_and_private_io,
+    execute_with_spawn_hook_and_redactions,
+};
 #[cfg(windows)]
 use windows::{
     ensure_original_workspace_root as platform_ensure_original_workspace_root,
@@ -81,6 +84,8 @@ pub enum Containment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionOutcome {
+    /// Only mediated private IO sets this; ordinary process status is unchanged.
+    pub private_response_accepted: Option<bool>,
     /// Capture occurs only after containment; failure preserves process/log evidence.
     pub workspace_snapshot: Option<Result<mcloving_domain::workspace::WorkspaceSnapshot, String>>,
     pub termination: Termination,
@@ -91,8 +96,21 @@ pub struct ExecutionOutcome {
     pub stderr: SpoolEntry,
 }
 
+/// One bounded helper exchange. Raw output is never written to a spool.
+pub struct PrivateExecutionIo<'a> {
+    pub request: &'a [u8],
+    pub transform: &'a (dyn Fn(&[u8], &[u8]) -> PrivateExecutionOutput + Sync),
+}
+
+pub struct PrivateExecutionOutput {
+    pub stdout: Vec<u8>,
+    pub accepted: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
+    #[error("private helper I/O configuration is invalid")]
+    InvalidPrivateIo,
     #[error("execution was cancelled before process spawn")]
     CancelledBeforeSpawn,
     #[error("workspace transfer failed: {0}")]

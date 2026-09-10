@@ -75,6 +75,26 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
                         None => writer.u8(0),
                     }
                 }
+                Step::CacheIntent(cache) => {
+                    let intent = &cache.intent;
+                    writer.u8(3);
+                    writer.string(&intent.mapping_id);
+                    writer.string(&intent.mapping_digest);
+                    writer.u8(match intent.operation {
+                        mcloving_domain::cache_intent::CacheOperation::Read => 1,
+                        mcloving_domain::cache_intent::CacheOperation::Publish => 2,
+                    });
+                    writer.string(&intent.logical_key_sha256);
+                    writer.string(&intent.input_sha256);
+                    match &intent.content_base64 {
+                        Some(content) => {
+                            writer.u8(1);
+                            writer.string(content);
+                        }
+                        None => writer.u8(0),
+                    }
+                    writer.u64(intent.timeout_seconds);
+                }
                 Step::ConnectorIntent(intent) => {
                     writer.u8(2);
                     writer.string(&intent.mapping_id);
@@ -264,7 +284,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 3 {
+    if schema.major != 1 || schema.minor > 4 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -442,6 +462,51 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                             ));
                         }
                     }
+                }
+                3 if schema.minor >= 4 => {
+                    use mcloving_domain::cache_intent::{CacheIntentSpec, CacheOperation};
+                    if stage_steps != 1 {
+                        return Err(CanonicalError::new(
+                            reader.offset,
+                            "cache intent stage must contain exactly one step",
+                        ));
+                    }
+                    let mapping_id = reader.string()?;
+                    let mapping_digest = reader.string()?;
+                    let operation = match reader.u8()? {
+                        1 => CacheOperation::Read,
+                        2 => CacheOperation::Publish,
+                        _ => {
+                            return Err(CanonicalError::new(
+                                reader.offset,
+                                "invalid cache operation",
+                            ));
+                        }
+                    };
+                    let logical_key_sha256 = reader.string()?;
+                    let input_sha256 = reader.string()?;
+                    let content_base64 = match reader.u8()? {
+                        0 => None,
+                        1 => Some(reader.string()?),
+                        _ => {
+                            return Err(CanonicalError::new(
+                                reader.offset,
+                                "invalid cache content marker",
+                            ));
+                        }
+                    };
+                    let timeout_seconds = reader.u64()?;
+                    CacheIntentSpec {
+                        mapping_id,
+                        mapping_digest,
+                        operation,
+                        logical_key_sha256,
+                        input_sha256,
+                        content_base64,
+                        timeout_seconds,
+                    }
+                    .validate()
+                    .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
                 }
                 2 if schema.minor >= 3 => {
                     if stage_steps != 1 {

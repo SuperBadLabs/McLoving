@@ -7,8 +7,6 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-#[cfg(test)]
-use std::process::Command;
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -222,6 +220,7 @@ where
     sync_directory(&workspace)?;
 
     Ok(ExecutionOutcome {
+        private_response_accepted: None,
         workspace_snapshot: None,
         termination,
         exit_code: status.code(),
@@ -497,10 +496,36 @@ fn containment_unverified(process_id: u32, error: ExecutionError) -> ExecutionEr
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
+    use mcloving_windows_job::ProcessObserver;
+
+    fn observe_live_process(pid: u32) -> (u32, ProcessObserver) {
+        let observer = ProcessObserver::open(pid)
+            .unwrap_or_else(|error| panic!("open original PID {pid}: {error}"));
+        let status = observer
+            .try_wait()
+            .unwrap_or_else(|error| panic!("query original PID {pid} before action: {error}"));
+        assert!(
+            status.is_none(),
+            "original PID {pid} must be alive before action: {status:?}"
+        );
+        (pid, observer)
+    }
+
+    fn assert_original_process_terminated((pid, observer): &(u32, ProcessObserver)) {
+        let status = observer
+            .try_wait()
+            .unwrap_or_else(|error| panic!("query original PID {pid} after containment: {error}"))
+            .unwrap_or_else(|| {
+                panic!("original PID {pid} handle is not signaled after containment")
+            });
+        assert_eq!(
+            status.code(),
+            Some(TERMINATED_EXIT_CODE as i32),
+            "original PID {pid} termination status: {status:?}"
+        );
+    }
 
     fn request(
         root: &Path,
@@ -559,28 +584,17 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let cancel_at_hook = cancellation.clone();
-        let process_id = AtomicU32::new(0);
+        let mut observer = None;
         let result = execute_with_spawn_hook(&request, cancellation, |pid| {
-            process_id.store(pid, Ordering::SeqCst);
+            observer = Some(observe_live_process(pid));
             cancel_at_hook.cancel();
             Ok(())
         })
         .await;
         assert!(matches!(result, Err(ExecutionError::CancelledBeforeSpawn)));
         assert!(!root.path().join("cancelled-hook/spawned.marker").exists());
-        let pid = process_id.load(Ordering::SeqCst);
-        assert_ne!(
-            pid, 0,
-            "suspended process must reach the durable spawn hook"
-        );
-        let status = Command::new("powershell.exe")
-            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &format!(
-                "try {{ $p = [System.Diagnostics.Process]::GetProcessById({pid}); if (!$p.HasExited) {{ exit 1 }} }} catch [System.ArgumentException] {{ exit 0 }} catch {{ throw }}"
-            )])
-            .status().unwrap();
-        assert!(
-            status.success(),
-            "suspended workload {pid} must be terminated before return"
+        assert_original_process_terminated(
+            &observer.expect("spawn hook must pin process identity"),
         );
     }
 
@@ -867,12 +881,11 @@ while ($true) { [Console]::Out.Write("0123456789abcdef") }
         request.output_limit_bytes = Some(4_096);
         request.timeout = Duration::from_secs(30);
 
-        let process_id = Arc::new(AtomicU32::new(0));
-        let recorded_process_id = Arc::clone(&process_id);
+        let mut observer = None;
         let public_path = root.path().join("renamed-log/spool/stdout.log");
         let renamed_path = root.path().join("renamed-log/spool/renamed.log");
-        let result = execute_with_spawn_hook(&request, CancellationToken::new(), move |spawned| {
-            recorded_process_id.store(spawned, Ordering::SeqCst);
+        let result = execute_with_spawn_hook(&request, CancellationToken::new(), |spawned| {
+            observer = Some(observe_live_process(spawned));
             fs::rename(&public_path, &renamed_path)?;
             File::create(public_path)?;
             Ok(())
@@ -888,21 +901,9 @@ while ($true) { [Console]::Out.Write("0123456789abcdef") }
                 .len()
                 <= 4_096
         );
-        let process_id = process_id.load(Ordering::SeqCst);
-        assert_ne!(process_id, 0, "spawn hook did not record the workload PID");
-        let status = Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "if (Get-Process -Id {process_id} -ErrorAction SilentlyContinue) {{ exit 1 }}"
-                ),
-            ])
-            .status()
-            .unwrap();
-        assert!(status.success(), "workload {process_id} escaped its Job");
+        assert_original_process_terminated(
+            &observer.expect("spawn hook must pin process identity"),
+        );
     }
 
     #[tokio::test]
@@ -932,43 +933,26 @@ Wait-Process -Id $child.Id
         let token = CancellationToken::new();
         let cancel = token.clone();
         let cancellation_pid_path = pid_path.clone();
-        let cancellation = tokio::spawn(async move {
+        let cancellation = async move {
             for _ in 0..2_500 {
                 if let Ok(contents) = fs::read_to_string(&cancellation_pid_path)
-                    && contents.trim().parse::<u32>().is_ok()
+                    && let Ok(pid) = contents.trim().parse::<u32>()
                 {
+                    let observer = observe_live_process(pid);
                     cancel.cancel();
-                    return;
+                    return observer;
                 }
                 sleep(Duration::from_millis(10)).await;
             }
             panic!("descendant PID was not written within 25 seconds");
-        });
+        };
 
-        let outcome = execute(&request, token).await.unwrap();
-        cancellation.await.unwrap();
+        // Keep the original handle local; no observer subprocess or post-kill
+        // PID lookup can confuse termination with process-identifier reuse.
+        let (outcome, observer) = tokio::join!(execute(&request, token), cancellation);
+        let outcome = outcome.unwrap();
         assert_eq!(outcome.termination, Termination::Cancelled);
-        let child_pid = fs::read_to_string(pid_path)
-            .unwrap()
-            .trim()
-            .parse::<u32>()
-            .unwrap();
-        let status = Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "if (Get-Process -Id {child_pid} -ErrorAction SilentlyContinue) {{ exit 1 }}"
-                ),
-            ])
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "descendant {child_pid} escaped the Job Object"
-        );
+        assert_original_process_terminated(&observer);
     }
 
     #[test]

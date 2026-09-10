@@ -24,10 +24,31 @@ fn run() -> Result<(), CacheError> {
         return Err(CacheError::InvalidConfig);
     }
     let receipt_key_path = arguments.next().ok_or(CacheError::InvalidConfig)?;
-    if arguments.next().is_some() {
+    let expected_config = match arguments.next() {
+        None => None,
+        Some(flag) if flag == "--expected-config-sha256" => {
+            let digest = arguments.next().ok_or(CacheError::InvalidConfig)?;
+            if arguments.next().is_some() {
+                return Err(CacheError::InvalidConfig);
+            }
+            Some(
+                digest
+                    .into_string()
+                    .map_err(|_| CacheError::InvalidConfig)?,
+            )
+        }
+        Some(_) => return Err(CacheError::InvalidConfig),
+    };
+    let config = load_config(Path::new(&config_path))?;
+    // Compare the same parsed configuration before opening any cache state.
+    if let Some(expected) = expected_config
+        && mcloving_cache::configuration_sha256(&config)? != expected
+    {
         return Err(CacheError::InvalidConfig);
     }
-    let config = load_config(Path::new(&config_path))?;
+    #[cfg(target_os = "linux")]
+    let running_executable = std::path::PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
     let running_executable = std::env::current_exe().map_err(|_| CacheError::InvalidConfig)?;
     if sha256_file(&running_executable)? != config.implementation_sha256 {
         return Err(CacheError::InvalidConfig);
