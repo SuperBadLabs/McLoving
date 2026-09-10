@@ -10,7 +10,7 @@ durable compiler supplement and reviewed runtime design. The earlier
 On September 9, PR #128 merged as `904fd1f`; exact-main Foundation
 `34317917356` and actual native Windows `34317917395` succeeded. JCOMP-002
 closed in the subsequent JCOMP-002A bookkeeping commit after receipt review
-and live verification. JCOMP-002C is the immediate ACTIVE dispatch; JCOMP-003 remains ACTIVE with campaigns held on this correction; JCOMP-002B and AGENT-007 earned closure as recorded below. The original dated
+and live verification. JCOMP-003 is the immediate ACTIVE dispatch after JCOMP-002C earned closure; JCOMP-002B and AGENT-007 earned closure as recorded below. The original dated
 handoff remains an immutable historical observation. Fresh custody on `09b6c53`
 observed successful Foundation `34342349617` and native Windows `34342349592`;
 those observations verify only that head.
@@ -31,7 +31,7 @@ authority, closes no ticket, and does not relax
 
 The owner selected broader pipeline support with Linux sequential Declarative
 pipelines and literal shell steps as the first milestone. The selected slot is
-now `JCOMP-002C` (`ACTIVE`); `JCOMP-003` remains ACTIVE but cannot dispatch new campaigns until this prerequisite closes. The serialized dispatch is `JCOMP-001` ->
+now `JCOMP-003` (`ACTIVE`); JCOMP-002C is DONE on its corrected protected merge and exact-main receipts. The serialized dispatch is `JCOMP-001` ->
 `JCOMP-002` -> `JCOMP-002A` -> `JCOMP-002B` -> `JCOMP-002C` -> `JCOMP-003`, with one standalone
 PR per ticket. The [board](../EXECUTION_BOARD.md) holds their complete acceptance
 criteria; no successor starts before its predecessor is protected-main merged
@@ -120,7 +120,7 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   count copied into this file is stale on the next ticket. As an observation
   rather than a current-state claim: on 2026-09-08 the reorganized local board
   reported 112 tickets with 26 remaining, and 86 done with the admitted, ratcheted 37-item debt.
-- `JCOMP-002C` is the selected dispatch ticket and is `ACTIVE`; `JCOMP-003` remains ACTIVE but held on this prerequisite. Before
+- `JCOMP-003` is the selected dispatch ticket and is `ACTIVE`; `JCOMP-002C` has earned closure. Before
   continuing on a successor head, evaluate the standing successor-head verification gate against
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
@@ -168,7 +168,7 @@ source-acquirer package must run under `aa-exec -p mcloving-source-acquirer`.
 
 The September 8 priority replaces the thaw's `EXEC-005` selection with
 the Jenkins compatibility chain. `JCOMP-001`, `JCOMP-002` and `JCOMP-002A` are now verified complete and
-`JCOMP-002B` and `AGENT-007` have earned closure. `JCOMP-002C` is selected to correct the observed negative diagnostic disagreements; after its earned closure, refresh the JCOMP-003 execution freeze before collecting new paired and original-corpus evidence.
+`JCOMP-002B` and `AGENT-007` have earned closure. `JCOMP-002C` earned the bounded diagnostic correction; refresh the JCOMP-003 execution freeze before collecting new paired and original-corpus evidence.
 Before starting, refresh protected main, open PRs, alerts and protection,
 run the board/closure and full Foundation gates, and observe the condition
 below against the head that is current when you read this. Use a fresh
@@ -220,6 +220,8 @@ PR #131 protected merge `49c7e3346529babc131b318a5cf4091e4194db8d` earned JCOMP-
 
 The contained JCOMP-003 original-corpus capture at source `2eadf80ec99f362d901a01a074b79e669a7fe3a9` retained six cases as `unverified` under `E_SOURCE_CLASSIFICATION`: 018, 019, 023, 065, 160 and 162. They are not rejection or unsupported evidence. `JCOMP-002C` owns the bounded independent negative-diagnostic correction described on the board. No admitted grammar or runtime expansion is authorized by this ticket. Preserve the original 228 identities and separate authored-fixture evidence.
 
-Exact candidate `2326a63b6c52a5354a82d58aee9879db046613c9` now has independent source/build/evidence review: 34 Rust tests, strict Clippy, 13 Clojure tests with 257 assertions, two meaningful failing mutations and independent replay of all 46 preregistered fixture responses. The separate original corpus has 1 admitted, 216 unsupported, 11 rejected and zero unverified across 226 exact originals and two previously retained redacted representations. Only the six prior disagreements changed classification; these are compile-only observations. The [security review and bounded retained evidence](../evidence/JCOMP-002C_SECURITY_REVIEW.md) qualify the exact tested source and omitted raw inventory. Protected merge and successful exact-main checks remain required before closure. JCOMP-003 remains ACTIVE with new campaigns held; after this prerequisite closes it must refresh the exact compiler/runtime freeze and regenerate affected captures. Earlier successful components and failed cleanup/startup observations retain their original source identities. The compiler-only corpus result does not establish a sealed paired execution claim.
+Exact candidate `2326a63b6c52a5354a82d58aee9879db046613c9` now has independent source/build/evidence review: 34 Rust tests, strict Clippy, 13 Clojure tests with 257 assertions, two meaningful failing mutations and independent replay of all 46 preregistered fixture responses. The separate original corpus has 1 admitted, 216 unsupported, 11 rejected and zero unverified across 226 exact originals and two previously retained redacted representations. Only the six prior disagreements changed classification; these are compile-only observations. The [security review and bounded retained evidence](../evidence/JCOMP-002C_SECURITY_REVIEW.md) qualify the exact tested source and omitted raw inventory. The corrected final c94 source subsequently earned protected merge and exact-main verification as recorded below. JCOMP-003 remains ACTIVE and must refresh the exact compiler/runtime freeze and regenerate affected captures. Earlier successful components and failed cleanup/startup observations retain their original source identities. The compiler-only corpus result does not establish a sealed paired execution claim.
 
-PR #135 review subsequently found a malformed first-dollar interpolation prefix that source `2326a63` classified inconsistently before a later lexical exclusion. The bounded follow-up mirrors the already trusted Rust prefix predicates in Clojure before the dynamic flag changes. The sealed `jcomp-002c-v1` receipts remain historical baseline evidence, not verification of the new compiler source. Fresh candidate and protected gate receipts must be reviewed before closure; see the updated JCOMP-002C security review.
+PR #135 review subsequently found a malformed first-dollar interpolation prefix that source `2326a63` classified inconsistently before a later lexical exclusion. The bounded follow-up mirrors the already trusted Rust prefix predicates in Clojure before the dynamic flag changes. The sealed `jcomp-002c-v1` receipts remain historical baseline evidence, not verification of the new compiler source. Final c94 validation independently replayed all 17 reduced cases, 46 preregistered responses and 228 originals with 1 admitted / 216 unsupported / 11 rejected / 0 unverified. See the updated JCOMP-002C security review for source-qualified receipts.
+
+JCOMP-002C earned closure on signed PR #135 merge `01137b54b8fbefdc0deb0214a5d4d8979a773575`, tree `b5f50381ad6af2183bb6d6ef56c8daee2e371723`, with exact-main Foundation `34450761533` and native Windows `34450761576`, both successful attempt 1. The [retained post-merge audit](../evidence/JCOMP-002C_CLOSURE.json) has SHA-256 `d10d2965828e40d17673a711cf181a6033aa0a61c2ccc20c920ff9a6605487e6`. JCOMP-003 is the selected ACTIVE successor; its fresh final freeze and campaigns remain independently gated.
