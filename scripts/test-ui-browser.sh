@@ -87,12 +87,41 @@ if [[ -z "${listening}" ]]; then
 fi
 
 printf 'Running the contained browser gate against 127.0.0.1:%s\n' "${port}" >&2
-# Rootless podman maps container UID 1000 to a subordinate host UID, which
-# cannot write the mounted evidence directory. keep-id maps the invoking user
-# onto the image's runtime UID so the gate writes its own output as itself.
+# The gate has to write its evidence into a directory owned by the invoking
+# user, and how a container process reaches that identity differs by podman
+# mode. Detect it rather than assuming: `--userns=keep-id` is REJECTED outright
+# by a rootful podman, and `--user` alone does the wrong thing under a rootless
+# one, so guessing fails either way round.
+identity=()
+if [[ -n "${MCLOVING_UI_BROWSER_IDENTITY:-}" ]]; then
+  # Escape hatch for a host neither branch below describes.
+  read -r -a identity <<<"${MCLOVING_UI_BROWSER_IDENTITY}"
+else
+  rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
+  case "${rootless}" in
+    true)
+      # Rootless maps container UID 1000 to a subordinate host UID that cannot
+      # write the mount; keep-id maps the invoking user onto the image's
+      # runtime UID instead.
+      identity=(--userns=keep-id:uid=1000,gid=1000)
+      ;;
+    false)
+      # Rootful applies no remapping, so name the invoking user directly rather
+      # than inheriting the image's USER 1000.
+      identity=(--user "$(id -u):$(id -g)")
+      ;;
+    *)
+      printf 'cannot determine whether podman is rootless (got %q); set\n' \
+        "${rootless}" >&2
+      printf 'MCLOVING_UI_BROWSER_IDENTITY to the podman flags to use\n' >&2
+      exit 69
+      ;;
+  esac
+fi
+
 podman run --rm \
   --network=host \
-  --userns=keep-id:uid=1000,gid=1000 \
+  "${identity[@]}" \
   --volume "${script_dir}/ui-browser/gate.py:/gate/gate.py:ro,Z" \
   --volume "${repo_root}/crates/controller-api/ui:/gate/ui:ro,Z" \
   --volume "${output_dir}:/gate/out:rw,Z" \
