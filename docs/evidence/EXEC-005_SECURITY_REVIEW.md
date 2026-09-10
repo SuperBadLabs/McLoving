@@ -224,3 +224,19 @@ bound Tokio listener and hands it directly to tonic's incoming stream. It adds
 only an already-locked, test-only tokio-stream dependency; production renewal
 logic and test timing assertions are unchanged. The failed Foundation run is
 preserved separately, and the corrected candidate requires fresh validation.
+
+The corrected signed candidate `680e88f8c766f88317ae923639eeba539711469b`
+passed local general and host Foundation lanes with unchanged source snapshots.
+The host lane reused byte-identical loaded policy and transport mounts; dependency
+mounts ran only in verified private user/mount namespaces, with cleanup and
+unchanged outer-host mount state verified. This was the reviewed alternative to
+an automatically rejected privileged host-policy setup, not a policy bypass.
+Protected PR #140's first native Windows job compiled the production agent but
+failed strict Clippy on three explicit drops of the adapter's non-Unix empty
+spool-lock type. That newly reachable dependency lint failure is retained;
+Windows execution remains required before publication can be credited.
+The correction consumes the spool lock in a private synchronous scope at each
+original release boundary. Unix still drops the real file lock there; non-Unix
+acquisition still refuses. It adds no fake destructor or lint suppression.
+Independent review, all 25 adapter tests and agent/adapter strict Clippy passed
+on Linux; the corrected native Windows result must be observed separately.

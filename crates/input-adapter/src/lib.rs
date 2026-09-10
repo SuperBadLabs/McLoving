@@ -574,7 +574,7 @@ impl InputAdapter {
         }
         let client = builder.build().map_err(|_| AdapterError::InvalidConfig)?;
         ensure_private_spool(&config.spool_dir).await?;
-        drop(lock_spool(&config.spool_dir, true).await?);
+        release_spool_lock(lock_spool(&config.spool_dir, true).await?);
         // A capture claim is useful only if its directory entry can be made
         // durable before source access. Fail adapter construction on platforms
         // without that primitive instead of discovering the limitation after
@@ -633,7 +633,7 @@ impl InputAdapter {
             .matching_claim(request.capture_id, &request_sha256)
             .await?
         {
-            drop(spool_admission);
+            release_spool_lock(spool_admission);
             drop(admission);
             return self
                 .await_claimed_receipt(request.capture_id, &request_sha256, &claim)
@@ -671,7 +671,7 @@ impl InputAdapter {
             self.release_rate_reservation_unlocked(request.capture_id)
                 .await?;
         }
-        drop(spool_admission);
+        release_spool_lock(spool_admission);
         drop(admission);
         if !claimed {
             let existing_claim = self
@@ -1318,6 +1318,11 @@ type SpoolLock = nix::fcntl::Flock<std::fs::File>;
 
 #[cfg(not(unix))]
 struct SpoolLock;
+
+// Returning from this scope releases the Unix Flock at the exact admission
+// boundary. Unsupported platforms cannot acquire a SpoolLock; their sentinel
+// needs no destructor and must not enable a non-durable locking fallback.
+fn release_spool_lock(_lock: SpoolLock) {}
 
 async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, AdapterError> {
     #[cfg(unix)]
