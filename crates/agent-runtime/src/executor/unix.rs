@@ -149,6 +149,11 @@ where
         .stdout(stdout_destination)
         .stderr(stderr_destination)
         .process_group(0);
+    // Workspace preparation may await I/O while lease authority is lost.
+    // A cancelled request must not resurrect work after that preparation.
+    if cancellation.is_cancelled() {
+        return Err(ExecutionError::CancelledBeforeSpawn);
+    }
     let mut child = command.spawn()?;
     drop(command);
     let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
@@ -880,6 +885,21 @@ mod tests {
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_execution_never_spawns_a_process() {
+        let root = tempfile::tempdir().unwrap();
+        let request = request(root.path(), "cancelled", Duration::from_secs(30));
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = execute_with_spawn_hook(&request, cancellation, |_| {
+            panic!("cancelled execution must not invoke the spawn hook")
+        })
+        .await;
+        assert!(matches!(result, Err(ExecutionError::CancelledBeforeSpawn)));
+        assert!(!root.path().join("cancelled/child.pid").exists());
+        assert!(!root.path().join("cancelled/spawned.marker").exists());
     }
 
     #[tokio::test]

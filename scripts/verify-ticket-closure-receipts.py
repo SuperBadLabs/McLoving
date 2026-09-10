@@ -345,7 +345,11 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # like a smaller number that nobody was watching, so the count is pinned:
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
-MINIMUM_TICKET_ROWS = 115
+#
+# 115 -> 116 on 2026-09-09 with the `AGENT-007` row that earns it. No table
+# is added: the ticket joins the existing product-hardening table, so
+# EXPECTED_TABLES does not move.
+MINIMUM_TICKET_ROWS = 116
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the

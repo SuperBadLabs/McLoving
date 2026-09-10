@@ -186,8 +186,16 @@ struct DurableResult<'a> {
 struct LeaseRenewalControl {
     lease_seconds: u32,
     renewal_interval: Duration,
+    /// The last instant the agent KNOWS preceded the controller stamping this
+    /// term's `lease_expires_at` -- the moment the request that opened the term
+    /// left, never the moment its answer came back. The controller stamps the
+    /// expiry while the request is in flight, so an anchor taken on receipt is
+    /// later than the controller's own by the round trip, and a round trip
+    /// longer than the one-second margin would put the agent's deadline AFTER
+    /// the instant the attempt becomes reclaimable.
     lease_started_at: tokio::time::Instant,
     lease_window: Duration,
+    termination_grace: Duration,
     execution_cancellation: CancellationToken,
     authority_lost: CancellationToken,
     stop: CancellationToken,
@@ -217,15 +225,60 @@ fn renewal_rejection_cause(cause: &str) -> &'static str {
     }
 }
 
-/// Classifies a renewal RPC rejection status: a stale-session fencing
-/// rejection is named as such rather than as a transport failure.
+/// Classifies a renewal status the controller actually ANSWERED with: a
+/// stale-session fencing rejection is named as such, and every other answered
+/// refusal is the generic rejection. A status the agent merely failed to get an
+/// answer to never reaches this function -- see [`renewal_went_unanswered`].
 fn renewal_status_cause(status: &tonic::Status) -> &'static str {
     if status.code() == tonic::Code::FailedPrecondition
         && status.message().contains("stale agent session epoch")
     {
         "renewal_session_stale"
     } else {
-        "renewal_transport_failure"
+        "renewal_refused"
+    }
+}
+
+/// Did this renewal fail to produce a usable answer, rather than carry one?
+///
+/// Only an answer can withdraw authority. Unreachability cannot: the lease the
+/// agent already holds stands until it expires, and the controller cannot
+/// requeue the attempt before then -- `requeue_one_expired` reclaims only a
+/// lease whose `lease_expires_at` has passed, and the renewal statement itself
+/// requires an unexpired one. Treating the two alike killed a running step on
+/// the first failed renewal RPC while 296 seconds of a 300-second lease
+/// remained, which is `AGENT-007`.
+///
+/// The predicate is deliberately the SAME one every other authority-bearing RPC
+/// in this file already uses, so the renewal task cannot disagree with the log
+/// publication and start-work paths about which statuses are worth another ask.
+/// Those paths are bounded by `authority_lost`, which this task owns; this one
+/// is bounded by the lease itself.
+fn renewal_went_unanswered(status: &tonic::Status) -> bool {
+    retryable_authority_transition(status)
+}
+
+/// How often an unanswered renewal is retried: at least once a second, so a
+/// controller that comes back from a short restart is noticed promptly, and
+/// never more often than the agent's own renewal cadence, which the
+/// configuration already forbids from being zero.
+fn renewal_retry_interval(renewal_interval: Duration) -> Duration {
+    renewal_interval.min(Duration::from_secs(1))
+}
+
+/// When to ask again after an unanswered renewal, or `None` at the execution
+/// cancellation deadline. Its request-start anchor reserves the complete
+/// termination grace plus one second before controller expiry. Cancellation
+/// begins at this deadline; observed process quiescence is a separate gate.
+fn next_renewal_retry(
+    now: tokio::time::Instant,
+    lease_deadline: tokio::time::Instant,
+    retry_interval: Duration,
+) -> Option<tokio::time::Instant> {
+    if now >= lease_deadline {
+        None
+    } else {
+        Some((now + retry_interval).min(lease_deadline))
     }
 }
 
@@ -379,6 +432,7 @@ pub(super) async fn recover_finalizations(
                 renewal_interval: recovery_renewal_interval(config.lease_renewal_interval),
                 lease_started_at,
                 lease_window,
+                termination_grace: Duration::ZERO,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -836,21 +890,23 @@ async fn refuse_unsupported_assignment(
         lease_window_rpc(lease_window, client.accept_work(refusal.authority.clone())).await?;
     let accept_cancellation = receipt.cancellation_requested;
     require_work_receipt(receipt, session_epoch)?;
-    let lease_started_at = tokio::time::Instant::now();
-    // Folded exactly like the runnable path: the accept receipt answers the
-    // serialized renewal's questions when accept-carries-lease-state-v1 was
-    // negotiated, and the periodic renewal task covers the lease from here.
-    let cancellation_requested = if features.accept_lease_state
+    let accepted_at = tokio::time::Instant::now();
+    // Folded exactly like the runnable path, and anchored the same way: the
+    // accept receipt answers the serialized renewal's questions when
+    // accept-carries-lease-state-v1 was negotiated, the periodic renewal task
+    // covers the lease from here, and the arm that did not renew is still on
+    // the claim's own term because accepting does not extend it.
+    let (cancellation_requested, lease_started_at) = if features.accept_lease_state
         && !accept_consumed_claim_lease(
             claimed_no_later_than,
             lease_window,
-            lease_started_at,
+            accepted_at,
             config.lease_renewal_interval,
         ) {
-        accept_cancellation
+        (accept_cancellation, claimed_no_later_than)
     } else {
         let lease = lease_deadline_rpc(
-            lease_started_at + lease_rpc_budget(lease_window),
+            accepted_at + lease_rpc_budget(lease_window),
             client.renew_work_lease(WorkLeaseRenewal {
                 authority: Some(refusal.authority.clone()),
                 lease_seconds: config.lease_seconds,
@@ -861,7 +917,7 @@ async fn refuse_unsupported_assignment(
         if !lease.accepted {
             return Err(AgentError::StaleAuthority);
         }
-        lease.cancellation_requested
+        (lease.cancellation_requested, accepted_at)
     };
     let lease_stop = CancellationToken::new();
     // No process will ever spawn for this refusal, so execution cancellation
@@ -877,6 +933,7 @@ async fn refuse_unsupported_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
+            termination_grace: Duration::ZERO,
             execution_cancellation,
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -939,7 +996,7 @@ async fn run_assignment(
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
     features: SessionFeatures,
-    claimed_no_later_than: tokio::time::Instant,
+    _claimed_no_later_than: tokio::time::Instant,
     assignment: ValidatedAssignment,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -964,40 +1021,32 @@ async fn run_assignment(
     .await?;
     let accept_cancellation = receipt.cancellation_requested;
     require_work_receipt(receipt, session_epoch)?;
-    let lease_started_at = tokio::time::Instant::now();
-    // With accept-carries-lease-state-v1 the accept receipt already answers
-    // what the serialized renewal below existed to ask — live authority and
-    // committed cancellation, read under the accepting transaction's row
-    // lock — so no renewal happens here at all. The claim-time lease keeps
-    // its window minus the offer-to-accept latency, the periodic renewal
-    // task re-arms it on its ordinary cadence (the configuration invariant
-    // that the renewal interval sits well inside the lease window covers
-    // that gap), and the fence keeps the pathological remainder correct.
-    // Without the feature the receipt's field is default-false noise from an
-    // older controller, so the explicit round trip stays.
-    let cancellation_requested = if features.accept_lease_state
-        && !accept_consumed_claim_lease(
-            claimed_no_later_than,
-            lease_window,
-            lease_started_at,
-            config.lease_renewal_interval,
-        ) {
-        accept_cancellation
-    } else {
-        let lease = lease_deadline_rpc(
-            lease_started_at + lease_rpc_budget(lease_window),
-            client.renew_work_lease(WorkLeaseRenewal {
-                authority: Some(assignment.authority.clone()),
-                lease_seconds: config.lease_seconds,
-            }),
-        )
-        .await?;
-        ensure_session(lease.session_epoch, session_epoch)?;
-        if !lease.accepted {
-            return Err(AgentError::StaleAuthority);
-        }
-        lease.cancellation_requested
-    };
+    let accepted_at = tokio::time::Instant::now();
+    // Acceptance does not renew the controller's claim term or report its
+    // duration. Before spawning, obtain a term with the explicitly requested
+    // duration; agent/controller defaults need not match. This deliberately
+    // retains one serialized RPC even when folded acceptance is negotiated.
+    // Request-start anchoring and the shortened timeout ensure a delayed
+    // response cannot leave a process starting without termination reserve.
+    let lease_started_at = accepted_at;
+    let lease = lease_deadline_rpc(
+        lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace),
+        client.renew_work_lease(WorkLeaseRenewal {
+            authority: Some(assignment.authority.clone()),
+            lease_seconds: config.lease_seconds,
+        }),
+    )
+    .await?;
+    ensure_session(lease.session_epoch, session_epoch)?;
+    if !lease.accepted {
+        return Err(AgentError::StaleAuthority);
+    }
+    if tokio::time::Instant::now()
+        >= lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace)
+    {
+        return Err(AgentError::LeaseRenewalTimeout);
+    }
+    let cancellation_requested = accept_cancellation || lease.cancellation_requested;
     if cancellation_requested {
         let lease_stop = CancellationToken::new();
         let execution_cancellation = CancellationToken::new();
@@ -1011,6 +1060,7 @@ async fn run_assignment(
                 renewal_interval: config.lease_renewal_interval,
                 lease_started_at,
                 lease_window,
+                termination_grace: Duration::ZERO,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -1054,6 +1104,7 @@ async fn run_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
+            termination_grace: config.termination_grace,
             execution_cancellation: execution_cancellation.clone(),
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -1262,8 +1313,16 @@ async fn run_assignment(
                         authority: &assignment.authority,
                         workspace: &assignment.workspace,
                         session_epoch,
-                        outcome: WorkOutcome::Failed,
+                        outcome: if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
+                            WorkOutcome::Aborted
+                        } else {
+                            WorkOutcome::Failed
+                        },
                         reason: match &error {
+                            ExecutionError::CancelledBeforeSpawn => lease_loss_reason
+                                .get()
+                                .map(|cause| format!("lease_lost_during_execution:{cause}"))
+                                .unwrap_or_else(|| "cancelled_before_process_spawn".to_owned()),
                             ExecutionError::WorkspaceTransfer(_) => {
                                 format!("workspace_seed_failed:{error}")
                             }
@@ -1667,6 +1726,7 @@ async fn renew_lease(
         renewal_interval,
         lease_started_at,
         lease_window,
+        termination_grace,
         execution_cancellation,
         authority_lost,
         stop,
@@ -1674,46 +1734,126 @@ async fn renew_lease(
     } = control;
     let mut lease_started_at = lease_started_at;
     let mut lease_window = lease_window;
+    let retry_interval = renewal_retry_interval(renewal_interval);
     loop {
+        // Start cancellation early enough to finish graceful termination and
+        // send SIGKILL before reclamation. The wake itself must obey this bound:
+        // a long cadence must not sleep through the reserved termination time.
+        let lease_deadline =
+            lease_cancellation_deadline(lease_started_at, lease_window, termination_grace);
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep_until(lease_started_at + renewal_interval) => {}
+            () = tokio::time::sleep_until(
+                (lease_started_at + renewal_interval).min(lease_deadline)
+            ) => {}
         }
-        let deadline = lease_started_at + lease_rpc_budget(lease_window);
-        let renewal = tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            result = tokio::time::timeout_at(
-                deadline,
-                client.renew_work_lease(WorkLeaseRenewal {
-                    authority: Some(authority.clone()),
-                    lease_seconds,
-                }),
-            ) => result,
-        };
-        // A stop request makes any concurrent renewal failure moot: the
-        // attempt is already finalized and the session must not be torn down
-        // over a lease this task was told to release. The failure arms below
-        // re-check because the select above is unbiased and the RPC may have
-        // failed in the same poll that observed the stop.
-        let receipt = match renewal {
-            Err(_) => {
+        if tokio::time::Instant::now() >= lease_deadline {
+            if stop.is_cancelled() {
+                return Ok(());
+            }
+            record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
+            execution_cancellation.cancel();
+            authority_lost.cancel();
+            return Err(AgentError::LeaseRenewalTimeout);
+        }
+        let mut unanswered: u64 = 0;
+        // Carried out of the loop with the receipt: the term a successful
+        // renewal opens is measured from the moment THAT request left, so the
+        // agent's deadline stays before the controller's stamp however slow the
+        // round trip is.
+        let (receipt, request_sent_at) = loop {
+            let request_sent_at = tokio::time::Instant::now();
+            if request_sent_at >= lease_deadline {
                 if stop.is_cancelled() {
                     return Ok(());
                 }
-                record_lease_loss(&loss_reason, "renewal_timeout");
+                record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
                 return Err(AgentError::LeaseRenewalTimeout);
             }
-            Ok(Ok(response)) => response.into_inner(),
-            Ok(Err(error)) => {
+            // A connected peer may keep one RPC pending through its outage.
+            // Bound each ask independently so it cannot consume the entire
+            // held term and prevent a later request from observing recovery.
+            let rpc_deadline = (request_sent_at + retry_interval).min(lease_deadline);
+            let renewal = tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                result = tokio::time::timeout_at(
+                    rpc_deadline,
+                    client.renew_work_lease(WorkLeaseRenewal {
+                        authority: Some(authority.clone()),
+                        lease_seconds,
+                    }),
+                ) => result,
+            };
+            // A stop request makes any concurrent renewal failure moot: the
+            // attempt is already finalized and the session must not be torn
+            // down over a lease this task was told to release. The failure arms
+            // below re-check because the select above is unbiased and the RPC
+            // may have failed in the same poll that observed the stop.
+            match renewal {
+                Ok(Ok(response)) => {
+                    if unanswered > 0 {
+                        eprintln!(
+                            "renewal_answered_again: the controller answered after \
+                             {unanswered} unanswered attempt(s); the step kept running \
+                             on the lease it already held"
+                        );
+                    }
+                    break (response.into_inner(), request_sent_at);
+                }
+                Ok(Err(error)) => {
+                    if stop.is_cancelled() {
+                        return Ok(());
+                    }
+                    if !renewal_went_unanswered(&error) {
+                        record_lease_loss(&loss_reason, renewal_status_cause(&error));
+                        execution_cancellation.cancel();
+                        authority_lost.cancel();
+                        return Err(error.into());
+                    }
+                    if unanswered == 0 {
+                        eprintln!(
+                            "renewal_unanswered: {}: {}; authority is not withdrawn by \
+                             an answer that never arrived, so the step keeps running \
+                             and the renewal is retried every {retry_interval:?} until \
+                             the held lease lapses",
+                            error.code(),
+                            error.message(),
+                        );
+                    }
+                    unanswered = unanswered.saturating_add(1);
+                }
+                // Only this ask expired; the unchanged term deadline below
+                // decides whether any authority remains for another request.
+                Err(_) => {
+                    if stop.is_cancelled() {
+                        return Ok(());
+                    }
+                    if unanswered == 0 {
+                        eprintln!(
+                            "renewal_unanswered: RPC timed out; retrying within the held lease"
+                        );
+                    }
+                    unanswered = unanswered.saturating_add(1);
+                }
+            }
+            let now = tokio::time::Instant::now();
+            // Count time spent awaiting the RPC toward the cadence. A timed-out
+            // ask must not incur another whole interval before the next ask.
+            let retry_delay = (request_sent_at + retry_interval).saturating_duration_since(now);
+            let Some(retry_at) = next_renewal_retry(now, lease_deadline, retry_delay) else {
                 if stop.is_cancelled() {
                     return Ok(());
                 }
-                record_lease_loss(&loss_reason, renewal_status_cause(&error));
+                record_lease_loss(&loss_reason, "renewal_unanswered_until_expiry");
                 execution_cancellation.cancel();
                 authority_lost.cancel();
-                return Err(error.into());
+                return Err(AgentError::LeaseRenewalTimeout);
+            };
+            tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                () = tokio::time::sleep_until(retry_at) => {}
             }
         };
         match ensure_session(receipt.session_epoch, authority.session_epoch) {
@@ -1747,7 +1887,7 @@ async fn renew_lease(
             let _ = loss_reason.set(CONTROLLER_CANCELLATION_TRIGGER);
             execution_cancellation.cancel();
         }
-        lease_started_at = tokio::time::Instant::now();
+        lease_started_at = request_sent_at;
         lease_window = Duration::from_secs(u64::from(lease_seconds));
     }
 }
@@ -1769,6 +1909,24 @@ fn accept_consumed_claim_lease(
 ) -> bool {
     claimed_no_later_than + lease_window.saturating_sub(Duration::from_secs(1))
         < accepted_at + renewal_interval
+}
+
+pub(super) fn execution_lease_budget(
+    lease_window: Duration,
+    termination_grace: Duration,
+) -> Duration {
+    lease_rpc_budget(lease_window).saturating_sub(termination_grace)
+}
+
+/// Cancellation must begin with the complete termination grace still inside
+/// the term. This is the cancellation deadline, not proof of process death;
+/// the shipped-runtime gate independently observes quiescence before expiry.
+fn lease_cancellation_deadline(
+    lease_started_at: tokio::time::Instant,
+    lease_window: Duration,
+    termination_grace: Duration,
+) -> tokio::time::Instant {
+    lease_started_at + execution_lease_budget(lease_window, termination_grace)
 }
 
 pub(super) fn lease_rpc_budget(lease_window: Duration) -> Duration {
@@ -3034,12 +3192,191 @@ mod tests {
     }
 
     #[test]
+    fn execution_budget_reserves_entire_grace_and_rejects_exhausted_windows() {
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(30), Duration::from_secs(2)),
+            Duration::from_secs(27)
+        );
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(10), Duration::from_secs(4)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(5), Duration::from_secs(4)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            execution_lease_budget(Duration::from_secs(5), Duration::MAX),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn lease_rpc_budget_expires_before_the_controller_lease() {
         assert_eq!(
             lease_rpc_budget(Duration::from_secs(30)),
             Duration::from_secs(29)
         );
         assert_eq!(lease_rpc_budget(Duration::from_millis(500)), Duration::ZERO);
+    }
+
+    /// AGENT-007. Only an ANSWER can withdraw authority. Every status the
+    /// controller's own renewal handler can return is treated as an answer and
+    /// cancels the step; a status that means the ask never landed is retried.
+    #[test]
+    fn only_an_answered_renewal_withdraws_authority() {
+        for answered in [
+            tonic::Status::failed_precondition("stale agent session epoch for agent x"),
+            tonic::Status::failed_precondition("attempt is not leased"),
+            tonic::Status::permission_denied("agent is not in the trust pool"),
+            tonic::Status::unauthenticated("client certificate is unknown"),
+            tonic::Status::not_found("attempt does not exist"),
+            tonic::Status::invalid_argument("lease_seconds must be between 5 and 300"),
+        ] {
+            assert!(
+                !renewal_went_unanswered(&answered),
+                "{answered:?} is an answer from the controller and must cancel the step"
+            );
+        }
+        for unanswered in [
+            tonic::Status::unavailable("tcp connect error: Connection refused"),
+            tonic::Status::deadline_exceeded("no reply"),
+            tonic::Status::cancelled("connection closed mid-call"),
+            tonic::Status::unknown("h2 protocol error"),
+            tonic::Status::internal("controller store is unavailable"),
+        ] {
+            assert!(
+                renewal_went_unanswered(&unanswered),
+                "{unanswered:?} withdraws no authority and must be retried"
+            );
+        }
+    }
+
+    /// AGENT-007. The stale-session fencing rejection keeps its own name, and
+    /// every other answered refusal is named as a refusal rather than -- as it
+    /// was before this ticket -- as a transport failure it is not.
+    #[test]
+    fn an_answered_refusal_is_named_as_one() {
+        assert_eq!(
+            renewal_status_cause(&tonic::Status::failed_precondition(
+                "stale agent session epoch for agent x"
+            )),
+            "renewal_session_stale"
+        );
+        assert_eq!(
+            renewal_status_cause(&tonic::Status::permission_denied("not in trust pool")),
+            "renewal_refused"
+        );
+    }
+
+    /// AGENT-007, from review. Cancelling an execution is not stopping it: the
+    /// executor signals the group and waits the termination grace before
+    /// `SIGKILL`, so the grace has to come out of the lease. Reserving only the
+    /// one-second RPC margin left a workload that ignores `SIGTERM` running past
+    /// the instant another runtime may claim the same attempt.
+    #[test]
+    fn the_termination_grace_is_reserved_inside_the_lease() {
+        let start = tokio::time::Instant::now();
+        let window = Duration::from_secs(30);
+        let grace = Duration::from_secs(2);
+        assert_eq!(
+            lease_cancellation_deadline(start, window, grace),
+            start + Duration::from_secs(27),
+            "the deadline reserves the RPC margin AND the grace"
+        );
+        assert!(
+            lease_cancellation_deadline(start, window, grace) + grace <= start + window,
+            "the configured termination reserve fits before lease expiry"
+        );
+        // A grace wider than the whole window cannot go negative; the renewal
+        // then has no room at all, which the agent configuration refuses.
+        assert_eq!(
+            lease_cancellation_deadline(start, Duration::from_secs(5), Duration::from_secs(30)),
+            start
+        );
+    }
+
+    /// AGENT-007, from review. A lease term must be anchored at the instant its
+    /// request LEFT, never at the instant its answer arrived. The controller
+    /// stamps `lease_expires_at` while the request is in flight, so a round trip
+    /// longer than the one-second margin makes a receipt-time anchor put the
+    /// agent's deadline AFTER the attempt becomes reclaimable -- and the retry
+    /// this ticket adds would then run the step into that window.
+    ///
+    /// This test is the arithmetic, not a mutation gate on the call sites: the
+    /// anchor is a call-site choice, and no test here can fail if a call site
+    /// picks the wrong instant. That limit is stated in the closure receipt
+    /// rather than papered over.
+    #[test]
+    fn a_lease_term_anchored_on_receipt_can_outlive_the_controller() {
+        let window = Duration::from_secs(30);
+        let sent = tokio::time::Instant::now();
+        // The controller stamps its expiry somewhere inside the round trip.
+        let processed = sent + Duration::from_millis(400);
+        let answered = sent + Duration::from_millis(2_400);
+        let controller_expiry = processed + window;
+
+        assert!(
+            sent + lease_rpc_budget(window) <= controller_expiry,
+            "anchoring at the send instant must never reach the controller's expiry"
+        );
+        assert!(
+            answered + lease_rpc_budget(window) > controller_expiry,
+            "anchoring on receipt overruns it as soon as the round trip exceeds \
+             the one-second margin, which is why the anchor is the send instant"
+        );
+    }
+
+    /// AGENT-007. The retry cadence is bounded on both sides: never slower than
+    /// one second, so a controller back from a short restart is found promptly,
+    /// and never faster than the agent's own renewal interval.
+    #[test]
+    fn the_renewal_retry_cadence_is_bounded_on_both_sides() {
+        assert_eq!(
+            renewal_retry_interval(Duration::from_secs(5)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            renewal_retry_interval(Duration::from_millis(200)),
+            Duration::from_millis(200)
+        );
+    }
+
+    /// AGENT-007. The lease the agent already holds is the whole bound on the
+    /// retry: no wait reaches past it, and at it the retry stops so the step is
+    /// cancelled rather than outliving the authority that covered it.
+    #[test]
+    fn a_renewal_retry_never_outlives_the_held_lease() {
+        let now = tokio::time::Instant::now();
+        let deadline = now + Duration::from_secs(10);
+        assert_eq!(
+            next_renewal_retry(now, deadline, Duration::from_secs(1)),
+            Some(now + Duration::from_secs(1)),
+            "an ordinary retry waits the cadence"
+        );
+        assert_eq!(
+            next_renewal_retry(
+                now + Duration::from_millis(9_500),
+                deadline,
+                Duration::from_secs(1)
+            ),
+            Some(deadline),
+            "a retry that would wait past the lease is pulled back to it"
+        );
+        assert_eq!(
+            next_renewal_retry(deadline, deadline, Duration::from_secs(1)),
+            None,
+            "at the lease deadline the step is cancelled, not retried"
+        );
+        assert_eq!(
+            next_renewal_retry(
+                deadline + Duration::from_secs(1),
+                deadline,
+                Duration::from_secs(1)
+            ),
+            None,
+            "past the lease deadline the step is cancelled, not retried"
+        );
     }
 
     #[tokio::test]
@@ -3933,3 +4270,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod renewal_tests;
