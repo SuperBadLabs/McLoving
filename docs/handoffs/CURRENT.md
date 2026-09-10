@@ -132,7 +132,9 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   `UI-009` are `PENDING` too, as one serial web-interface lane; `UI-002`
   earns the unsupported browser-journey claim with only necessary minimal
   served-client repairs, retaining initial failures separately from the accepted
-  repaired baseline; it adds no redesign, route, CSP or authorization change.
+  repaired baseline; both remain unchanged when `UI-007` adds a separate
+  source-bound baseline for its new views. `UI-002` adds no redesign, route,
+  CSP or authorization change.
   `UI-003` decides a threat boundary rather than implementing one, and the
   six after it are implementation behind that decision. Read the board
   rather than this list for the full set; that is the point of the bullet
