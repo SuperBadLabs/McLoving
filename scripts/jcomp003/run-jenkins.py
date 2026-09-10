@@ -36,9 +36,19 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def verify_tmpfs(value, size, mode, owner=False):
+def launch(command, output):
+    (output / 'launch.json').write_text(json.dumps(command, indent=2) + '\n')
+    try:
+        return run(command)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        (output / 'launch-failed.stdout').write_bytes(error.stdout or b'')
+        (output / 'launch-failed.stderr').write_bytes(error.stderr or b'')
+        raise
+
+
+def verify_tmpfs(value, size, mode):
     options = dict(part.split('=', 1) if '=' in part else (part, None) for part in value.split(','))
-    assert set(options) <= {'rw', 'noexec', 'nosuid', 'nodev', 'size', 'mode', 'uid', 'gid',
+    assert set(options) <= {'rw', 'noexec', 'nosuid', 'nodev', 'size', 'mode',
                             'rprivate', 'tmpcopyup'}
     assert {'rw', 'noexec', 'nosuid', 'nodev'} <= set(options)
     observed_size = options['size'].lower()
@@ -46,8 +56,6 @@ def verify_tmpfs(value, size, mode, owner=False):
     count = (int(observed_size[:-1]) * multipliers[observed_size[-1]]
              if observed_size[-1] in multipliers else int(observed_size))
     assert count == size and int(options['mode'], 8) == mode
-    assert options.get('uid') == ('1000' if owner else None)
-    assert options.get('gid') == ('1000' if owner else None)
 
 
 def verify_boundary(inspect, expected_mounts):
@@ -67,7 +75,7 @@ def verify_boundary(inspect, expected_mounts):
     assert config['NanoCpus'] == 4 * 10 ** 9
     assert set(config['Tmpfs']) == {'/tmp', '/var/jenkins_home'}
     verify_tmpfs(config['Tmpfs']['/tmp'], 2 * 1024 ** 3, 0o1777)
-    verify_tmpfs(config['Tmpfs']['/var/jenkins_home'], 2 * 1024 ** 3, 0o700, owner=True)
+    verify_tmpfs(config['Tmpfs']['/var/jenkins_home'], 2 * 1024 ** 3, 0o1777)
     assert config['LogConfig']['Type'] == 'k8s-file'
     assert config['LogConfig']['Size'] in ('16MB', '16mb', '16m', '16777216')
     assert any(limit['Name'] == 'RLIMIT_NOFILE' and limit['Soft'] == 1024 and
@@ -153,16 +161,17 @@ def main():
                    '--cpus=4', '--memory=4g', '--memory-swap=4g', '--pids-limit=1024',
                    '--ulimit=nofile=1024:1024', '--log-driver=k8s-file', '--log-opt=max-size=16mb',
                    '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=2g,mode=1777',
-                   '--tmpfs=/var/jenkins_home:rw,noexec,nosuid,nodev,size=2g,uid=1000,gid=1000,mode=700',
+                   # Podman rejects tmpfs uid/gid options. This private, sticky
+                   # home permits UID 1000 writes without a root bootstrap.
+                   '--tmpfs=/var/jenkins_home:rw,noexec,nosuid,nodev,size=2g,mode=1777',
                    '--env=JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g',
                    '--volume', f'{inputs}:/opt/jcomp/input:ro',
                    '--volume', f'{scratch / "observe-shell"}:/opt/jcomp/observe-shell:ro',
                    '--volume', f'{scratch / "jenkins-init.groovy"}:/var/jenkins_home/init.groovy.d/jcomp003.groovy:ro',
                    *mounts, '--entrypoint=/usr/bin/tini', 'sha256:' + IMAGE_ID, *WATCHDOG]
-        (output / 'launch.json').write_text(json.dumps(command, indent=2) + '\n')
         try:
             launch_attempted = True
-            container = run(command).decode().strip()
+            container = launch(command, output).decode().strip()
             (output / 'container-id.txt').write_text(container + '\n')
             container_inspect = run(['podman', 'inspect', name])
             (output / 'container-inspect.json').write_bytes(container_inspect)

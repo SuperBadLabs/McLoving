@@ -97,7 +97,13 @@ fresh test certificates exist only within the disposable product tmpfs.
 The product workload tmpfs is 512 MiB, with a 2 GiB memory/swap limit and 512-PID
 limit. Jenkins has bounded home and temporary tmpfs suitable for its plugin and
 disk-monitor requirements, a 4 GiB memory/swap limit and 1024-PID limit. Both
-runners have a 1024-file descriptor limit, four CPU limit, bounded container logs,
+Jenkins tmpfs mounts use mode 1777 without uid/gid options, which the execution
+host's Podman rejects. The sticky, root-owned home is private to this
+disposable container and permits the fixed UID 1000 Jenkins process to initialize
+its files without a root bootstrap. It is not a shared host home or a claim of
+isolation between hostile users inside the container. All inspected namespace,
+read-only root, nonroot user, mount and capability restrictions remain required.
+Both runners have a 1024-file descriptor limit, four CPU limit, bounded container logs,
 private PID/IPC namespaces, dropped capabilities, read-only roots and
 no-new-privileges. PostgreSQL has no host data volume, a 512 MiB data tmpfs,
 1 GiB memory/swap limit, two CPU limit and 256-PID limit; its image's bounded

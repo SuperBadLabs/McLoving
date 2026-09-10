@@ -2,8 +2,12 @@
 """Mutation tests for the pre-execution container inspection gate."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('jenkins', Path(__file__).with_name('run-jenkins.py'))
 J = importlib.util.module_from_spec(SPEC)
@@ -25,7 +29,7 @@ class BoundaryTests(unittest.TestCase):
                 'LogConfig': {'Type':'k8s-file', 'Size':'16MB'},
                 'Ulimits':[{'Name':'RLIMIT_NOFILE','Soft':1024,'Hard':1024}],
                 'Tmpfs': {'/tmp': 'rw,noexec,nosuid,nodev,size=2g,mode=1777',
-                          '/var/jenkins_home': 'rw,noexec,nosuid,nodev,size=2g,mode=700,uid=1000,gid=1000'}}}]
+                          '/var/jenkins_home': 'rw,noexec,nosuid,nodev,size=2g,mode=1777'}}}]
 
     def test_expected_boundary(self):
         J.verify_boundary(self.inspect, self.mounts)
@@ -79,6 +83,30 @@ class BoundaryTests(unittest.TestCase):
                 mutated[0][field] = value
                 with self.assertRaises(AssertionError):
                     J.verify_boundary(mutated, self.mounts)
+
+    def test_private_home_mode_and_ownership_mutations(self):
+        prefix = 'rw,noexec,nosuid,nodev,size=2g,'
+        for options in ['mode=700', 'mode=777', 'mode=1777,uid=1000',
+                        'mode=1777,gid=1000', 'mode=1777,uid=0,gid=0']:
+            with self.subTest(options=options):
+                mutated = copy.deepcopy(self.inspect)
+                mutated[0]['HostConfig']['Tmpfs']['/var/jenkins_home'] = prefix + options
+                with self.assertRaises(AssertionError):
+                    J.verify_boundary(mutated, self.mounts)
+
+    def test_failed_launch_retains_exact_command_and_streams(self):
+        command = ['podman', 'run', '--network=none', 'sha256:' + J.IMAGE_ID]
+        for error in [subprocess.CalledProcessError(125, command, b'partial-id', b'mount error\n'),
+                      subprocess.TimeoutExpired(command, 30, b'partial-id', b'partial error\n')]:
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                with patch.object(J, 'run', side_effect=error):
+                    with self.assertRaises(type(error)) as observed:
+                        J.launch(command, output)
+                self.assertIs(observed.exception, error)
+                self.assertEqual(json.loads((output / 'launch.json').read_text()), command)
+                self.assertEqual((output / 'launch-failed.stdout').read_bytes(), error.stdout)
+                self.assertEqual((output / 'launch-failed.stderr').read_bytes(), error.stderr)
 
 
 if __name__ == '__main__':
