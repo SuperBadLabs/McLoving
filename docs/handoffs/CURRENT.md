@@ -94,7 +94,12 @@ The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `GROOVY-001` and `HYG-003` retain their pending parallel lanes; `AGENT-007`
 is ACTIVE in its lease-survival lane and must merge with exact-main verification
 before JCOMP-003 collects paired-runtime evidence, and the new `UI-002` through
-`UI-009` web-interface lane is serial beside them. M1 keeps the current
+`UI-009` web-interface lane is serial beside them. `REL-003` waits for `UI-009`,
+so the complete UI chain and final browser proof precede packaging and subsequent
+deployment/canary receipts. Before packaging, identify earlier case, containment
+or ceremony receipts invalidated by those UI changes and regenerate the affected
+evidence; completed dependency statuses alone do not establish fresh evidence.
+`CASE-002`/`DEPLOY-002` retain their final deployed-runtime checks. M1 keeps the current
 compile-only architecture; an interpreter port requires a separate decision and
 ticket. Shared contract or documentation boundaries serialize.
 
