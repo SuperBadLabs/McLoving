@@ -1,0 +1,2 @@
+printf "first\n"
+printf "%s\n" "second line"

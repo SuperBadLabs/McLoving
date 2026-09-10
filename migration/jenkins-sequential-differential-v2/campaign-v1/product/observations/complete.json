@@ -1,0 +1,140 @@
+{
+  "distinct_workspace_namespaces": 11,
+  "input_sha256": "26fa52c301ac25b67e73448308b54cbaaf52c6dc2a07f2484abc8bd7531cb147",
+  "negative_inputs": 12,
+  "observed_database_builds": 11,
+  "observed_database_nodes": 23,
+  "positive_builds": 11,
+  "production_authority": false,
+  "records": [
+    {
+      "build_id": "0a8a32e1-f244-4016-9721-3397776dff8b",
+      "fixture": "S01"
+    },
+    {
+      "build_id": "fd426e54-c0ee-4e4b-a6f6-ceee942b9cab",
+      "fixture": "S02"
+    },
+    {
+      "build_id": "2299efa5-30d2-4017-a50c-c5365d877013",
+      "fixture": "S03"
+    },
+    {
+      "build_id": "5e66bf7d-94d4-443d-b1a9-222b6ae3d3d7",
+      "fixture": "S04"
+    },
+    {
+      "build_id": "7a35ab1d-f478-4000-b536-c98105454db5",
+      "fixture": "S05"
+    },
+    {
+      "build_id": "2dbdd50a-3ce7-4285-a1b7-9bcdcdcf7636",
+      "fixture": "S06"
+    },
+    {
+      "build_id": "2b03e39a-85b4-41a8-bd2f-0f84c93af323",
+      "fixture": "S07"
+    },
+    {
+      "build_id": "f0629a3c-dca0-40ae-adb6-80022af9b0eb",
+      "fixture": "S08"
+    },
+    {
+      "build_id": "b6c7034e-f3f9-4e8d-9ea9-b50e37a21c97",
+      "fixture": "S09"
+    },
+    {
+      "build_id": "93adbc14-7825-4296-b93c-70bd3e2b941d",
+      "fixture": "S10"
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N01",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N02",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N03",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N04",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "rejected",
+      "fixture": "N05",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N06",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N07",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N08",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "rejected",
+      "fixture": "N09",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N10",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N11",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "compilation": "unsupported",
+      "fixture": "N12",
+      "scheduled_work": 0,
+      "scheduler_nodes_after": 22,
+      "scheduler_nodes_before": 22
+    },
+    {
+      "build_id": "be98778d-3372-4472-aa57-ed9ae3580324",
+      "fixture": "C052"
+    }
+  ],
+  "schema": "mcloving.sequential-product-observations/1"
+}

@@ -1,0 +1,13 @@
+{
+  "admission": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "admission-build.log": "5f66647a984cb58c17be3b1f10c134a8966ae0a5f8b88517cea454d9faa3a1a4",
+  "admission.sha256": "bfe00f98f4e1a0627f603c4b3cb453e384083c31470eb4f6cfad66a06a47ca59",
+  "compiler-source-inputs.json": "953362088cc42538b25f29a36c9cc8bc1495be01188e36ccf5ea1c45555d84a6",
+  "image-build.log": "f342c598911bc737ee40be099ab42f92fa574f356eefba4b74f8323e41b50f3e",
+  "image-id.txt": "9ddd44a42b8a3d89cd8022b16b656f841b6cfa9a5272fdc1323bb43abc9ae373",
+  "image-inspect.json": "2cc3cd5f28d02ecb817564351ae652205109bae231bbf8ef10b7b54da8907b54",
+  "image-reference.txt": "5bd15a279f24f7e8730725c841cc4b5f5cbe2b337a312ceaab33e0c1cd5f95b1",
+  "source-commit.txt": "b02121a17e0e7602e7a7bd52e3b383e58425482e88bc2416ab204ae8e2507316",
+  "source-tree.txt": "05cee72e2d77b71030cc8b8a5ab9ff5ebfa68c0985a9296c5cd5e90a464d7506",
+  "source.tar": "a7644bd868e7f743fd45651c484e888bcbab08cbe8f2cf3f213e8a78a7ea8d87"
+}

@@ -1,0 +1,292 @@
+{
+  "attempt_workspace_cleanup": true,
+  "checkpoint_raw_bytes_removed": true,
+  "fixture": "C052",
+  "logs": [
+    {
+      "attempt_id": "3ea8cd46-4138-4532-b1ef-2702da917427",
+      "chunks": [
+        {
+          "content": [
+            72,
+            101,
+            108,
+            108,
+            111,
+            32,
+            87,
+            111,
+            114,
+            108,
+            100,
+            10
+          ],
+          "cursor_id": 35,
+          "digest": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+          "fence": 1,
+          "sequence": 0,
+          "stream": "stdout"
+        },
+        {
+          "content": [
+            43,
+            32,
+            101,
+            99,
+            104,
+            111,
+            32,
+            72,
+            101,
+            108,
+            108,
+            111,
+            32,
+            87,
+            111,
+            114,
+            108,
+            100,
+            10
+          ],
+          "cursor_id": 36,
+          "digest": "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
+          "fence": 1,
+          "sequence": 1,
+          "stream": "stderr"
+        }
+      ]
+    }
+  ],
+  "result": {
+    "build_id": "be98778d-3372-4472-aa57-ed9ae3580324",
+    "layout_version": 1,
+    "pipeline_digest": [
+      149,
+      99,
+      208,
+      185,
+      4,
+      90,
+      205,
+      250,
+      216,
+      170,
+      173,
+      108,
+      49,
+      224,
+      164,
+      167,
+      132,
+      52,
+      94,
+      32,
+      156,
+      19,
+      169,
+      197,
+      110,
+      38,
+      33,
+      39,
+      148,
+      33,
+      9,
+      247
+    ],
+    "pipeline_id": "fec5f8c8-0642-4b79-9cf8-5439dc1a77ae",
+    "pipeline_operational_generation": 1,
+    "pipeline_revision": 1,
+    "stages": [
+      {
+        "stage_id": "build",
+        "stage_name": "Build",
+        "stage_ordinal": 1,
+        "status": "succeeded",
+        "steps": [
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "3ea8cd46-4138-4532-b1ef-2702da917427",
+                  "completed_at_unix_ms": 1789027542233,
+                  "created_at_unix_ms": 1789027542168,
+                  "fence": 1,
+                  "lease_owner": "sequential-2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                  "node_id": "13057e2c-5c7e-4dc8-83fb-10d6e6548216",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": 1789027542168,
+                  "retry_of": null,
+                  "started_at_unix_ms": 1789027542224,
+                  "status": "succeeded",
+                  "terminal_summary": {
+                    "exit_code": 0,
+                    "result_sha256": "b2e61b59603db7fba7c2987c05b578fa83d95b7267934152d1b0358eef552e55",
+                    "termination": "exited",
+                    "workspace_transfer": {
+                      "build_id": "be98778d-3372-4472-aa57-ed9ae3580324",
+                      "error": null,
+                      "generation": 0,
+                      "input_digest": [
+                        139,
+                        202,
+                        225,
+                        129,
+                        210,
+                        19,
+                        33,
+                        183,
+                        158,
+                        28,
+                        238,
+                        73,
+                        118,
+                        166,
+                        201,
+                        117,
+                        154,
+                        15,
+                        3,
+                        118,
+                        157,
+                        222,
+                        100,
+                        182,
+                        248,
+                        33,
+                        171,
+                        93,
+                        34,
+                        163,
+                        57,
+                        33
+                      ],
+                      "namespace_id": "4e0f3cd9-5b78-47a0-86aa-3604d8d95204",
+                      "organization_id": "2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                      "receipt": {
+                        "digest": [
+                          139,
+                          202,
+                          225,
+                          129,
+                          210,
+                          19,
+                          33,
+                          183,
+                          158,
+                          28,
+                          238,
+                          73,
+                          118,
+                          166,
+                          201,
+                          117,
+                          154,
+                          15,
+                          3,
+                          118,
+                          157,
+                          222,
+                          100,
+                          182,
+                          248,
+                          33,
+                          171,
+                          93,
+                          34,
+                          163,
+                          57,
+                          33
+                        ],
+                        "entries": [],
+                        "total_bytes": 0,
+                        "version": 1
+                      },
+                      "version": 1
+                    }
+                  }
+                },
+                "logs": [
+                  {
+                    "attempt_id": "3ea8cd46-4138-4532-b1ef-2702da917427",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 1,
+                    "last_sequence": 1,
+                    "stream": "stderr"
+                  },
+                  {
+                    "attempt_id": "3ea8cd46-4138-4532-b1ef-2702da917427",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 0,
+                    "last_sequence": 0,
+                    "stream": "stdout"
+                  }
+                ]
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 1,
+              "node_key": "build[step=01]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 1
+            },
+            "logical_outcome": "succeeded",
+            "max_attempts": 1,
+            "node_id": "13057e2c-5c7e-4dc8-83fb-10d6e6548216",
+            "status": "succeeded"
+          }
+        ]
+      }
+    ],
+    "status": "succeeded",
+    "workspace_closed": true,
+    "workspace_generation": 1,
+    "workspace_namespace": "4e0f3cd9-5b78-47a0-86aa-3604d8d95204",
+    "workspace_receipt": {
+      "digest": [
+        139,
+        202,
+        225,
+        129,
+        210,
+        19,
+        33,
+        183,
+        158,
+        28,
+        238,
+        73,
+        118,
+        166,
+        201,
+        117,
+        154,
+        15,
+        3,
+        118,
+        157,
+        222,
+        100,
+        182,
+        248,
+        33,
+        171,
+        93,
+        34,
+        163,
+        57,
+        33
+      ],
+      "entries": [],
+      "total_bytes": 0,
+      "version": 1
+    }
+  },
+  "source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100"
+}

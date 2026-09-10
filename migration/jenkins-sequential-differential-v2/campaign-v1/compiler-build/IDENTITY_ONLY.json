@@ -1,0 +1,8 @@
+{
+  "claim": "Retained build metadata and admission identity; no binary reproduction or workload rerun.",
+  "omitted_admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "original_inventory_sha256": "394511c34325b65e05bf23746571eac27bf11bdd3d7f2f4b9b8c7f4d490fc0be",
+  "schema": "mcloving.jcomp003.compiler-build-retention/1",
+  "source_archive_reconstructible_from": "../source.bundle",
+  "source_archive_sha256": "a7644bd868e7f743fd45651c484e888bcbab08cbe8f2cf3f213e8a78a7ea8d87"
+}

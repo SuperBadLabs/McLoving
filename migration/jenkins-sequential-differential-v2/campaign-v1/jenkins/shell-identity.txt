@@ -1,0 +1,6 @@
+/usr/bin/dash
+a6f559e00b69a4aa4d8cb607be18d9386c5aee55c509e2c075549dcf00e00fc7  /bin/sh
+58f24f3965fbef7708629fbe158d51bf138ffd577cadbc86b46367e8ad0beb83  /usr/share/jenkins/jenkins.war
+openjdk version "21.0.11" 2026-04-21 LTS
+OpenJDK Runtime Environment Temurin-21.0.11+10 (build 21.0.11+10-LTS)
+OpenJDK 64-Bit Server VM Temurin-21.0.11+10 (build 21.0.11+10-LTS, mixed mode)

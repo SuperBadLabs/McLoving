@@ -1,0 +1,51 @@
+{
+    "schema": "mcloving.jenkins.sequential-observations/1",
+    "results": [
+        {
+            "fixture": "S01",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S02",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S03",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S04",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S05",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S06",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S07",
+            "result": "SUCCESS"
+        },
+        {
+            "fixture": "S08",
+            "result": "FAILURE"
+        },
+        {
+            "fixture": "S09",
+            "result": "FAILURE"
+        },
+        {
+            "fixture": "S10",
+            "result": "FAILURE"
+        },
+        {
+            "fixture": "C052",
+            "result": "SUCCESS"
+        }
+    ],
+    "queue": 0,
+    "production_authority": false
+}

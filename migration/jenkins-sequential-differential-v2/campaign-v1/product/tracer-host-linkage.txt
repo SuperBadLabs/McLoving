@@ -1,0 +1,7 @@
+	linux-vdso.so.1 (0x00007a9df0fa8000)
+	libunwind-ptrace.so.0 => /lib/x86_64-linux-gnu/libunwind-ptrace.so.0 (0x00007a9df0f84000)
+	libunwind-x86_64.so.8 => /lib/x86_64-linux-gnu/libunwind-x86_64.so.8 (0x00007a9df0f68000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007a9df0800000)
+	liblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007a9df0f36000)
+	libunwind.so.8 => /lib/x86_64-linux-gnu/libunwind.so.8 (0x00007a9df0f1b000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007a9df0faa000)

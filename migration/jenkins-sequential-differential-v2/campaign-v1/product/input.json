@@ -1,0 +1,493 @@
+{
+  "schema": "mcloving.jcomp003.contained-input/1",
+  "manifest_sha256": "654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727",
+  "compiler_campaign_sha256": "913a588775af11b0161f02bbf979229b6b1769d6ad38bbf03a8279cb8f8b217f",
+  "fixtures": [
+    {
+      "id": "S01",
+      "source_sha256": "22c80f890a56aa0c0cace07a29de86bc30ef306791da94a4fcbc22c9f20a2c77",
+      "response_sha256": "15182f5dc0597d400850752a7a0a6821df23e51e02009ed49bed2123397773cd",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "22c80f890a56aa0c0cace07a29de86bc30ef306791da94a4fcbc22c9f20a2c77",
+        "launch_context_sha256": "469c21ab1a8c0fd95399f57cd448206d154a0eff29bc4f996d07d85ef2d3bb0e",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s01",
+        "document_id": "jcomp-s01",
+        "source_sha256": "22c80f890a56aa0c0cace07a29de86bc30ef306791da94a4fcbc22c9f20a2c77",
+        "context_sha256": "469c21ab1a8c0fd95399f57cd448206d154a0eff29bc4f996d07d85ef2d3bb0e",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "1b0b587dc51899616dbcfad269fbe28682bfc23e3e1abbc0f5c01cff64fe505e",
+        "definition_yaml_sha256": "ab9f5f2290b2b115e05f53b921d2b3246258e4d9325785aa0394296c2cb266b8",
+        "semantic_ir_sha256": "7939470e986be32972bd0460c8af3b4058f223d8d41f0e0224e160992a5da8f0",
+        "canonical_ir_sha256": "7939470e986be32972bd0460c8af3b4058f223d8d41f0e0224e160992a5da8f0",
+        "stages": "1",
+        "steps": "1",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s01\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"hello\\\\n\\\"\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s01\"\nstate: disabled\nsource:\n  context_sha256: \"469c21ab1a8c0fd95399f57cd448206d154a0eff29bc4f996d07d85ef2d3bb0e\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S01\"\n  sha256: \"22c80f890a56aa0c0cace07a29de86bc30ef306791da94a4fcbc22c9f20a2c77\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"1b0b587dc51899616dbcfad269fbe28682bfc23e3e1abbc0f5c01cff64fe505e\"\n"
+    },
+    {
+      "id": "S02",
+      "source_sha256": "dd054270bcb0f28ba558584bff70c27d48af8fa08354daf0d3f05cbd4a128d63",
+      "response_sha256": "1ea795f923609736b4247af642c294595255d35aa8a1cbb1e4a52b38749257bf",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "dd054270bcb0f28ba558584bff70c27d48af8fa08354daf0d3f05cbd4a128d63",
+        "launch_context_sha256": "278f033cdc7f956be2c8140e30ebd626903f3deabca3ec5006df3f05eacd4095",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s02",
+        "document_id": "jcomp-s02",
+        "source_sha256": "dd054270bcb0f28ba558584bff70c27d48af8fa08354daf0d3f05cbd4a128d63",
+        "context_sha256": "278f033cdc7f956be2c8140e30ebd626903f3deabca3ec5006df3f05eacd4095",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "3f41c09fc1d19f150b1608eed57f41eece2daf85410a19bd48947d6838b3187e",
+        "definition_yaml_sha256": "28d11f8e438337569821813ba2fd1080de0c42ae44b6786b7a1a2580f70b1b6e",
+        "semantic_ir_sha256": "b4b70cfb14c843f7789cebf001905f5a76d6081fd742f532f96f2b03b6f235b3",
+        "canonical_ir_sha256": "b4b70cfb14c843f7789cebf001905f5a76d6081fd742f532f96f2b03b6f235b3",
+        "stages": "3",
+        "steps": "3",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s02\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"build\\\\n\\\"\"]\n  - id: \"test\"\n    name: \"Test\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"test\\\\n\\\"\"]\n  - id: \"package\"\n    name: \"Package\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"package\\\\n\\\"\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s02\"\nstate: disabled\nsource:\n  context_sha256: \"278f033cdc7f956be2c8140e30ebd626903f3deabca3ec5006df3f05eacd4095\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S02\"\n  sha256: \"dd054270bcb0f28ba558584bff70c27d48af8fa08354daf0d3f05cbd4a128d63\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"3f41c09fc1d19f150b1608eed57f41eece2daf85410a19bd48947d6838b3187e\"\n"
+    },
+    {
+      "id": "S03",
+      "source_sha256": "9831d919e00abcc01fba291bf62af5d004614b5a466cf5d1d6e8e334942aa87e",
+      "response_sha256": "638df3e15610669f8b8014fcb828ba6074f72f373687aa6232d53713288babde",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "9831d919e00abcc01fba291bf62af5d004614b5a466cf5d1d6e8e334942aa87e",
+        "launch_context_sha256": "a35d4977dc9d7bd8d5407f29d38b9813d75f0428fa6061f36b81987c2f33e757",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s03",
+        "document_id": "jcomp-s03",
+        "source_sha256": "9831d919e00abcc01fba291bf62af5d004614b5a466cf5d1d6e8e334942aa87e",
+        "context_sha256": "a35d4977dc9d7bd8d5407f29d38b9813d75f0428fa6061f36b81987c2f33e757",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "7c586ed7b65ef095c62cb951c09f74eb3c5aa829ee395e7d937cdd9b3076b57d",
+        "definition_yaml_sha256": "9047b35048dfd881843de6523061822967d1c93a98ca4b11163ce16461d4fe7c",
+        "semantic_ir_sha256": "e81a4ee11c0965aa3ec06de7af0bf7e1a29c756f3bc95ba5370e6936ee08f89d",
+        "canonical_ir_sha256": "e81a4ee11c0965aa3ec06de7af0bf7e1a29c756f3bc95ba5370e6936ee08f89d",
+        "stages": "1",
+        "steps": "3",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s03\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"export JCOMP_STEP_SENTINEL=first; mkdir nested; cd nested; printf \\\"one\\\\n\\\"\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"test \\\"${JCOMP_STEP_SENTINEL-unset}\\\" = unset; test -d nested; printf \\\"two\\\\n\\\"\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"rmdir nested; printf \\\"three\\\\n\\\"\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s03\"\nstate: disabled\nsource:\n  context_sha256: \"a35d4977dc9d7bd8d5407f29d38b9813d75f0428fa6061f36b81987c2f33e757\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S03\"\n  sha256: \"9831d919e00abcc01fba291bf62af5d004614b5a466cf5d1d6e8e334942aa87e\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"7c586ed7b65ef095c62cb951c09f74eb3c5aa829ee395e7d937cdd9b3076b57d\"\n"
+    },
+    {
+      "id": "S04",
+      "source_sha256": "7af58d9c5959738cde8254dee31d4986049bb5807ffc942a6227731d5841185b",
+      "response_sha256": "31826a26715a4e56bed62a223d61c3c55e1d375cdb8becad873f43f2cf183d56",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "7af58d9c5959738cde8254dee31d4986049bb5807ffc942a6227731d5841185b",
+        "launch_context_sha256": "93d6034fbf09e01a0883c360efd83d8d87d7ec760dd17b32f1849c195772ee69",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s04",
+        "document_id": "jcomp-s04",
+        "source_sha256": "7af58d9c5959738cde8254dee31d4986049bb5807ffc942a6227731d5841185b",
+        "context_sha256": "93d6034fbf09e01a0883c360efd83d8d87d7ec760dd17b32f1849c195772ee69",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "8f8d954a5a6e5afa7f591512729997268e46348a2250589786927792fcaad091",
+        "definition_yaml_sha256": "3e114a346bd562b39b114bcfa430a1e8a043c232deb8fde1b1af0ef8a0d0e104",
+        "semantic_ir_sha256": "880f247464701a426a3a476cf55eb99f25fde6726628a0b256aeb3986587460d",
+        "canonical_ir_sha256": "880f247464701a426a3a476cf55eb99f25fde6726628a0b256aeb3986587460d",
+        "stages": "1",
+        "steps": "1",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s04\"\nstages:\n  - id: \"quote\"\n    name: \"Quote\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"%s\\\\n\\\" \\\"a b\\\" 'single' '$literal' 'back\\\\slash'\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s04\"\nstate: disabled\nsource:\n  context_sha256: \"93d6034fbf09e01a0883c360efd83d8d87d7ec760dd17b32f1849c195772ee69\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S04\"\n  sha256: \"7af58d9c5959738cde8254dee31d4986049bb5807ffc942a6227731d5841185b\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"8f8d954a5a6e5afa7f591512729997268e46348a2250589786927792fcaad091\"\n"
+    },
+    {
+      "id": "S05",
+      "source_sha256": "8292a37dbc45209a97d85402544d0dc16272c853d653ca51fb7e201361c2caa3",
+      "response_sha256": "64197f508169bf4476efac9eccce1fde26cfe48df97b1af94ef9c6ac9bdb3d85",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "8292a37dbc45209a97d85402544d0dc16272c853d653ca51fb7e201361c2caa3",
+        "launch_context_sha256": "021fb42346638165c5ec2b2871ebda24f63666941397de8e1403074ddf2d4399",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s05",
+        "document_id": "jcomp-s05",
+        "source_sha256": "8292a37dbc45209a97d85402544d0dc16272c853d653ca51fb7e201361c2caa3",
+        "context_sha256": "021fb42346638165c5ec2b2871ebda24f63666941397de8e1403074ddf2d4399",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "8e3832cbd54460ee212db7fee1d4b8d71fae3709a2e7ef4bf7f2f530b603a18f",
+        "definition_yaml_sha256": "22f9197b6cd3a59c5b014252b03b7274e33897d48104ce2655484877a8ece2f2",
+        "semantic_ir_sha256": "b4983ac351f7d3e4d51332c12e22a82068eb0a195cdf192b89a83d139f6943a6",
+        "canonical_ir_sha256": "b4983ac351f7d3e4d51332c12e22a82068eb0a195cdf192b89a83d139f6943a6",
+        "stages": "1",
+        "steps": "1",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s05\"\nstages:\n  - id: \"multiline\"\n    name: \"Multiline\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"first\\\\n\\\"\\nprintf \\\"%s\\\\n\\\" \\\"second line\\\"\\n\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s05\"\nstate: disabled\nsource:\n  context_sha256: \"021fb42346638165c5ec2b2871ebda24f63666941397de8e1403074ddf2d4399\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S05\"\n  sha256: \"8292a37dbc45209a97d85402544d0dc16272c853d653ca51fb7e201361c2caa3\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"8e3832cbd54460ee212db7fee1d4b8d71fae3709a2e7ef4bf7f2f530b603a18f\"\n"
+    },
+    {
+      "id": "S06",
+      "source_sha256": "d4ea23abb62226ddb863464dfcce195812bceab2712a8ca34cb3a107dbb1e931",
+      "response_sha256": "9098c3cca4f491fa73bb3ca79568817198bf3379ce038737453b49eed97efa56",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "d4ea23abb62226ddb863464dfcce195812bceab2712a8ca34cb3a107dbb1e931",
+        "launch_context_sha256": "193eb2c1315de672c33ad3b4b60439eef9a185c051829eddf12ec7c6da428375",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s06",
+        "document_id": "jcomp-s06",
+        "source_sha256": "d4ea23abb62226ddb863464dfcce195812bceab2712a8ca34cb3a107dbb1e931",
+        "context_sha256": "193eb2c1315de672c33ad3b4b60439eef9a185c051829eddf12ec7c6da428375",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "2664fac612bf9bca0fb7f1993ed158c8508dbdb16dd32bb8629abfde555569cd",
+        "definition_yaml_sha256": "965e0cdb0791a474cbd91ca076bb31d8061540fd806ea1656e8924af7fe68b67",
+        "semantic_ir_sha256": "d2aa13e6a8a71c2e574a883d8db4580690db94d678dd412dee4e90e04a61263c",
+        "canonical_ir_sha256": "d2aa13e6a8a71c2e574a883d8db4580690db94d678dd412dee4e90e04a61263c",
+        "stages": "1",
+        "steps": "2",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s06\"\nstages:\n  - id: \"workspace\"\n    name: \"Workspace\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"payload\\\\n\\\" > shared.txt\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"cat shared.txt\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s06\"\nstate: disabled\nsource:\n  context_sha256: \"193eb2c1315de672c33ad3b4b60439eef9a185c051829eddf12ec7c6da428375\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S06\"\n  sha256: \"d4ea23abb62226ddb863464dfcce195812bceab2712a8ca34cb3a107dbb1e931\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"2664fac612bf9bca0fb7f1993ed158c8508dbdb16dd32bb8629abfde555569cd\"\n"
+    },
+    {
+      "id": "S07",
+      "source_sha256": "8fb1b71d3a67e023b9a77a177fe79c3e9e1d690e31828031fe4d46e27f1ad6ad",
+      "response_sha256": "741ca3ef924ad66595614a718f2722f0b1622ce82d6ae1165b8c8abd51bc9d22",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "8fb1b71d3a67e023b9a77a177fe79c3e9e1d690e31828031fe4d46e27f1ad6ad",
+        "launch_context_sha256": "77df88b1a198482e91b206ec227401b7b29d19a1ba10ef27558564fb7d3987c7",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s07",
+        "document_id": "jcomp-s07",
+        "source_sha256": "8fb1b71d3a67e023b9a77a177fe79c3e9e1d690e31828031fe4d46e27f1ad6ad",
+        "context_sha256": "77df88b1a198482e91b206ec227401b7b29d19a1ba10ef27558564fb7d3987c7",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "08396c3c6970d06a566513dd6cea48549163a13abd36d41f9a973211e14cf28c",
+        "definition_yaml_sha256": "285db233cf88bf8abc3997d55148e64e0eeb9fc2dfdc1df0f7f3ab1a911a49a8",
+        "semantic_ir_sha256": "36df92244d91ffd501d6cf95d04ea1b35cb1db908e41b28e43ec0cd0ad853052",
+        "canonical_ir_sha256": "36df92244d91ffd501d6cf95d04ea1b35cb1db908e41b28e43ec0cd0ad853052",
+        "stages": "2",
+        "steps": "2",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s07\"\nstages:\n  - id: \"write\"\n    name: \"Write\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"mkdir output\\nprintf \\\"across\\\\n\\\" > output/value.txt\"]\n  - id: \"read\"\n    name: \"Read\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"cat output/value.txt\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s07\"\nstate: disabled\nsource:\n  context_sha256: \"77df88b1a198482e91b206ec227401b7b29d19a1ba10ef27558564fb7d3987c7\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S07\"\n  sha256: \"8fb1b71d3a67e023b9a77a177fe79c3e9e1d690e31828031fe4d46e27f1ad6ad\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"08396c3c6970d06a566513dd6cea48549163a13abd36d41f9a973211e14cf28c\"\n"
+    },
+    {
+      "id": "S08",
+      "source_sha256": "5363199f442ad074cb5427b0d4c0d82dc8ee1cfb6aed917263c970602d827f99",
+      "response_sha256": "5cb65cb409ab655926270d2aec9bfb170ae12a40d90e81a58aadb6cd10a5594d",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "5363199f442ad074cb5427b0d4c0d82dc8ee1cfb6aed917263c970602d827f99",
+        "launch_context_sha256": "d87923dba7131eb59ee6d991255be93b975eb8b34158e1eb46f64d99deabcde7",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s08",
+        "document_id": "jcomp-s08",
+        "source_sha256": "5363199f442ad074cb5427b0d4c0d82dc8ee1cfb6aed917263c970602d827f99",
+        "context_sha256": "d87923dba7131eb59ee6d991255be93b975eb8b34158e1eb46f64d99deabcde7",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "8e9a9c43479c65d68af85e5ccde5cc912c7ad051c7b40e67dfbbed28d3f89038",
+        "definition_yaml_sha256": "d0f021f9f5f4443d2e84567446f5b7e665ebf01e079459abce3139f51ea6b883",
+        "semantic_ir_sha256": "0beb36ad9bf8456884a1833e35f8aeb85cc236b78cd4b6d47fed47572774600f",
+        "canonical_ir_sha256": "0beb36ad9bf8456884a1833e35f8aeb85cc236b78cd4b6d47fed47572774600f",
+        "stages": "2",
+        "steps": "3",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s08\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"first failed\\\\n\\\"; exit 7\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"must not run\\\\n\\\"\"]\n  - id: \"later\"\n    name: \"Later\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"must not run\\\\n\\\"\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s08\"\nstate: disabled\nsource:\n  context_sha256: \"d87923dba7131eb59ee6d991255be93b975eb8b34158e1eb46f64d99deabcde7\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S08\"\n  sha256: \"5363199f442ad074cb5427b0d4c0d82dc8ee1cfb6aed917263c970602d827f99\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"8e9a9c43479c65d68af85e5ccde5cc912c7ad051c7b40e67dfbbed28d3f89038\"\n"
+    },
+    {
+      "id": "S09",
+      "source_sha256": "eb85caf1bce97c3dbf801d332cf6113299058f44b068adc9fa3398e8fb70b3b0",
+      "response_sha256": "504f45877add554e419efd879e8cd65ac020b03adb1bde265f7bec107024d0d2",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "eb85caf1bce97c3dbf801d332cf6113299058f44b068adc9fa3398e8fb70b3b0",
+        "launch_context_sha256": "16a3aa97b2745dff5475e66c12cac400f353e8aa2516a7659a86ef041bc70ea7",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s09",
+        "document_id": "jcomp-s09",
+        "source_sha256": "eb85caf1bce97c3dbf801d332cf6113299058f44b068adc9fa3398e8fb70b3b0",
+        "context_sha256": "16a3aa97b2745dff5475e66c12cac400f353e8aa2516a7659a86ef041bc70ea7",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "17923f5be6c084d2226cd387c733ccdd2baf22d43154022747c20f3ff75c8094",
+        "definition_yaml_sha256": "21c16da658840bc64643e02818d40848991856c541a36f6f946f152e908307db",
+        "semantic_ir_sha256": "1b50925b5693075a8eef5fc2c950b75b7ab48888e7d283f4156ca88fd76c1760",
+        "canonical_ir_sha256": "1b50925b5693075a8eef5fc2c950b75b7ab48888e7d283f4156ca88fd76c1760",
+        "stages": "2",
+        "steps": "4",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s09\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"before\\\\n\\\"\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"middle failed\\\\n\\\"; exit 7\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"must not run\\\\n\\\"\"]\n  - id: \"later\"\n    name: \"Later\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"must not run\\\\n\\\"\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s09\"\nstate: disabled\nsource:\n  context_sha256: \"16a3aa97b2745dff5475e66c12cac400f353e8aa2516a7659a86ef041bc70ea7\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S09\"\n  sha256: \"eb85caf1bce97c3dbf801d332cf6113299058f44b068adc9fa3398e8fb70b3b0\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"17923f5be6c084d2226cd387c733ccdd2baf22d43154022747c20f3ff75c8094\"\n"
+    },
+    {
+      "id": "S10",
+      "source_sha256": "4d3d8abf0fd19e86371a3e949f468a621c0e87b887a823f554482f483928e8b8",
+      "response_sha256": "6d9c8894ce386a796cbeb80adbded7d1ddf3ef3459f764fab37d308b894c1435",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "4d3d8abf0fd19e86371a3e949f468a621c0e87b887a823f554482f483928e8b8",
+        "launch_context_sha256": "a5924fbddd58ae989a33d1f9cefcb59b6b6d96a7c988312621043cc3d22bf4db",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-s10",
+        "document_id": "jcomp-s10",
+        "source_sha256": "4d3d8abf0fd19e86371a3e949f468a621c0e87b887a823f554482f483928e8b8",
+        "context_sha256": "a5924fbddd58ae989a33d1f9cefcb59b6b6d96a7c988312621043cc3d22bf4db",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "0b81862f0bd30ce2e75e51b7fb76a55bd0e02b9aa541631b6fb811f52659e82b",
+        "definition_yaml_sha256": "fbf7974e7eac8a5ee240b00b5ed87b8b715461b9d6c0232feab7934d7b8ac3b2",
+        "semantic_ir_sha256": "857ee296c9274edeb752e8aca0128511747e14f1b6926f00f587058d517e6b9a",
+        "canonical_ir_sha256": "857ee296c9274edeb752e8aca0128511747e14f1b6926f00f587058d517e6b9a",
+        "stages": "1",
+        "steps": "2",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-s10\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"before\\\\n\\\"\"]\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"printf \\\"last failed\\\\n\\\"; exit 7\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-s10\"\nstate: disabled\nsource:\n  context_sha256: \"a5924fbddd58ae989a33d1f9cefcb59b6b6d96a7c988312621043cc3d22bf4db\"\n  origin_kind: \"authored-document\"\n  origin: \"project-authored:JCOMP-001/S10\"\n  sha256: \"4d3d8abf0fd19e86371a3e949f468a621c0e87b887a823f554482f483928e8b8\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"0b81862f0bd30ce2e75e51b7fb76a55bd0e02b9aa541631b6fb811f52659e82b\"\n"
+    },
+    {
+      "id": "N01",
+      "source_sha256": "2f86fd37f984297b7c7a38aa6a76e6eaf5bc9346787036dc9570b502a029a272",
+      "response_sha256": "4c592db36b1e74840241e00531e1a0e1584d683cdb6363ba7256c164134ca002",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "2f86fd37f984297b7c7a38aa6a76e6eaf5bc9346787036dc9570b502a029a272",
+        "launch_context_sha256": "4915472be07a5001343deb7a58fffbb3a0dd2d1bbd7d0d7ec0e2bf819a9f84cb",
+        "status": "unsupported",
+        "code": "E_DECLARATIVE_ROOT"
+      }
+    },
+    {
+      "id": "N02",
+      "source_sha256": "52ffade30f685d837e673091bc45b78c40d5af995478952f4ee4c7e0977aa00b",
+      "response_sha256": "24f15c4c432e9b49feca28a64db52bc66e471b92fd29de2f43eebbbd6be54556",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "52ffade30f685d837e673091bc45b78c40d5af995478952f4ee4c7e0977aa00b",
+        "launch_context_sha256": "e3a8d4e5c07e91d952e72339ec4e4a41cfa7fe79d44046d38efdad9352d6ca6c",
+        "status": "unsupported",
+        "code": "E_STEP_DYNAMIC"
+      }
+    },
+    {
+      "id": "N03",
+      "source_sha256": "7e0c9035d0a2bbc63d1c0ee8b2560d4144343ed8c77425f54fa8ebfa9d1c21a0",
+      "response_sha256": "537c9a20c005429f7c15f18639e285e90d6787e3e0fc602b71dd1fee1d9ad722",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "7e0c9035d0a2bbc63d1c0ee8b2560d4144343ed8c77425f54fa8ebfa9d1c21a0",
+        "launch_context_sha256": "4aeeb5061638ed33453960a8e1980031f76cae2db426f512ab22a99ed97fab21",
+        "status": "unsupported",
+        "code": "E_STEP_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "N04",
+      "source_sha256": "d5da78c070510174c88d3c21b3c009c382837fb8a1fd17a8fc428ab8271f81fd",
+      "response_sha256": "1b1e9e4acc304e5e86b58b76e644bf49e8294f00e91cbac67d6638baea0a5b58",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "d5da78c070510174c88d3c21b3c009c382837fb8a1fd17a8fc428ab8271f81fd",
+        "launch_context_sha256": "abda54c9d83288f1fe169d0f740aa23d832ecd9a334ed445c96ede4822446562",
+        "status": "unsupported",
+        "code": "E_DIRECTIVE_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "N05",
+      "source_sha256": "d8acd511892b9a4112facbb08e4d20ad9ca57aff79d4dc1fd0705fa6997b4777",
+      "response_sha256": "9e432882f112a8043ca0f5c0931a4a4baaf69ab5a4d40b74d9b3df50d403bc1b",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "d8acd511892b9a4112facbb08e4d20ad9ca57aff79d4dc1fd0705fa6997b4777",
+        "launch_context_sha256": "ca78b737ef15efa3dadf39a12b5cd193e65d586d1962e49a6b804d139ddbce9b",
+        "status": "rejected",
+        "code": "E_SOURCE_PARSE"
+      }
+    },
+    {
+      "id": "N06",
+      "source_sha256": "06c41040ad1e226fea55682af3e6edc6dab11f1d7552d2b8cef58e124b564796",
+      "response_sha256": "5d6293733d84f58065c85fce13523704965050f19069e84c74ba32acf98dabec",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "06c41040ad1e226fea55682af3e6edc6dab11f1d7552d2b8cef58e124b564796",
+        "launch_context_sha256": "b9c8dbd1765b6bf15e16d81e7b0008c555bfff186a684d6443fb54e67bd22af2",
+        "status": "unsupported",
+        "code": "E_SHELL_SHEBANG_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "N07",
+      "source_sha256": "43794b7bb8c10828bacf102586e5b3449c58b2f1edf1f865416497cf6f3b2292",
+      "response_sha256": "39ad4fdf04a4d179fe6b9c9743ac176190744832cd59a23bd6f65bbd9750791a",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "43794b7bb8c10828bacf102586e5b3449c58b2f1edf1f865416497cf6f3b2292",
+        "launch_context_sha256": "789e711800e6539a9b2bc7ffb4536b0649075ad4d90dd6c9326ef77eed516dee",
+        "status": "unsupported",
+        "code": "E_STAGE_DUPLICATE"
+      }
+    },
+    {
+      "id": "N08",
+      "source_sha256": "b0b80733b8277ad891c20e20d19b894a16a63669daf7f0be938a2bbd14774f43",
+      "response_sha256": "8a4c024c63a21c2ce838a13f94568f650ebed889632f27fe1ceec40f0caac8a7",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "b0b80733b8277ad891c20e20d19b894a16a63669daf7f0be938a2bbd14774f43",
+        "launch_context_sha256": "bf9febcf5dc9d539e01be4cda0a28c6e9a26e6a4fd446aa32e294312e6e817dc",
+        "status": "unsupported",
+        "code": "E_STAGE_BODY"
+      }
+    },
+    {
+      "id": "N09",
+      "source_sha256": "6229f10c291ecb047c39d871a0575d36e076e5d5b6d5dc996d20c87db2caa54e",
+      "response_sha256": "2b746b6456d86fff76cff0e596a7e87ddf4a62239cf072693529e86a4f166502",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "6229f10c291ecb047c39d871a0575d36e076e5d5b6d5dc996d20c87db2caa54e",
+        "launch_context_sha256": "640a67be9c5bcc7523fe067e708f464d42197c16c691dcd00c8251c3a2077ea0",
+        "status": "rejected",
+        "code": "E_SOURCE_TOO_LARGE"
+      }
+    },
+    {
+      "id": "N10",
+      "source_sha256": "99643fdebe0cfbc077d63ed4c72d974a0ac4228d08a6c19d8821770a1fb9c579",
+      "response_sha256": "a2ad0ceb73c3c95414249beaed361e6a927791c919ccaafc04318f0b0d6f59ff",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "99643fdebe0cfbc077d63ed4c72d974a0ac4228d08a6c19d8821770a1fb9c579",
+        "launch_context_sha256": "b786c13c898ab6ddd364e92f098fa08917a7ffba80c46cc3b58e8dc7b0d2c4c0",
+        "status": "unsupported",
+        "code": "E_STAGES_BODY"
+      }
+    },
+    {
+      "id": "N11",
+      "source_sha256": "9c4be80e5d367d7b8aa817f7b98d5e9728898f2ed084759fdd37046cd254e092",
+      "response_sha256": "a18ecb04d72a57018413be289083baf019be40bba2910040b2bce190f88cd8ef",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "9c4be80e5d367d7b8aa817f7b98d5e9728898f2ed084759fdd37046cd254e092",
+        "launch_context_sha256": "6b5ef3f88b845a83dff0e70c8e0007875bf64f9d45cebd6cb25aeb339425d173",
+        "status": "unsupported",
+        "code": "E_STEP_LIMIT"
+      }
+    },
+    {
+      "id": "N12",
+      "source_sha256": "9b1db6cf5372e7c439521cbdb576cb42849d7ebbc4c622691efce67a108ab855",
+      "response_sha256": "fd2b5c79344b6bb975d9e991252c0f7057156b2beadd310e0da371f14fbd77d4",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "9b1db6cf5372e7c439521cbdb576cb42849d7ebbc4c622691efce67a108ab855",
+        "launch_context_sha256": "87cfc4af362787de30a41bc4a9fbc9a06ba4e8addbdb291dd98009fe5e172272",
+        "status": "unsupported",
+        "code": "E_STEP_ARGUMENT"
+      }
+    },
+    {
+      "id": "C052",
+      "source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+      "response_sha256": "57882aa3e073eddd1a8edce748161a731396ece765bb27b2be3f409c706b8eb6",
+      "receipt": {
+        "worker_image_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+        "admission_binary_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+        "launch_source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+        "launch_context_sha256": "ddac887ac006f28705ab4dd8293b65daca31a0fb5a7e591e892e14eb1e069ba6",
+        "status": "admitted",
+        "protocol": "mcloving.jenkins.compiler/2",
+        "compiler": "mcloving-jenkins-compiler-worker/2",
+        "target_profile_sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+        "request_id": "jcomp-c052",
+        "document_id": "jcomp-c052",
+        "source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+        "context_sha256": "ddac887ac006f28705ab4dd8293b65daca31a0fb5a7e591e892e14eb1e069ba6",
+        "contract_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+        "pipeline_yaml_sha256": "af613bb83c1027c3ae5775526a824817b244b24dab6f24e5cf8a1d825e264b1a",
+        "definition_yaml_sha256": "8152b15a27671db51e8ecc1dc4a93f3008d76a49f50087a04e9db9ff24be7649",
+        "semantic_ir_sha256": "9563d0b9045acdfad8aaad6c31e0a4a784345e209c13a9c56e262127942109f7",
+        "canonical_ir_sha256": "9563d0b9045acdfad8aaad6c31e0a4a784345e209c13a9c56e262127942109f7",
+        "stages": "1",
+        "steps": "1",
+        "state": "disabled",
+        "execution_authority": "false"
+      },
+      "pipeline_yaml": "version: 1\nname: \"jcomp-c052\"\nstages:\n  - id: \"build\"\n    name: \"Build\"\n    steps:\n      - process:\n          program: \"/bin/sh\"\n          args: [\"-xe\", \"-c\", \"echo \\\"Hello World\\\"\"]\n",
+      "disabled_definition_yaml": "version: 1\nschema: mcloving.jenkins.disabled-document\ndefinition_id: \"jcomp-c052\"\nstate: disabled\nsource:\n  context_sha256: \"ddac887ac006f28705ab4dd8293b65daca31a0fb5a7e591e892e14eb1e069ba6\"\n  origin_kind: \"corpus-reference\"\n  origin: \"repository:migration/mario-jenkins-oracle-228/corpus-v1/sources/cinqict_jenkinsdev.Jenkinsfile\"\n  sha256: \"666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100\"\ncompilation:\n  compiler: \"mcloving-jenkins-compiler-worker/2\"\n  contract_sha256: \"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"\n  target_profile_sha256: \"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"\n  pipeline_yaml_sha256: \"af613bb83c1027c3ae5775526a824817b244b24dab6f24e5cf8a1d825e264b1a\"\n"
+    }
+  ]
+}

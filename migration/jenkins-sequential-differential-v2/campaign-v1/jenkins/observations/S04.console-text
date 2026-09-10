@@ -1,0 +1,19 @@
+Started by user unknown or anonymous
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on Jenkins in /var/jenkins_home/workspace/jcomp-S04
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Quote)
+[Pipeline] sh
++ printf %s\n a b single $literal back\slash
+a b
+single
+$literal
+back\slash
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

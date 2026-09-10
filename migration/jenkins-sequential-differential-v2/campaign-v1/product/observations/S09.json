@@ -1,0 +1,581 @@
+{
+  "attempt_workspace_cleanup": true,
+  "checkpoint_raw_bytes_removed": true,
+  "fixture": "S09",
+  "logs": [
+    {
+      "attempt_id": "6bcb8c04-70d7-4e5b-b325-90b552fe76c5",
+      "chunks": [
+        {
+          "content": [
+            98,
+            101,
+            102,
+            111,
+            114,
+            101,
+            10
+          ],
+          "cursor_id": 27,
+          "digest": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+          "fence": 1,
+          "sequence": 0,
+          "stream": "stdout"
+        },
+        {
+          "content": [
+            43,
+            32,
+            112,
+            114,
+            105,
+            110,
+            116,
+            102,
+            32,
+            98,
+            101,
+            102,
+            111,
+            114,
+            101,
+            92,
+            110,
+            10
+          ],
+          "cursor_id": 28,
+          "digest": "0474f29d8aa104b45c21df13f2bd27275b2eac3c3663c87dae2e5a7a11551b5c",
+          "fence": 1,
+          "sequence": 1,
+          "stream": "stderr"
+        }
+      ]
+    },
+    {
+      "attempt_id": "91d9ad1e-4d49-48ff-adbb-1de3abda5773",
+      "chunks": [
+        {
+          "content": [
+            109,
+            105,
+            100,
+            100,
+            108,
+            101,
+            32,
+            102,
+            97,
+            105,
+            108,
+            101,
+            100,
+            10
+          ],
+          "cursor_id": 29,
+          "digest": "27148adee51f02cde03f963ddbfaa2e94e8a66671c80acca8e9921c489856eef",
+          "fence": 1,
+          "sequence": 0,
+          "stream": "stdout"
+        },
+        {
+          "content": [
+            43,
+            32,
+            112,
+            114,
+            105,
+            110,
+            116,
+            102,
+            32,
+            109,
+            105,
+            100,
+            100,
+            108,
+            101,
+            32,
+            102,
+            97,
+            105,
+            108,
+            101,
+            100,
+            92,
+            110,
+            10,
+            43,
+            32,
+            101,
+            120,
+            105,
+            116,
+            32,
+            55,
+            10
+          ],
+          "cursor_id": 30,
+          "digest": "6d5d5b2d3c75cef31730c94e09b7b92126d928071da00b66fe91d8f1bcdde119",
+          "fence": 1,
+          "sequence": 1,
+          "stream": "stderr"
+        }
+      ]
+    },
+    {
+      "attempt_id": "65f86280-de4d-418b-b033-bd5a57f6db44",
+      "chunks": []
+    },
+    {
+      "attempt_id": "e699cc1e-4e70-460e-b4fc-73be4a681d17",
+      "chunks": []
+    }
+  ],
+  "result": {
+    "build_id": "b6c7034e-f3f9-4e8d-9ea9-b50e37a21c97",
+    "layout_version": 1,
+    "pipeline_digest": [
+      27,
+      80,
+      146,
+      91,
+      86,
+      147,
+      7,
+      90,
+      142,
+      239,
+      95,
+      194,
+      201,
+      80,
+      183,
+      91,
+      122,
+      180,
+      136,
+      136,
+      231,
+      210,
+      131,
+      244,
+      21,
+      108,
+      168,
+      143,
+      215,
+      108,
+      23,
+      96
+    ],
+    "pipeline_id": "5555c079-c3db-437e-aa14-34b12cd7b368",
+    "pipeline_operational_generation": 1,
+    "pipeline_revision": 1,
+    "stages": [
+      {
+        "stage_id": "build",
+        "stage_name": "Build",
+        "stage_ordinal": 1,
+        "status": "failed",
+        "steps": [
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "6bcb8c04-70d7-4e5b-b325-90b552fe76c5",
+                  "completed_at_unix_ms": 1789027541328,
+                  "created_at_unix_ms": 1789027541262,
+                  "fence": 1,
+                  "lease_owner": "sequential-2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                  "node_id": "3775d162-9557-4d1b-b32e-551aebd3fa4b",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": 1789027541262,
+                  "retry_of": null,
+                  "started_at_unix_ms": 1789027541318,
+                  "status": "succeeded",
+                  "terminal_summary": {
+                    "exit_code": 0,
+                    "result_sha256": "30ea0b073df27d535110ff74163da82d713d5dc14624dc24c3d34db1595ce078",
+                    "termination": "exited",
+                    "workspace_transfer": {
+                      "build_id": "b6c7034e-f3f9-4e8d-9ea9-b50e37a21c97",
+                      "error": null,
+                      "generation": 0,
+                      "input_digest": [
+                        139,
+                        202,
+                        225,
+                        129,
+                        210,
+                        19,
+                        33,
+                        183,
+                        158,
+                        28,
+                        238,
+                        73,
+                        118,
+                        166,
+                        201,
+                        117,
+                        154,
+                        15,
+                        3,
+                        118,
+                        157,
+                        222,
+                        100,
+                        182,
+                        248,
+                        33,
+                        171,
+                        93,
+                        34,
+                        163,
+                        57,
+                        33
+                      ],
+                      "namespace_id": "483d3205-d7f8-4e04-9cba-a0a67d22f721",
+                      "organization_id": "2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                      "receipt": {
+                        "digest": [
+                          139,
+                          202,
+                          225,
+                          129,
+                          210,
+                          19,
+                          33,
+                          183,
+                          158,
+                          28,
+                          238,
+                          73,
+                          118,
+                          166,
+                          201,
+                          117,
+                          154,
+                          15,
+                          3,
+                          118,
+                          157,
+                          222,
+                          100,
+                          182,
+                          248,
+                          33,
+                          171,
+                          93,
+                          34,
+                          163,
+                          57,
+                          33
+                        ],
+                        "entries": [],
+                        "total_bytes": 0,
+                        "version": 1
+                      },
+                      "version": 1
+                    }
+                  }
+                },
+                "logs": [
+                  {
+                    "attempt_id": "6bcb8c04-70d7-4e5b-b325-90b552fe76c5",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 1,
+                    "last_sequence": 1,
+                    "stream": "stderr"
+                  },
+                  {
+                    "attempt_id": "6bcb8c04-70d7-4e5b-b325-90b552fe76c5",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 0,
+                    "last_sequence": 0,
+                    "stream": "stdout"
+                  }
+                ]
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 1,
+              "node_key": "build[step=01]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 1
+            },
+            "logical_outcome": "succeeded",
+            "max_attempts": 1,
+            "node_id": "3775d162-9557-4d1b-b32e-551aebd3fa4b",
+            "status": "succeeded"
+          },
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "91d9ad1e-4d49-48ff-adbb-1de3abda5773",
+                  "completed_at_unix_ms": 1789027541394,
+                  "created_at_unix_ms": 1789027541263,
+                  "fence": 1,
+                  "lease_owner": "sequential-2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                  "node_id": "4ce2407f-08a0-4ef9-874d-50b7bba0b4ae",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": 1789027541329,
+                  "retry_of": null,
+                  "started_at_unix_ms": 1789027541385,
+                  "status": "failed",
+                  "terminal_summary": {
+                    "exit_code": 7,
+                    "result_sha256": "f584d597c8d30688f5d99d75b28cefa3572b79f99e886f9eb02850195d73817a",
+                    "termination": "exited",
+                    "workspace_transfer": {
+                      "build_id": "b6c7034e-f3f9-4e8d-9ea9-b50e37a21c97",
+                      "error": null,
+                      "generation": 1,
+                      "input_digest": [
+                        139,
+                        202,
+                        225,
+                        129,
+                        210,
+                        19,
+                        33,
+                        183,
+                        158,
+                        28,
+                        238,
+                        73,
+                        118,
+                        166,
+                        201,
+                        117,
+                        154,
+                        15,
+                        3,
+                        118,
+                        157,
+                        222,
+                        100,
+                        182,
+                        248,
+                        33,
+                        171,
+                        93,
+                        34,
+                        163,
+                        57,
+                        33
+                      ],
+                      "namespace_id": "483d3205-d7f8-4e04-9cba-a0a67d22f721",
+                      "organization_id": "2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                      "receipt": {
+                        "digest": [
+                          139,
+                          202,
+                          225,
+                          129,
+                          210,
+                          19,
+                          33,
+                          183,
+                          158,
+                          28,
+                          238,
+                          73,
+                          118,
+                          166,
+                          201,
+                          117,
+                          154,
+                          15,
+                          3,
+                          118,
+                          157,
+                          222,
+                          100,
+                          182,
+                          248,
+                          33,
+                          171,
+                          93,
+                          34,
+                          163,
+                          57,
+                          33
+                        ],
+                        "entries": [],
+                        "total_bytes": 0,
+                        "version": 1
+                      },
+                      "version": 1
+                    }
+                  }
+                },
+                "logs": [
+                  {
+                    "attempt_id": "91d9ad1e-4d49-48ff-adbb-1de3abda5773",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 1,
+                    "last_sequence": 1,
+                    "stream": "stderr"
+                  },
+                  {
+                    "attempt_id": "91d9ad1e-4d49-48ff-adbb-1de3abda5773",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 0,
+                    "last_sequence": 0,
+                    "stream": "stdout"
+                  }
+                ]
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 2,
+              "node_key": "build[step=02]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 2
+            },
+            "logical_outcome": "failed",
+            "max_attempts": 1,
+            "node_id": "4ce2407f-08a0-4ef9-874d-50b7bba0b4ae",
+            "status": "failed"
+          },
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "65f86280-de4d-418b-b033-bd5a57f6db44",
+                  "completed_at_unix_ms": 1789027541395,
+                  "created_at_unix_ms": 1789027541263,
+                  "fence": 0,
+                  "lease_owner": null,
+                  "node_id": "b19d9976-7684-408d-90cd-d9a5ca53b5a2",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": null,
+                  "retry_of": null,
+                  "started_at_unix_ms": null,
+                  "status": "aborted",
+                  "terminal_summary": {
+                    "reason": "dependency_not_succeeded"
+                  }
+                },
+                "logs": []
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 3,
+              "node_key": "build[step=03]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 3
+            },
+            "logical_outcome": "skipped",
+            "max_attempts": 1,
+            "node_id": "b19d9976-7684-408d-90cd-d9a5ca53b5a2",
+            "status": "skipped"
+          }
+        ]
+      },
+      {
+        "stage_id": "later",
+        "stage_name": "Later",
+        "stage_ordinal": 2,
+        "status": "skipped",
+        "steps": [
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "e699cc1e-4e70-460e-b4fc-73be4a681d17",
+                  "completed_at_unix_ms": 1789027541396,
+                  "created_at_unix_ms": 1789027541263,
+                  "fence": 0,
+                  "lease_owner": null,
+                  "node_id": "1f84c6d9-d9fe-4469-862b-e211fc11a59b",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": null,
+                  "retry_of": null,
+                  "started_at_unix_ms": null,
+                  "status": "aborted",
+                  "terminal_summary": {
+                    "reason": "dependency_not_succeeded"
+                  }
+                },
+                "logs": []
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 4,
+              "node_key": "later[step=01]",
+              "stage_id": "later",
+              "stage_name": "Later",
+              "stage_ordinal": 2,
+              "step_ordinal": 1
+            },
+            "logical_outcome": "skipped",
+            "max_attempts": 1,
+            "node_id": "1f84c6d9-d9fe-4469-862b-e211fc11a59b",
+            "status": "skipped"
+          }
+        ]
+      }
+    ],
+    "status": "failed",
+    "workspace_closed": true,
+    "workspace_generation": 2,
+    "workspace_namespace": "483d3205-d7f8-4e04-9cba-a0a67d22f721",
+    "workspace_receipt": {
+      "digest": [
+        139,
+        202,
+        225,
+        129,
+        210,
+        19,
+        33,
+        183,
+        158,
+        28,
+        238,
+        73,
+        118,
+        166,
+        201,
+        117,
+        154,
+        15,
+        3,
+        118,
+        157,
+        222,
+        100,
+        182,
+        248,
+        33,
+        171,
+        93,
+        34,
+        163,
+        57,
+        33
+      ],
+      "entries": [],
+      "total_bytes": 0,
+      "version": 1
+    }
+  },
+  "source_sha256": "eb85caf1bce97c3dbf801d332cf6113299058f44b068adc9fa3398e8fb70b3b0"
+}

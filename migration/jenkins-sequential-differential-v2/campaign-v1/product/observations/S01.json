@@ -1,0 +1,284 @@
+{
+  "attempt_workspace_cleanup": true,
+  "checkpoint_raw_bytes_removed": true,
+  "fixture": "S01",
+  "logs": [
+    {
+      "attempt_id": "d77e8ba3-590a-4359-97e7-797682a57802",
+      "chunks": [
+        {
+          "content": [
+            104,
+            101,
+            108,
+            108,
+            111,
+            10
+          ],
+          "cursor_id": 1,
+          "digest": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+          "fence": 1,
+          "sequence": 0,
+          "stream": "stdout"
+        },
+        {
+          "content": [
+            43,
+            32,
+            112,
+            114,
+            105,
+            110,
+            116,
+            102,
+            32,
+            104,
+            101,
+            108,
+            108,
+            111,
+            92,
+            110,
+            10
+          ],
+          "cursor_id": 2,
+          "digest": "7a689c155b29da53e24204a94eaeb60cda7ab4d0926951dd0115c08df4b06042",
+          "fence": 1,
+          "sequence": 1,
+          "stream": "stderr"
+        }
+      ]
+    }
+  ],
+  "result": {
+    "build_id": "0a8a32e1-f244-4016-9721-3397776dff8b",
+    "layout_version": 1,
+    "pipeline_digest": [
+      121,
+      57,
+      71,
+      14,
+      152,
+      107,
+      227,
+      41,
+      114,
+      189,
+      4,
+      96,
+      200,
+      175,
+      59,
+      64,
+      88,
+      242,
+      35,
+      216,
+      212,
+      31,
+      14,
+      2,
+      36,
+      225,
+      96,
+      153,
+      42,
+      93,
+      168,
+      240
+    ],
+    "pipeline_id": "afb7a308-5389-48c3-a25a-3511be60924a",
+    "pipeline_operational_generation": 1,
+    "pipeline_revision": 1,
+    "stages": [
+      {
+        "stage_id": "build",
+        "stage_name": "Build",
+        "stage_ordinal": 1,
+        "status": "succeeded",
+        "steps": [
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "d77e8ba3-590a-4359-97e7-797682a57802",
+                  "completed_at_unix_ms": 1789027540153,
+                  "created_at_unix_ms": 1789027540061,
+                  "fence": 1,
+                  "lease_owner": "sequential-2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                  "node_id": "2588f34c-a072-42e9-9a53-0f5ddcd2db46",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": 1789027540061,
+                  "retry_of": null,
+                  "started_at_unix_ms": 1789027540137,
+                  "status": "succeeded",
+                  "terminal_summary": {
+                    "exit_code": 0,
+                    "result_sha256": "6ee685bf9fb2791929a20a4cebf9e5b61d0f0010e50a16dba4dde7dbac356e82",
+                    "termination": "exited",
+                    "workspace_transfer": {
+                      "build_id": "0a8a32e1-f244-4016-9721-3397776dff8b",
+                      "error": null,
+                      "generation": 0,
+                      "input_digest": [
+                        139,
+                        202,
+                        225,
+                        129,
+                        210,
+                        19,
+                        33,
+                        183,
+                        158,
+                        28,
+                        238,
+                        73,
+                        118,
+                        166,
+                        201,
+                        117,
+                        154,
+                        15,
+                        3,
+                        118,
+                        157,
+                        222,
+                        100,
+                        182,
+                        248,
+                        33,
+                        171,
+                        93,
+                        34,
+                        163,
+                        57,
+                        33
+                      ],
+                      "namespace_id": "5a7102fc-048b-430f-8e11-90bbf46ee6f7",
+                      "organization_id": "2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                      "receipt": {
+                        "digest": [
+                          139,
+                          202,
+                          225,
+                          129,
+                          210,
+                          19,
+                          33,
+                          183,
+                          158,
+                          28,
+                          238,
+                          73,
+                          118,
+                          166,
+                          201,
+                          117,
+                          154,
+                          15,
+                          3,
+                          118,
+                          157,
+                          222,
+                          100,
+                          182,
+                          248,
+                          33,
+                          171,
+                          93,
+                          34,
+                          163,
+                          57,
+                          33
+                        ],
+                        "entries": [],
+                        "total_bytes": 0,
+                        "version": 1
+                      },
+                      "version": 1
+                    }
+                  }
+                },
+                "logs": [
+                  {
+                    "attempt_id": "d77e8ba3-590a-4359-97e7-797682a57802",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 1,
+                    "last_sequence": 1,
+                    "stream": "stderr"
+                  },
+                  {
+                    "attempt_id": "d77e8ba3-590a-4359-97e7-797682a57802",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 0,
+                    "last_sequence": 0,
+                    "stream": "stdout"
+                  }
+                ]
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 1,
+              "node_key": "build[step=01]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 1
+            },
+            "logical_outcome": "succeeded",
+            "max_attempts": 1,
+            "node_id": "2588f34c-a072-42e9-9a53-0f5ddcd2db46",
+            "status": "succeeded"
+          }
+        ]
+      }
+    ],
+    "status": "succeeded",
+    "workspace_closed": true,
+    "workspace_generation": 1,
+    "workspace_namespace": "5a7102fc-048b-430f-8e11-90bbf46ee6f7",
+    "workspace_receipt": {
+      "digest": [
+        139,
+        202,
+        225,
+        129,
+        210,
+        19,
+        33,
+        183,
+        158,
+        28,
+        238,
+        73,
+        118,
+        166,
+        201,
+        117,
+        154,
+        15,
+        3,
+        118,
+        157,
+        222,
+        100,
+        182,
+        248,
+        33,
+        171,
+        93,
+        34,
+        163,
+        57,
+        33
+      ],
+      "entries": [],
+      "total_bytes": 0,
+      "version": 1
+    }
+  },
+  "source_sha256": "22c80f890a56aa0c0cace07a29de86bc30ef306791da94a4fcbc22c9f20a2c77"
+}

@@ -1,0 +1,18 @@
+Started by user unknown or anonymous
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on Jenkins in /var/jenkins_home/workspace/jcomp-S06
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Workspace)
+[Pipeline] sh
++ printf payload\n
+[Pipeline] sh
++ cat shared.txt
+payload
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

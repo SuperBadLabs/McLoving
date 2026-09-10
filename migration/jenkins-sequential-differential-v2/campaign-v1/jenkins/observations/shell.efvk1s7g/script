@@ -1,0 +1,1 @@
+export JCOMP_STEP_SENTINEL=first; mkdir nested; cd nested; printf "one\n"

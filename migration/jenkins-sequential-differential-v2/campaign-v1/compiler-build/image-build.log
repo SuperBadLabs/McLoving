@@ -1,0 +1,30 @@
+STEP 1/9: FROM docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02
+STEP 2/9: LABEL org.opencontainers.image.title="McLoving isolated Jenkins compiler worker"       io.mcloving.compiler.protocol="mcloving.jenkins.compiler/1"       io.mcloving.compiler.sequential.protocol="mcloving.jenkins.compiler/2"       io.mcloving.compiler.sequential.contract.sha256="264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41"       io.mcloving.compiler.profile.id="mario-jenkins-oracle-228"       io.mcloving.compiler.profile.sha256="feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271"       io.mcloving.compiler.base.digest="sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02"
+--> Using cache 4512c659de0f75d6086a86d6d423c451c4469804c0125498599d2b70fb6eca48
+--> 4512c659de0f
+STEP 3/9: USER root
+--> Using cache 47cce4100ec0e9f7118a13a4109dc140c0d782fb3c5e330dc5f6ca1bc2546f0c
+--> 47cce4100ec0
+STEP 4/9: COPY runtime/clojure/ /opt/mcloving/lib/
+--> Using cache a64cf280eeffccedecc1af71a82556a47f3d7079c7937c1cc76bb548e9697e6c
+--> a64cf280eeff
+STEP 5/9: COPY runtime/profile/ /opt/mcloving/profile/
+--> Using cache 66200a0212d98da671bf6627d3b4372b7b7debd52d4422b795926e1b6930640a
+--> 66200a0212d9
+STEP 6/9: COPY src/ /opt/mcloving/src/
+--> Using cache 449c21a24125e03bb6754dc59069567a4905ee36c1f507edcba71ad8dd35b152
+--> 449c21a24125
+STEP 7/9: RUN unzip -p /usr/share/jenkins/jenkins.war WEB-INF/lib/groovy-all-2.4.21.jar       > /opt/mcloving/lib/groovy-all-2.4.21.jar     && unzip -p /usr/share/jenkins/jenkins.war WEB-INF/lib/jenkins-core-2.568.1.jar       > /opt/mcloving/lib/jenkins-core-2.568.1.jar     && find /opt/mcloving -type d -exec chmod 0555 {} \;     && find /opt/mcloving -type f -exec chmod 0444 {} \;
+--> Using cache 717f5ae2e730382029710d117d079de65fe864775fab4562a07477f5760f3ad0
+--> 717f5ae2e730
+STEP 8/9: USER 1000:1000
+--> Using cache 1bbe6cc435f0888d198e35ed0799842d9bd7a26cd996b6b99d848dcd331e0f7c
+--> 1bbe6cc435f0
+STEP 9/9: ENTRYPOINT ["/opt/java/openjdk/bin/java", "-Xms32m", "-Xmx384m", "-XX:ActiveProcessorCount=1", "-cp", "/opt/mcloving/src:/opt/mcloving/lib/*", "clojure.main", "-m", "mcloving.compat.main"]
+--> Using cache d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2
+COMMIT localhost/mcloving/jcomp003-compiler:f263ad4ae2871e8bb06fe3b5bceef534179a0a88
+--> d1124bcb148e
+Successfully tagged localhost/mcloving/jcomp003-compiler:f263ad4ae2871e8bb06fe3b5bceef534179a0a88
+Successfully tagged localhost/mcloving/jcomp003-compiler:c94d232af0f0319585e13c72ed5d96cffe04ce33
+d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2
+image=d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2 profile=feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271 base=sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02

@@ -271,6 +271,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Offline retained-source bundle verification needs base ancestry.
+      - name: Verify retained Jenkins sequential observations
+        run: bash scripts/verify-jenkins-sequential-retained.sh
       - name: Test protected workflow aggregates
         run: /usr/bin/python3 -I scripts/test-workflow-aggregate.py
       - name: Test sequential runtime gate controls
