@@ -222,3 +222,10 @@ listener, the download URL and the response handling untested. When adding an
 assertion here, ask which call sites it does *not* reach, prefer the surface that
 changes on its own over the one a test can click, and go one step past
 "it rendered" to "it did the thing".
+
+The fixture is subject to the same suspicion. It exists to make journeys
+drivable, and every shortcut it takes is a claim about production that nobody
+checked. One revision here answered a fence-specific artifact for a query that
+production resolves by first match with no fence at all: the gate went green on
+behaviour the shipped controller does not have. When a fixture answers something
+production would answer differently, the gate is measuring the fixture.

@@ -28,7 +28,7 @@
     },
     {
       "assertion": "desktop_build_view_renders_all_panels",
-      "detail": "populated {'artifact-download-controls': 2, 'build-approvals': 2, 'build-artifacts': 2, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
+      "detail": "populated {'artifact-download-controls': 3, 'build-approvals': 2, 'build-artifacts': 3, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
       "passed": true
     },
     {
@@ -53,7 +53,7 @@
     },
     {
       "assertion": "keyboard_focus_is_visible_through_journeys",
-      "detail": "80 keyboard stops across 5 views, every one with a visible ring",
+      "detail": "81 keyboard stops across 5 views, every one with a visible ring",
       "passed": true
     },
     {
@@ -63,7 +63,7 @@
     },
     {
       "assertion": "artifact_download_delivers_content",
-      "detail": "clicked={'count': 2, 'disabled': False}, error-styled=False, file=report.txt, delivered_bytes=34, result '{\\n  \"downloaded\": \"report.txt\",\\n  \"bytes\": 34\\n}'",
+      "detail": "clicked={'count': 3, 'disabled': False}, error-styled=False, file=build.log, delivered_bytes=26, result '{\\n  \"downloaded\": \"build.log\",\\n  \"bytes\": 26\\n}'",
       "passed": true
     },
     {

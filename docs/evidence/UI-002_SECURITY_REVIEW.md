@@ -162,7 +162,16 @@ A second coverage gap of the same shape was found by review after the first was
 fixed: the artifact assertion proved rows and Download controls *rendered* but
 never activated one, and the fixture exposed no `/artifacts/content` route at
 all — so the click listener, the URL `downloadArtifact` builds and the response
-handling were outside the gate. `artifact_download_delivers_content` now clicks
+handling were outside the gate. The fixture's artifact table is also resolved the way production resolves it:
+`ArtifactQuery` carries only `attempt_id` and `name`, and `find_artifact` takes
+the **first** match with no fence in the predicate or the ordering. An earlier
+revision answered a fence-specific record for that query, which manufactured
+behaviour the shipped controller does not have and would have kept a green
+delivery baseline while production served a different fenced artifact. The
+delivery journey now drives a uniquely named row, and the deliberately ambiguous
+`report.txt` pair is kept only for the client-side focus key.
+
+`artifact_download_delivers_content` clicks
 the control and reads **the bytes that actually arrived on disk** — Chrome is
 given a download directory the gate inspects — requiring the file to be named
 `report.txt` and to hold exactly the 34 bytes the fixture serves. Asserting the

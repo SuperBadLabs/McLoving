@@ -45,4 +45,4 @@ Baseline: unmutated client must pass every assertion
     caught, also red: ['console_has_no_unexpected_resource_failures']
 
 21 of 21 mutations caught
-Mutation evidence written to /tmp/claude-1000/mut21
+Mutation evidence written to /tmp/claude-1000/mutfinal

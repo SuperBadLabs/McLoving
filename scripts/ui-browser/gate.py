@@ -680,14 +680,22 @@ class Gate:
         """
         self.show_view("build")
         self.settle(0.4)
+        # The uniquely named row, deliberately. `report.txt` appears twice
+        # differing only by fence, and production's artifact query carries no
+        # fence -- `find_artifact` takes the first match -- so a download of that
+        # name is ambiguous by construction. Driving delivery through it would
+        # assert whatever the fixture chose to answer rather than what the
+        # shipped controller would.
         clicked = self.session.script(
             """
-            const buttons = document.querySelectorAll('#build-artifacts .artifact button');
-            const button = buttons[buttons.length - 1];
+            const rows = [...document.querySelectorAll('#build-artifacts .artifact')];
+            const row = rows.find((r) => r.textContent.includes('build.log'));
+            if (!row) return null;
+            const button = row.querySelector('button');
             if (!button) return null;
             if (button.disabled) return {disabled: true};
             button.click();
-            return {disabled: false, count: buttons.length};
+            return {disabled: false, count: rows.length};
             """
         )
         self.settle(1.4)
@@ -719,11 +727,11 @@ class Gate:
             clicked is not None
             and not clicked.get("disabled")
             and not errored
-            and '"downloaded": "report.txt"' in result
+            and '"downloaded": "build.log"' in result
             and delivered is not None
-            and delivered.name == "report.txt"
-            and len(payload) == 34
-            and payload == b"browser fixture artifact bytes\n123",
+            and delivered.name == "build.log"
+            and len(payload) == 26
+            and payload == b"browser fixture build log\n",
             f"clicked={clicked}, error-styled={errored}, "
             f"file={delivered.name if delivered else None}, "
             f"delivered_bytes={len(payload)}, result {result[:80]!r}",

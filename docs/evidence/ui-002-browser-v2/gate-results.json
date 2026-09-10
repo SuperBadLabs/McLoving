@@ -28,7 +28,7 @@
     },
     {
       "assertion": "desktop_build_view_renders_all_panels",
-      "detail": "populated {'artifact-download-controls': 2, 'build-approvals': 2, 'build-artifacts': 2, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
+      "detail": "populated {'artifact-download-controls': 3, 'build-approvals': 2, 'build-artifacts': 3, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
       "passed": true
     },
     {
@@ -53,7 +53,7 @@
     },
     {
       "assertion": "keyboard_focus_is_visible_through_journeys",
-      "detail": "81 keyboard stops across 5 views, every one with a visible ring",
+      "detail": "82 keyboard stops across 5 views, every one with a visible ring",
       "passed": true
     },
     {
@@ -63,12 +63,12 @@
     },
     {
       "assertion": "artifact_download_delivers_content",
-      "detail": "clicked={'count': 2, 'disabled': False}, error-styled=False, file=report.txt, delivered_bytes=34, result '{\\n  \"downloaded\": \"report.txt\",\\n  \"bytes\": 34\\n}'",
+      "detail": "clicked={'count': 3, 'disabled': False}, error-styled=False, file=build.log, delivered_bytes=26, result '{\\n  \"downloaded\": \"build.log\",\\n  \"bytes\": 26\\n}'",
       "passed": true
     },
     {
       "assertion": "focus_survives_build_view_live_refresh",
-      "detail": "focus before {'index': 1, 'key': '44444444-4444-4444-8444-444444444444/2/report.txt', 'label': 'report.txt (34 bytes, available)Download'} -> after {'focusVisible': True, 'index': 1, 'isBody': False, 'key': '44444444-4444-4444-8444-444444444444/2/report.txt', 'label': 'report.txt (34 bytes, available)Download', 'tag': 'BUTTON'}",
+      "detail": "focus before {'index': 2, 'key': '44444444-4444-4444-8444-444444444444/2/report.txt', 'label': 'report.txt (34 bytes, available)Download'} -> after {'focusVisible': True, 'index': 2, 'isBody': False, 'key': '44444444-4444-4444-8444-444444444444/2/report.txt', 'label': 'report.txt (34 bytes, available)Download', 'tag': 'BUTTON'}",
       "passed": true
     },
     {

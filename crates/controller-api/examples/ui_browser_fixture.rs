@@ -256,48 +256,53 @@ async fn tests(headers: HeaderMap) -> impl IntoResponse {
     )
 }
 
-// Two records that share an attempt and a name and differ only by fence. The
-// shipped API can return exactly this -- `ArtifactResponse` carries `fence` --
-// and an empty list here left the whole artifact surface, including the focus
-// preservation `renderArtifacts` performs on every live tick, rendered by
-// nothing and asserted by nothing.
-async fn artifacts(headers: HeaderMap) -> impl IntoResponse {
-    authorized(
-        &headers,
-        json!([
-            {
-                "build_id": BUILD,
-                "node_id": "55555555-5555-4555-8555-555555555555",
-                "attempt_id": ATTEMPT,
-                "fence": 1,
-                "name": "report.txt",
-                "sha256": "11".repeat(32),
-                "bytes": 12,
-                "media_type": "text/plain",
-                "status": "available"
-            },
-            {
-                "build_id": BUILD,
-                "node_id": "55555555-5555-4555-8555-555555555555",
-                "attempt_id": ATTEMPT,
-                "fence": 2,
-                "name": "report.txt",
-                "sha256": "22".repeat(32),
-                "bytes": 34,
-                "media_type": "text/plain",
-                "status": "available"
-            }
-        ]),
-    )
+// The listing and the content route are driven from ONE table, and the content
+// route resolves it the way production does.
+//
+// `ArtifactQuery` carries only `attempt_id` and `name`, and `find_artifact`
+// takes the FIRST match with no fence in the predicate or the ordering. A
+// fixture that answered a fence-specific record for that query would manufacture
+// behaviour the shipped controller does not have, and the gate would stay green
+// on it.
+//
+// `report.txt` appears twice, sharing an attempt and a name and differing only
+// by fence, because that pair is what makes the client's focus key -- which does
+// carry the fence -- load-bearing. It is deliberately ambiguous to the download
+// query, and the shipped client cannot disambiguate it; that is a real client
+// limitation, filed separately rather than papered over here. `build.log` is
+// uniquely named, so it is the row the delivery journey uses.
+fn artifact_table() -> Vec<(&'static str, i64, &'static str)> {
+    vec![
+        ("report.txt", 1, "twelve bytes"),
+        ("build.log", 1, "browser fixture build log\n"),
+        ("report.txt", 2, "browser fixture artifact bytes\n123"),
+    ]
 }
 
-// The client's Download control fetches this route and reports the byte count it
-// received. Without it the download journey could not be driven at all, so the
-// click listener, the URL `downloadArtifact` builds and the response handling
-// were all outside the gate.
-// The query is honoured, not ignored. A route that returns the same bytes
-// whatever it is asked for cannot fail on a malformed request, so the client
-// could build a wrong URL and the journey would still look like a delivery.
+async fn artifacts(headers: HeaderMap) -> impl IntoResponse {
+    let items: Vec<Value> = artifact_table()
+        .into_iter()
+        .map(|(name, fence, body)| {
+            json!({
+                "build_id": BUILD,
+                "node_id": "55555555-5555-4555-8555-555555555555",
+                "attempt_id": ATTEMPT,
+                "fence": fence,
+                "name": name,
+                "sha256": "11".repeat(32),
+                "bytes": body.len(),
+                "media_type": "text/plain",
+                "status": "available"
+            })
+        })
+        .collect();
+    authorized(&headers, Value::Array(items))
+}
+
+// Resolved exactly as `find_artifact` resolves it: first record matching the
+// attempt and name, fence ignored. For `report.txt` that is the fence-1 record,
+// not the fence-2 one the user may have clicked -- which is the production
+// behaviour, faithfully reproduced rather than corrected here.
 async fn artifact_content(
     headers: HeaderMap,
     Query(query): Query<BTreeMap<String, String>>,
@@ -305,25 +310,31 @@ async fn artifact_content(
     if let Some(denial) = unauthorized(&headers) {
         return denial;
     }
-    if query.get("attempt_id").map(String::as_str) != Some(ATTEMPT)
-        || query.get("name").map(String::as_str) != Some("report.txt")
-    {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "code": "artifact_not_found",
-                "message": format!("no artifact for {query:?}")
-            })),
-        )
-            .into_response();
+    if query.get("attempt_id").map(String::as_str) != Some(ATTEMPT) {
+        return artifact_not_found(&query);
     }
-    // Exactly the 34 bytes the fence-2 listing advertises, so a client that
-    // fetched a different record would disagree with what it rendered.
-    let body = "browser fixture artifact bytes\n123";
+    let requested = query.get("name").map(String::as_str).unwrap_or_default();
+    match artifact_table()
+        .into_iter()
+        .find(|(name, _, _)| *name == requested)
+    {
+        Some((_, _, body)) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            body,
+        )
+            .into_response(),
+        None => artifact_not_found(&query),
+    }
+}
+
+fn artifact_not_found(query: &BTreeMap<String, String>) -> Response {
     (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        body,
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "code": "artifact_not_found",
+            "message": format!("no artifact for {query:?}")
+        })),
     )
         .into_response()
 }
