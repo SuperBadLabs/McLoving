@@ -621,83 +621,14 @@ impl CacheStore {
         request: &CacheKeyRequest,
         write: bool,
     ) -> Result<AdmittedKey<'a>, CacheError> {
-        if !valid_identity(caller_id) || !valid_identity(caller_trust_class) {
-            return Err(CacheError::InvalidRequest);
-        }
-        if request.generation_sha256 != self.generation_sha256
-            || request.restore_epoch != self.config.restore_epoch
-            || !valid_digest(&request.generation_sha256)
-            || !valid_digest(&request.logical_key_sha256)
-            || !valid_digest(&request.input_sha256)
-            || !valid_digest(&request.toolchain_sha256)
-            || !valid_digest(&request.platform_sha256)
-        {
-            return Err(CacheError::InvalidRequest);
-        }
-        let policy = self
-            .config
-            .policies
-            .binary_search_by(|candidate| candidate.policy_id.as_str().cmp(&request.policy_id))
-            .ok()
-            .map(|index| &self.config.policies[index])
-            .ok_or(CacheError::Unauthorized)?;
-        let principals = if write {
-            &policy.write_principals
-        } else {
-            &policy.read_principals
-        };
-        if policy.tenant_id != request.tenant_id
-            || policy.project_id != request.project_id
-            || policy.pipeline_id != request.pipeline_id
-            || policy.trust_class != request.trust_class
-            || policy.trust_class != caller_trust_class
-            || policy
-                .allowed_kinds
-                .binary_search(&request.cache_kind)
-                .is_err()
-            || principals
-                .binary_search_by(|principal| principal.as_str().cmp(caller_id))
-                .is_err()
-        {
-            return Err(CacheError::Unauthorized);
-        }
-        let policy_sha256 = canonical_digest(policy)?;
-        let canonical = CanonicalCacheKey {
-            schema_version: KEY_SCHEMA_VERSION.to_owned(),
-            service_id: self.config.service_id.clone(),
-            policy_id: policy.policy_id.clone(),
-            policy_sha256: policy_sha256.clone(),
-            tenant_id: request.tenant_id.clone(),
-            project_id: request.project_id.clone(),
-            pipeline_id: request.pipeline_id.clone(),
-            trust_class: request.trust_class.clone(),
-            cache_kind: request.cache_kind,
-            cache_generation: self.config.cache_generation,
-            generation_sha256: self.generation_sha256.clone(),
-            restore_epoch: request.restore_epoch,
-            logical_key_sha256: request.logical_key_sha256.clone(),
-            input_sha256: request.input_sha256.clone(),
-            toolchain_sha256: request.toolchain_sha256.clone(),
-            platform_sha256: request.platform_sha256.clone(),
-        };
-        let canonical_bytes = canonical_bytes(&canonical)?;
-        let namespace_sha256 = canonical_digest(&NamespaceBinding {
-            service_id: &self.config.service_id,
-            policy_id: &policy.policy_id,
-            tenant_id: &policy.tenant_id,
-            project_id: &policy.project_id,
-            pipeline_id: &policy.pipeline_id,
-            trust_class: &policy.trust_class,
-        })?;
-        let key_sha256 = domain_digest(b"mcloving.cache-key/v1\0", &canonical_bytes);
-        Ok(AdmittedKey {
-            policy,
-            policy_sha256,
-            canonical,
-            canonical_bytes,
-            namespace_sha256,
-            key_sha256,
-        })
+        admit_key(
+            &self.config,
+            &self.generation_sha256,
+            caller_id,
+            caller_trust_class,
+            request,
+            write,
+        )
     }
 
     fn open_connection(&self) -> Result<Connection, CacheError> {
@@ -1794,4 +1725,310 @@ fn strictly_sorted_by<T, K: Ord + ?Sized>(values: &[T], key: impl Fn(&T) -> &K) 
 
 fn to_i64(value: u64) -> Result<i64, CacheError> {
     i64::try_from(value).map_err(|_| CacheError::InvalidConfig)
+}
+
+fn admit_key<'a>(
+    config: &'a CacheConfig,
+    generation_sha256: &str,
+    caller_id: &str,
+    caller_trust_class: &str,
+    request: &CacheKeyRequest,
+    write: bool,
+) -> Result<AdmittedKey<'a>, CacheError> {
+    if !valid_identity(caller_id) || !valid_identity(caller_trust_class) {
+        return Err(CacheError::InvalidRequest);
+    }
+    if request.generation_sha256 != generation_sha256
+        || request.restore_epoch != config.restore_epoch
+        || !valid_digest(&request.generation_sha256)
+        || !valid_digest(&request.logical_key_sha256)
+        || !valid_digest(&request.input_sha256)
+        || !valid_digest(&request.toolchain_sha256)
+        || !valid_digest(&request.platform_sha256)
+    {
+        return Err(CacheError::InvalidRequest);
+    }
+    let policy = config
+        .policies
+        .binary_search_by(|candidate| candidate.policy_id.as_str().cmp(&request.policy_id))
+        .ok()
+        .map(|index| &config.policies[index])
+        .ok_or(CacheError::Unauthorized)?;
+    let principals = if write {
+        &policy.write_principals
+    } else {
+        &policy.read_principals
+    };
+    if policy.tenant_id != request.tenant_id
+        || policy.project_id != request.project_id
+        || policy.pipeline_id != request.pipeline_id
+        || policy.trust_class != request.trust_class
+        || policy.trust_class != caller_trust_class
+        || policy
+            .allowed_kinds
+            .binary_search(&request.cache_kind)
+            .is_err()
+        || principals
+            .binary_search_by(|principal| principal.as_str().cmp(caller_id))
+            .is_err()
+    {
+        return Err(CacheError::Unauthorized);
+    }
+    let policy_sha256 = canonical_digest(policy)?;
+    let canonical = CanonicalCacheKey {
+        schema_version: KEY_SCHEMA_VERSION.to_owned(),
+        service_id: config.service_id.clone(),
+        policy_id: policy.policy_id.clone(),
+        policy_sha256: policy_sha256.clone(),
+        tenant_id: request.tenant_id.clone(),
+        project_id: request.project_id.clone(),
+        pipeline_id: request.pipeline_id.clone(),
+        trust_class: request.trust_class.clone(),
+        cache_kind: request.cache_kind,
+        cache_generation: config.cache_generation,
+        generation_sha256: generation_sha256.to_owned(),
+        restore_epoch: request.restore_epoch,
+        logical_key_sha256: request.logical_key_sha256.clone(),
+        input_sha256: request.input_sha256.clone(),
+        toolchain_sha256: request.toolchain_sha256.clone(),
+        platform_sha256: request.platform_sha256.clone(),
+    };
+    let canonical_bytes = canonical_bytes(&canonical)?;
+    let namespace_sha256 = canonical_digest(&NamespaceBinding {
+        service_id: &config.service_id,
+        policy_id: &policy.policy_id,
+        tenant_id: &policy.tenant_id,
+        project_id: &policy.project_id,
+        pipeline_id: &policy.pipeline_id,
+        trust_class: &policy.trust_class,
+    })?;
+    let key_sha256 = domain_digest(b"mcloving.cache-key/v1\0", &canonical_bytes);
+    Ok(AdmittedKey {
+        policy,
+        policy_sha256,
+        canonical,
+        canonical_bytes,
+        namespace_sha256,
+        key_sha256,
+    })
+}
+
+/// Canonical identity of the exact parsed configuration; never opens cache state.
+pub fn configuration_sha256(config: &CacheConfig) -> Result<String, CacheError> {
+    validate_config(config)?;
+    canonical_digest(config)
+}
+
+/// Public receipt identity only. Cached bytes remain private to verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedCacheOperation {
+    pub outcome: &'static str,
+    pub succeeded: bool,
+    pub event_sha256: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum ClientResponse {
+    Published {
+        outcome: PublishStatus,
+        receipts: Vec<CacheReceipt>,
+    },
+    Read {
+        outcome: ReadStatus,
+        content_base64: Option<String>,
+        receipts: Vec<CacheReceipt>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
+/// Authenticates the full bounded helper answer using the identical pure key
+/// derivation as the store. No database or provider authority is opened here.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_operation_response(
+    config: &CacheConfig,
+    receipt_key: &[u8],
+    caller: &str,
+    trust: &str,
+    request: &CacheKeyRequest,
+    publication: Option<&[u8]>,
+    frame: &[u8],
+    started_at_ms: i64,
+    completed_at_ms: i64,
+) -> Result<VerifiedCacheOperation, CacheError> {
+    let config_digest = configuration_sha256(config)?;
+    if receipt_key.len() < 32
+        || sha256(receipt_key) != config.receipt_key_sha256
+        || frame.len()
+            > usize::try_from(config.max_frame_bytes).map_err(|_| CacheError::InvalidConfig)?
+        || started_at_ms > completed_at_ms
+    {
+        return Err(CacheError::MalformedProtocol);
+    }
+    let line = frame
+        .strip_suffix(b"\n")
+        .ok_or(CacheError::MalformedProtocol)?;
+    if line.is_empty() || line.contains(&b'\n') || line.contains(&b'\r') {
+        return Err(CacheError::MalformedProtocol);
+    }
+    let answer: ClientResponse = crate::parse_json_no_duplicates(line)?;
+    let (receipts, operation, expected_outcome, public_outcome, succeeded, content) =
+        match (answer, publication) {
+            (ClientResponse::Published { outcome, receipts }, Some(bytes)) => {
+                let (expected, name, success) = match outcome {
+                    PublishStatus::Published => (CacheOutcome::Published, "published", true),
+                    PublishStatus::Replay => (CacheOutcome::PublicationReplay, "replay", true),
+                    PublishStatus::Conflict => {
+                        (CacheOutcome::PublicationConflict, "conflict", false)
+                    }
+                    PublishStatus::CorruptRejected => {
+                        (CacheOutcome::CorruptRejected, "corrupt_rejected", false)
+                    }
+                };
+                (
+                    receipts,
+                    CacheOperation::Publish,
+                    expected,
+                    name,
+                    success,
+                    Some(bytes.to_vec()),
+                )
+            }
+            (
+                ClientResponse::Read {
+                    outcome,
+                    content_base64,
+                    receipts,
+                },
+                None,
+            ) => {
+                let content = content_base64
+                    .map(|value| {
+                        BASE64
+                            .decode(value)
+                            .map_err(|_| CacheError::MalformedProtocol)
+                    })
+                    .transpose()?;
+                let (expected, name, success) = match outcome {
+                    ReadStatus::Hit => (CacheOutcome::Hit, "hit", true),
+                    ReadStatus::Miss => (CacheOutcome::Miss, "miss", true),
+                    ReadStatus::CorruptRejected => {
+                        (CacheOutcome::CorruptRejected, "corrupt_rejected", false)
+                    }
+                };
+                if content.is_some() != (outcome == ReadStatus::Hit) {
+                    return Err(CacheError::MalformedProtocol);
+                }
+                (
+                    receipts,
+                    CacheOperation::Read,
+                    expected,
+                    name,
+                    success,
+                    content,
+                )
+            }
+            (ClientResponse::Error { code, message }, _) => {
+                let _ = (code, message);
+                return Err(CacheError::InvalidRequest);
+            }
+            _ => return Err(CacheError::MalformedProtocol),
+        };
+    let generation = derive_generation_sha256(config)?;
+    let admitted = admit_key(
+        config,
+        &generation,
+        caller,
+        trust,
+        request,
+        publication.is_some(),
+    )?;
+    if receipts.is_empty()
+        || receipts.len()
+            > usize::try_from(config.max_cleanup_rows.saturating_add(2))
+                .map_err(|_| CacheError::InvalidConfig)?
+    {
+        return Err(CacheError::InvalidAuditChain);
+    }
+    let mut previous: Option<&CacheReceipt> = None;
+    for receipt in &receipts {
+        let event = &receipt.event;
+        let digest = event_digest(&canonical_bytes(event)?);
+        let signature = BASE64
+            .decode(&receipt.signature)
+            .map_err(|_| CacheError::InvalidAuditChain)?;
+        let mut mac =
+            HmacSha256::new_from_slice(receipt_key).map_err(|_| CacheError::InvalidConfig)?;
+        mac.update(digest.as_bytes());
+        if mac.verify_slice(&signature).is_err()
+            || digest != receipt.event_sha256
+            || receipt.sequence == 0
+            || event.schema_version != EVENT_SCHEMA_VERSION
+            || event.service_id != config.service_id
+            || event.configuration_sha256 != config_digest
+            || event.implementation_sha256 != config.implementation_sha256
+            || event.caller_id != caller
+            || event.observed_at_unix_ms < started_at_ms
+            || event.observed_at_unix_ms > completed_at_ms
+            || previous.is_some_and(|prior| {
+                receipt.sequence != prior.sequence.saturating_add(1)
+                    || event.previous_event_sha256 != prior.event_sha256
+            })
+        {
+            return Err(CacheError::InvalidAuditChain);
+        }
+        previous = Some(receipt);
+    }
+    let final_receipt = receipts.last().ok_or(CacheError::InvalidAuditChain)?;
+    let event = &final_receipt.event;
+    if event.operation != operation
+        || event.outcome != expected_outcome
+        || event.policy_id != request.policy_id
+        || event.policy_sha256 != admitted.policy_sha256
+        || event.namespace_sha256 != admitted.namespace_sha256
+        || event.key_sha256 != admitted.key_sha256
+        || event.generation_sha256 != generation
+        || event.restore_epoch != request.restore_epoch
+    {
+        return Err(CacheError::InvalidAuditChain);
+    }
+    // Conflict/corruption receipts describe the stored bytes, which may differ
+    // from the rejected publication. They are authenticated failures, never hits.
+    if succeeded {
+        match content {
+            Some(bytes) => {
+                if bytes.len() as u64 > admitted.policy.max_entry_bytes
+                    || event.content_sha256.as_deref() != Some(sha256(&bytes).as_str())
+                    || event.content_bytes != Some(bytes.len() as u64)
+                {
+                    return Err(CacheError::InvalidAuditChain);
+                }
+            }
+            None if event.content_sha256.is_some() || event.content_bytes.is_some() => {
+                return Err(CacheError::InvalidAuditChain);
+            }
+            None => {}
+        }
+    }
+    Ok(VerifiedCacheOperation {
+        outcome: public_outcome,
+        succeeded,
+        event_sha256: final_receipt.event_sha256.clone(),
+    })
+}
+
+/// Pure pre-dispatch admission. It grants no operation and opens no state.
+pub fn validate_operation_request(
+    config: &CacheConfig,
+    caller: &str,
+    trust: &str,
+    request: &CacheKeyRequest,
+    write: bool,
+) -> Result<(), CacheError> {
+    validate_config(config)?;
+    let generation = derive_generation_sha256(config)?;
+    admit_key(config, &generation, caller, trust, request, write).map(|_| ())
 }

@@ -611,3 +611,46 @@ protocols, persistence, execution, secrets, connectors, agent pools, supply
 chain, or deployment boundaries.
 
 PR #135 follow-up review identified an earlier malformed interpolation prefix hidden by a later lexical exclusion. The bounded Clojure precheck now follows the existing independent Rust proof before entering dynamic syntax; unknown nested expressions are not guessed. Original `2326a63` receipts remain historical, and fresh exact-source evidence plus protected verification are required for the follow-up. The V2 contract and runtime authority are unchanged; no closure attribution is added.
+
+## EXEC-005 review — bounded cache product integration, ticket ACTIVE
+
+The cache slice reviews TM-036 and TM-012 across submitted intent, operator
+mapping, controller context, sealed process and authenticated response. Closed
+read/publish types exclude operator maintenance, paths, principals and trust
+promotion. Exact scoped startup catalogs and a context-bound journal digest
+prevent cross-pipeline/attempt/fence substitution. Pure cache admission and
+receipt verification share the existing store's canonical key policy without
+opening its database. Config identity is checked before state open; executable
+bytes are sealed and verified through Linux `/proc/self/exe`; special-file opens
+are nonblocking and refused. Every returned event is authenticated and the final
+operation/key/content binding is checked. Conflict/corruption never imply success.
+
+TM-007 and TM-011 are reviewed for the new private IO path: existing mTLS,
+capability/pool matching, lease renewal/reserve, process identity journaling and
+whole-group cleanup remain mandatory. Concurrent bounded input/output avoids
+pipe deadlock; no request precedes durable spawn journaling. Raw output remains
+memory-only until containment and successful protocol verification; failure,
+overflow or incomplete input emits no raw spool. Actual post-helper/pre-result
+and post-terminal crash gates distinguish unresolved operation truth from
+replayable terminal evidence. No new sidecar journal or blind retry authority is
+introduced. A post-helper/pre-result crash can park the agent pending operator
+recovery; automatic terminal completion is not promised. Test crash hooks are absent from release builds.
+
+The API/compiler boundary is reviewed under TM-008/TM-026: literal cache intents
+use IR 1.4 and envelope 3, retain existing scalar bounds, require deployment
+catalog approval and an actual pipeline scope, reject unsupported platforms and
+operator forms before queueing, and do not broaden the literal-shell Jenkins
+migration planner or any earlier differential claim. TM-005/TM-014/TM-051 are
+reviewed unchanged for PostgreSQL durability, artifact mediation and production
+effect authority: this slice creates no artifact/workspace restoration, connector
+or production authority. Actual gate and residual-scope details are recorded in
+`docs/architecture/CACHE_PRODUCT_PATH_V1.md` and the ACTIVE implementation review
+`docs/evidence/EXEC-005_SECURITY_REVIEW.md`.
+
+Residual trust includes the controller/agent, deployment owner, kernel, selected
+cache producer and shared HMAC verifier. Same-UID hostile workload containment
+remains SEC-005, startup catalogs do not promise hot revocation, and cached bytes
+are not restored to a downstream workspace. Four other helper product paths
+remain refused; all five end-to-end gates and normal protected-main verification
+are still required before EXEC-005 can close. This is a partial implementation
+boundary review, not ticket closure or production qualification.

@@ -589,6 +589,7 @@ async fn submission_request(path: &PathBuf, parameters: &[String]) -> Result<Sub
     let source = read_pipeline_source(path).await?;
     Ok(SubmissionRequest {
         source,
+        pipeline_id: None,
         parameters: parse_parameters(parameters)?,
     })
 }

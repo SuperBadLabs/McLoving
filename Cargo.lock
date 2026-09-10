@@ -1330,8 +1330,10 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mcloving-agent"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "mcloving-agent-protocol",
  "mcloving-agent-runtime",
+ "mcloving-cache",
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-domain",
@@ -1447,6 +1449,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "libc",
  "mcloving-agent-protocol",
  "mcloving-controller-api",
  "mcloving-controller-store",
@@ -1573,6 +1576,7 @@ dependencies = [
 name = "mcloving-domain"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "sha2",
@@ -1756,6 +1760,7 @@ dependencies = [
 name = "mcloving-pipeline-ir"
 version = "0.0.0"
 dependencies = [
+ "mcloving-domain",
  "proptest",
  "saphyr-parser",
  "sha2",

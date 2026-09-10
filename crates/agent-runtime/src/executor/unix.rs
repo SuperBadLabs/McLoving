@@ -14,6 +14,7 @@ use nix::unistd::{Pid, pipe};
 #[cfg(target_os = "linux")]
 use rustix::process::{Pid as RustixPid, PidfdFlags, pidfd_open};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt as _;
 #[cfg(target_os = "linux")]
 use tokio::io::unix::AsyncFd;
 use tokio::process::{Child, Command};
@@ -63,6 +64,40 @@ pub async fn execute_with_spawn_hook_and_redactions<F>(
 where
     F: FnOnce(u32) -> Result<(), ExecutionError>,
 {
+    execute_with_io(request, cancellation, redactions, None, on_spawn).await
+}
+
+/// Uses the ordinary fenced process lifecycle, with request bytes withheld
+/// until the spawn hook has committed and all output kept in bounded memory.
+pub async fn execute_with_spawn_hook_and_private_io<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    private_io: super::PrivateExecutionIo<'_>,
+    on_spawn: F,
+) -> Result<ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(u32) -> Result<(), ExecutionError>,
+{
+    if private_io.request.is_empty()
+        || private_io.request.len() > 262_144
+        || !matches!(request.output_limit_bytes, Some(1..=262_144))
+        || request.workspace_seed.is_some()
+    {
+        return Err(ExecutionError::InvalidPrivateIo);
+    }
+    execute_with_io(request, cancellation, &[], Some(private_io), on_spawn).await
+}
+
+async fn execute_with_io<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    redactions: &[Vec<u8>],
+    private_io: Option<super::PrivateExecutionIo<'_>>,
+    on_spawn: F,
+) -> Result<ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(u32) -> Result<(), ExecutionError>,
+{
     if request.mode != ExecutionMode::Direct {
         return Err(ExecutionError::UnsupportedMode(request.mode));
     }
@@ -74,7 +109,7 @@ where
             "unsupported_platform_or_environment".to_owned(),
         ));
     }
-    let capture_limit = if redactions.is_empty() {
+    let capture_limit = if redactions.is_empty() && private_io.is_none() {
         None
     } else {
         Some(
@@ -145,7 +180,11 @@ where
         .env("LANG", "C.UTF-8")
         .envs(&request.environment)
         .current_dir(&workspace)
-        .stdin(Stdio::null())
+        .stdin(if private_io.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(stdout_destination)
         .stderr(stderr_destination)
         .process_group(0);
@@ -176,6 +215,21 @@ where
         .await?;
         return Err(error);
     }
+
+    let mut input_task = PrivateInputTask(if let Some(io) = &private_io {
+        let mut stdin = child.stdin.take().ok_or(ExecutionError::InvalidPrivateIo)?;
+        let bytes = io.request.to_vec();
+        let cancelled = cancellation.clone();
+        Some(tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                () = cancelled.cancelled() => Err(std::io::Error::other("helper input cancelled")),
+                result = async { stdin.write_all(&bytes).await?; stdin.shutdown().await } => result,
+            }
+        }))
+    } else {
+        None
+    });
 
     let deadline = Instant::now() + request.timeout;
     let mut termination = tokio::select! {
@@ -240,13 +294,41 @@ where
     if termination.0 == Termination::Exited && exceeded {
         termination.0 = Termination::OutputLimitExceeded;
     }
+    let input_delivered = if let Some(mut task) = input_task.0.take() {
+        // Containment is already empty. A peer holding an inherited pipe must
+        // not strand completion; aborting a pending writer sends no more bytes.
+        tokio::select! {
+            result = &mut task => result.is_ok_and(|result| result.is_ok()),
+            () = sleep(Duration::from_millis(100)) => { task.abort(); false },
+        }
+    } else {
+        true
+    };
+    let mut private_response_accepted = private_io.as_ref().map(|_| false);
     if let Some(capture) = capture.take() {
         let captured = capture.finish().await?;
         if captured.exceeded {
             termination.0 = Termination::OutputLimitExceeded;
         }
-        write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
-        write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
+        if let Some(io) = &private_io {
+            // Parsing a truncated frame, nonzero exit or incomplete request
+            // could turn a plausible forged prefix into successful work.
+            if input_delivered
+                && !captured.exceeded
+                && termination.0 == Termination::Exited
+                && termination.1.success()
+            {
+                let public = (io.transform)(&captured.stdout, &captured.stderr);
+                if public.stdout.len() as u64 <= request.output_limit_bytes.unwrap_or(0) {
+                    write_redacted_output(&mut stdout_control, &public.stdout, &[])?;
+                    private_response_accepted = Some(public.accepted);
+                }
+            }
+            // stderr remains the original empty spool, including every error path.
+        } else {
+            write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
+            write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
+        }
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     } else if termination.0 == Termination::OutputLimitExceeded || exceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
@@ -274,6 +356,7 @@ where
         super::workspace_transfer::capture(&workspace, &workspace_control)
     });
     Ok(ExecutionOutcome {
+        private_response_accepted,
         workspace_snapshot,
         termination: termination.0,
         exit_code: termination.1.code(),
@@ -1400,5 +1483,196 @@ mod tests {
             "outside"
         );
         assert!(displaced_root.join("org/replaced-root/spool").is_dir());
+    }
+}
+
+struct PrivateInputTask(Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>);
+impl Drop for PrivateInputTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod private_io_tests {
+    use super::*;
+    use crate::executor::{PrivateExecutionIo, PrivateExecutionOutput};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    fn request(root: &Path, script: &str) -> ExecutionRequest {
+        ExecutionRequest {
+            workspace_seed: None,
+            workspace_root: root.to_owned(),
+            workspace: "org/private".into(),
+            mode: ExecutionMode::Direct,
+            program: "/bin/sh".into(),
+            arguments: vec!["-c".into(), script.into()],
+            environment: BTreeMap::new(),
+            output_limit_bytes: Some(262_144),
+            timeout: Duration::from_secs(3),
+            termination_grace: Duration::from_millis(50),
+        }
+    }
+    #[tokio::test]
+    async fn private_exchange_drains_before_stdin_and_publishes_only_transformed_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let request = request(
+            root.path(),
+            "head -c 70000 /dev/zero; head -c 70000 /dev/zero >&2; cat >/dev/null; printf private-marker",
+        );
+        let called = AtomicBool::new(false);
+        let transform = |stdout: &[u8], stderr: &[u8]| {
+            assert_eq!(stdout.len(), 70000 + 14);
+            assert_eq!(stderr.len(), 70000);
+            assert!(stdout.ends_with(b"private-marker"));
+            called.store(true, Ordering::SeqCst);
+            PrivateExecutionOutput {
+                stdout: b"public-receipt\n".to_vec(),
+                accepted: true,
+            }
+        };
+        let input = vec![b'x'; 200_000];
+        let result = execute_with_spawn_hook_and_private_io(
+            &request,
+            CancellationToken::new(),
+            PrivateExecutionIo {
+                request: &input,
+                transform: &transform,
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.private_response_accepted, Some(true));
+        assert!(called.load(Ordering::SeqCst));
+        assert_eq!(
+            std::fs::read(root.path().join(result.stdout.relative_path)).unwrap(),
+            b"public-receipt\n"
+        );
+        assert!(
+            std::fs::read(root.path().join(result.stderr.relative_path))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[tokio::test]
+    async fn private_request_is_withheld_on_spawn_hook_failure_or_preexisting_cancellation() {
+        for cancelled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let request = request(root.path(), "read value; printf reached > request-observed");
+            let token = CancellationToken::new();
+            if cancelled {
+                token.cancel();
+            }
+            let transform = |_: &[u8], _: &[u8]| panic!("no response may be transformed");
+            let result = execute_with_spawn_hook_and_private_io(
+                &request,
+                token,
+                PrivateExecutionIo {
+                    request: b"request\n",
+                    transform: &transform,
+                },
+                |_| Err(ExecutionError::SpawnHook("durability denied".to_owned())),
+            )
+            .await;
+            assert!(result.is_err());
+            assert!(!root.path().join("org/private/request-observed").exists());
+        }
+    }
+    #[tokio::test]
+    async fn blocked_private_stdin_is_cancelled_and_descendants_end_before_transform() {
+        for timed_out in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut request = request(
+                root.path(),
+                "trap '' TERM; (trap '' TERM; sleep 30) & echo $! > child.pid; while :; do sleep 1; done",
+            );
+            request.timeout = if timed_out {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_secs(30)
+            };
+            let token = CancellationToken::new();
+            let trigger = token.clone();
+            if !timed_out {
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(200)).await;
+                    trigger.cancel();
+                });
+            }
+            let transform =
+                |_: &[u8], _: &[u8]| panic!("incomplete request cannot become a receipt");
+            let input = vec![b'x'; 200_000];
+            let started = Instant::now();
+            let result = execute_with_spawn_hook_and_private_io(
+                &request,
+                token,
+                PrivateExecutionIo {
+                    request: &input,
+                    transform: &transform,
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(result.private_response_accepted, Some(false));
+            assert_eq!(
+                result.termination,
+                if timed_out {
+                    Termination::TimedOut
+                } else {
+                    Termination::Cancelled
+                }
+            );
+            let pid: i32 = std::fs::read_to_string(root.path().join("org/private/child.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(matches!(
+                nix::sys::signal::kill(Pid::from_raw(pid), None),
+                Err(Errno::ESRCH)
+            ));
+            assert!(
+                std::fs::read(root.path().join(result.stdout.relative_path))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                std::fs::read(root.path().join(result.stderr.relative_path))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn private_overflow_and_nonzero_exit_never_transform_a_plausible_prefix() {
+        for script in ["printf plausible-receipt; exit 1", "yes private-marker"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut request = request(root.path(), script);
+            request.output_limit_bytes = Some(1024);
+            let transform =
+                |_: &[u8], _: &[u8]| panic!("invalid process result must never reach parser");
+            let result = execute_with_spawn_hook_and_private_io(
+                &request,
+                CancellationToken::new(),
+                PrivateExecutionIo {
+                    request: b"request\n",
+                    transform: &transform,
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.private_response_accepted, Some(false));
+            assert!(
+                std::fs::read(root.path().join(result.stdout.relative_path))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 }

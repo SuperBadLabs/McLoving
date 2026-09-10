@@ -147,6 +147,9 @@ message WorkAssignment {
   // Present only for negotiated build-workspace-transfer-v1 in the contained Linux pool.
   // Empty preserves legacy attempt-only workspace semantics.
   bytes workspace_transfer_json = 8;
+  // Controller-owned durable scope; required by sealed cache assignments.
+  string project_id = 9;
+  string pipeline_id = 10;
 }
 
 message WorkAuthority {

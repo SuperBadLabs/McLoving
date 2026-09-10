@@ -222,6 +222,7 @@ where
     sync_directory(&workspace)?;
 
     Ok(ExecutionOutcome {
+        private_response_accepted: None,
         workspace_snapshot: None,
         termination,
         exit_code: status.code(),

@@ -17,11 +17,11 @@ pub use expression::{
     ParameterValue, evaluate_expression, parse_expression,
 };
 pub use model::{
-    AmbiguityPolicy, CompileError, CompileErrorCategory, CompilerIdentity, ConnectorEffectClass,
-    ConnectorIntentStep, ExpressionBinding, IrValidationError, JsonFieldType, ParameterDefinition,
-    ParameterType, PipelineIr, ProcessMode, ProcessStep, Provenance, SchemaCompatibility,
-    SchemaVersion, Stage, Step, compile_strict_yaml, compile_strict_yaml_with_parameters,
-    instantiate_pipeline, validate_pipeline,
+    AmbiguityPolicy, CacheIntentStep, CompileError, CompileErrorCategory, CompilerIdentity,
+    ConnectorEffectClass, ConnectorIntentStep, ExpressionBinding, IrValidationError, JsonFieldType,
+    ParameterDefinition, ParameterType, PipelineIr, ProcessMode, ProcessStep, Provenance,
+    SchemaCompatibility, SchemaVersion, Stage, Step, compile_strict_yaml,
+    compile_strict_yaml_with_parameters, instantiate_pipeline, validate_pipeline,
 };
 pub use strict_yaml::{
     AdmissionError, ErrorCode, MappingEntry, ParseLimits, SourceLocation, SourceSpan, SpannedValue,
@@ -39,3 +39,6 @@ pub const IR_V1_2: SchemaVersion = SchemaVersion { major: 1, minor: 2 };
 
 /// Typed controller-owned external-effect intents.
 pub const IR_V1_3: SchemaVersion = SchemaVersion { major: 1, minor: 3 };
+
+/// Bounded deployment-resolved cache helper intents.
+pub const IR_V1_4: SchemaVersion = SchemaVersion { major: 1, minor: 4 };

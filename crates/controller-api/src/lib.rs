@@ -1,7 +1,10 @@
 #![recursion_limit = "256"]
 //! Versioned public HTTP API and its Rust client.
 
+mod cache_intent;
 mod oidc;
+use cache_intent::validate_cache_mappings;
+pub use cache_intent::{CACHE_MAPPING_CATALOG_V1, CacheMappingCatalog, CacheMappingRecord};
 #[doc(hidden)]
 pub mod sequential;
 
@@ -79,6 +82,7 @@ pub struct ApiState {
     publication_claim_cursor: Arc<Mutex<Option<String>>>,
     oidc_clients: BTreeMap<(Uuid, Uuid), oidc::OidcClient>,
     connector_mapping_catalog: ConnectorMappingCatalog,
+    cache_mapping_catalog: CacheMappingCatalog,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -181,6 +185,7 @@ impl ApiState {
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
             connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
+            cache_mapping_catalog: CacheMappingCatalog::deny_all(),
         })
     }
 
@@ -200,6 +205,7 @@ impl ApiState {
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
             connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
+            cache_mapping_catalog: CacheMappingCatalog::deny_all(),
         }
     }
 
@@ -346,6 +352,15 @@ impl ApiState {
             usize::try_from(object_store.quota().max_object_bytes).unwrap_or(usize::MAX);
         self.object_store = Some(object_store);
         self
+    }
+
+    pub fn with_cache_mapping_catalog(
+        mut self,
+        catalog: CacheMappingCatalog,
+    ) -> Result<Self, ApiError> {
+        catalog.validate()?;
+        self.cache_mapping_catalog = catalog;
+        Ok(self)
     }
 
     pub fn with_connector_mapping_catalog(
@@ -618,6 +633,8 @@ fn static_ui_response(content_type: &'static str, body: &'static str) -> Respons
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SubmissionRequest {
     pub source: String,
+    #[serde(default)]
+    pub pipeline_id: Option<Uuid>,
     #[serde(default)]
     pub parameters: BTreeMap<String, Value>,
 }
@@ -894,6 +911,7 @@ pub struct PipelineStagePlan {
     pub name: String,
     pub process_steps: usize,
     pub connector_intent_steps: usize,
+    pub cache_intent_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1332,7 +1350,8 @@ fn openapi_document() -> Value {
                     "required": ["source"],
                     "properties": {
                         "source": {"type": "string"},
-                        "parameters": parameter_values_schema()
+                        "parameters": parameter_values_schema(),
+                        "pipeline_id": {"type": ["string", "null"], "format": "uuid"}
                     },
                     "additionalProperties": false
                 },
@@ -2394,6 +2413,14 @@ async fn validate_pipeline(
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    validate_cache_scope_headers(
+        &pipeline,
+        &state.cache_mapping_catalog,
+        organization_id,
+        project_id,
+        request.pipeline_id,
+        &headers,
+    )?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     Ok(Json(ValidationResponse {
         valid: true,
@@ -2418,6 +2445,14 @@ async fn plan_pipeline(
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    validate_cache_scope_headers(
+        &pipeline,
+        &state.cache_mapping_catalog,
+        organization_id,
+        project_id,
+        request.pipeline_id,
+        &headers,
+    )?;
     Ok(Json(pipeline_plan(&pipeline)?))
 }
 
@@ -2439,6 +2474,14 @@ async fn put_pipeline(
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    validate_cache_scope_headers(
+        &pipeline,
+        &state.cache_mapping_catalog,
+        organization_id,
+        project_id,
+        Some(pipeline_id),
+        &headers,
+    )?;
     let semantic_digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     let source_sha256 = Sha256::digest(request.source.as_bytes()).into();
     let parameter_schema = parameter_schema(&pipeline);
@@ -4242,6 +4285,15 @@ async fn admit_pipeline_parameters(
     };
     let pipeline = compile_source_with_parameters(&source, parameters)?;
     validate_connector_mappings(&pipeline, &state.connector_mapping_catalog)?;
+    validate_cache_mappings(
+        &pipeline,
+        &state.cache_mapping_catalog,
+        organization_id,
+        project_id,
+        Some(pipeline_id),
+        &required_platform,
+        &required_trust_pool,
+    )?;
     // Revalidated here, not only at ingress. A delivery captured by an earlier
     // release can carry a platform outside the closed set, and every admission
     // path — header submission, claimed processing, and replay — funnels
@@ -4274,7 +4326,7 @@ async fn admit_pipeline_parameters(
                     }]
                 })
                 .unwrap_or_default(),
-            required_capabilities: Vec::new(),
+            required_capabilities: stage_required_capabilities(stage),
             required_platform: required_platform.clone(),
             required_trust_pool: required_trust_pool.clone(),
             priority: 0,
@@ -4425,7 +4477,49 @@ fn invalid_platform() -> ApiError {
     )
 }
 
+fn validate_cache_scope_headers(
+    pipeline: &PipelineIr,
+    catalog: &CacheMappingCatalog,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Option<Uuid>,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    if !pipeline
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.steps)
+        .any(|step| matches!(step, Step::CacheIntent(_)))
+    {
+        return Ok(());
+    }
+    validate_cache_mappings(
+        pipeline,
+        catalog,
+        organization_id,
+        project_id,
+        pipeline_id,
+        &submission_platform(headers)?,
+        &submission_trust_pool(headers)?,
+    )
+}
+
+fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<String> {
+    if stage
+        .steps
+        .iter()
+        .any(|step| matches!(step, Step::CacheIntent(_)))
+    {
+        vec![mcloving_domain::cache_intent::CACHE_CAPABILITY.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
 fn execution_spec(steps: &[Step]) -> Value {
+    let contains_cache_intent = steps
+        .iter()
+        .any(|step| matches!(step, Step::CacheIntent(_)));
     let contains_connector_intent = steps
         .iter()
         .any(|step| matches!(step, Step::ConnectorIntent(_)));
@@ -4440,6 +4534,11 @@ fn execution_spec(steps: &[Step]) -> Value {
                 "env": process.env,
                 "timeout_seconds": process.timeout_seconds,
             }),
+            Step::CacheIntent(cache) => {
+                let mut value = serde_json::to_value(&cache.intent).expect("cache intent contains serializable literal fields");
+                value["kind"] = json!("cache_intent");
+                value
+            },
             Step::ConnectorIntent(intent) => json!({
                 "kind": "connector_intent",
                 "mapping_id": intent.mapping_id,
@@ -4459,7 +4558,7 @@ fn execution_spec(steps: &[Step]) -> Value {
             }),
         })
         .collect::<Vec<_>>();
-    json!({"version": if contains_connector_intent { 2 } else { 1 }, "steps": steps})
+    json!({"version": if contains_cache_intent { 3 } else if contains_connector_intent { 2 } else { 1 }, "steps": steps})
 }
 
 fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
@@ -4538,6 +4637,7 @@ fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
             let (kind, timeout_seconds) = match step {
                 Step::Process(process) => ("process", process.timeout_seconds),
                 Step::ConnectorIntent(intent) => ("connector-intent", Some(intent.timeout_seconds)),
+                Step::CacheIntent(cache) => ("cache-intent", Some(cache.intent.timeout_seconds)),
             };
             if !matches!(
                 timeout_seconds,
@@ -4589,7 +4689,7 @@ fn validate_connector_mappings(
         .flat_map(|stage| &stage.steps)
         .filter_map(|step| match step {
             Step::ConnectorIntent(intent) => Some(intent),
-            Step::Process(_) => None,
+            Step::Process(_) | Step::CacheIntent(_) => None,
         })
     {
         let Some(mapping) = catalog
@@ -4730,6 +4830,11 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
                     .steps
                     .iter()
                     .filter(|step| matches!(step, Step::Process(_)))
+                    .count(),
+                cache_intent_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::CacheIntent(_)))
                     .count(),
                 connector_intent_steps: stage
                     .steps

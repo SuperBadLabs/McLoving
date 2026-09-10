@@ -17,7 +17,7 @@ const MAX_RECEIPT_KEY_BYTES: usize = 4 * 1_024;
 const MAX_RECEIPT_RESPONSE_BYTES: u64 = 4 * 1_024;
 const RESPONSE_ENVELOPE_BYTES: u64 = 1_024;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CacheCommand {
     Publish {
@@ -256,7 +256,9 @@ fn read_bounded_regular_file(
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
     let mut options = OpenOptions::new();
-    options.read(true).custom_flags(nix::libc::O_NOFOLLOW);
+    options
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
     let file = options.open(path).map_err(|_| CacheError::InvalidConfig)?;
     let metadata = file.metadata().map_err(|_| CacheError::InvalidConfig)?;
     if !metadata.file_type().is_file()
