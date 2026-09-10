@@ -81,6 +81,14 @@ modify a process. Production Job Object creation, termination and empty-job
 verification are unchanged. Cross-compilation checks cover the observer with
 the feature on and off; actual native runtime verification remains required.
 
+Compatibility review found that the new plan-response cache-step counter was
+required during deserialization, breaking upgraded clients against older
+controllers with nonempty stages. Only that additive response counter now
+defaults to zero when absent. The actual CLI HTTP fixture covers an old
+nonempty process stage and preserves a current nonzero cache count; authority
+fields retain their strict validation. The response-field audit found no other
+new counter in this change requiring a compatibility default.
+
 ## Verification scope
 
 Focused verification covers agent scope/payload mutations, sealed original-path

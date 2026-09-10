@@ -911,6 +911,7 @@ pub struct PipelineStagePlan {
     pub name: String,
     pub process_steps: usize,
     pub connector_intent_steps: usize,
+    #[serde(default)]
     pub cache_intent_steps: usize,
 }
 

@@ -5,7 +5,7 @@ use axum::http::HeaderMap;
 use axum::routing::{post, put};
 use axum::{Json, Router};
 use clap::Parser;
-use mcloving_cli::{Arguments, execute};
+use mcloving_cli::{Arguments, CommandOutput, execute};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -71,9 +71,25 @@ async fn configuration_commands_preserve_scope_and_admission_headers_over_the_ap
                         platform.to_owned(),
                     ]);
                 }
-                execute(&Arguments::try_parse_from(&argv).unwrap())
+                let output = execute(&Arguments::try_parse_from(&argv).unwrap())
                     .await
                     .unwrap();
+                if command == "plan" {
+                    let CommandOutput::Structured(plan) = output else {
+                        panic!("plan must return structured output");
+                    };
+                    assert_eq!(plan["stages"].as_array().unwrap().len(), 1);
+                    assert_eq!(plan["stages"][0]["id"], "build");
+                    assert_eq!(
+                        plan["stages"][0]["process_steps"],
+                        if custom { 0 } else { 2 }
+                    );
+                    assert_eq!(plan["stages"][0]["connector_intent_steps"], 0);
+                    assert_eq!(
+                        plan["stages"][0]["cache_intent_steps"],
+                        if custom { 1 } else { 0 }
+                    );
+                }
                 let (body, headers) = observed.lock().unwrap().pop().unwrap();
                 assert_eq!(
                     headers["mcloving-trust-pool"],
@@ -120,12 +136,21 @@ async fn observe(
     Json(body): Json<Value>,
 ) -> Json<Value> {
     assert_eq!(headers["authorization"], "Bearer scope-fixture-token");
+    let custom = headers["mcloving-trust-pool"] == "cache-special";
+    let mut stage =
+        json!({"id":"build","name":"Build","process_steps":2,"connector_intent_steps":0});
+    if custom {
+        stage["process_steps"] = json!(0);
+        stage["cache_intent_steps"] = json!(1);
+    }
+    // Default responses model an older controller with a nonempty process
+    // stage and no cache counter. Current responses preserve a nonzero count.
     observed.lock().unwrap().push((body.clone(), headers));
     // This transport fixture does not grant Windows cache admission: it only
     // verifies that the CLI sends the platform for the real server to assess.
     Json(json!({
         "valid":true,"semantic_digest":if body.get("slug").is_some() { json!(vec![1u8;32]) } else { json!("ab".repeat(32)) },
-        "schema_major":1,"schema_minor":4,"parameters":{},"stages":[],
+        "schema_major":1,"schema_minor":if custom { 4 } else { 3 },"parameters":{},"stages":[stage],
         "organization_id":Uuid::nil(),"project_id":Uuid::nil(),"pipeline_id":Uuid::nil(),
         "slug":"scoped-pipeline","revision":8,"source":body["source"],
         "source_sha256":vec![0u8;32],"parameter_schema":{},
