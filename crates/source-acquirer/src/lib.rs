@@ -679,15 +679,7 @@ impl SourceAcquirer {
             0o500,
         )
         .await?;
-        let askpass_executable_path =
-            std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?;
-        let source_askpass_executable = snapshot_verified_file(
-            &askpass_executable_path,
-            &implementation_sha256,
-            "mcloving-source-askpass",
-            0o500,
-        )
-        .await?;
+        let source_askpass_executable = snapshot_running_executable(&implementation_sha256).await?;
         let ca_bundle = match (&config.ca_bundle_path, &config.ca_bundle_sha256) {
             (Some(path), Some(expected)) => {
                 let snapshot =
@@ -3212,19 +3204,20 @@ pub async fn read_bounded_regular_file(
     path: &Path,
     max_bytes: usize,
 ) -> Result<Vec<u8>, SourceError> {
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|_| SourceError::StateUnavailable)?;
-    if !metadata.file_type().is_file()
-        || metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    #[cfg(not(unix))]
     {
-        return Err(SourceError::StateUnavailable);
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?;
+        if !metadata.is_file() {
+            return Err(SourceError::StateUnavailable);
+        }
     }
     let mut options = tokio::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
-        options.custom_flags(nix::libc::O_NOFOLLOW);
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
     }
     let file = options
         .open(path)
@@ -3256,20 +3249,16 @@ pub async fn read_private_bounded_regular_file(
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        let metadata = tokio::fs::symlink_metadata(path)
-            .await
-            .map_err(|_| SourceError::StateUnavailable)?;
         let valid = |metadata: &std::fs::Metadata| {
             metadata.file_type().is_file()
                 && metadata.len() <= u64::try_from(max_bytes).unwrap_or(u64::MAX)
                 && metadata.permissions().mode() & 0o077 == 0
                 && metadata.uid() == nix::unistd::Uid::effective().as_raw()
         };
-        if !valid(&metadata) {
-            return Err(SourceError::StateUnavailable);
-        }
         let mut options = tokio::fs::OpenOptions::new();
-        options.read(true).custom_flags(nix::libc::O_NOFOLLOW);
+        options
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
         let file = options
             .open(path)
             .await
@@ -3289,22 +3278,77 @@ pub async fn read_private_bounded_regular_file(
 }
 
 pub async fn sha256_file(path: &Path) -> Result<String, SourceError> {
-    let metadata = tokio::fs::symlink_metadata(path)
+    let bytes = read_bounded_regular_file(
+        path,
+        usize::try_from(MAX_EXECUTABLE_BYTES).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|_| SourceError::InvalidConfig)?;
+    Ok(sha256_hex(&bytes))
+}
+
+/// Identity of the actual running image, including a sealed memfd execution.
+/// Only this fixed kernel self-image path deliberately follows a symlink.
+pub async fn running_implementation_sha256() -> Result<String, SourceError> {
+    Ok(sha256_hex(&read_running_image().await?))
+}
+
+async fn read_running_image() -> Result<Vec<u8>, SourceError> {
+    #[cfg(target_os = "linux")]
+    let file = tokio::fs::File::open("/proc/self/exe")
         .await
         .map_err(|_| SourceError::InvalidConfig)?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+    #[cfg(not(target_os = "linux"))]
+    let file = {
+        let path = std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+        #[cfg(not(unix))]
+        if !tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|_| SourceError::InvalidConfig)?
+            .is_file()
+        {
+            return Err(SourceError::InvalidConfig);
+        }
+        options
+            .open(path)
+            .await
+            .map_err(|_| SourceError::InvalidConfig)?
+    };
+    read_opened_executable(file).await
+}
+
+async fn read_opened_executable(file: tokio::fs::File) -> Result<Vec<u8>, SourceError> {
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| SourceError::InvalidConfig)?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_EXECUTABLE_BYTES {
         return Err(SourceError::InvalidConfig);
     }
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| SourceError::InvalidConfig)?;
     let bytes = read_bounded(
         file,
         usize::try_from(MAX_EXECUTABLE_BYTES).unwrap_or(usize::MAX),
     )
     .await
     .map_err(|_| SourceError::InvalidConfig)?;
-    Ok(sha256_hex(&bytes))
+    if bytes.len() as u64 != metadata.len() {
+        return Err(SourceError::InvalidConfig);
+    }
+    Ok(bytes)
+}
+
+async fn snapshot_running_executable(expected_sha256: &str) -> Result<VerifiedFile, SourceError> {
+    let bytes = read_running_image().await?;
+    if sha256_hex(&bytes) != expected_sha256 {
+        return Err(SourceError::InvalidConfig);
+    }
+    // Keep the original implementation identity before the existing derived ELF
+    // interpreter binding creates the askpass/transport execution image.
+    sealed_verified_file(&bytes, "mcloving-source-askpass", 0o500).await
 }
 
 pub fn runtime_closure_digest(bindings: &[RuntimeBinding]) -> Result<String, SourceError> {
@@ -3344,10 +3388,17 @@ async fn open_runtime_closure(
         for binding in bindings {
             let file = std::fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
                 .open(&binding.path)
                 .map_err(|_| SourceError::InvalidConfig)?;
             let metadata = file.metadata().map_err(|_| SourceError::InvalidConfig)?;
+            if !metadata.is_file()
+                || metadata.len() > MAX_EXECUTABLE_BYTES
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err(SourceError::InvalidConfig);
+            }
             let mut bytes_file = tokio::fs::File::from_std(
                 file.try_clone().map_err(|_| SourceError::InvalidConfig)?,
             );
@@ -3361,12 +3412,7 @@ async fn open_runtime_closure(
             )
             .await
             .map_err(|_| SourceError::InvalidConfig)?;
-            if !metadata.file_type().is_file()
-                || metadata.len() > MAX_EXECUTABLE_BYTES
-                || metadata.uid() != 0
-                || metadata.permissions().mode() & 0o022 != 0
-                || sha256_hex(&bytes) != binding.sha256
-            {
+            if sha256_hex(&bytes) != binding.sha256 {
                 return Err(SourceError::InvalidConfig);
             }
             let bytes = if interpreter_paths.contains(&binding.path) {
@@ -3557,7 +3603,7 @@ async fn snapshot_verified_file(
 
         let source = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
             .open(path)
             .map_err(|_| SourceError::InvalidConfig)?;
         let metadata = source.metadata().map_err(|_| SourceError::InvalidConfig)?;
@@ -4200,7 +4246,7 @@ async fn open_coordination_lock_file(root: &Path) -> Result<std::fs::File, Sourc
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
             .open(path)
             .map_err(|_| SourceError::StateUnavailable)?;
         let metadata = file.metadata().map_err(|_| SourceError::StateUnavailable)?;
@@ -4299,7 +4345,9 @@ async fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Sour
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        options.mode(mode).custom_flags(nix::libc::O_NOFOLLOW);
+        options
+            .mode(mode)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
     }
     let mut file = options
         .open(path)
@@ -4846,6 +4894,156 @@ fn duration_until_monotonic_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn running_image_snapshot_binds_original_bytes_and_refuses_wrong_digest() {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        let original = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let expected = content_sha256(&original);
+        assert_eq!(running_implementation_sha256().await.unwrap(), expected);
+        let snapshot = snapshot_running_executable(&expected).await.unwrap();
+        assert_eq!(snapshot.sha256, expected);
+        assert_eq!(verified_file_bytes(&snapshot).await.unwrap(), original);
+        let seals = SealFlag::F_SEAL_WRITE
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_SEAL;
+        assert_eq!(
+            fcntl(&snapshot.file, FcntlArg::F_GET_SEALS).unwrap() & seals.bits(),
+            seals.bits()
+        );
+        assert!(snapshot_running_executable(&"0".repeat(64)).await.is_err());
+        assert!(
+            sha256_file(Path::new("/proc/self/exe")).await.is_err(),
+            "ordinary paths do not inherit the self-image exception"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn ordinary_snapshot_retains_pinned_bytes_after_path_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("executable");
+        let original = std::fs::read("/bin/echo").unwrap();
+        let expected = content_sha256(&original);
+        std::fs::write(&path, &original).unwrap();
+        let snapshot = snapshot_verified_file(&path, &expected, "source-custody-test", 0o500)
+            .await
+            .unwrap();
+        std::fs::write(&path, b"substituted").unwrap();
+        assert_eq!(verified_file_bytes(&snapshot).await.unwrap(), original);
+        let output = Command::new(&snapshot.invocation_path)
+            .arg("pinned-source-image")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"pinned-source-image\n");
+        assert!(
+            snapshot_verified_file(&path, &expected, "source-custody-test", 0o500)
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bounded_file_custody_refuses_fifo_symlink_and_racing_substitutions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("input");
+        let regular = b"approved-regular";
+        let digest = content_sha256(regular);
+        let secret = root.path().join("must-not-follow");
+        std::fs::write(&secret, b"forbidden").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+        assert!(read_bounded_regular_file(&path, 64).await.is_err());
+        assert!(read_private_bounded_regular_file(&path, 64).await.is_err());
+        assert!(sha256_file(&path).await.is_err());
+        assert!(
+            snapshot_verified_file(&path, &digest, "source-custody-test", 0o400)
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(&path).unwrap();
+        nix::unistd::mkfifo(
+            &path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            assert!(read_bounded_regular_file(&path, 64).await.is_err());
+            assert!(read_private_bounded_regular_file(&path, 64).await.is_err());
+            assert!(sha256_file(&path).await.is_err());
+            assert!(
+                snapshot_verified_file(&path, &digest, "source-custody-test", 0o400)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                open_runtime_closure(
+                    &[RuntimeBinding {
+                        path: path.clone(),
+                        sha256: digest.clone()
+                    }],
+                    &BTreeSet::new(),
+                    Path::new("/unused-preload")
+                )
+                .await
+                .is_err()
+            );
+        })
+        .await
+        .expect("FIFO paths must never wait for a writer");
+        let raced = path.clone();
+        let alternate = root.path().join("alternate");
+        let writer = std::thread::spawn(move || {
+            for _ in 0..500 {
+                std::os::unix::fs::symlink(&secret, &alternate).unwrap();
+                std::fs::rename(&alternate, &raced).unwrap();
+                std::fs::write(&alternate, regular).unwrap();
+                std::fs::set_permissions(&alternate, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                std::fs::rename(&alternate, &raced).unwrap();
+                nix::unistd::mkfifo(
+                    &alternate,
+                    nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+                )
+                .unwrap();
+                std::fs::rename(&alternate, &raced).unwrap();
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..100 {
+                if let Ok(bytes) = read_bounded_regular_file(&path, 64).await {
+                    assert_eq!(bytes, regular);
+                }
+                if let Ok(bytes) = read_private_bounded_regular_file(&path, 64).await {
+                    assert_eq!(bytes, regular);
+                }
+                if let Ok(hash) = sha256_file(&path).await {
+                    assert_eq!(hash, digest);
+                }
+                if let Ok(snapshot) =
+                    snapshot_verified_file(&path, &digest, "source-custody-test", 0o400).await
+                {
+                    assert_eq!(verified_file_bytes(&snapshot).await.unwrap(), regular);
+                }
+            }
+        })
+        .await
+        .expect("path races must remain bounded");
+        writer.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(
+            sha256_file(&path).await.unwrap(),
+            content_sha256(b""),
+            "ordinary empty-file hashing remains compatible"
+        );
+    }
 
     #[test]
     fn curl_resolve_entry_keeps_all_addresses_in_one_host_rule() {

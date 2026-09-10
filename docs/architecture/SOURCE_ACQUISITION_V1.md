@@ -49,6 +49,44 @@ mount configuration and authority files read-only, expose only the exact
 repository endpoint through egress policy, bound the private output volume, and
 use a dedicated service identity.
 
+## Standalone sealed-caller prerequisite
+
+An operator may supply `MCLOVING_SOURCE_ACQUIRER_EXPECTED_CONFIG_SHA256`.
+For the normal acquisition entrypoint, a present value must match the canonical digest of the exact parsed
+`SourceConfig`, before credential, receipt-key or marker reads and before
+output/transport state or runtime snapshots are created. This is a canonical
+configuration pin, not a hash of the JSON file's whitespace or member order.
+Malformed, non-Unicode and mismatched present values refuse; absence preserves
+the standalone interface. The variable is helper-only and adds no service or
+pipeline authority. Internal resolver, askpass and transport-launcher modes retain
+their separate existing admission and deadline checks; they do not load
+`SourceConfig` or apply this acquisition-entrypoint pin.
+
+Linux running-image identity deliberately opens fixed `/proc/self/exe`, checks
+the opened regular image and bounds/hashes those bytes. Constructor self-snapshot
+uses the same opened-image custody and verifies the original implementation
+hash before applying the existing deterministic ELF interpreter binding. This
+supports callers that execute the original helper from a sealed memory file;
+it does not make ordinary operator paths symlink-following. Ordinary bounded
+file and runtime snapshot readers use nofollow/nonblocking opens and validate
+the opened object, so a substituted FIFO cannot hang acquisition setup.
+
+The externally selected `mcloving-source-acquirer` profile and exact transport
+filesystem remain prerequisites. The standalone fixture runs the real sealed
+helper against authenticated HTTP Git and exercises its internal self-snapshot,
+askpass and runtime-bound transport. Native request, receipt, claim, replay and
+retained-tree semantics are unchanged.
+
+This is a prerequisite for later EXEC-005 work, not source product integration.
+There is no `source_intent`, agent capability, controller catalog, downstream
+checkout or new receipt-verifier API. Source-native commands create nested
+process groups; the agent's current outer-group emptiness check does not prove
+termination of that entire descendant tree. Production source-only profile
+selection, nested-process cancellation, held-directory retained-tree custody
+and bounded retention ownership remain separate integration obligations. This
+source-inspected mismatch is not an observed process escape. EXEC-005 remains
+ACTIVE and no frozen Mario/JCOMP-003 or production authority is expanded.
+
 ## Certified configuration
 
 The canonical configuration digest binds:
@@ -108,8 +146,9 @@ credential-bearing Git/HTTPS-helper chain does not invoke ambient NSS service
 modules for the admitted repository endpoint. Literal IP endpoints require no
 resolver child.
 
-The process opens itself, Git, the HTTPS remote helper, and any private CA
-without following a final symlink, hashes the exact bytes, copies them into
+The process opens Git, the HTTPS remote helper, and any private CA without
+following a final symlink, and opens its own image through fixed
+`/proc/self/exe`. It hashes the exact opened bytes and copies them into
 anonymous memory-backed files, and applies write/grow/shrink/further-seal
 kernel seals before use. Git and askpass execute only those immutable snapshots;
 the CA is read only from its sealed snapshot. The sealed executable, runtime,
