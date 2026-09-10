@@ -123,11 +123,14 @@ pub fn load_bindings(path: &Path, expected_sha256: &str) -> Result<InputBindings
             .into_iter()
             .any(|p| !p.is_absolute())
             || b.confidentiality_ceiling != Confidentiality::Public
-            || b.query.len() > 64
+            || b.trust_pool.len() > 128
+            || b.query.len() > 32
             || b.query
                 .iter()
-                .any(|(k, v)| k.is_empty() || k.len() > 256 || v.len() > 4096)
-            || b.expected_cursor.as_ref().is_some_and(|v| v.len() > 256)
+                .any(|(k, v)| k.trim().is_empty() || k.len() > 256 || v.len() > 4096)
+            || b.expected_cursor
+                .as_ref()
+                .is_some_and(|v| v.trim().is_empty() || v.len() > 256)
         {
             return Err(denied());
         }
@@ -424,6 +427,78 @@ mod tests {
         };
         (binding, cfg, intent, context)
     }
+    #[cfg(unix)]
+    #[test]
+    fn startup_bindings_match_native_query_and_catalog_boundaries() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let load = |binding: InputBinding| {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().canonicalize().unwrap().join("bindings.json");
+            let bytes = serde_json::to_vec(&InputBindings {
+                schema_version: "mcloving.agent-input-bindings/v1".into(),
+                mappings: vec![binding],
+            })
+            .unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            load_bindings(&path, &mcloving_input_adapter::content_sha256(&bytes))
+        };
+        let (mut binding, mut cfg, mut intent, context) = fixture();
+        binding.query = (0..32)
+            .map(|index| (format!("key-{index:02}"), "value".into()))
+            .collect();
+        cfg.allowed_query_keys = binding.query.keys().cloned().collect();
+        let key = b"a-signing-key-with-at-least-32-bytes";
+        let markers = vec![b"never-disclose-this-marker".to_vec()];
+        cfg.signing_key_sha256 = mcloving_input_adapter::content_sha256(key);
+        cfg.secret_marker_set_sha256 = mcloving_input_adapter::marker_set_digest(&markers);
+        binding.config_sha256 = cfg.canonical_digest().unwrap();
+        intent.mapping_digest = binding.mapping_digest().unwrap();
+        mcloving_input_adapter::validate_verifier_config(
+            &cfg,
+            &binding.executable_sha256,
+            key,
+            &markers,
+        )
+        .unwrap();
+        let accepted = load(binding.clone()).unwrap();
+        let request = derive_capture_request(
+            &accepted.mappings[0],
+            &cfg,
+            &intent,
+            &context,
+            &[1; 32],
+            150000,
+            150001,
+        )
+        .unwrap();
+        assert_eq!(request.query.len(), 32);
+        let mut changed = binding.clone();
+        changed.query.insert("thirty-third".into(), "value".into());
+        assert!(load(changed).is_err());
+        for invalid_key in ["", " ", "\t"] {
+            let mut changed = binding.clone();
+            changed.query = BTreeMap::from([(invalid_key.into(), "value".into())]);
+            assert!(load(changed).is_err());
+        }
+        for cursor in ["", " ", "\t"] {
+            let mut changed = binding.clone();
+            changed.expected_cursor = Some(cursor.into());
+            assert!(load(changed).is_err());
+        }
+        let mut changed = binding.clone();
+        changed.trust_pool = "p".repeat(128);
+        assert!(load(changed.clone()).is_ok());
+        changed.trust_pool.push('p');
+        assert!(load(changed).is_err());
+        let mut changed = binding;
+        changed.query = BTreeMap::from([("k".repeat(256), "v".repeat(4096))]);
+        changed.expected_cursor = Some("c".repeat(256));
+        assert!(load(changed.clone()).is_ok());
+        changed.query.values_mut().next().unwrap().push('v');
+        assert!(load(changed).is_err());
+    }
+
     #[test]
     fn durable_request_recomputes_exactly_caps_grant_and_retains_complete_assignment_digest() {
         let (binding, cfg, intent, context) = fixture();

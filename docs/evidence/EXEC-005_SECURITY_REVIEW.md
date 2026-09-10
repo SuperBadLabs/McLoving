@@ -240,3 +240,13 @@ original release boundary. Unix still drops the real file lock there; non-Unix
 acquisition still refuses. It adds no fake destructor or lint suppression.
 Independent review, all 25 adapter tests and agent/adapter strict Clippy passed
 on Linux; the corrected native Windows result must be observed separately.
+
+A later PR review identified that startup allowed 64 fixed query keys while the
+native adapter allows 32. Startup now rejects more than 32, whitespace-only query
+keys, blank expected cursors and pool names over the controller catalog's
+128-byte bound. A real pinned mode-0400 loader test accepts a native-valid
+32-key request and rejects 33, with adjacent boundary cases. Three focused input
+tests, strict agent Clippy and independent review passed. This proves the loader
+boundary; pre-advertisement refusal follows configuration construction ordering,
+not a separately executed capability-exchange fixture. Prior candidate gates
+remain source-qualified and the corrected head still requires protected checks.
