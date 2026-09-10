@@ -46,6 +46,18 @@ def run_gate(repo_root, output_dir, label, expected_assertions):
             f"gate produced no verdict for {label}\n"
             f"stdout:\n{result.stdout[-3000:]}\nstderr:\n{result.stderr[-3000:]}"
         )
+    # Under --record-only a failing ASSERTION is exit 0 -- that is the whole
+    # point here, since the mutation is supposed to make one fail. Any other
+    # non-zero status is the gate itself failing: a pinned-count mismatch (65),
+    # a fixture that never listened (70), a missing podman, a crashed browser.
+    # Reading the verdict file anyway would let the harness report a mutation
+    # "caught" on the strength of a run that never really happened.
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gate exited {result.returncode} for {label}; a recorded run may "
+            f"only exit non-zero when the gate itself failed\n"
+            f"stdout:\n{result.stdout[-3000:]}\nstderr:\n{result.stderr[-3000:]}"
+        )
     return json.loads(verdict_path.read_text())
 
 

@@ -113,6 +113,16 @@ class Session:
             raise WebDriverError(
                 f"{method} {path} failed: {error.read().decode(errors='replace')[:600]}"
             ) from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            # A dead or unreachable chromedriver is the common CI failure and it
+            # is far easier to act on when it is named as one.
+            raise WebDriverError(
+                f"{method} {path} could not reach chromedriver at {self.base}: {error}"
+            ) from error
+        except json.JSONDecodeError as error:
+            raise WebDriverError(
+                f"{method} {path} returned a non-JSON body: {error}"
+            ) from error
 
     def _session(self, method, path, body=None):
         return self._request(method, f"/session/{self.session_id}{path}", body)
@@ -148,13 +158,24 @@ class Session:
         narrower by whatever the window chrome costs. Measure and correct rather
         than assuming headless chrome has no border.
         """
-        for _ in range(4):
-            self._session("POST", "/window/rect", {"width": width, "height": height})
+        target = width
+        outer = width
+        for _ in range(6):
+            self._session("POST", "/window/rect", {"width": outer, "height": height})
             inner = self.script("return window.innerWidth")
-            if inner == width:
+            if inner == target:
                 return inner
-            width += width - inner if inner else 1
-            width = max(width, 1)
+            # Correct the OUTER width toward the target inner width. Folding the
+            # correction back into the comparison value instead -- as this did --
+            # makes every later iteration measure against a window size nobody
+            # asked for, so a browser with any chrome at all never converges and
+            # the 390-pixel assertion fails on a viewport that was in fact
+            # reached.
+            if not inner:
+                break
+            outer += target - inner
+            if outer < 1:
+                break
         return self.script("return window.innerWidth")
 
     def quit(self):
@@ -319,6 +340,15 @@ class Gate:
             const ids = ['build-summary','build-graph','build-logs','build-tests','build-approvals'];
             const out = {};
             for (const id of ids) out[id] = document.getElementById(id).textContent.trim().length;
+            // The artifact panel renders controls rather than text, so a text
+            // length would report it populated while it held nothing. Count the
+            // rows and their download controls instead. Leaving it out of this
+            // list let the whole artifact surface disappear with the assertion
+            // still green.
+            out['build-artifacts'] = document.querySelectorAll(
+                '#build-artifacts .artifact').length;
+            out['artifact-download-controls'] = document.querySelectorAll(
+                '#build-artifacts .artifact button').length;
             return out;
             """
         )
@@ -630,6 +660,82 @@ class Gate:
             detail = f"focus before {before} -> after {after}"
         self.assertion("focus_survives_repeated_live_updates", ok, detail)
 
+    def check_focus_survives_build_view_live_refresh(self):
+        """The surface that refreshes *by itself*, not the one you click.
+
+        `focus_survives_repeated_live_updates` drives the dashboard's manual
+        Refresh button. That is not the case a keyboard user actually hits: the
+        build view re-renders its artifact rows on a two-second timer, through a
+        different call site (`renderArtifacts`), with no user action at all.
+        Asserting only the clicked path meant removing focus preservation from
+        `renderArtifacts` left every assertion green -- the repair was real and
+        the coverage was not, which is the same defect this whole ticket exists
+        to correct.
+        """
+        self.show_view("build")
+        self.session.script(
+            "document.getElementById('build-id').value = arguments[0];"
+            " document.getElementById('build-form').requestSubmit();",
+            BUILD,
+        )
+        self.settle(1.6)
+        before = self.session.script(
+            """
+            // The LAST row, deliberately. The two fixture artifacts share an
+            // attempt and a name and differ only by fence, so restoring focus
+            // to "the first row matching the key" is only indistinguishable
+            // from correct behaviour if the key ignores the fence. Focusing the
+            // second row makes that property load-bearing here.
+            const buttons = document.querySelectorAll('#build-artifacts .artifact button');
+            const button = buttons[buttons.length - 1];
+            if (!button) return null;
+            button.focus();
+            const row = button.closest('[data-focus-key]');
+            const rows = [...document.querySelectorAll('#build-artifacts .artifact')];
+            return {key: row ? row.dataset.focusKey : null,
+                    index: rows.indexOf(row),
+                    label: (row ? row.textContent : '').slice(0, 60)};
+            """
+        )
+        # One assertion call, whatever happened: two call sites for the same
+        # claim make the count unpinnable and the failure unattributable.
+        if before is None:
+            ok = False
+            detail = "no artifact row rendered, so focus could not be placed"
+        else:
+            # Start the client's own timer and let it fire more than once.
+            # Nothing below clicks anything: the refreshes have to happen on
+            # their own or the assertion is testing the wrong thing.
+            self.session.script("document.getElementById('toggle-live').click()")
+            time.sleep(5.0)
+            after = self.session.script(
+                """
+                const el = document.activeElement;
+                const row = el.closest ? el.closest('[data-focus-key]') : null;
+                const rows = [...document.querySelectorAll('#build-artifacts .artifact')];
+                // Compare the row's IDENTITY, not just its key. Under a key that
+                // drops the fence both artifact rows carry the SAME key, so a
+                // key-only comparison cannot tell "restored to the row I was on"
+                // from "restored to the first row that looked like it". The
+                // mutation proof caught exactly that escape.
+                return {tag: el.tagName, isBody: el === document.body,
+                        key: row ? row.dataset.focusKey : null,
+                        index: row ? rows.indexOf(row) : -1,
+                        label: (row ? row.textContent : '').slice(0, 60),
+                        focusVisible: el.matches ? el.matches(':focus-visible') : false};
+                """
+            )
+            self.session.script("document.getElementById('toggle-live').click()")
+            self.capture("focus-after-live-refresh")
+            ok = (
+                not after["isBody"]
+                and after["key"] == before["key"]
+                and after["index"] == before["index"]
+                and after["label"] == before["label"]
+            )
+            detail = f"focus before {before} -> after {after}"
+        self.assertion("focus_survives_build_view_live_refresh", ok, detail)
+
     def check_live_status_announcements(self):
         """A live region only announces if its text actually changes in place."""
         readings = self.session.script(
@@ -671,6 +777,7 @@ class Gate:
         self.check_accessible_names()
         self.check_keyboard_focus_visible()
         self.check_focus_survives_live_updates()
+        self.check_focus_survives_build_view_live_refresh()
         self.check_live_status_announcements()
         self.check_viewport_390()
         # Console last: it accumulates across every journey above, so asking

@@ -110,9 +110,15 @@ map it to a subordinate UID that cannot write the mount.
   leaves a stale image that still carries matching browser digests, and the gate
   runs against an environment the repository no longer describes.
 - **Every assertion is mutation-proved.** `scripts/ui-browser/mutations.json`
-  names, for each of the 16 assertions, a client defect that breaks exactly what
-  that assertion claims. `scripts/test-ui-browser-mutations.py` introduces each
-  one and requires the named assertion to turn red.
+  names, for each of the 17 assertions, at least one client defect that breaks
+  exactly what that assertion claims. `scripts/test-ui-browser-mutations.py`
+  introduces each one and requires the named assertion to turn red, and refuses
+  to read a verdict from a gate run that exited non-zero for any reason other
+  than the assertion failures it was expecting.
+- **An assertion may carry more than one mutation.** Requiring exactly one was
+  itself a way to leave a surface unproved: review found the build-panel and
+  live-refresh assertions each covering one call site while a second, unasserted
+  one sat beside it, and a one-mutation rule forbade closing that.
 
 ## When the lane runs, and why it is allowed not to
 
@@ -124,7 +130,7 @@ decisions.
 
 | Decision | What it costs | When it is required |
 |---|---|---|
-| `run-ui-gate` | ~6 minutes | any change to the client, to `crates/controller-api/src/lib.rs` (which decides what is served), or to the gate's own definition |
+| `run-ui-gate` | ~6 minutes | any change to the client, to `crates/controller-api/src/lib.rs` (which decides what is served), to `crates/pipeline-ir/` (the strict parser whose refusal wording one assertion checks), or to the gate's own definition |
 | `run-ui-mutations` | ~20 minutes | any change to the gate's own definition, or a client change of at least `MUTATION_LINE_THRESHOLD` (20) changed lines |
 
 They are separate because they protect different things. The gate proves the
@@ -194,3 +200,12 @@ evidence that it did. `UI-001`'s original claim is qualified accordingly in
 Cross-engine rendering is not covered: one pinned Chromium is the whole
 population. A second engine belongs with the interface `UI-006` onwards builds,
 not with the one this gate exists to pin down.
+
+**The gate's own coverage is the thing most worth distrusting.** Its first
+version made sixteen assertions, all passing and all mutation-proved, while the
+entire artifact surface sat outside it — the fixture served `[]`, so
+`renderArtifacts` never ran, and the focus repair claimed for it had no evidence
+behind it. Nothing in the mutation proof could detect that, because a mutation
+can only break code an assertion already reaches. Review caught it. When adding
+an assertion here, ask which call sites it does *not* reach, and prefer the
+surface that changes on its own over the one a test can click.

@@ -255,8 +255,39 @@ async fn tests(headers: HeaderMap) -> impl IntoResponse {
     )
 }
 
+// Two records that share an attempt and a name and differ only by fence. The
+// shipped API can return exactly this -- `ArtifactResponse` carries `fence` --
+// and an empty list here left the whole artifact surface, including the focus
+// preservation `renderArtifacts` performs on every live tick, rendered by
+// nothing and asserted by nothing.
 async fn artifacts(headers: HeaderMap) -> impl IntoResponse {
-    authorized(&headers, json!([]))
+    authorized(
+        &headers,
+        json!([
+            {
+                "build_id": BUILD,
+                "node_id": "55555555-5555-4555-8555-555555555555",
+                "attempt_id": ATTEMPT,
+                "fence": 1,
+                "name": "report.txt",
+                "sha256": "11".repeat(32),
+                "bytes": 12,
+                "media_type": "text/plain",
+                "status": "available"
+            },
+            {
+                "build_id": BUILD,
+                "node_id": "55555555-5555-4555-8555-555555555555",
+                "attempt_id": ATTEMPT,
+                "fence": 2,
+                "name": "report.txt",
+                "sha256": "22".repeat(32),
+                "bytes": 34,
+                "media_type": "text/plain",
+                "status": "available"
+            }
+        ]),
+    )
 }
 
 async fn approvals(headers: HeaderMap) -> impl IntoResponse {

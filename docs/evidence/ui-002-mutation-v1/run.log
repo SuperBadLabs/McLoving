@@ -1,38 +1,44 @@
 Baseline: unmutated client must pass every assertion
-  baseline clean: 16 assertions
+  baseline clean: 17 assertions
 
-[1/16] dashboard-rows-never-appended -> expects desktop_dashboard_lists_builds red
+[1/19] dashboard-rows-never-appended -> expects desktop_dashboard_lists_builds red
     caught, also red: ['focus_survives_repeated_live_updates']
-[2/16] validate-button-unwired -> expects desktop_pipeline_validate_accepts_valid_source red
+[2/19] validate-button-unwired -> expects desktop_pipeline_validate_accepts_valid_source red
     caught, also red: ['strict_yaml_refusal_surfaced_to_user']
-[3/16] plan-button-unwired -> expects desktop_pipeline_plan_renders_stages red
+[3/19] plan-button-unwired -> expects desktop_pipeline_plan_renders_stages red
     caught
-[4/16] save-pipeline-unwired -> expects desktop_pipeline_save_and_submit red
+[4/19] save-pipeline-unwired -> expects desktop_pipeline_save_and_submit red
     caught
-[5/16] refusal-not-styled-or-shown -> expects strict_yaml_refusal_surfaced_to_user red
+[5/19] refusal-not-styled-or-shown -> expects strict_yaml_refusal_surfaced_to_user red
     caught
-[6/16] build-summary-never-rendered -> expects desktop_build_view_renders_all_panels red
+[6/19] build-summary-never-rendered -> expects desktop_build_view_renders_all_panels red
     caught
-[7/16] audit-output-never-rendered -> expects desktop_audit_view_renders_events red
+[7/19] audit-output-never-rendered -> expects desktop_audit_view_renders_events red
     caught
-[8/16] explain-output-never-rendered -> expects desktop_explain_view_renders_reason red
+[8/19] explain-output-never-rendered -> expects desktop_explain_view_renders_reason red
     caught
-[9/16] navigation-landmark-unlabelled -> expects landmarks_present_in_rendered_dom red
+[9/19] navigation-landmark-unlabelled -> expects landmarks_present_in_rendered_dom red
     caught
-[10/16] control-loses-its-label -> expects every_control_has_accessible_name red
+[10/19] control-loses-its-label -> expects every_control_has_accessible_name red
     caught
-[11/16] focus-ring-removed -> expects keyboard_focus_is_visible_through_journeys red
+[11/19] focus-ring-removed -> expects keyboard_focus_is_visible_through_journeys red
     caught
-[12/16] focus-not-preserved-across-refresh -> expects focus_survives_repeated_live_updates red
-    caught
-[13/16] live-region-not-announced -> expects live_status_region_announces_changes red
+[12/19] focus-not-preserved-across-refresh -> expects focus_survives_repeated_live_updates red
+    caught, also red: ['focus_survives_build_view_live_refresh']
+[13/19] live-region-not-announced -> expects live_status_region_announces_changes red
     caught, also red: ['landmarks_present_in_rendered_dom']
-[14/16] table-scroller-removed -> expects viewport_390_has_no_horizontal_overflow red
+[14/19] table-scroller-removed -> expects viewport_390_has_no_horizontal_overflow red
     caught
-[15/16] script-error-thrown-on-load -> expects console_has_no_script_errors red
+[15/19] script-error-thrown-on-load -> expects console_has_no_script_errors red
     caught
-[16/16] favicon-declaration-removed -> expects console_has_no_unexpected_resource_failures red
+[16/19] favicon-declaration-removed -> expects console_has_no_unexpected_resource_failures red
+    caught
+[17/19] artifact-rows-never-rendered -> expects desktop_build_view_renders_all_panels red
+    caught, also red: ['focus_survives_build_view_live_refresh']
+[18/19] artifact-focus-not-preserved-across-live-refresh -> expects focus_survives_build_view_live_refresh red
+    caught
+[19/19] artifact-focus-key-ignores-fence -> expects focus_survives_build_view_live_refresh red
     caught
 
-16 of 16 mutations caught
-Mutation evidence written to /tmp/claude-1000/mutations-final
+19 of 19 mutations caught
+Mutation evidence written to /tmp/claude-1000/mut-final

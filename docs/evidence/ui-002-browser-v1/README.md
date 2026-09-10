@@ -28,14 +28,19 @@ along with the exact Chrome and chromedriver versions that produced the renders.
 
 ## Verdict
 
-**13 of 16 assertions passed. Three failed**, each one a claim `UI-001`'s closure
+**13 of 17 assertions passed. Four failed**, each one a claim `UI-001`'s closure
 record asserted and no check in the repository could support:
 
 | Failing assertion | What the browser observed |
 |---|---|
 | `focus_survives_repeated_live_updates` | Focus was on a build row's **Open** button; after three dashboard refreshes the active element was `<body>`. `refreshBuilds` rebuilds the table body with `replaceChildren`, discarding the focused control. A keyboard user loses their place on every refresh. |
+| `focus_survives_build_view_live_refresh` | The same defect on the surface that refreshes **without being asked**: focus was placed on an artifact's **Download** button and the build view's own two-second timer, going through `renderArtifacts`, discarded it. This assertion did not exist in the first version of this gate; review pointed out that asserting only the clicked path left the automatic one uncovered, and adding it found a fourth pre-existing defect rather than confirming three. |
 | `viewport_390_has_no_horizontal_overflow` | At an inner width of exactly 390px the document overflowed horizontally on two views: **dashboard** `scrollWidth=510` (the recent-builds table) and **pipeline** `scrollWidth=437` (the non-wrapping `.actions` button row). |
 | `console_has_no_unexpected_resource_failures` | `GET /favicon.ico` → **404**, logged SEVERE on every page load. The client declares no icon and the controller serves no such route. |
+
+The fourth failure is why the count here is 17 and not 16: the artifact surface
+was outside the first version of this gate entirely, so `renderArtifacts` and the
+focus behaviour of the build view's own timer were asserted by nothing.
 
 The console assertion is split in two so that neither failure can hide the
 other. `console_has_no_script_errors` **passed**: the client logged no
@@ -51,9 +56,10 @@ and a correct 422 is the point of that probe rather than a defect.
   browser identity.
 - `console.json` — every SEVERE console entry, separated into script errors,
   deliberately provoked network failures, and unexpected ones.
-- `screenshots/` — 20 renders: each of the five views at desktop width, each at a
+- `screenshots/` — 21 renders: each of the five views at desktop width, each at a
   390px viewport, the accepted and refused validation results, the keyboard-focus
-  state per view, and the post-refresh focus loss.
+  state per view, and the focus loss after both a manual dashboard refresh and
+  the build view's automatic one.
 - `fixture.log` — the mock controller's own output for the run.
 - `ARTIFACTS.sha256`, `SCREENSHOTS.sha256` — digests of everything above.
 

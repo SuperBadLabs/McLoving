@@ -102,6 +102,21 @@ class ClassifierTests(unittest.TestCase):
         self.assertFalse(run_mutations)
         self.assertIn("served", reason)
 
+    def test_a_strict_parser_change_runs_the_gate(self) -> None:
+        """The refusal assertion executes the real compiler, so the crate is an
+        input to the gate even though no UI file moved."""
+        self.repository.write("crates/pipeline-ir/src/model.rs", "changed\n")
+        run_gate, run_mutations, reason = self.classify()
+        self.assertTrue(run_gate, reason)
+        self.assertFalse(run_mutations)
+
+    def test_an_unrelated_crate_still_runs_nothing(self) -> None:
+        # The prefix must not be so broad that it swallows the workspace.
+        self.repository.write("crates/controller-store/src/lib.rs", "changed\n")
+        run_gate, run_mutations, _ = self.classify()
+        self.assertFalse(run_gate)
+        self.assertFalse(run_mutations)
+
     def test_small_client_change_runs_the_gate_only(self) -> None:
         self.repository.write(
             "crates/controller-api/ui/app.css",

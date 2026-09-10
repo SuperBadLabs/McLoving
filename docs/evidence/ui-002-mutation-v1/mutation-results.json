@@ -1,9 +1,9 @@
 {
-  "caught": 16,
+  "caught": 19,
   "escaped": [],
-  "expected_assertions": 16,
+  "expected_assertions": 17,
   "gate_protocol": "mcloving.ui.browser/1",
-  "mutations_run": 16,
+  "mutations_run": 19,
   "results": [
     {
       "caught": true,
@@ -123,10 +123,13 @@
     },
     {
       "caught": true,
-      "collateral_failures": [],
+      "collateral_failures": [
+        "focus_survives_build_view_live_refresh"
+      ],
       "expected_red": "focus_survives_repeated_live_updates",
       "failing_assertions": [
-        "focus_survives_repeated_live_updates"
+        "focus_survives_repeated_live_updates",
+        "focus_survives_build_view_live_refresh"
       ],
       "file": "app.js",
       "mutation": "focus-not-preserved-across-refresh"
@@ -173,6 +176,39 @@
       ],
       "file": "index.html",
       "mutation": "favicon-declaration-removed"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [
+        "focus_survives_build_view_live_refresh"
+      ],
+      "expected_red": "desktop_build_view_renders_all_panels",
+      "failing_assertions": [
+        "desktop_build_view_renders_all_panels",
+        "focus_survives_build_view_live_refresh"
+      ],
+      "file": "app.js",
+      "mutation": "artifact-rows-never-rendered"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "focus_survives_build_view_live_refresh",
+      "failing_assertions": [
+        "focus_survives_build_view_live_refresh"
+      ],
+      "file": "app.js",
+      "mutation": "artifact-focus-not-preserved-across-live-refresh"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "focus_survives_build_view_live_refresh",
+      "failing_assertions": [
+        "focus_survives_build_view_live_refresh"
+      ],
+      "file": "app.js",
+      "mutation": "artifact-focus-key-ignores-fence"
     }
   ]
 }

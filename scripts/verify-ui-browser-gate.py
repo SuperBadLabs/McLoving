@@ -83,10 +83,11 @@ def main():
 
     spec = json.loads(mutations_path.read_text())
     mutations = spec["mutations"]
+    # An assertion may carry several mutations. Requiring exactly one was itself
+    # a way to leave a surface unproved: review found the build-panel and
+    # live-refresh assertions each covered one call site while a second,
+    # unasserted one sat beside it, and a one-mutation rule forbade closing that.
     covered = [m["assertion"] for m in mutations]
-    covered_duplicates = sorted({a for a in covered if covered.count(a) > 1})
-    if covered_duplicates:
-        failures.append(f"mutations.json covers an assertion twice: {covered_duplicates}")
     unproved = sorted(emitted - set(covered))
     if unproved:
         failures.append(
@@ -106,7 +107,16 @@ def main():
     # "passes" by changing nothing.
     ui_dir = repo_root / "crates" / "controller-api" / "ui"
     for mutation in mutations:
-        source = (ui_dir / mutation["file"]).read_text()
+        target = ui_dir / mutation["file"]
+        try:
+            source = target.read_text()
+        except OSError as error:
+            # A renamed or deleted client file must be reported alongside every
+            # other coherence failure, not raised as a traceback that hides them.
+            failures.append(
+                f"mutation {mutation['name']}: cannot read {mutation['file']}: {error}"
+            )
+            continue
         if mutation["find"] not in source:
             failures.append(
                 f"mutation {mutation['name']}: its find text is absent from "
@@ -146,6 +156,11 @@ def main():
     impact_spec.loader.exec_module(impact)
     watched = impact.GATE_DEFINITION_PATHS | impact.CLIENT_PATHS | impact.SERVING_PATHS
     absent = sorted(path for path in watched if not (repo_root / path).is_file())
+    absent += sorted(
+        prefix
+        for prefix in impact.SERVING_PREFIXES
+        if not (repo_root / prefix.rstrip("/")).is_dir()
+    )
     if absent:
         failures.append(
             f"the impact classifier watches paths that do not exist, so those "

@@ -77,12 +77,15 @@ check that could not observe it.
   `scripts/verify-ui-browser-gate.py` refuses the workflow if it ever appears
   there uncommented.
 - **Every assertion is mutation-proved.** `scripts/ui-browser/mutations.json`
-  names, for each of the sixteen assertions, a client defect that breaks exactly
-  what that assertion claims. `scripts/test-ui-browser-mutations.py` introduces
-  each one and requires that named assertion to turn red; it first requires the
-  unmutated client to pass everything, so a mutation cannot "fail correctly" for
-  an unrelated reason. All sixteen were caught; the record is
-  `docs/evidence/ui-002-mutation-v1/`.
+  names, for each of the seventeen assertions, at least one client defect that
+  breaks exactly what that assertion claims.
+  `scripts/test-ui-browser-mutations.py` introduces each one and requires that
+  named assertion to turn red; it first requires the unmutated client to pass
+  everything, so a mutation cannot "fail correctly" for an unrelated reason, and
+  it refuses to read a verdict from a gate run that exited non-zero for any
+  reason other than the expected assertion failures — without that check a
+  pinned-count mismatch or a fixture that never listened would have been read as
+  a caught mutation. The record is `docs/evidence/ui-002-mutation-v1/`.
 - **The pins cannot drift apart.** `scripts/verify-ui-browser-gate.py` checks
   that the count pinned in the runner, the assertions `gate.py` emits, and the
   mutation set all agree, that no mutation's find-text is absent from the client
@@ -128,25 +131,45 @@ script error cannot hide behind the allowance.
 
 ## Findings
 
-Three defects in the shipped client, all found by the gate on its first run and
-all repaired:
+Four defects in the shipped client, all repaired. Three were found by the gate on
+its first run; the fourth was found only after review showed the gate was not
+looking at the surface that matters most:
 
 1. **Keyboard focus destroyed on every live refresh.** `refreshBuilds` rebuilt the
    table body with `replaceChildren()`, so a keyboard user on a build row's
    **Open** button was returned to `<body>`. Fixed with `preserveFocusAcross`,
-   which restores focus by a stable row key rather than by position. The same
-   defect existed in `renderArtifacts`, which re-renders on every live tick; it
-   was fixed at the same time rather than left for the next reviewer to find.
-2. **Horizontal overflow at a 390-pixel viewport** on the dashboard
+   which restores focus by a stable row key rather than by position.
+2. **The same defect on the surface that refreshes without being asked.** The
+   build view re-renders its artifact rows on a two-second timer through
+   `renderArtifacts`. The repair above was applied there at the same time — but
+   **no assertion covered it**, because the fixture served an empty artifact
+   list, so those rows never rendered. The repair was real and the evidence for
+   it did not exist, which is precisely the defect class this ticket exists to
+   correct, reproduced inside the work that corrects it. Review caught it. The
+   fixture now serves two real artifact records, a seventeenth assertion drives
+   the client's own timer rather than a clicked refresh, and two further
+   mutations prove it binds. Running the completed gate against the original
+   client then showed this failing there too: the shipped client lost focus on
+   **both** live surfaces, not one.
+3. **Horizontal overflow at a 390-pixel viewport** on the dashboard
    (`scrollWidth=510`, the recent-builds table) and pipeline (`scrollWidth=437`,
    the non-wrapping `.actions` row). Fixed by giving the table its own labelled,
    focusable horizontal scroller and letting the button row wrap.
-3. **A `favicon.ico` 404 on every page load**, logged SEVERE. Fixed by declaring
+4. **A `favicon.ico` 404 on every page load**, logged SEVERE. Fixed by declaring
    an empty `data:` icon, permitted by the existing CSP.
+
+A fifth defect was latent rather than observed: the viewport helper folded its
+correction back into the value it compared against, so on any browser with window
+chrome it would never converge on 390 CSS pixels and the assertion would fail on
+a viewport it had in fact reached. It passes here because headless Chrome has no
+chrome to correct for. It fails closed, but it was wrong, and it is fixed.
 
 None is a privilege, authorization or data-exposure defect. The security-relevant
 finding is the one the ticket names: a closure record asserted five properties
-that no check in this repository could evaluate, and two of them were false.
+that no check in this repository could evaluate, and two of them were false —
+and, on the evidence of the artifact surface above, the honest count of what the
+shipped client got wrong was higher than the first version of this gate could
+see.
 
 ## Residual risk
 

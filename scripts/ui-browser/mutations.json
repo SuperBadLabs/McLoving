@@ -6,6 +6,10 @@
     "red. An assertion that stays green under a mutation that breaks exactly what",
     "it claims to check is not a gate -- it is decoration, which is the class this",
     "ticket exists to correct.",
+    "An assertion may carry more than one mutation. Review found that the build",
+    "panel and live-refresh assertions each covered one call site while a second,",
+    "unasserted one existed beside it, so 'exactly one mutation per assertion' was",
+    "itself a way to leave a surface unproved.",
     "Each mutation is a literal substring replacement against the shipped client."
   ],
   "mutations": [
@@ -120,6 +124,27 @@
       "file": "index.html",
       "find": "  <link rel=\"icon\" href=\"data:,\">\n",
       "replace": ""
+    },
+    {
+      "name": "artifact-rows-never-rendered",
+      "assertion": "desktop_build_view_renders_all_panels",
+      "file": "app.js",
+      "find": "  renderArtifacts(artifacts);",
+      "replace": ""
+    },
+    {
+      "name": "artifact-focus-not-preserved-across-live-refresh",
+      "assertion": "focus_survives_build_view_live_refresh",
+      "file": "app.js",
+      "find": "  preserveFocusAcross(root, () => {",
+      "replace": "  ((rebuild) => rebuild())(() => {"
+    },
+    {
+      "name": "artifact-focus-key-ignores-fence",
+      "assertion": "focus_survives_build_view_live_refresh",
+      "file": "app.js",
+      "find": "      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.fence}/${artifact.name}`;",
+      "replace": "      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.name}`;"
     }
   ]
 }

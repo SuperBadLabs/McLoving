@@ -68,6 +68,16 @@ GATE_DEFINITION_PATHS = frozenset(
 # gate; it does not by itself make the assertions stop binding.
 SERVING_PATHS = frozenset({"crates/controller-api/src/lib.rs"})
 
+# The strict-YAML compiler is a *behavioural* input to the gate, not just a
+# dependency of it: `strict_yaml_refusal_surfaced_to_user` submits a duplicate
+# mapping key and asserts on the compiler's own refusal wording, through the
+# same `compile_strict_yaml_with_parameters` the shipped handler calls. A parser
+# change that started accepting duplicate keys, or that reworded the rejection,
+# would break that assertion while touching nothing this classifier otherwise
+# watches -- so it would ship without the gate ever running. Directory prefix
+# rather than a file list, because the crate is the unit that has this property.
+SERVING_PREFIXES = ("crates/pipeline-ir/",)
+
 # Changed lines across the client files, added plus removed, at or above which
 # the mutation proof is required even though the gate definition did not move.
 #
@@ -148,7 +158,9 @@ def classify(base: str, head: str, repository: Path) -> tuple[bool, bool, str]:
         )
 
     client = sorted(paths & CLIENT_PATHS)
-    serving = sorted(paths & SERVING_PATHS)
+    serving = sorted(paths & SERVING_PATHS) + sorted(
+        path for path in paths if path.startswith(SERVING_PREFIXES)
+    )
     if not client and not serving:
         return False, False, "no UI, serving or gate path changed"
 
@@ -156,7 +168,7 @@ def classify(base: str, head: str, repository: Path) -> tuple[bool, bool, str]:
         return (
             True,
             False,
-            f"what is served may have changed: {serving[0]}",
+            f"what is served or how it is validated may have changed: {serving[0]}",
         )
 
     lines = changed_client_lines(base, head, repository)

@@ -28,7 +28,7 @@
     },
     {
       "assertion": "desktop_build_view_renders_all_panels",
-      "detail": "populated {'build-approvals': 2, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
+      "detail": "populated {'artifact-download-controls': 2, 'build-approvals': 2, 'build-artifacts': 2, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
       "passed": true
     },
     {
@@ -53,12 +53,17 @@
     },
     {
       "assertion": "keyboard_focus_is_visible_through_journeys",
-      "detail": "78 keyboard stops across 5 views, every one with a visible ring",
+      "detail": "80 keyboard stops across 5 views, every one with a visible ring",
       "passed": true
     },
     {
       "assertion": "focus_survives_repeated_live_updates",
       "detail": "focus before {'id': None, 'row': '33333333-3333-4333-8333-333333333333', 'text': 'Open'} -> after {'focusVisible': False, 'id': None, 'isBody': True, 'row': None, 'tag': 'BODY', 'text': '\\n  \\n    \\n      BETTER AND FASTER JENKINS\\n      McLoving\\n    '}",
+      "passed": false
+    },
+    {
+      "assertion": "focus_survives_build_view_live_refresh",
+      "detail": "focus before {'key': None, 'label': ''} -> after {'focusVisible': False, 'isBody': True, 'key': None, 'tag': 'BODY'}",
       "passed": false
     },
     {
@@ -86,16 +91,17 @@
     "chrome": "Google Chrome for Testing 153.0.8010.36",
     "chromedriver": "ChromeDriver 153.0.8010.36 (507c6ee3e2f3b2ca0e660547e5b9ea4820c67f4c-refs/branch-heads/8010@{#906})"
   },
-  "expected_assertions": 16,
-  "failed": 3,
+  "expected_assertions": 17,
+  "failed": 4,
   "failing_assertions": [
     "focus_survives_repeated_live_updates",
+    "focus_survives_build_view_live_refresh",
     "viewport_390_has_no_horizontal_overflow",
     "console_has_no_unexpected_resource_failures"
   ],
   "gate_protocol": "mcloving.ui.browser/1",
   "label": "ui-002-initial-shipped-client",
-  "observed_assertions": 16,
+  "observed_assertions": 17,
   "passed": 13,
   "recorded_without_enforcing": true,
   "ui_source": {

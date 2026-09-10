@@ -262,7 +262,10 @@ function renderArtifacts(artifacts) {
     for (const artifact of artifacts) {
       const row = document.createElement("div");
       row.className = "artifact";
-      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.name}`;
+      // Fence is part of the identity: one attempt can carry records with the
+      // same name from different fences, and a key without it restores focus
+      // to the first match rather than the row the user was on.
+      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.fence}/${artifact.name}`;
       const label = document.createElement("span");
       label.textContent = `${artifact.name} (${artifact.bytes} bytes, ${artifact.status})`;
       const button = document.createElement("button");
