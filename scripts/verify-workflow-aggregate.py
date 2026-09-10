@@ -14,6 +14,7 @@ FOUNDATION_JOBS = (
     "architecture",
     "formal",
     "controller-postgres",
+    "ui-browser",
     "recovery-drill",
     "deployment",
 )

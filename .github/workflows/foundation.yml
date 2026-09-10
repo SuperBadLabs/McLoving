@@ -343,11 +343,14 @@ jobs:
           bash -n scripts/test-backup-restore.sh
           bash -n scripts/run-verified-rust-test.sh
           bash -n scripts/verify-boundary-runtime.sh
+          bash -n scripts/test-ui-browser.sh
+          bash -n scripts/ui-browser/build-image.sh
           python3 scripts/test-execution-board.py
           python3 scripts/verify-execution-board.py
           python3 scripts/test-ticket-closure-receipts.py
           python3 scripts/verify-ticket-closure-receipts.py
           python3 scripts/test-verify-rust-test-execution.py
+          python3 scripts/verify-ui-browser-gate.py
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15
           test -s docs/architecture/CHARTER.md
           test -s docs/ALPHA_DEMO.md
@@ -504,6 +507,54 @@ jobs:
         env:
           MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
         run: bash scripts/test-sequential-runtime.sh
+
+  ui-browser:
+    name: UI browser gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reclaim runner disk before building
+        # Same reason as the other Rust jobs: a full disk surfaces as a linker
+        # SIGBUS rather than a disk error, and this job also pulls a ~200MB
+        # browser archive and builds a container image on top of it.
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sync
+          df -h /
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux-ui-browser
+      - name: Verify the browser gate's pins agree with each other
+        # Cheap and browserless. It runs first so a drifted pin fails in
+        # seconds rather than after the image build and the full journey.
+        run: python3 scripts/verify-ui-browser-gate.py
+      - name: Run the executing browser gate against the shipped client
+        # The assertion count is pinned inside the script. --record-only is
+        # never passed here, and verify-ui-browser-gate.py refuses this
+        # workflow if it ever is.
+        run: bash scripts/test-ui-browser.sh --output-dir "${RUNNER_TEMP}/ui-browser"
+      - name: Mutation-prove every browser assertion
+        # UI-002 acceptance (4): removed, each gate must turn a named test red.
+        # This introduces one client defect per assertion and requires exactly
+        # that assertion to fail.
+        run: >-
+          python3 scripts/test-ui-browser-mutations.py
+          --output-dir "${RUNNER_TEMP}/ui-mutations"
+      - name: Upload browser gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-browser-gate
+          path: |
+            ${{ runner.temp }}/ui-browser
+            ${{ runner.temp }}/ui-mutations
+          retention-days: 7
 
   recovery-drill:
     name: Backup and restore
@@ -673,6 +724,7 @@ jobs:
       - architecture
       - formal
       - controller-postgres
+      - ui-browser
       - recovery-drill
       - deployment
     if: always()
@@ -687,6 +739,7 @@ jobs:
           ARCHITECTURE_RESULT: ${{ needs.architecture.result }}
           FORMAL_RESULT: ${{ needs.formal.result }}
           CONTROLLER_POSTGRES_RESULT: ${{ needs.controller-postgres.result }}
+          UI_BROWSER_RESULT: ${{ needs.ui-browser.result }}
           RECOVERY_DRILL_RESULT: ${{ needs.recovery-drill.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
         run: |
@@ -697,5 +750,6 @@ jobs:
             architecture="${ARCHITECTURE_RESULT}" \
             formal="${FORMAL_RESULT}" \
             controller-postgres="${CONTROLLER_POSTGRES_RESULT}" \
+            ui-browser="${UI_BROWSER_RESULT}" \
             recovery-drill="${RECOVERY_DRILL_RESULT}" \
             deployment="${DEPLOYMENT_RESULT}"

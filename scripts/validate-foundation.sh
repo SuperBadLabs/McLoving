@@ -143,4 +143,9 @@ test -s "${repo_root}/docs/architecture/CHARTER.md"
 test -s "${repo_root}/docs/threat-model/README.md"
 test -s "${repo_root}/docs/EXECUTION_BOARD.md"
 
+# The browser gate itself is too slow for this script, but the check that its
+# pinned count, its emitted assertions and its mutation set still agree runs
+# in a second and catches the drift that would make the gate meaningless.
+python3 "${repo_root}/scripts/verify-ui-browser-gate.py"
+
 printf 'McLoving foundation validation passed.\n'

@@ -1,0 +1,178 @@
+{
+  "caught": 16,
+  "escaped": [],
+  "expected_assertions": 16,
+  "gate_protocol": "mcloving.ui.browser/1",
+  "mutations_run": 16,
+  "results": [
+    {
+      "caught": true,
+      "collateral_failures": [
+        "focus_survives_repeated_live_updates"
+      ],
+      "expected_red": "desktop_dashboard_lists_builds",
+      "failing_assertions": [
+        "desktop_dashboard_lists_builds",
+        "focus_survives_repeated_live_updates"
+      ],
+      "file": "app.js",
+      "mutation": "dashboard-rows-never-appended"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [
+        "strict_yaml_refusal_surfaced_to_user"
+      ],
+      "expected_red": "desktop_pipeline_validate_accepts_valid_source",
+      "failing_assertions": [
+        "desktop_pipeline_validate_accepts_valid_source",
+        "strict_yaml_refusal_surfaced_to_user"
+      ],
+      "file": "app.js",
+      "mutation": "validate-button-unwired"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "desktop_pipeline_plan_renders_stages",
+      "failing_assertions": [
+        "desktop_pipeline_plan_renders_stages"
+      ],
+      "file": "app.js",
+      "mutation": "plan-button-unwired"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "desktop_pipeline_save_and_submit",
+      "failing_assertions": [
+        "desktop_pipeline_save_and_submit"
+      ],
+      "file": "app.js",
+      "mutation": "save-pipeline-unwired"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "strict_yaml_refusal_surfaced_to_user",
+      "failing_assertions": [
+        "strict_yaml_refusal_surfaced_to_user"
+      ],
+      "file": "app.js",
+      "mutation": "refusal-not-styled-or-shown"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "desktop_build_view_renders_all_panels",
+      "failing_assertions": [
+        "desktop_build_view_renders_all_panels"
+      ],
+      "file": "app.js",
+      "mutation": "build-summary-never-rendered"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "desktop_audit_view_renders_events",
+      "failing_assertions": [
+        "desktop_audit_view_renders_events"
+      ],
+      "file": "app.js",
+      "mutation": "audit-output-never-rendered"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "desktop_explain_view_renders_reason",
+      "failing_assertions": [
+        "desktop_explain_view_renders_reason"
+      ],
+      "file": "app.js",
+      "mutation": "explain-output-never-rendered"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "landmarks_present_in_rendered_dom",
+      "failing_assertions": [
+        "landmarks_present_in_rendered_dom"
+      ],
+      "file": "index.html",
+      "mutation": "navigation-landmark-unlabelled"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "every_control_has_accessible_name",
+      "failing_assertions": [
+        "every_control_has_accessible_name"
+      ],
+      "file": "index.html",
+      "mutation": "control-loses-its-label"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "keyboard_focus_is_visible_through_journeys",
+      "failing_assertions": [
+        "keyboard_focus_is_visible_through_journeys"
+      ],
+      "file": "app.css",
+      "mutation": "focus-ring-removed"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "focus_survives_repeated_live_updates",
+      "failing_assertions": [
+        "focus_survives_repeated_live_updates"
+      ],
+      "file": "app.js",
+      "mutation": "focus-not-preserved-across-refresh"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [
+        "landmarks_present_in_rendered_dom"
+      ],
+      "expected_red": "live_status_region_announces_changes",
+      "failing_assertions": [
+        "landmarks_present_in_rendered_dom",
+        "live_status_region_announces_changes"
+      ],
+      "file": "index.html",
+      "mutation": "live-region-not-announced"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "viewport_390_has_no_horizontal_overflow",
+      "failing_assertions": [
+        "viewport_390_has_no_horizontal_overflow"
+      ],
+      "file": "app.css",
+      "mutation": "table-scroller-removed"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "console_has_no_script_errors",
+      "failing_assertions": [
+        "console_has_no_script_errors"
+      ],
+      "file": "app.js",
+      "mutation": "script-error-thrown-on-load"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "console_has_no_unexpected_resource_failures",
+      "failing_assertions": [
+        "console_has_no_unexpected_resource_failures"
+      ],
+      "file": "index.html",
+      "mutation": "favicon-declaration-removed"
+    }
+  ]
+}

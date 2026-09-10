@@ -1,0 +1,29 @@
+{
+  "comment": [
+    "Pinned browser stack for the UI-002 contained browser gate. Every entry is",
+    "immutable and content-addressed: Chrome for Testing publishes versioned,",
+    "never-rewritten archive paths, and the base image is referenced by manifest",
+    "digest rather than by tag. scripts/ui-browser/build-image.sh refuses to build",
+    "when any recorded digest does not match what was fetched.",
+    "Recorded 2026-09-10 from the Chrome for Testing Stable channel."
+  ],
+  "chrome_for_testing_version": "153.0.8010.36",
+  "chrome_for_testing_revision": "1681091",
+  "platform": "linux64",
+  "downloads": {
+    "chrome": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.36/linux64/chrome-linux64.zip",
+      "sha256": "167a098c4fdec156b58a9f678c90a84f9072d789f9c6e7b35496a6987b8b7ef8"
+    },
+    "chromedriver": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.36/linux64/chromedriver-linux64.zip",
+      "sha256": "c05f3bfb501b37b12b7fa2a54b8b30b51d089a64389898362aeb2785f12ac83f"
+    }
+  },
+  "base_image": {
+    "reference": "docker.io/library/debian:bookworm-slim",
+    "manifest_digest": "sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+    "image_id": "160466e67bb85a4099d9d9c2356b4a6a64747b281a22c142efbd4539db1b8525"
+  },
+  "image_tag": "localhost/mcloving/ui-browser-gate:153.0.8010.36-v1"
+}

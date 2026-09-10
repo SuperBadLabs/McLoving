@@ -1,0 +1,158 @@
+# UI-002 security review
+
+Ticket: `UI-002` — make the current web UI provable before anything replaces it.
+Date: 2026-09-10.
+
+## What was reviewed
+
+The introduction of a browser into a repository that had none, and the minimal
+client repairs needed to earn the claims `UI-001` had already asserted. Three
+things carry security weight here: what the new dependency is and how it is
+pinned, what boundary the browser runs inside, and whether the gate can fail.
+
+## The new dependency, and why it is bounded
+
+`UI-002` adds Chrome for Testing 153.0.8010.36 and its matching chromedriver,
+pinned by URL and SHA-256 in `scripts/ui-browser/browser-pin.json`. The archives
+are fetched and verified by `scripts/ui-browser/build-image.sh` **before** they
+enter the container build context; the `Containerfile` itself downloads nothing.
+On a digest mismatch the script exits 66 **and deletes the offending archive**,
+so a later run cannot inherit trust in a file that already failed once.
+
+The base image is referenced by manifest digest, not by tag, and its image id is
+checked after the pull. The image is rebuilt whenever the browser digests **or
+the SHA-256 of the Containerfile itself** differ from what the cached image's
+labels record. That last check was added after the omission bit during
+development: an edit to the Containerfile left a cached image that still carried
+matching browser digests, and the gate ran against an environment the repository
+no longer described.
+
+No package manager, language runtime or third-party library was added for the
+driver. `scripts/ui-browser/gate.py` speaks WebDriver classic over loopback HTTP
+using only the Python standard library. The alternative considered and rejected
+was Playwright or Puppeteer, which would pull a `node_modules` tree into a
+repository with no JavaScript toolchain; the full argument is in
+`docs/architecture/UI_BROWSER_GATE_V1.md`.
+
+## The boundary the browser runs inside
+
+Chrome's renderer sandbox requires unprivileged user namespaces, which AppArmor
+restricts on Ubuntu 23.10+ — both the development hosts and the CI runners.
+Chrome refuses to start rather than degrading quietly.
+
+The browser therefore runs inside a rootless podman container and `--no-sandbox`
+is passed **only inside it**. This is a deliberate trade, not an oversight:
+
+- The renderer sandbox defends against hostile page content. The gate loads
+  exactly one origin — a fixture it starts itself, serving this repository's own
+  client — so it removes a defence against a threat the gate does not face.
+- The container still bounds the process, filesystem, user and PID namespaces.
+- The alternative that keeps Chrome's own sandbox is a named AppArmor profile
+  granting `userns create,`, the shape `deploy/apparmor/mcloving-source-acquirer`
+  already uses. It was rejected because it requires a root profile load on every
+  host and runner before the gate can run at all. The owner selected the
+  contained option.
+
+`--network=host` is used so the fixture stays bound to `127.0.0.1` rather than
+being published on a routable address for the browser's benefit. Loopback-only
+binding is the stronger of the two properties available. `--userns=keep-id` maps
+the invoking user onto the image's runtime UID so the gate writes its evidence as
+itself rather than as a subordinate UID that cannot write the mount.
+
+**No production code path changed.** `static_ui_router`, the CSP, every route and
+every authorization check are untouched. The CSP already permitted
+`img-src 'self' data:`, which is why the favicon repair needed no policy change
+and no new route.
+
+## Whether the gate can fail
+
+This is the crux, because the defect `UI-002` corrects is a claim asserted by a
+check that could not observe it.
+
+- **The assertion count is pinned.** `--expected-assertions` is required and a
+  mismatch exits 65, including under `--record-only`. A gate that silently stops
+  running assertions fails rather than reporting success.
+- **`--record-only` cannot reach CI.** It exists solely to capture the pre-repair
+  baseline, where the failures are the evidence.
+  `scripts/verify-ui-browser-gate.py` refuses the workflow if it ever appears
+  there uncommented.
+- **Every assertion is mutation-proved.** `scripts/ui-browser/mutations.json`
+  names, for each of the sixteen assertions, a client defect that breaks exactly
+  what that assertion claims. `scripts/test-ui-browser-mutations.py` introduces
+  each one and requires that named assertion to turn red; it first requires the
+  unmutated client to pass everything, so a mutation cannot "fail correctly" for
+  an unrelated reason. All sixteen were caught; the record is
+  `docs/evidence/ui-002-mutation-v1/`.
+- **The pins cannot drift apart.** `scripts/verify-ui-browser-gate.py` checks
+  that the count pinned in the runner, the assertions `gate.py` emits, and the
+  mutation set all agree, that no mutation's find-text is absent from the client
+  it targets, and that the Containerfile's base image is the pinned digest.
+- **The lane gates merge.** `ui-browser` is in `FOUNDATION_JOBS` and in the
+  `foundation` aggregate's `needs`, so a failure blocks rather than being a job
+  nobody required.
+
+## The validation claim
+
+The fixture's `/pipelines/validate` previously answered `valid: true`
+unconditionally and so could not prove strict-YAML rejection at all. It now
+compiles the submitted source through
+`mcloving_pipeline_ir::compile_strict_yaml_with_parameters` — the same entry
+point the shipped `validate_pipeline` handler uses — and reproduces that
+handler's rejection envelope (422, `pipeline_rejected`, the compiler's own
+message). The refusal the gate asserts is therefore the production parser's
+verdict and wording, not an error the fixture invented. The probe is a duplicate
+mapping key, chosen because a permissive YAML parser accepts it silently, so the
+refusal is evidence that the strict parser answered.
+
+That correct 422 is logged by the browser as a SEVERE console entry. Rather than
+excuse it wholesale, the console assertion is split: `console_has_no_script_errors`
+admits nothing, and `console_has_no_unexpected_resource_failures` enumerates the
+excused failure by URL and status and writes it into `console.json`. A genuine
+script error cannot hide behind the allowance.
+
+## Findings
+
+Three defects in the shipped client, all found by the gate on its first run and
+all repaired:
+
+1. **Keyboard focus destroyed on every live refresh.** `refreshBuilds` rebuilt the
+   table body with `replaceChildren()`, so a keyboard user on a build row's
+   **Open** button was returned to `<body>`. Fixed with `preserveFocusAcross`,
+   which restores focus by a stable row key rather than by position. The same
+   defect existed in `renderArtifacts`, which re-renders on every live tick; it
+   was fixed at the same time rather than left for the next reviewer to find.
+2. **Horizontal overflow at a 390-pixel viewport** on the dashboard
+   (`scrollWidth=510`, the recent-builds table) and pipeline (`scrollWidth=437`,
+   the non-wrapping `.actions` row). Fixed by giving the table its own labelled,
+   focusable horizontal scroller and letting the button row wrap.
+3. **A `favicon.ico` 404 on every page load**, logged SEVERE. Fixed by declaring
+   an empty `data:` icon, permitted by the existing CSP.
+
+None is a privilege, authorization or data-exposure defect. The security-relevant
+finding is the one the ticket names: a closure record asserted five properties
+that no check in this repository could evaluate, and two of them were false.
+
+## Residual risk
+
+- **One rendering engine.** A pinned Chromium is the whole population; a
+  Chromium-specific pass is not a cross-browser pass.
+- **Assistive-technology announcement is not observed.** The gate asserts the
+  structures a screen reader consumes, not what one says. This is recorded as a
+  manual convention in `docs/EXECUTION_BOARD.md` rather than presented as
+  evidence, and the corresponding `UI-001` claim is qualified rather than
+  restated.
+- **The browser runs without its own renderer sandbox inside the container.**
+  Argued above and in `docs/architecture/UI_BROWSER_GATE_V1.md`. If the gate is
+  ever pointed at content this repository does not author, that argument stops
+  holding and the boundary must be revisited.
+- **`--network=host`** means the gate's browser shares the host network
+  namespace. It is the price of keeping the fixture on loopback.
+
+## Evidence
+
+- `docs/evidence/ui-002-browser-v1/` — initial baseline, pre-repair, retained
+  unchanged; 13 of 16 passed, three named failures.
+- `docs/evidence/ui-002-browser-v2/` — accepted baseline bound to the repaired
+  client; 16 of 16.
+- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 16 of 16 caught.
+- `docs/architecture/UI_BROWSER_GATE_V1.md` — the driver and boundary argument.

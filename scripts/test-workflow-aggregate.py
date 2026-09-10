@@ -111,6 +111,7 @@ FOUNDATION_RUN = (
     "            architecture=\"${ARCHITECTURE_RESULT}\" \\\n"
     "            formal=\"${FORMAL_RESULT}\" \\\n"
     "            controller-postgres=\"${CONTROLLER_POSTGRES_RESULT}\" \\\n"
+    "            ui-browser=\"${UI_BROWSER_RESULT}\" \\\n"
     "            recovery-drill=\"${RECOVERY_DRILL_RESULT}\" \\\n"
     "            deployment=\"${DEPLOYMENT_RESULT}\"\n"
 )
@@ -127,6 +128,7 @@ FOUNDATION_ENV = (
     ("ARCHITECTURE_RESULT", "${{ needs.architecture.result }}"),
     ("FORMAL_RESULT", "${{ needs.formal.result }}"),
     ("CONTROLLER_POSTGRES_RESULT", "${{ needs.controller-postgres.result }}"),
+    ("UI_BROWSER_RESULT", "${{ needs.ui-browser.result }}"),
     ("RECOVERY_DRILL_RESULT", "${{ needs.recovery-drill.result }}"),
     ("DEPLOYMENT_RESULT", "${{ needs.deployment.result }}"),
 )
@@ -480,6 +482,7 @@ printf '%s\\n' "${workflow_files[@]}"
                 "architecture",
                 "formal",
                 "controller-postgres",
+                "ui-browser",
                 "recovery-drill",
                 "deployment",
                 "foundation",
@@ -509,6 +512,7 @@ printf '%s\\n' "${workflow_files[@]}"
             "architecture": "ARCHITECTURE_RESULT",
             "formal": "FORMAL_RESULT",
             "controller-postgres": "CONTROLLER_POSTGRES_RESULT",
+            "ui-browser": "UI_BROWSER_RESULT",
             "recovery-drill": "RECOVERY_DRILL_RESULT",
             "deployment": "DEPLOYMENT_RESULT",
         }

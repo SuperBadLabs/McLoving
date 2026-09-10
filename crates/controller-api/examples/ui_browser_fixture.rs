@@ -1,9 +1,12 @@
 use axum::Json;
+use axum::extract::Json as JsonBody;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use mcloving_controller_api::static_ui_router;
+use mcloving_pipeline_ir::{ParseLimits, compile_strict_yaml_with_parameters};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 const ORGANIZATION: &str = "11111111-1111-4111-8111-111111111111";
 const PROJECT: &str = "22222222-2222-4222-8222-222222222222";
@@ -128,10 +131,66 @@ fn state_record(state: &str, generation: i64) -> Value {
     })
 }
 
-async fn validate(headers: HeaderMap) -> impl IntoResponse {
-    authorized(
-        &headers,
-        json!({"valid": true, "semantic_digest": "ab".repeat(32)}),
+// The browser gate has to prove that a strict-YAML refusal reaches the user, so
+// this route cannot answer `valid: true` unconditionally the way the rest of the
+// fixture stubs its responses. It compiles the submitted source through the same
+// `compile_strict_yaml_with_parameters` entry point the shipped
+// `validate_pipeline` handler uses, and reproduces that handler's rejection
+// envelope -- 422 with `pipeline_rejected` and the compiler's own message -- so
+// what the client renders is the production parser's verdict and wording rather
+// than an error this fixture invented.
+async fn validate(headers: HeaderMap, body: Option<JsonBody<Value>>) -> Response {
+    if let Some(denial) = unauthorized(&headers) {
+        return denial;
+    }
+    match compile_submitted_source(body) {
+        Ok(pipeline) => match pipeline.semantic_digest_hex() {
+            Ok(digest) => Json(json!({"valid": true, "semantic_digest": digest})).into_response(),
+            Err(error) => pipeline_rejected(&error.to_string()),
+        },
+        Err(message) => pipeline_rejected(&message),
+    }
+}
+
+fn compile_submitted_source(
+    body: Option<JsonBody<Value>>,
+) -> Result<mcloving_pipeline_ir::PipelineIr, String> {
+    let source = body
+        .as_ref()
+        .and_then(|JsonBody(value)| value.get("source"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "request body must carry a pipeline source string".to_owned())?;
+    compile_strict_yaml_with_parameters(
+        "public-api",
+        source,
+        ParseLimits::default(),
+        BTreeMap::new(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn pipeline_rejected(message: &str) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"code": "pipeline_rejected", "message": message})),
+    )
+        .into_response()
+}
+
+fn unauthorized(headers: &HeaderMap) -> Option<Response> {
+    let expected = format!("Bearer {TOKEN}");
+    let presented = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    if presented == Some(expected.as_str()) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"code": "unauthorized", "message": "token required"})),
+        )
+            .into_response(),
     )
 }
 

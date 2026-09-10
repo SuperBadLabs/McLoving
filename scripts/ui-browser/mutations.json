@@ -1,0 +1,125 @@
+{
+  "comment": [
+    "Mutation proof for the UI-002 browser gate, to HYG-002's standard: each",
+    "assertion must be shown to bind to something. For every mutation below, the",
+    "named client defect is introduced and the gate must turn the named assertion",
+    "red. An assertion that stays green under a mutation that breaks exactly what",
+    "it claims to check is not a gate -- it is decoration, which is the class this",
+    "ticket exists to correct.",
+    "Each mutation is a literal substring replacement against the shipped client."
+  ],
+  "mutations": [
+    {
+      "name": "dashboard-rows-never-appended",
+      "assertion": "desktop_dashboard_lists_builds",
+      "file": "app.js",
+      "find": "      row.append(id, state, created, open);\n      body.append(row);",
+      "replace": "      row.append(id, state, created, open);"
+    },
+    {
+      "name": "validate-button-unwired",
+      "assertion": "desktop_pipeline_validate_accepts_valid_source",
+      "file": "app.js",
+      "find": "byId(\"validate-pipeline\").addEventListener(\"click\", () =>\n  action(() => api(`${projectPath()}/pipelines/validate`, { method: \"POST\", body: pretty(submission()) })));",
+      "replace": "byId(\"validate-pipeline\").addEventListener(\"click\", () => undefined);"
+    },
+    {
+      "name": "plan-button-unwired",
+      "assertion": "desktop_pipeline_plan_renders_stages",
+      "file": "app.js",
+      "find": "byId(\"plan-pipeline\").addEventListener(\"click\", () =>\n  action(() => api(`${projectPath()}/pipelines/plan`, { method: \"POST\", body: pretty(submission()) })));",
+      "replace": "byId(\"plan-pipeline\").addEventListener(\"click\", () => undefined);"
+    },
+    {
+      "name": "save-pipeline-unwired",
+      "assertion": "desktop_pipeline_save_and_submit",
+      "file": "app.js",
+      "find": "byId(\"save-pipeline\").addEventListener(\"click\", () => action(async () => {",
+      "replace": "byId(\"save-pipeline\").addEventListener(\"click\", () => (async () => {"
+    },
+    {
+      "name": "refusal-not-styled-or-shown",
+      "assertion": "strict_yaml_refusal_surfaced_to_user",
+      "file": "app.js",
+      "find": "    byId(\"operation-result\").classList.add(\"error\");\n    byId(\"operation-result\").textContent = error.message;",
+      "replace": "    byId(\"operation-result\").classList.remove(\"error\");"
+    },
+    {
+      "name": "build-summary-never-rendered",
+      "assertion": "desktop_build_view_renders_all_panels",
+      "file": "app.js",
+      "find": "  byId(\"build-summary\").textContent = pretty(status);",
+      "replace": ""
+    },
+    {
+      "name": "audit-output-never-rendered",
+      "assertion": "desktop_audit_view_renders_events",
+      "file": "app.js",
+      "find": "    byId(\"audit-output\").textContent = pretty(result);",
+      "replace": ""
+    },
+    {
+      "name": "explain-output-never-rendered",
+      "assertion": "desktop_explain_view_renders_reason",
+      "file": "app.js",
+      "find": "    byId(\"explain-output\").textContent = pretty(result);",
+      "replace": ""
+    },
+    {
+      "name": "navigation-landmark-unlabelled",
+      "assertion": "landmarks_present_in_rendered_dom",
+      "file": "index.html",
+      "find": "<nav aria-label=\"Product journeys\">",
+      "replace": "<nav>"
+    },
+    {
+      "name": "control-loses-its-label",
+      "assertion": "every_control_has_accessible_name",
+      "file": "index.html",
+      "find": "<label>Trust pool <input id=\"trust-pool\" value=\"trusted-linux\" required></label>",
+      "replace": "<input id=\"trust-pool\" value=\"trusted-linux\" required>"
+    },
+    {
+      "name": "focus-ring-removed",
+      "assertion": "keyboard_focus_is_visible_through_journeys",
+      "file": "app.css",
+      "find": "  outline: 3px solid #6fb7ff; outline-offset: 2px;",
+      "replace": "  outline: none;"
+    },
+    {
+      "name": "focus-not-preserved-across-refresh",
+      "assertion": "focus_survives_repeated_live_updates",
+      "file": "app.js",
+      "find": "  const key = owner ? owner.dataset.focusKey : null;\n  rebuild();",
+      "replace": "  const key = null;\n  rebuild();"
+    },
+    {
+      "name": "live-region-not-announced",
+      "assertion": "live_status_region_announces_changes",
+      "file": "index.html",
+      "find": "<p id=\"connection-state\" role=\"status\" aria-live=\"polite\">",
+      "replace": "<p id=\"connection-state\" role=\"status\">"
+    },
+    {
+      "name": "table-scroller-removed",
+      "assertion": "viewport_390_has_no_horizontal_overflow",
+      "file": "app.css",
+      "find": ".table-scroll { overflow-x: auto; }",
+      "replace": ".table-scroll { overflow-x: visible; }"
+    },
+    {
+      "name": "script-error-thrown-on-load",
+      "assertion": "console_has_no_script_errors",
+      "file": "app.js",
+      "find": "const byId = (id) => document.getElementById(id);",
+      "replace": "const byId = (id) => document.getElementById(id);\nsetTimeout(() => { throw new Error(\"mutation-injected script error\"); }, 0);"
+    },
+    {
+      "name": "favicon-declaration-removed",
+      "assertion": "console_has_no_unexpected_resource_failures",
+      "file": "index.html",
+      "find": "  <link rel=\"icon\" href=\"data:,\">\n",
+      "replace": ""
+    }
+  ]
+}

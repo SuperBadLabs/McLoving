@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Keep the UI browser gate's pins from drifting apart.
+
+The gate is only fail-closed if the numbers that make it fail-closed agree with
+each other. Three of them are written in three different files, and nothing else
+would notice if one moved:
+
+  * the assertion count pinned in `scripts/test-ui-browser.sh`,
+  * the assertions `scripts/ui-browser/gate.py` actually emits,
+  * the mutations in `scripts/ui-browser/mutations.json` that prove each one binds.
+
+An assertion added without a mutation is unproved. A mutation naming an
+assertion that no longer exists proves nothing. A pinned count that drifts above
+the real one turns the count check into a permanent failure, and one that drifts
+below lets assertions disappear silently -- which is the failure `UI-002` exists
+to correct.
+
+This runs in a second and needs no browser.
+"""
+
+import ast
+import json
+import pathlib
+import re
+import sys
+
+
+def emitted_assertions(gate_path):
+    """Every literal name passed to self.assertion(...) in the gate."""
+    tree = ast.parse(gate_path.read_text())
+    names = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if not (isinstance(function, ast.Attribute) and function.attr == "assertion"):
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            raise SystemExit(
+                f"{gate_path.name}:{node.lineno}: assertion name is not a literal "
+                "string, so it cannot be pinned or mutation-proved"
+            )
+        names.append(first.value)
+    return names
+
+
+def main():
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    gate_path = repo_root / "scripts" / "ui-browser" / "gate.py"
+    runner_path = repo_root / "scripts" / "test-ui-browser.sh"
+    mutations_path = repo_root / "scripts" / "ui-browser" / "mutations.json"
+    pin_path = repo_root / "scripts" / "ui-browser" / "browser-pin.json"
+    containerfile = repo_root / "scripts" / "ui-browser" / "Containerfile"
+    workflow = repo_root / ".github" / "workflows" / "foundation.yml"
+
+    failures = []
+
+    names = emitted_assertions(gate_path)
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    if duplicates:
+        failures.append(
+            f"gate.py emits duplicate assertion names, so a failure could not be "
+            f"attributed: {duplicates}"
+        )
+    emitted = set(names)
+
+    runner = runner_path.read_text()
+    match = re.search(r"^expected_assertions=(\d+)$", runner, re.MULTILINE)
+    if not match:
+        failures.append(f"{runner_path.name} does not pin expected_assertions")
+        pinned = None
+    else:
+        pinned = int(match.group(1))
+        if pinned != len(names):
+            failures.append(
+                f"{runner_path.name} pins {pinned} assertions but gate.py emits "
+                f"{len(names)}"
+            )
+
+    spec = json.loads(mutations_path.read_text())
+    mutations = spec["mutations"]
+    covered = [m["assertion"] for m in mutations]
+    covered_duplicates = sorted({a for a in covered if covered.count(a) > 1})
+    if covered_duplicates:
+        failures.append(f"mutations.json covers an assertion twice: {covered_duplicates}")
+    unproved = sorted(emitted - set(covered))
+    if unproved:
+        failures.append(
+            f"assertions with no mutation proving they bind: {unproved}"
+        )
+    orphaned = sorted(set(covered) - emitted)
+    if orphaned:
+        failures.append(
+            f"mutations naming assertions the gate no longer emits: {orphaned}"
+        )
+
+    mutation_names = [m["name"] for m in mutations]
+    if len(set(mutation_names)) != len(mutation_names):
+        failures.append("mutations.json contains duplicate mutation names")
+
+    # Every mutation must actually mutate the client it is aimed at, or it
+    # "passes" by changing nothing.
+    ui_dir = repo_root / "crates" / "controller-api" / "ui"
+    for mutation in mutations:
+        source = (ui_dir / mutation["file"]).read_text()
+        if mutation["find"] not in source:
+            failures.append(
+                f"mutation {mutation['name']}: its find text is absent from "
+                f"{mutation['file']}, so it would mutate nothing"
+            )
+        elif mutation["find"] == mutation["replace"]:
+            failures.append(
+                f"mutation {mutation['name']}: replaces its find text with itself"
+            )
+
+    pin = json.loads(pin_path.read_text())
+    for component in ("chrome", "chromedriver"):
+        digest = pin["downloads"][component]["sha256"]
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            failures.append(f"browser pin for {component} is not a SHA-256 digest")
+        version = pin["chrome_for_testing_version"]
+        if version not in pin["downloads"][component]["url"]:
+            failures.append(
+                f"browser pin for {component} points at a URL that is not the "
+                f"pinned version {version}"
+            )
+    base_digest = pin["base_image"]["manifest_digest"]
+    if base_digest not in containerfile.read_text():
+        failures.append(
+            "the Containerfile's base image is not the digest pinned in "
+            "browser-pin.json"
+        )
+
+    # --record-only exists to capture a pre-repair baseline, where the failures
+    # are the evidence. In CI it would turn the gate into a reporter.
+    workflow_text = workflow.read_text()
+    if "test-ui-browser.sh" not in workflow_text:
+        failures.append("foundation.yml does not run the browser gate at all")
+    for line in workflow_text.splitlines():
+        if "--record-only" in line and not line.lstrip().startswith("#"):
+            failures.append(
+                "foundation.yml passes --record-only, which would let the "
+                f"browser gate report failures instead of failing: {line.strip()!r}"
+            )
+
+    if failures:
+        for failure in failures:
+            print(f"UI browser gate coherence failure: {failure}", file=sys.stderr)
+        return 1
+
+    print(
+        f"UI browser gate coherence passed: {len(names)} assertions, "
+        f"all pinned at {pinned} and all mutation-proved."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

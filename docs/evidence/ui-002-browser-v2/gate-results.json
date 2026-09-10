@@ -1,0 +1,117 @@
+{
+  "assertion_count_matches": true,
+  "assertions": [
+    {
+      "assertion": "desktop_dashboard_lists_builds",
+      "detail": "1 row(s), first build id '33333333-3333-4333-8333-333333333333'",
+      "passed": true
+    },
+    {
+      "assertion": "desktop_pipeline_validate_accepts_valid_source",
+      "detail": "error-styled=False, result begins '{\\n  \"semantic_digest\": \"f9e0517d07626c7c4c7b3ce7281b9e4c8ed95cebc49015b83e5ab4d6'",
+      "passed": true
+    },
+    {
+      "assertion": "desktop_pipeline_plan_renders_stages",
+      "detail": "plan result begins '{\\n  \"parameters\": {},\\n  \"schema_major\": 1,\\n  \"schema_minor\": 1,\\n  \"semantic_dige'",
+      "passed": true
+    },
+    {
+      "assertion": "desktop_pipeline_save_and_submit",
+      "detail": "save '{\\n  \"created_at_unix_ms\": 1,\\n  \"operational_generation\": 1,\\n'; submit '{\\n  \"attempt_id\": \"44444444-4444-4444-8444-444444444444\",\\n  '",
+      "passed": true
+    },
+    {
+      "assertion": "strict_yaml_refusal_surfaced_to_user",
+      "detail": "error-styled=True, rendered refusal 'pipeline_rejected: DuplicateKey at 3:0: duplicate mapping key \"name\"'",
+      "passed": true
+    },
+    {
+      "assertion": "desktop_build_view_renders_all_panels",
+      "detail": "populated {'build-approvals': 2, 'build-graph': 133, 'build-logs': 28, 'build-summary': 330, 'build-tests': 76}",
+      "passed": true
+    },
+    {
+      "assertion": "desktop_audit_view_renders_events",
+      "detail": "audit output begins '{\\n  \"events\": [\\n    {\\n      \"kind\": \"build.submitted\",\\n      \"sequence\": 1\\n    }'",
+      "passed": true
+    },
+    {
+      "assertion": "desktop_explain_view_renders_reason",
+      "detail": "explain output begins '{\\n  \"reason\": \"ready\"\\n}'",
+      "passed": true
+    },
+    {
+      "assertion": "landmarks_present_in_rendered_dom",
+      "detail": "{\"banner\": 1, \"h1\": 1, \"labelledSections\": 7, \"live\": [\"connection-state\", \"operation-result\"], \"main\": 1, \"nav\": 1, \"sections\": 7}",
+      "passed": true
+    },
+    {
+      "assertion": "every_control_has_accessible_name",
+      "detail": "every rendered control resolves a non-empty name",
+      "passed": true
+    },
+    {
+      "assertion": "keyboard_focus_is_visible_through_journeys",
+      "detail": "79 keyboard stops across 5 views, every one with a visible ring",
+      "passed": true
+    },
+    {
+      "assertion": "focus_survives_repeated_live_updates",
+      "detail": "focus before {'id': None, 'row': '33333333-3333-4333-8333-333333333333', 'text': 'Open'} -> after {'focusVisible': True, 'id': None, 'isBody': False, 'row': '33333333-3333-4333-8333-333333333333', 'tag': 'BUTTON', 'text': 'Open'}",
+      "passed": true
+    },
+    {
+      "assertion": "live_status_region_announces_changes",
+      "detail": "regions {\"connection\": \"Context active\", \"live\": \"polite\", \"logsLive\": \"polite\", \"resultLive\": \"polite\"}, result text changed=True",
+      "passed": true
+    },
+    {
+      "assertion": "viewport_390_has_no_horizontal_overflow",
+      "detail": "inner width 390px, no view overflows",
+      "passed": true
+    },
+    {
+      "assertion": "console_has_no_script_errors",
+      "detail": "no script errors logged across every journey",
+      "passed": true
+    },
+    {
+      "assertion": "console_has_no_unexpected_resource_failures",
+      "detail": "1 deliberately provoked refusal(s), nothing else",
+      "passed": true
+    }
+  ],
+  "browser": {
+    "chrome": "Google Chrome for Testing 153.0.8010.36",
+    "chromedriver": "ChromeDriver 153.0.8010.36 (507c6ee3e2f3b2ca0e660547e5b9ea4820c67f4c-refs/branch-heads/8010@{#906})"
+  },
+  "expected_assertions": 16,
+  "failed": 0,
+  "failing_assertions": [],
+  "gate_protocol": "mcloving.ui.browser/1",
+  "label": "ui-002-accepted-repaired-client",
+  "observed_assertions": 16,
+  "passed": 16,
+  "recorded_without_enforcing": false,
+  "ui_source": {
+    "combined_sha256": "bda84c9c7840a7da5c9eabb44df0001532d1e75bae5c1c11361de151ac881911",
+    "files": {
+      "app.css": {
+        "bytes": 2709,
+        "lines": 56,
+        "sha256": "1d59977bd9140381e3d732dd7f80f3c8f5863e9cc67760e356343c139cf9a1e0"
+      },
+      "app.js": {
+        "bytes": 16856,
+        "lines": 451,
+        "sha256": "66063a426b12d502dc79996d17ded98a2a2d2a06c1160be769dedf09395a2520"
+      },
+      "index.html": {
+        "bytes": 7609,
+        "lines": 164,
+        "sha256": "035c77205d6a9d9209edfa62fcdea7fe3c0330437eae29f647423de81b7b319c"
+      }
+    }
+  }
+}

@@ -97,6 +97,27 @@ function showView(name) {
   byId(`${name}-view`).classList.remove("hidden");
 }
 
+// Rebuilding a list with replaceChildren() discards whatever the user was on.
+// Both live surfaces do it -- the dashboard refreshes its build rows, and the
+// build view re-renders its artifact rows on every live tick -- so a keyboard
+// user is thrown back to the top of the document each time either fires. Put
+// focus back on the same logical row, matched by a stable key rather than by
+// position, because the row may have moved or the list may have reordered.
+function preserveFocusAcross(root, rebuild) {
+  const active = document.activeElement;
+  const owner = active && root.contains(active) ?
+    active.closest("[data-focus-key]") : null;
+  const key = owner ? owner.dataset.focusKey : null;
+  rebuild();
+  if (key === null) return;
+  for (const row of root.querySelectorAll("[data-focus-key]")) {
+    if (row.dataset.focusKey !== key) continue;
+    const target = row.querySelector("button, a, input, select, textarea");
+    if (target) target.focus();
+    return;
+  }
+}
+
 function buildPageQuery(status, cursor) {
   const query = new URLSearchParams({ limit: "100" });
   if (status) query.set("status", status);
@@ -124,27 +145,30 @@ async function loadAllBuilds(status) {
 async function refreshBuilds() {
   const builds = await loadAllBuilds(byId("build-status").value);
   const body = byId("build-list");
-  body.replaceChildren();
-  for (const build of builds) {
-    const row = document.createElement("tr");
-    const id = document.createElement("td");
-    id.textContent = build.build_id;
-    const state = document.createElement("td");
-    state.textContent = build.status;
-    const created = document.createElement("td");
-    created.textContent = new Date(Number(build.created_at_unix_micros / 1000)).toISOString();
-    const open = document.createElement("td");
-    const button = document.createElement("button");
-    button.textContent = "Open";
-    button.addEventListener("click", () => {
-      byId("build-id").value = build.build_id;
-      showView("build");
-      action(loadBuild);
-    });
-    open.append(button);
-    row.append(id, state, created, open);
-    body.append(row);
-  }
+  preserveFocusAcross(body, () => {
+    body.replaceChildren();
+    for (const build of builds) {
+      const row = document.createElement("tr");
+      row.dataset.focusKey = build.build_id;
+      const id = document.createElement("td");
+      id.textContent = build.build_id;
+      const state = document.createElement("td");
+      state.textContent = build.status;
+      const created = document.createElement("td");
+      created.textContent = new Date(Number(build.created_at_unix_micros / 1000)).toISOString();
+      const open = document.createElement("td");
+      const button = document.createElement("button");
+      button.textContent = "Open";
+      button.addEventListener("click", () => {
+        byId("build-id").value = build.build_id;
+        showView("build");
+        action(loadBuild);
+      });
+      open.append(button);
+      row.append(id, state, created, open);
+      body.append(row);
+    }
+  });
   return { items: builds, next_after: null };
 }
 
@@ -233,19 +257,22 @@ async function loadBuild() {
 
 function renderArtifacts(artifacts) {
   const root = byId("build-artifacts");
-  root.replaceChildren();
-  for (const artifact of artifacts) {
-    const row = document.createElement("div");
-    row.className = "artifact";
-    const label = document.createElement("span");
-    label.textContent = `${artifact.name} (${artifact.bytes} bytes, ${artifact.status})`;
-    const button = document.createElement("button");
-    button.textContent = "Download";
-    button.disabled = artifact.status !== "available";
-    button.addEventListener("click", () => action(() => downloadArtifact(artifact)));
-    row.append(label, button);
-    root.append(row);
-  }
+  preserveFocusAcross(root, () => {
+    root.replaceChildren();
+    for (const artifact of artifacts) {
+      const row = document.createElement("div");
+      row.className = "artifact";
+      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.name}`;
+      const label = document.createElement("span");
+      label.textContent = `${artifact.name} (${artifact.bytes} bytes, ${artifact.status})`;
+      const button = document.createElement("button");
+      button.textContent = "Download";
+      button.disabled = artifact.status !== "available";
+      button.addEventListener("click", () => action(() => downloadArtifact(artifact)));
+      row.append(label, button);
+      root.append(row);
+    }
+  });
 }
 
 async function downloadArtifact(artifact) {
