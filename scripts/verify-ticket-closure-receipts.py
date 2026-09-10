@@ -377,7 +377,7 @@ CLOSED_TICKETS = frozenset({
     # fixes are its acceptance, and its own row went DONE in the same change.
     "FOUND-002", "HYG-001", "HYG-002", "IDP-001", "INPUT-001", "INV-001",
     "INV-002", "INV-003", "INV-004", "IR-001", "IR-002", "IR-003",
-    "IR-004", "JCOMP-001", "JCOMP-002", "JCOMP-002A", "JCOMP-002B", "JCOMP-002C", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
+    "IR-004", "JCOMP-001", "JCOMP-002", "JCOMP-002A", "JCOMP-002B", "JCOMP-002C", "JCOMP-003", "JOBSTATE-001", "MIG-000", "MIG-001", "MIG-002",
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
     "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
     "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",
