@@ -41,17 +41,16 @@ stale container image — and the proof would be worthless while looking perfect
 
 ## Collateral failures are recorded, not hidden
 
-Three mutations turned a second assertion red as well. Each is honest coupling
-rather than an imprecise assertion, and each is recorded in
-`mutation-results.json` under `collateral_failures`:
+6 of the 21 mutations turned a second assertion red as well. Each is honest coupling rather than an imprecise assertion, and each is recorded in `mutation-results.json` under `collateral_failures`. This table is derived from that file, and `scripts/verify-ui-browser-gate.py` refuses a README that does not match it.
 
 | Mutation | Also red | Why |
 |---|---|---|
-| `dashboard-rows-never-appended` | `focus_survives_repeated_live_updates` | With no build row rendered there is no control to put focus on, so the focus assertion cannot be evaluated and reports failure rather than passing vacuously. That is the intended behaviour — a focus check that passes when there is nothing to focus is the vacuous-success shape. |
+| `dashboard-rows-never-appended` | `focus_survives_repeated_live_updates` | With no build row there is no control to put focus on, so the focus assertion reports failure rather than passing vacuously. That is intended: a focus check that passes when there is nothing to focus is the vacuous-success shape. |
 | `validate-button-unwired` | `strict_yaml_refusal_surfaced_to_user` | Both assertions travel through the same button. Unwiring it removes the accepted case and the refused case together. |
+| `focus-not-preserved-across-refresh` | `focus_survives_build_view_live_refresh` | This disables the shared `preserveFocusAcross` helper, which both live surfaces call, so both go red. The build-view assertion has its own mutations that touch only the `renderArtifacts` call site, which is what proves it binds independently rather than by borrowing the dashboard's coverage. |
 | `live-region-not-announced` | `landmarks_present_in_rendered_dom` | The landmark assertion requires at least two `[role=status][aria-live]` regions, so stripping `aria-live` from the connection-state region is visible to both. |
-| `focus-not-preserved-across-refresh` | `focus_survives_build_view_live_refresh` | This one disables the shared `preserveFocusAcross` helper, which both live surfaces call, so both go red. The build-view assertion has its own mutation (`artifact-focus-not-preserved-across-live-refresh`) that touches only the `renderArtifacts` call site, which is what proves it binds independently rather than by borrowing the dashboard's coverage. |
-| `artifact-rows-never-rendered` | `focus_survives_build_view_live_refresh` | With no artifact row there is no control to focus, so the focus assertion reports failure rather than passing vacuously. |
+| `artifact-rows-never-rendered` | `artifact_download_delivers_content`, `focus_survives_build_view_live_refresh` | With no artifact row there is nothing to focus and nothing to download, so both artifact assertions fail rather than passing vacuously. |
+| `artifact-download-requests-the-wrong-artifact` | `console_has_no_unexpected_resource_failures` | The fixture answers 404 for an artifact it does not have, and a 404 is precisely what the console assertion calls an unexpected resource failure. Honest coupling, not an imprecise assertion. |
 
 The requirement is that the **named** assertion goes red, not that it is the only
 one. A mutation whose named assertion stayed green would be a harness failure and

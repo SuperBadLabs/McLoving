@@ -251,6 +251,39 @@ def main():
                 f"ui-002-mutation-v1/README.md does not state the result its own "
                 f"mutation-results.json records ({expected!r})"
             )
+        # The collateral table drifted twice by hand: it claimed three coupled
+        # mutations when the JSON recorded six, and listed one collateral for a
+        # mutation that had two. Derive the requirement from the file instead of
+        # trusting prose to keep up.
+        coupled = [r for r in mutation["results"] if r["collateral_failures"]]
+        if f"{len(coupled)} of the {mutation['mutations_run']} mutations" not in mutation_readme:
+            failures.append(
+                f"ui-002-mutation-v1/README.md does not state how many mutations "
+                f"had collateral failures ({len(coupled)} of "
+                f"{mutation['mutations_run']})"
+            )
+        for record in coupled:
+            row = next(
+                (
+                    line
+                    for line in mutation_readme.splitlines()
+                    if f"`{record['mutation']}`" in line and line.startswith("|")
+                ),
+                None,
+            )
+            if row is None:
+                failures.append(
+                    f"ui-002-mutation-v1/README.md has no collateral row for "
+                    f"{record['mutation']}"
+                )
+                continue
+            for assertion in record["collateral_failures"]:
+                if f"`{assertion}`" not in row:
+                    failures.append(
+                        f"ui-002-mutation-v1/README.md's row for "
+                        f"{record['mutation']} omits its recorded collateral "
+                        f"failure {assertion}"
+                    )
         if str(mutation["expected_assertions"]) not in mutation_readme:
             failures.append(
                 f"ui-002-mutation-v1/README.md does not state the assertion count "
