@@ -9,6 +9,8 @@ use std::sync::Mutex;
 struct StallingRenewals {
     requests: Arc<Mutex<Vec<tokio::time::Instant>>>,
     recover_after_first: bool,
+    healthy_response_delay: Option<Duration>,
+    first_response_request_count: Arc<Mutex<Option<usize>>>,
 }
 
 #[tonic::async_trait]
@@ -22,7 +24,13 @@ impl wire::agent_control_server::AgentControl for StallingRenewals {
             requests.push(tokio::time::Instant::now());
             requests.len()
         };
-        if ordinal == 1 || !self.recover_after_first {
+        if let Some(delay) = self.healthy_response_delay {
+            tokio::time::sleep(delay).await;
+            let mut first = self.first_response_request_count.lock().unwrap();
+            if first.is_none() {
+                *first = Some(self.requests.lock().unwrap().len());
+            }
+        } else if ordinal == 1 || !self.recover_after_first {
             // Keep a real HTTP/2 request pending. No response/refusal is sent.
             return std::future::pending().await;
         }
@@ -96,16 +104,19 @@ impl wire::agent_control_server::AgentControl for StallingRenewals {
     }
 }
 
-async fn run_stalled_peer(recover_after_first: bool) {
+async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Duration>) {
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = socket.local_addr().unwrap();
     drop(socket);
     let requests = Arc::new(Mutex::new(Vec::new()));
     let server_stop = CancellationToken::new();
     let _server_guard = server_stop.clone().drop_guard();
+    let first_response_request_count = Arc::new(Mutex::new(None));
     let peer = StallingRenewals {
         requests: requests.clone(),
         recover_after_first,
+        healthy_response_delay,
+        first_response_request_count: first_response_request_count.clone(),
     };
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -143,7 +154,11 @@ async fn run_stalled_peer(recover_after_first: bool) {
         },
         LeaseRenewalControl {
             lease_seconds: 5,
-            renewal_interval: Duration::from_secs(1),
+            renewal_interval: if healthy_response_delay.is_some() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(1)
+            },
             lease_started_at: started,
             lease_window: Duration::from_secs(5),
             termination_grace: Duration::from_secs(1),
@@ -153,7 +168,25 @@ async fn run_stalled_peer(recover_after_first: bool) {
             loss_reason: loss_reason.clone(),
         },
     ));
-    if recover_after_first {
+    if healthy_response_delay.is_some() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(count) = *first_response_request_count.lock().unwrap() {
+                    assert_eq!(count, 1, "a healthy response must arrive before any retry");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the healthy delayed response must not be repeatedly cancelled");
+        tokio::time::sleep_until(deadline + Duration::from_millis(100)).await;
+        assert!(!execution_cancellation.is_cancelled());
+        assert!(!authority_lost.is_cancelled());
+        assert!(loss_reason.get().is_none());
+        stop.cancel();
+        assert!(task.await.unwrap().is_ok());
+    } else if recover_after_first {
         // First request starts at about one second. Its bounded ask expires at
         // two seconds; a second full sleep would miss the original three-second
         // cancellation deadline just as surely as one unbounded hanging RPC.
@@ -195,10 +228,15 @@ async fn run_stalled_peer(recover_after_first: bool) {
 
 #[tokio::test]
 async fn a_stalled_renewal_response_is_retried_and_recovery_keeps_authority() {
-    run_stalled_peer(true).await;
+    run_peer(true, None).await;
 }
 
 #[tokio::test]
 async fn repeated_stalled_responses_never_extend_the_held_term() {
-    run_stalled_peer(false).await;
+    run_peer(false, None).await;
+}
+
+#[tokio::test]
+async fn healthy_response_slower_than_the_renewal_cadence_is_not_retried() {
+    run_peer(true, Some(Duration::from_millis(200))).await;
 }

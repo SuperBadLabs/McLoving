@@ -1775,7 +1775,9 @@ async fn renew_lease(
             // A connected peer may keep one RPC pending through its outage.
             // Bound each ask independently so it cannot consume the entire
             // held term and prevent a later request from observing recovery.
-            let rpc_deadline = (request_sent_at + retry_interval).min(lease_deadline);
+            // The response allowance is independent of a fast renewal cadence:
+            // a healthy 200ms response must not be retried every 100ms.
+            let rpc_deadline = (request_sent_at + Duration::from_secs(1)).min(lease_deadline);
             let renewal = tokio::select! {
                 () = stop.cancelled() => return Ok(()),
                 result = tokio::time::timeout_at(

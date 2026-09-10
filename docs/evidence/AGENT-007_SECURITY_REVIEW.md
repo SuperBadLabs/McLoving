@@ -379,7 +379,7 @@ A subsequent independent P1 review found a renewal RPC could remain pending
 until the entire held cancellation deadline, preventing another ask from
 observing controller recovery. Those green checks did not cover this case.
 
-Each periodic renewal RPC now expires at the earlier of its request-start time
+That correction made each periodic renewal RPC expire at the earlier of its request-start time
 plus the retry interval and the unchanged held cancellation deadline. Time
 spent awaiting that RPC counts toward the retry cadence; timeout does not add
 another full sleep. Only a validated successful receipt establishes a new term.
@@ -395,3 +395,31 @@ unanswered-expiry cause, and no request after that bound. These are transport
 regressions, separate from the five actual PostgreSQL/controller/agent gates;
 they do not claim actual process containment by themselves. Final corrected-head
 local and protected CI evidence must be earned separately before closure.
+
+## Healthy response allowance follow-up after main aaa3778
+
+PR132 merged as `aaa3778` with the reviewed tree and successful exact-PR-head
+checks. The subsequent main Controller PostgreSQL job failed the existing
+`remote_work` transaction budget: the trivial build succeeded, but its measured
+tenant transaction starts were 33 against the unchanged limit of 25. The job
+logged pending-response timeouts and recovery after six unanswered requests.
+The fixture configures a 100ms renewal cadence; using that cadence as the RPC
+response allowance cancels healthy replies taking longer than 100ms and can
+create unnecessary transaction starts. The log does not identify which of the
+extra starts occurred inside the measured window, so it is not an exact
+per-request attribution or evidence of a fencing failure. The five lease gates
+were not reached in that failed main job. Closure and JCOMP-003 remain blocked.
+
+The bounded follow-up gives every renewal ask a one-second response allowance,
+still capped by the unchanged held cancellation deadline. Retry scheduling
+continues to count elapsed RPC time toward the configured cadence. A fast
+cadence therefore does not imply an equally short allowance for an otherwise
+healthy response; a genuinely stalled ask still cannot consume the whole term.
+The 25-transaction budget is unchanged.
+
+A new real tonic test configures 100ms cadence and a healthy 200ms response.
+It requires exactly one request before that first response and continued
+validated authority beyond the original term. The existing actually stalled
+recovery and all-stalled expiry tests remain in place. Final follow-up source
+review, exact-head local/CI validation and successful exact-main Foundation plus
+actual native Windows execution must be earned before closure.
