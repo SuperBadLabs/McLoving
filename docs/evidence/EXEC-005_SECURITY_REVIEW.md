@@ -250,3 +250,77 @@ tests, strict agent Clippy and independent review passed. This proves the loader
 boundary; pre-advertisement refusal follows configuration construction ordering,
 not a separately executed capability-exchange fixture. Prior candidate gates
 remain source-qualified and the corrected head still requires protected checks.
+
+
+## Standalone source-helper custody prerequisite, ACTIVE scope
+
+Input PR #140 merged as `30a79f3f3c7c1318d09668da9d77adda266a0889`,
+with exact-main Foundation `34528466630` and actual native Windows
+`34528466620` successful. Its tree equals reviewed candidate `fabddc5`;
+all eight required app-bound checks and three resolved review threads were
+verified before normal protected merge. Those gates qualify the input slice.
+
+The subsequent source change is a standalone prerequisite. The normal
+acquisition entrypoint optionally checks the exact parsed canonical config
+digest before private authority reads or state creation. Missing pins preserve
+the existing interface; malformed, non-Unicode and mismatched pins refuse.
+Internal resolver, askpass and transport modes keep their existing admission
+and deadline checks. Running-image hashing and constructor self-snapshot each
+use a deliberately opened kernel self-image, authenticate original bytes, and
+preserve the existing derived ELF interpreter/runtime binding. Ordinary file
+readers remain bounded and final-symlink refusing, and nonblocking opens reject
+FIFO substitutions without waiting for a writer. The generic file hasher still
+accepts empty regular files.
+
+Independent source review found no changes to native requests, claims, receipts,
+replay, process groups, profile contents, agent dispatch or controller admission.
+The source fixture and full native suite must earn their own results; the
+input gates above do not substitute for them. No source product gate, downstream
+checkout, production source authority or expanded JCOMP-003 claim is earned.
+Source-native commands create nested process groups, so the existing agent
+outer-group emptiness check cannot certify their complete cancellation. This
+is a source-inspected integration mismatch, not an observed process escape.
+Production source-only profile selection, nested-process lifetime enforcement,
+held-directory retained-tree custody and bounded retention ownership remain
+separate obligations. EXEC-005 stays ACTIVE.
+
+Local native verification passed 35 tests: eight library, four CLI, 21 contained
+and two inventory tests, with zero failures or ignored tests. The final
+fixture-only refinement then passed its focused test and strict Clippy; native
+implementation hashes were unchanged. That refinement observes the actual
+held helper's named profile and proves a pretty-printed configuration's raw
+hash differs from its accepted canonical pin.
+
+The real fixture executes an immutable original helper image after replacing
+its former pathname. While authenticated Git traffic is held, it verifies the
+running image hash and all four seals. It then independently checks the native
+HMAC, complete request digest, receipt authority/time fields, Git commit/tree,
+retained manifest/content and modes, unchanged provider repository and absence
+of private authority bytes. Upload-pack POST is counted as a read; unapproved
+routes are denied and counted. Owned-file inotify watches with a positive
+open/read control observe zero credential/key/marker opens for wrong, malformed
+and non-Unicode pins. Eight actual CLI symlink/FIFO cases refuse within bounded
+waits before output state or provider access. Existing loaded profile and
+transport evidence remained unchanged; no host policy or mount mutation was
+performed. These are standalone source gates, not submitted-job source or
+outer-agent descendant-cancellation evidence. Protected PR and exact-main
+Foundation/native Windows results remain separate required observations.
+
+The standalone fixture preserves the existing host-capability contract. The
+named source-profile gate must complete the authenticated positive acquisition.
+Where the native sealed-launcher probe establishes namespace unavailability,
+the fixture executes the real sealed helper and requires exactly
+`transport_namespace_unavailable`, zero provider requests, and no acquisition,
+claim or staging publication. This is an asserted native refusal, not a skipped
+test. Other capable hosts retain the full positive path and verify the actual
+inherited profile. Foundation runs the named source suite; it syntax-checks the
+separate Podman differential script but does not execute that complete script.
+The startup observer represents arbitrary output bytes losslessly as Base64 and
+names its `IN_OPEN`/`IN_ACCESS` event mask.
+
+Local correction validation exercised three actual routes: named-profile
+authenticated acquisition (one passed), the Podman source invocation with the
+differential lane's security settings on this capable host (one positive passed),
+and the unconfined host's existing namespace restriction (one exact refusal
+passed). Strict Clippy passed. No injected denial or host policy mutation was
+needed, and this targeted container run is not a full differential-lane result.

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_source_acquirer::{
     AcquisitionRequest, SourceAcquirer, SourceConfig, content_sha256, parse_json_no_duplicates,
-    read_bounded_regular_file, read_private_bounded_regular_file, sha256_file,
+    read_bounded_regular_file, read_private_bounded_regular_file, running_implementation_sha256,
 };
 #[cfg(unix)]
 use nix::sys::signal::{SigEvent, SigevNotify, Signal};
@@ -361,6 +361,11 @@ async fn run() -> Result<(), ()> {
         .await
         .map_err(|_| ())?;
     let config: SourceConfig = parse_json_no_duplicates(&config_bytes).map_err(|_| ())?;
+    match std::env::var("MCLOVING_SOURCE_ACQUIRER_EXPECTED_CONFIG_SHA256") {
+        Ok(expected) if config.canonical_digest().map_err(|_| ())? == expected => {}
+        Err(std::env::VarError::NotPresent) => {}
+        _ => return Err(()),
+    }
     if (config.test_allow_file_repositories || config.test_allow_http_loopback)
         && std::env::var("MCLOVING_SOURCE_ACQUIRER_TEST_MODE").as_deref() != Ok("1")
     {
@@ -379,9 +384,7 @@ async fn run() -> Result<(), ()> {
         .filter(|marker| !marker.is_empty())
         .map(<[u8]>::to_vec)
         .collect::<Vec<_>>();
-    let implementation_sha256 = sha256_file(&std::env::current_exe().map_err(|_| ())?)
-        .await
-        .map_err(|_| ())?;
+    let implementation_sha256 = running_implementation_sha256().await.map_err(|_| ())?;
     let acquirer = SourceAcquirer::new(
         config,
         implementation_sha256,

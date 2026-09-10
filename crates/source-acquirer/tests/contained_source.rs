@@ -2394,3 +2394,7 @@ fn now_ms() -> i64 {
     )
     .expect("millisecond clock")
 }
+
+#[cfg(target_os = "linux")]
+#[path = "source_sealed_fixture/mod.rs"]
+mod source_sealed_fixture;
