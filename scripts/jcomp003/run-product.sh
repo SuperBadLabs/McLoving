@@ -23,12 +23,32 @@ name="mcloving-jcomp003-${scratch##*.}"
 database="${name}-db"
 runner="${name}-runner"
 compiler="${name}-compiler"
+remove_owned_container() {
+  local container=$1
+  podman rm --force --ignore "$container" || return $?
+  if podman container exists "$container"; then
+    echo "owned container remains after removal: $container" >&2
+    return 1
+  else
+    local exists_status=$?
+    [[ $exists_status == 1 ]] || return "$exists_status"
+  fi
+}
 cleanup() {
   local status=$?
+  local cleanup_status=0
   trap - EXIT
-  podman rm -f "$runner" "$database" "$compiler" >/dev/null 2>&1 || true
-  rm -rf -- "$scratch"
-  exit "$status"
+  # The runner owns a dependency on the database network namespace. Podman's
+  # batch removal can race that dependency, so prove absence before continuing.
+  if remove_owned_container "$runner"; then
+    remove_owned_container "$database" || cleanup_status=$?
+  else
+    cleanup_status=$?
+  fi
+  remove_owned_container "$compiler" || cleanup_status=$?
+  rm -rf -- "$scratch" || cleanup_status=$?
+  (( status == 0 )) || exit "$status"
+  exit "$cleanup_status"
 }
 trap cleanup EXIT
 mkdir "$scratch/source" "$scratch/target" "$scratch/binaries" "$scratch/tracer" "$scratch/tracer/lib"
@@ -144,7 +164,8 @@ assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in log
 assert 'jcomp003-product-evidence positive_builds=11 negative_inputs=12 cleanup=complete' in log
 assert not re.search(r'\bskipped:', log)
 PY
-podman rm -f "$runner" "$database" > "$evidence/cleanup.txt"
+remove_owned_container "$runner" > "$evidence/cleanup.txt" 2>&1
+remove_owned_container "$database" >> "$evidence/cleanup.txt" 2>&1
 ! podman container exists "$runner"
 ! podman container exists "$database"
 printf '%s\n' 'product-containers-removed=true' 'workspaces-and-database-tmpfs-removed=true' > "$evidence/cleanup-verified.txt"
