@@ -92,7 +92,7 @@ below for the current or any future head.
 The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`; `EXEC-005` additionally waits for `JCOMP-003`.
 `GROOVY-001` and `HYG-003` retain their pending parallel lanes, and the new
-`UI-002` -> `UI-003` web-interface lane is serial beside them. M1 keeps the
+`UI-002` through `UI-009` web-interface lane is serial beside them. M1 keeps the
 current compile-only architecture; an interpreter port requires a separate
 decision and ticket. Shared contract or documentation boundaries serialize.
 
@@ -121,12 +121,12 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
 - `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
-  `PARALLEL` lane and neither occupies the dispatch slot. `UI-002` and
-  `UI-003` are `PENDING` too, as one serial web-interface lane; `UI-002`
-  earns a browser-journey claim `UI-001` already made and cannot support, and
-  `UI-003` decides a threat boundary rather than implementing one. Read the
-  board rather than this list for the full set; that is the point of the
-  bullet above.
+  `PARALLEL` lane and neither occupies the dispatch slot. `UI-002` through
+  `UI-009` are `PENDING` too, as one serial web-interface lane; `UI-002`
+  earns a browser-journey claim `UI-001` already made and cannot support,
+  `UI-003` decides a threat boundary rather than implementing one, and the
+  six after it are implementation behind that decision. Read the board rather
+  than this list for the full set; that is the point of the bullet above.
 - Protected-main Foundation, native Windows, and Release Builder runs are green
   at the authoring baseline. All eight required contexts remain bound to GitHub
   Actions app id `15368`.

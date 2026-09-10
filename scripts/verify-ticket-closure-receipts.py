@@ -346,10 +346,10 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # format drift that drops rows fails the gate instead of shrinking the
 # denominator. Raise this when tickets are added.
 #
-# 115 -> 117 on 2026-09-09 with the `UI-002` and `UI-003` rows that earn it.
-# No table is added: both join the existing product-hardening table, so
-# EXPECTED_TABLES does not move.
-MINIMUM_TICKET_ROWS = 117
+# 115 -> 123 on 2026-09-09 with the `UI-002` through `UI-009` rows that earn
+# it. No table is added: all eight join the existing product-hardening table,
+# so EXPECTED_TABLES does not move.
+MINIMUM_TICKET_ROWS = 123
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
