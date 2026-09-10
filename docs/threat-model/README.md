@@ -529,6 +529,10 @@ only contained transfer implementation on the exact-source receipts; no producti
 
 `docs/evidence/AGENT-007_SECURITY_REVIEW.md` records the corrected-source review and closure evidence for TM-003 and the existing cancellation/reconciliation boundaries. Unanswered renewal replies preserve only already-held authority; answered refusals still cancel immediately, and validated request-start anchored receipts alone advance the term. The response allowance is fixed per renewal cycle to the smaller of one second and half the initially remaining cancellation budget; retry cadence is capped by that fixed allowance, and each ask remains bounded by the held deadline, which reserves configured termination grace and a margin. Actual controller/agent gates and native Windows execution support the bounded implementation claim. No protocol or fencing authority changes. Host scheduling and process-supervision assumptions, hostile same-UID containment under SEC-005, agent-death recovery and JCOMP-003 paired evidence remain outside this closure. Existing threat rows were reviewed and need no semantic change because their ownership and enforcement boundaries are unchanged.
 
+## JCOMP-002C negative diagnostic correction (active)
+
+`docs/evidence/JCOMP-002C_SECURITY_REVIEW.md` records the six original-source compiler/admission disagreements and the bounded correction acceptance for TM-008 and TM-020. Independent negative diagnostic agreement must be earned from original bytes; unknown or unproved forms remain unverified. Lexical exclusion does not certify whole-source Groovy validity. Potentially admitted documents still require full parsing, bounded lexical/AST agreement and independent Rust output validation. The correction adds no runnable syntax, runtime effect or production authority. Final source/evidence review and protected-main verification remain pending; no JCOMP-002C closure attribution is recorded yet.
+
 ## Closure attribution
 
 Machine-readable, and read by `scripts/verify-ticket-closure-receipts.py` as the

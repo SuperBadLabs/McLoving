@@ -354,7 +354,9 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # it, taken over the `AGENT-007` raise rather than instead of it. All eight
 # join the same product-hardening table, so EXPECTED_TABLES still does not
 # move.
-MINIMUM_TICKET_ROWS = 124
+# 124 -> 125 on 2026-09-10 for the bounded JCOMP-002C diagnostic correction.
+# The ticket joins an existing table; no closure exemption or debt change.
+MINIMUM_TICKET_ROWS = 125
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the

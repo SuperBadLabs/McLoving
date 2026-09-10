@@ -38,7 +38,7 @@
     (is (= "de65260cf2070442e99882f2f3d72e7531725c1e6a257446cc0cea525c607bd0"
            (profile/sha256-bytes (Files/readAllBytes (.toPath jar))))))
   (is (= compiler/contract-sha256
-         (profile/sha256-bytes (Files/readAllBytes (.toPath (io/file "../../docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md")))))))
+         (profile/sha256-bytes (Files/readAllBytes (.toPath (io/file "../../docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V2.md")))))))
 
 (deftest fixed-contract-population
   (let [fixtures (get (.parseText (JsonSlurper.) (slurp "fixtures/sequential-v1/manifest.json")) "fixtures")]
@@ -194,3 +194,14 @@
         (is (= :rejected (:status result)))
         (is (= "E_RESPONSE_TOO_LARGE" (get-in result [:diagnostic :code])))
         (is (< (alength (protocol/canonical-bytes result)) 65536))))))
+
+(deftest explicit-diagnostic-precedence-preserves-runnable-boundary
+  (let [cases (.parseText (JsonSlurper.) (slurp "fixtures/diagnostic-v2/cases.json"))]
+    (is (= 10 (count cases)))
+    (doseq [case cases]
+      (testing (get case "id")
+        (let [result (response (b (get case "source")))]
+          (is (= (keyword (get case "status")) (:status result)))
+          (is (= (get case "code") (get-in result [:diagnostic :code])))
+          (is (nil? (:result result)))
+          (is (every? false? (vals (:authority result)))))))))

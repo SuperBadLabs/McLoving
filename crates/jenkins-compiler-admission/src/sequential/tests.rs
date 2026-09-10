@@ -993,3 +993,86 @@ fn literal_errors_distinguish_groovy_syntax_from_contract_exclusions() {
         Classification::Unsupported("E_STEP_DYNAMIC")
     );
 }
+
+#[test]
+fn explicit_diagnostic_precedence_refuses_forged_status_and_code() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cases: Value = serde_json::from_slice(
+        &std::fs::read(base.join("compat/jenkins-worker/fixtures/diagnostic-v2/cases.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let cases = cases.as_array().unwrap();
+    assert_eq!(cases.len(), 10);
+    for case in cases {
+        let source = case["source"].as_str().unwrap().as_bytes();
+        let classification = source::classify(source);
+        match case["status"].as_str().unwrap() {
+            "unsupported" => assert!(
+                matches!(classification, Classification::Unsupported(code) if code == case["code"].as_str().unwrap()),
+                "{}: {classification:?}",
+                case["id"]
+            ),
+            "rejected" => assert!(
+                matches!(classification, Classification::Rejected(code) if code == case["code"].as_str().unwrap()),
+                "{}: {classification:?}",
+                case["id"]
+            ),
+            _ => panic!("unexpected diagnostic fixture class"),
+        }
+        let ctx = context(source);
+        let wire = response(source, &ctx);
+        assert!(validate_sequential_response(&encoded(&wire), expected(source, &ctx)).is_ok());
+        let mut wrong_code = wire.clone();
+        change(
+            &mut wrong_code,
+            &["diagnostic", "code"],
+            text("E_DECLARATIVE_ROOT"),
+        );
+        assert!(
+            validate_sequential_response(&encoded(&wrong_code), expected(source, &ctx)).is_err()
+        );
+        let mut invented_admission = wire;
+        change(&mut invented_admission, &["status"], keyword("compiled"));
+        assert!(
+            validate_sequential_response(&encoded(&invented_admission), expected(source, &ctx))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn uncertain_nested_interpolation_does_not_borrow_lexical_denial() {
+    let unknown = program(r#"sh "${ /\q/ }""#);
+    assert_eq!(source::classify(&unknown), Classification::Unclassified);
+    let known = program(r#"sh(/"x\m"/)"#);
+    let known_context = context(&known);
+    let mut claimed = response(&known, &known_context);
+    let unknown_context = context(&unknown);
+    change(
+        &mut claimed,
+        &["source-context"],
+        unknown_context.value.clone(),
+    );
+    change(
+        &mut claimed,
+        &["source", "bytes"],
+        Edn::Integer(unknown.len() as i64),
+    );
+    change(
+        &mut claimed,
+        &["source", "sha256"],
+        text(&sha256_hex(&unknown)),
+    );
+    change(
+        &mut claimed,
+        &["source", "context-sha256"],
+        text(&unknown_context.context_sha256()),
+    );
+    assert_eq!(
+        validate_sequential_response(&encoded(&claimed), expected(&unknown, &unknown_context))
+            .unwrap_err()
+            .code,
+        "E_SOURCE_CLASSIFICATION"
+    );
+}

@@ -27,8 +27,20 @@
 (def escapes {\\ \\ \' \' \" \" \$ \$ \n \newline \r \return \t \tab \b \backspace \f \formfeed})
 (defn tokens [^String source]
   ;; Groovy consumes Unicode escapes before comments; inspect original runs.
-  (doseq [[_ run] (re-seq #"(\\+)u" source)]
-    (when (odd? (count run)) (fail! "E_SOURCE_LEXICAL")))
+  (let [excluded (atom false)]
+    ;; Inspect every raw introducer before returning lexical exclusion: an
+    ;; earlier valid Unicode escape must not hide a later malformed one.
+    (loop [offset 0]
+      (when-let [[match run _] (first (re-seq #"(\\+)(u+)" (subs source offset)))]
+        (let [start (.indexOf source ^String match offset)
+              end (+ start (count match))]
+          (when (odd? (count run))
+            (when-not (and (<= (+ end 4) (count source))
+                           (re-matches #"[0-9a-fA-F]{4}" (subs source end (+ end 4))))
+              (fail! "E_SOURCE_PARSE"))
+            (reset! excluded true))
+          (recur end))))
+    (when @excluded (fail! "E_SOURCE_LEXICAL")))
   (let [n (count source)
         at (fn [i] (when (< i n) (.charAt source i)))
         starts (fn [i s] (.startsWith source ^String s i))]
@@ -43,6 +55,11 @@
             (starts i "/*")
             (if-let [end (str/index-of source "*/" (+ i 2))]
               (recur (+ end 2) out) (fail! "E_SOURCE_PARSE"))
+            ;; A slash beginning a parenthesized argument is excluded before
+            ;; interior quotes can be mistaken for ordinary string literals.
+            ;; This is a lexical boundary, not a full Groovy validity claim.
+            (and (= c \/) (= \( (:kind (last (remove #(= :lf (:kind %)) out)))))
+            (fail! "E_SOURCE_LEXICAL")
             (#{\{ \} \( \) \;} c) (recur (inc i) (conj out {:kind c}))
             (or (= c \') (= c \"))
             (let [triple (starts i (apply str (repeat 3 c)))
@@ -54,7 +71,11 @@
                       (starts j delim) [(+ j (count delim)) (str value) dynamic]
                       (= (at j) \\)
                       (let [e (at (inc j))]
-                        (when-not (contains? escapes e) (fail! "E_SOURCE_LEXICAL"))
+                        (when-not (contains? escapes e)
+                          (fail! (if (or (nil? e) (and (not dynamic) e
+                                          (or (= e \tab) (<= 32 (int e) 126))
+                                          (not (<= (int \0) (int e) (int \7)))))
+                                   "E_SOURCE_PARSE" "E_SOURCE_LEXICAL")))
                         (.append value ^char (get escapes e))
                         (recur (+ j 2) value dynamic))
                       (and (not triple) (= (at j) \newline)) (fail! "E_SOURCE_PARSE")

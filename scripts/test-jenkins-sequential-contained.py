@@ -11,7 +11,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / 'compat/jenkins-worker/fixtures/sequential-v1'
 MANIFEST_SHA256 = '654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727'
-CONTRACT_SHA256 = 'ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe'
+CONTRACT_SHA256 = 'ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe'  # Historical retained-v1 verifier pin.
+CURRENT_CONTRACT_SHA256 = '264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41'
 PROFILE_SHA256 = 'feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271'
 RETAINED_CAMPAIGN_SHA256 = '1031912c20109e7585b20e8ef43bdc094c2d5f5cf9989a9c0c55630f18d854c2'
 RETAINED_IMAGE_SHA256 = '0b687a72f8cd99a1c8401796714e5f9867f2288d7aff80bf1fdd22e2ac417232'
@@ -232,7 +233,7 @@ def main():
                             'launch_context_sha256': digest(context_bytes)}
                 if status == 'admitted':
                     bindings.update(state='disabled', execution_authority='false',
-                        contract_sha256=CONTRACT_SHA256, source_sha256=digest(source),
+                        contract_sha256=CURRENT_CONTRACT_SHA256, source_sha256=digest(source),
                         context_sha256=digest(context_bytes),
                         protocol='mcloving.jenkins.compiler/2',
                         compiler='mcloving-jenkins-compiler-worker/2',

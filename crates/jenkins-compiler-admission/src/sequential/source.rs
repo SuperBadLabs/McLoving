@@ -135,12 +135,24 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                 }
                 i += 2;
             }
+            '/' if tokens
+                .iter()
+                .rev()
+                .find(|token| !matches!(token, Token::Lf))
+                == Some(&Token::Punct('(')) =>
+            {
+                // Exclude a slash beginning a parenthesized argument before
+                // misreading its interior quotes as ordinary string literals.
+                // This does not assert full Groovy syntax validity.
+                return Err(Unsupported("E_SOURCE_LEXICAL"));
+            }
             '\'' | '"' => {
                 let quote = chars[i];
                 let triple = chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote);
                 i += if triple { 3 } else { 1 };
                 let mut text = String::new();
                 let mut dynamic = false;
+                let mut known_literal_segment = true;
                 loop {
                     let Some(&ch) = chars.get(i) else {
                         return Err(if dynamic {
@@ -167,7 +179,7 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                             // Valid Groovy octal and physical LF escapes are
                             // deliberately outside the protected language.
                             '0'..='7' | '\n' => {
-                                return Err(if dynamic {
+                                return Err(if dynamic && !known_literal_segment {
                                     Unclassified
                                 } else {
                                     Unsupported("E_SOURCE_LEXICAL")
@@ -221,6 +233,12 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                                 return Err(Rejected("E_SOURCE_PARSE"));
                             }
                             dynamic = true;
+                            if let Some(end) = flat_interpolation_end(&chars, i) {
+                                text.extend(chars[i..end].iter());
+                                i = end;
+                                continue;
+                            }
+                            known_literal_segment = false;
                         }
                         text.push(ch);
                         i += 1;
@@ -243,6 +261,36 @@ fn lex(source: &str) -> Result<Vec<Token>> {
         }
     }
     Ok(tokens)
+}
+
+// Recognize only flat identifier/property interpolation boundaries. This does
+// not admit GStrings; it permits a later literal-segment lexical exclusion to
+// be identified without guessing where a nested expression/string ends.
+fn flat_interpolation_end(chars: &[char], start: usize) -> Option<usize> {
+    if chars.get(start..start + 2) != Some(&['$', '{']) {
+        return None;
+    }
+    let mut i = start + 2;
+    loop {
+        if !chars
+            .get(i)
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
+        {
+            return None;
+        }
+        i += 1;
+        while chars
+            .get(i)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+        {
+            i += 1;
+        }
+        match chars.get(i) {
+            Some('}') => return Some(i + 1),
+            Some('.') => i += 1,
+            _ => return None,
+        }
+    }
 }
 
 fn malformed_interpolation_prefix(tail: &[char], triple: bool) -> bool {

@@ -10,7 +10,7 @@
            (org.codehaus.groovy.ast.builder AstBuilder)
            (org.codehaus.groovy.control CompilePhase SourceUnit MultipleCompilationErrorsException)))
 
-(def contract-sha256 "ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe")
+(def contract-sha256 "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41")
 (def compiler-id "mcloving-jenkins-compiler-worker/2")
 (defn- reject!
   [code]
@@ -146,6 +146,11 @@
 
 (defn parse! [bytes]
   (let [source (lexer/source-text! bytes)]
+    ;; Lexically excluded source has no full-Groovy validity claim. Determine
+    ;; that boundary before full parsing, using the same precedence as the
+    ;; independent recognizer. Every eligible source still requires both the
+    ;; Groovy parse and AST agreement below before it can be compiled.
+    (lexer/tokens source)
     ;; SourceUnit.parse is PARSING only. Never convert arbitrary excluded forms.
     (try
       (let [unit (SourceUnit/create "Jenkinsfile" source)]
