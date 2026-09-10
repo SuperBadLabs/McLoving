@@ -11,7 +11,7 @@ UI at all.
 Two decisions come out of here, not one:
 
   run-ui-gate       the executing browser gate, ~90s plus image build
-  run-ui-mutations  the mutation proof, ~20 minutes
+  run-ui-mutations  the mutation proof, twenty-two browser runs, ~28 minutes
 
 They are separate because they protect different things. The gate proves the
 *client* still behaves; the mutation proof proves the *assertions still bind*.

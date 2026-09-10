@@ -607,7 +607,7 @@ jobs:
         run: bash scripts/test-ui-browser.sh --output-dir "${RUNNER_TEMP}/ui-browser"
       - name: Mutation-prove every browser assertion
         # UI-002 acceptance (4): removed, each gate must turn a named test red.
-        # Seventeen browser runs, so it is scoped by scripts/ui-browser-impact.py
+        # Twenty-two browser runs, so it is scoped by scripts/ui-browser-impact.py
         # to changes that can make an assertion stop binding -- any change to the
         # gate's own definition, or a client change at or above its line
         # threshold. The cheap half of that guarantee, that every mutation still

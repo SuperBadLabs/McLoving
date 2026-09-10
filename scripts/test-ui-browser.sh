@@ -59,6 +59,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Refuse a port that is already answering. The readiness probe below cannot tell
+# our fixture from someone else's: if a fixture left behind by an uncatchable
+# kill still holds this port, our own bind loses, the probe connects to the
+# stale listener and declares it ready, and the browser then renders the UI
+# compiled into THAT binary while the evidence records a source manifest read
+# from the current checkout. Falsely bound evidence is worse than no evidence,
+# and this gate exists to stop exactly that.
+if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+  exec 3<&- 3>&-
+  printf 'something is already listening on 127.0.0.1:%s; refusing to run\n' \
+    "${port}" >&2
+  printf 'a fixture from an interrupted run may have survived -- check with\n' >&2
+  printf '  ss -lptn "sport = :%s"\n' "${port}" >&2
+  printf 'or set MCLOVING_UI_FIXTURE_PORT to a free port\n' >&2
+  exit 70
+fi
+
 UI_FIXTURE_ADDRESS="127.0.0.1:${port}" \
   "${repo_root}/target/debug/examples/ui_browser_fixture" >"${fixture_log}" 2>&1 &
 fixture_pid=$!
@@ -77,6 +94,13 @@ for _ in $(seq 1 100); do
   fi
   sleep 0.1
 done
+# The child must still be the one holding the port. It was alive on the last
+# iteration of the loop above, but "alive then" is not "alive now".
+if [[ -n "${listening}" ]] && ! kill -0 "${fixture_pid}" 2>/dev/null; then
+  printf 'the UI fixture exited after the port answered; the listener is not ours\n' >&2
+  cat "${fixture_log}" >&2
+  exit 70
+fi
 if [[ -z "${listening}" ]]; then
   # Falling through here and running the gate anyway would report a browser
   # failure for what is really a fixture that never came up.

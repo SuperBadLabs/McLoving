@@ -22,7 +22,7 @@ FOUNDATION_JOBS = (
 WINDOWS_FIELDS = ("impact", "run-windows", "windows-agent")
 
 # `ui-browser` is the one Foundation lane that does not always execute: the
-# mutation proof inside it is seventeen browser runs, so `ui-impact` decides
+# mutation proof inside it is twenty-two browser runs, so `ui-impact` decides
 # whether the change can affect the interface at all. That makes it the same
 # shape as the Windows lane, and it carries the same hazard -- a skipped
 # required check reads as a pass to branch protection (TM-052). So the waiver

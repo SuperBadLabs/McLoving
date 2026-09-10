@@ -140,7 +140,7 @@ decisions.
 | Decision | What it costs | When it is required |
 |---|---|---|
 | `run-ui-gate` | ~6 minutes | any change to the client, to `crates/controller-api/src/lib.rs` (which decides what is served), to `crates/pipeline-ir/` (the strict parser whose refusal wording one assertion checks), or to the gate's own definition |
-| `run-ui-mutations` | ~20 minutes | any change to the gate's own definition, or a client change of at least `MUTATION_LINE_THRESHOLD` (20) changed lines |
+| `run-ui-mutations` | ~28 minutes, twenty-two browser runs | any change to the gate's own definition, or a client change of at least `MUTATION_LINE_THRESHOLD` (20) changed lines |
 
 They are separate because they protect different things. The gate proves the
 **client** still behaves. The mutation proof proves the **assertions still
