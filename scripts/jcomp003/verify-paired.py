@@ -376,14 +376,25 @@ def verify_case(fixture, jenkins_root, product_root, observed_shells, expected_t
     for stage, expected_stage in zip(stages, expected['stages']):
         ends = [node for node in j['nodes'] if node.get('block_start_id') == stage['id']]
         assert len(ends) == 1, 'stage has no unique observed block end'
+        # Jenkins labels and tags the stage body start, not the outer invocation
+        # carrying arguments.name. Bind the measured body to that invocation.
+        bodies = [node for node in j['nodes']
+                  if node['type'].endswith('StepStartNode')
+                  and node['parents'] == [stage['id']]
+                  and node['label'] == expected_stage['name']
+                  and 'org.jenkinsci.plugins.workflow.actions.BodyInvocationAction' in node['actions']]
+        assert len(bodies) == 1, 'stage has no unique labeled body start'
+        body = bodies[0]
+        body_ends = [node for node in j['nodes'] if node.get('block_start_id') == body['id']]
+        assert len(body_ends) == 1 and ends[0]['parents'] == [body_ends[0]['id']], 'stage body/end linkage changed'
         if expected_stage['outcome'] == 'skipped':
-            assert stage['tags'].get('STAGE_STATUS') == 'SKIPPED_FOR_FAILURE'
+            assert body['tags'].get('STAGE_STATUS') == 'SKIPPED_FOR_FAILURE'
             assert not any(ancestor(nodes, stage['id'], node['id']) and ancestor(nodes, node['id'], ends[0]['id']) for node in shell_nodes)
         elif expected_stage['outcome'] == 'failed':
             assert ends[0]['error'] is not None
         else:
             assert ends[0]['error'] is None
-            assert not stage['tags'].get('STAGE_STATUS', '').startswith('SKIPPED')
+            assert not body['tags'].get('STAGE_STATUS', '').startswith('SKIPPED')
     for previous, following in zip(shell_nodes, shell_nodes[1:]):
         assert ancestor(nodes, previous['id'], following['id']), 'shell order lacks graph ancestry'
         assert previous['start_ms'] <= following['start_ms']
