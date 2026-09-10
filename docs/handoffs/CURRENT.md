@@ -93,9 +93,15 @@ The subsequent production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`; `EXEC-005` additionally waits for `JCOMP-003`.
 `GROOVY-001` and `HYG-003` retain their pending parallel lanes; `AGENT-007`
 is ACTIVE in its lease-survival lane and must merge with exact-main verification
-before JCOMP-003 collects paired-runtime evidence. M1 keeps the current compile-only
-architecture; an interpreter port requires a separate decision and ticket.
-Shared contract or documentation boundaries serialize.
+before JCOMP-003 collects paired-runtime evidence, and the new `UI-002` through
+`UI-009` web-interface lane is serial beside them. `REL-003` waits for `UI-009`,
+so the complete UI chain and final browser proof precede packaging and subsequent
+deployment/canary receipts. Before packaging, identify earlier case, containment
+or ceremony receipts invalidated by those UI changes and regenerate the affected
+evidence; completed dependency statuses alone do not establish fresh evidence.
+`CASE-002`/`DEPLOY-002` retain their final deployed-runtime checks. M1 keeps the current
+compile-only architecture; an interpreter port requires a separate decision and
+ticket. Shared contract or documentation boundaries serialize.
 
 Use independent subagents for compiler/admission inspection and differential
 fixture design. Verify HeMan's Qwen model and connectivity before assigning
@@ -122,7 +128,15 @@ output cannot serve as Jenkins oracle evidence. Qwen is optional support.
   the current protected-main head -- see "Safe next action". That gate is not
   dischargeable by this file.
 - `GROOVY-001` and `HYG-003` are also `PENDING`. Each is a standalone
-  `PARALLEL` lane and neither occupies the dispatch slot. Read the board
+  `PARALLEL` lane and neither occupies the dispatch slot. `UI-002` through
+  `UI-009` are `PENDING` too, as one serial web-interface lane; `UI-002`
+  earns the unsupported browser-journey claim with only necessary minimal
+  served-client repairs, retaining initial failures separately from the accepted
+  repaired baseline; both remain unchanged when `UI-007` adds a separate
+  source-bound baseline for its new views. `UI-002` adds no redesign, route,
+  CSP or authorization change.
+  `UI-003` decides a threat boundary rather than implementing one, and the
+  six after it are implementation behind that decision. Read the board
   rather than this list for the full set; that is the point of the bullet
   above.
 - Protected-main Foundation, native Windows, and Release Builder runs are green

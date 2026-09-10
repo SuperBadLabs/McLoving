@@ -349,7 +349,12 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # 115 -> 116 on 2026-09-09 with the `AGENT-007` row that earns it. No table
 # is added: the ticket joins the existing product-hardening table, so
 # EXPECTED_TABLES does not move.
-MINIMUM_TICKET_ROWS = 116
+#
+# 116 -> 124 on 2026-09-09 with the `UI-002` through `UI-009` rows that earn
+# it, taken over the `AGENT-007` raise rather than instead of it. All eight
+# join the same product-hardening table, so EXPECTED_TABLES still does not
+# move.
+MINIMUM_TICKET_ROWS = 124
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
