@@ -200,8 +200,10 @@ see.
 ## Evidence
 
 - `docs/evidence/ui-002-browser-v1/` — initial baseline, pre-repair, retained
-  unchanged; 13 of 16 passed, three named failures.
+  unchanged; client `83966def…`, 13 of 17 passed, four named failures.
 - `docs/evidence/ui-002-browser-v2/` — accepted baseline bound to the repaired
-  client; 16 of 16.
-- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 16 of 16 caught.
+  client `5fe7ee2b3e38219606422ce888dc1ed0c66c23cc84f9f5d745063e0e59f09939`;
+  17 of 17. **This digest is what `UI-006` and later work compare against.**
+- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 19 of 19 caught across
+  17 assertions.
 - `docs/architecture/UI_BROWSER_GATE_V1.md` — the driver and boundary argument.

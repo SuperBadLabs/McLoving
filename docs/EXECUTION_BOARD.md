@@ -1757,15 +1757,22 @@ attribution and nothing would have noticed.
 `UI-002` built that gate and ran it. **The claims were not all true of the client
 `UI-001` shipped.** Against the original source
 (`83966def6a24e6bfbcae1354e422784ff09b20f37a6f71524fcfdf078f68826c`, recorded in
-`docs/evidence/ui-002-browser-v1/README.md`) thirteen of sixteen assertions passed and
-**three failed**: keyboard focus was destroyed on every dashboard refresh, the
-dashboard and pipeline views overflowed horizontally at a 390-pixel viewport, and
-every page load logged a `favicon.ico` 404 to the console. The landmark, label
-and focus-visibility contracts did hold.
+`docs/evidence/ui-002-browser-v1/README.md`) thirteen of seventeen assertions
+passed and **four failed**: keyboard focus was destroyed on every dashboard
+refresh **and** on the build view's own two-second timer, the dashboard and
+pipeline views overflowed horizontally at a 390-pixel viewport, and every page
+load logged a `favicon.ico` 404 to the console. The landmark, label and
+focus-visibility contracts did hold. The fourth failure was invisible to the
+first version of this gate, which made sixteen assertions and never rendered an
+artifact row at all; review found that gap and the assertion that closes it is
+what exposed the defect.
 
 Those three are now repaired, and the repaired client
-(`bda84c9c7840a7da5c9eabb44df0001532d1e75bae5c1c11361de151ac881911`,
-`docs/evidence/ui-002-browser-v2/README.md`) passes all sixteen. **That is a claim about
+(`5fe7ee2b3e38219606422ce888dc1ed0c66c23cc84f9f5d745063e0e59f09939`,
+`docs/evidence/ui-002-browser-v2/README.md`) passes all seventeen. That digest is
+the one `UI-006` and later work must compare against; an earlier revision of this
+correction named a superseded repaired client, which would have pointed
+successors at the wrong source. **That is a claim about
 the repaired source, not about what `UI-001` shipped**; the pre-repair baseline
 is retained unchanged so the difference cannot be read away later.
 
