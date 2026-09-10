@@ -35,6 +35,18 @@ required pipeline scope; both now expose optional `--pipeline-id`, with actual
 HTTP request coverage for scoped and legacy unscoped use. These findings are
 retained as failed-candidate evidence, not relabeled as passing gates.
 
+A subsequent full Foundation run failed the private-stdin test's two-second
+whole-execution assertion. That bound omitted the executor's existing separate
+five-second leader and descendant containment waits and final spool durability.
+A controlled unchanged syscall-traced diagnostic completed both modes with
+TERM/KILL, reaping and descendant absence; it did not reproduce or explain the
+earlier delay and does not replace the failed gate. The test now derives its
+12.35-second bound from the existing lifecycle budgets, including explicit
+setup/durability allowance, and checks exact termination, descendant absence,
+private-response refusal and empty output before timing. Runtime timeouts and
+containment behavior are unchanged; the hostile helper still has a 30-second
+lifetime. Final candidate Foundation verification must pass independently.
+
 ## Verification scope
 
 Focused verification covers agent scope/payload mutations, sealed original-path

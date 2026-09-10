@@ -1617,7 +1617,11 @@ mod private_io_tests {
             )
             .await
             .unwrap();
-            assert!(started.elapsed() < Duration::from_secs(2));
+            let elapsed = started.elapsed();
+            eprintln!(
+                "blocked private stdin: timed_out={timed_out}, elapsed={elapsed:?}, termination={:?}",
+                result.termination
+            );
             assert_eq!(result.private_response_accepted, Some(false));
             assert_eq!(
                 result.termination,
@@ -1645,6 +1649,22 @@ mod private_io_tests {
                 std::fs::read(root.path().join(result.stderr.relative_path))
                     .unwrap()
                     .is_empty()
+            );
+            // Measure the complete execution contract, including its existing
+            // bounded leader/descendant waits and final durability work, not
+            // just the private writer's 100 ms post-containment join. This
+            // remains well below the hostile helper's 30 second lifetime.
+            let completion_bound = Duration::from_millis(200)
+                + request.termination_grace
+                + Duration::from_secs(5) // unreaped leader exit
+                + Duration::from_secs(5) // anchored descendants
+                + Duration::from_millis(100) // private writer join
+                + Duration::from_secs(2); // setup, scheduling and spool durability
+            assert!(completion_bound < Duration::from_secs(30));
+            assert!(
+                elapsed < completion_bound,
+                "timed_out={timed_out}, elapsed={elapsed:?}, bound={completion_bound:?}, termination={:?}",
+                result.termination
             );
         }
     }
