@@ -67,7 +67,7 @@ class WebDriverError(RuntimeError):
 class Session:
     """The subset of WebDriver classic this gate needs."""
 
-    def __init__(self, port, chrome_binary, window=(1280, 900)):
+    def __init__(self, port, chrome_binary, download_dir, window=(1280, 900)):
         self.base = f"http://127.0.0.1:{port}"
         payload = {
             "capabilities": {
@@ -89,6 +89,15 @@ class Session:
                             "--no-default-browser-check",
                             f"--window-size={window[0]},{window[1]}",
                         ],
+                        # Downloads land in a directory the gate can inspect, so
+                        # the artifact journey can assert on the BYTES THAT
+                        # ARRIVED rather than on what the listing claimed they
+                        # would be.
+                        "prefs": {
+                            "download.default_directory": str(download_dir),
+                            "download.prompt_for_download": False,
+                            "download.directory_upgrade": True,
+                        },
                     },
                     # Without this the browser log endpoint returns nothing and
                     # "clean console" would pass by never being asked.
@@ -190,6 +199,7 @@ class Gate:
         self.session = session
         self.base_url = base_url.rstrip("/")
         self.output_dir = output_dir
+        self.download_dir = output_dir / "downloads"
         self.results = []
 
     def assertion(self, name, ok, detail):
@@ -684,17 +694,39 @@ class Gate:
         result = self.result_text()
         errored = self.result_is_error()
         self.capture("artifact-download")
-        # The byte count comes from the rendered listing, and the fixture serves
-        # exactly that many bytes, so a client that fetched a different record
-        # would disagree with what it had just displayed.
+
+        # What actually arrived on disk, not what the listing said would. The
+        # client reports `artifact.bytes` straight from the listing it already
+        # rendered, so a result of `"bytes": 34` proves nothing about delivery:
+        # it stays true if the click never fires, if the endpoint answers empty,
+        # or if it answers something else entirely. Wait for the download to
+        # settle, then read the file.
+        deadline = time.monotonic() + 15
+        delivered = None
+        while time.monotonic() < deadline:
+            files = [
+                path
+                for path in self.download_dir.iterdir()
+                if path.is_file() and not path.name.endswith(".crdownload")
+            ]
+            if files:
+                delivered = files[0]
+                break
+            time.sleep(0.25)
+        payload = delivered.read_bytes() if delivered is not None else b""
         self.assertion(
             "artifact_download_delivers_content",
             clicked is not None
             and not clicked.get("disabled")
             and not errored
             and '"downloaded": "report.txt"' in result
-            and '"bytes": 34' in result,
-            f"clicked={clicked}, error-styled={errored}, result {result[:120]!r}",
+            and delivered is not None
+            and delivered.name == "report.txt"
+            and len(payload) == 34
+            and payload == b"browser fixture artifact bytes\n123",
+            f"clicked={clicked}, error-styled={errored}, "
+            f"file={delivered.name if delivered else None}, "
+            f"delivered_bytes={len(payload)}, result {result[:80]!r}",
         )
 
     def check_focus_survives_build_view_live_refresh(self):
@@ -895,7 +927,9 @@ def main():
         if not wait_for_port(arguments.driver_port):
             print("chromedriver did not accept connections", file=sys.stderr)
             return 69
-        session = Session(arguments.driver_port, chrome)
+        download_dir = arguments.output_dir / "downloads"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        session = Session(arguments.driver_port, chrome, download_dir)
         gate = Gate(session, arguments.base_url, arguments.output_dir)
         print(f"Browser gate: {arguments.label}", flush=True)
         results = gate.run()

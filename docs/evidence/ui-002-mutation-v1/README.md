@@ -13,7 +13,7 @@ unproved, because it forbade covering a second call site.
 client, runs the full browser gate, and requires that named assertion to turn
 red.
 
-**Result: 20 of 20 caught. Nothing escaped.**
+**Result: 21 of 21 caught. Nothing escaped.**
 
 ### One escaped first, and that is the point
 
@@ -61,7 +61,7 @@ the run would exit non-zero.
 python3 scripts/test-ui-browser-mutations.py --output-dir OUT
 ```
 
-Roughly 27 minutes: twenty-one full gate runs, each rebuilding the fixture because
+Roughly 28 minutes: twenty-two full gate runs, each rebuilding the fixture because
 the client is compiled in with `include_str!`. The harness refuses to read a
 verdict from a gate that exited non-zero for any reason other than the assertion
 failures it expected — a pinned-count mismatch or a fixture that never listened

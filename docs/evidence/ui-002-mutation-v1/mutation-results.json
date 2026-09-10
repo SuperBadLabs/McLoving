@@ -1,9 +1,9 @@
 {
-  "caught": 20,
+  "caught": 21,
   "escaped": [],
   "expected_assertions": 18,
   "gate_protocol": "mcloving.ui.browser/1",
-  "mutations_run": 20,
+  "mutations_run": 21,
   "results": [
     {
       "caught": true,
@@ -221,6 +221,19 @@
       ],
       "file": "app.js",
       "mutation": "artifact-download-unwired"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [
+        "console_has_no_unexpected_resource_failures"
+      ],
+      "expected_red": "artifact_download_delivers_content",
+      "failing_assertions": [
+        "artifact_download_delivers_content",
+        "console_has_no_unexpected_resource_failures"
+      ],
+      "file": "app.js",
+      "mutation": "artifact-download-requests-the-wrong-artifact"
     }
   ]
 }

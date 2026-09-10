@@ -163,8 +163,16 @@ fixed: the artifact assertion proved rows and Download controls *rendered* but
 never activated one, and the fixture exposed no `/artifacts/content` route at
 all — so the click listener, the URL `downloadArtifact` builds and the response
 handling were outside the gate. `artifact_download_delivers_content` now clicks
-the control and requires the client to report the byte count the listing
-advertised, against a fixture that serves exactly that many bytes. It passes on
+the control and reads **the bytes that actually arrived on disk** — Chrome is
+given a download directory the gate inspects — requiring the file to be named
+`report.txt` and to hold exactly the 34 bytes the fixture serves. Asserting the
+client's reported byte count alone proved nothing, because the client reports
+`artifact.bytes` straight from the listing it already rendered: that stays true
+if the click never fires, if the endpoint answers empty, or if it answers
+something else. The fixture also validates the request query and 404s on a
+mismatch, so a client that builds the wrong URL fails rather than receiving the
+same bytes regardless. Two mutations cover it: removing the click listener, and
+requesting the wrong artifact name. It passes on
 the original client too: that listener was never broken, so this one is coverage
 gained rather than a defect found. Twice now an assertion here stopped one step
 short of the behaviour it implied; when adding one, ask what it would still
@@ -216,6 +224,6 @@ see.
 - `docs/evidence/ui-002-browser-v2/` — accepted baseline bound to the repaired
   client `5fe7ee2b3e38219606422ce888dc1ed0c66c23cc84f9f5d745063e0e59f09939`;
   18 of 18. **This digest is what `UI-006` and later work compare against.**
-- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 20 of 20 caught across
+- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 21 of 21 caught across
   18 assertions.
 - `docs/architecture/UI_BROWSER_GATE_V1.md` — the driver and boundary argument.

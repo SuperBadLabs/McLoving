@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::Json as JsonBody;
+use axum::extract::{Json as JsonBody, Query};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -295,9 +295,27 @@ async fn artifacts(headers: HeaderMap) -> impl IntoResponse {
 // received. Without it the download journey could not be driven at all, so the
 // click listener, the URL `downloadArtifact` builds and the response handling
 // were all outside the gate.
-async fn artifact_content(headers: HeaderMap) -> Response {
+// The query is honoured, not ignored. A route that returns the same bytes
+// whatever it is asked for cannot fail on a malformed request, so the client
+// could build a wrong URL and the journey would still look like a delivery.
+async fn artifact_content(
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
     if let Some(denial) = unauthorized(&headers) {
         return denial;
+    }
+    if query.get("attempt_id").map(String::as_str) != Some(ATTEMPT)
+        || query.get("name").map(String::as_str) != Some("report.txt")
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "code": "artifact_not_found",
+                "message": format!("no artifact for {query:?}")
+            })),
+        )
+            .into_response();
     }
     // Exactly the 34 bytes the fence-2 listing advertises, so a client that
     // fetched a different record would disagree with what it rendered.

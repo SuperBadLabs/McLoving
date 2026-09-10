@@ -152,6 +152,13 @@
       "file": "app.js",
       "find": "    button.addEventListener(\"click\", () => action(() => downloadArtifact(artifact)));",
       "replace": "    button.addEventListener(\"click\", () => undefined);"
+    },
+    {
+      "name": "artifact-download-requests-the-wrong-artifact",
+      "assertion": "artifact_download_delivers_content",
+      "file": "app.js",
+      "find": "name=${encodeURIComponent(artifact.name)}`;",
+      "replace": "name=${encodeURIComponent(\"wrong-\" + artifact.name)}`;"
     }
   ]
 }

@@ -63,7 +63,7 @@
     },
     {
       "assertion": "artifact_download_delivers_content",
-      "detail": "clicked={'count': 2, 'disabled': False}, error-styled=False, result '{\\n  \"downloaded\": \"report.txt\",\\n  \"bytes\": 34\\n}'",
+      "detail": "clicked={'count': 2, 'disabled': False}, error-styled=False, file=report.txt, delivered_bytes=34, result '{\\n  \"downloaded\": \"report.txt\",\\n  \"bytes\": 34\\n}'",
       "passed": true
     },
     {
