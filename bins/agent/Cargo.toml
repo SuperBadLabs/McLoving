@@ -35,6 +35,7 @@ windows-services = "=0.26.1"
 nix = { version = "=0.31.3", features = ["signal", "fs", "user"] }
 
 [dev-dependencies]
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 mcloving-pipeline-ir = { version = "0.0.0", path = "../../crates/pipeline-ir" }
 mcloving-controller-api = { version = "0.0.0", path = "../../crates/controller-api" }
 mcloving-controller-store = { version = "0.0.0", path = "../../crates/controller-store" }

@@ -208,3 +208,19 @@ test environment; they are not counted as passing evidence. A Linux-hosted
 Windows cross-check could not build its C dependency because MinGW GCC was
 missing. This is an unavailable local check, not a Windows pass or a waiver of
 the required native Windows gate.
+
+The first frozen candidate, `bc5da5820a4ad0c4a8996c47ad18d785121f9859`,
+passed all 22 commands in the local PostgreSQL workflow replay: 154 executed
+tests, with six existing backup/restore canaries explicitly ignored as in the
+workflow. Actual remote, identity, long-lease, cache, input and sequential
+denominators all passed, and source and shipped-binary hashes remained unchanged.
+This qualifies that frozen source; it does not claim protected publication.
+
+Its general Foundation run failed in an existing renewal fixture: the test
+reserved then dropped a TCP listener before tonic rebound the port. The retained
+trace reports `Address already in use` at server startup and a subsequent
+response timeout, with 77 other agent tests passing. The correction retains the
+bound Tokio listener and hands it directly to tonic's incoming stream. It adds
+only an already-locked, test-only tokio-stream dependency; production renewal
+logic and test timing assertions are unchanged. The failed Foundation run is
+preserved separately, and the corrected candidate requires fresh validation.
