@@ -96,8 +96,14 @@ fresh test certificates exist only within the disposable product tmpfs.
 
 The product workload tmpfs is 512 MiB, with a 2 GiB memory/swap limit and 512-PID
 limit. Jenkins has bounded home and temporary tmpfs suitable for its plugin and
-disk-monitor requirements, a 4 GiB memory/swap limit and 1024-PID limit. Both
-Jenkins tmpfs mounts use mode 1777 without uid/gid options, which the execution
+disk-monitor requirements, a 4 GiB memory/swap limit and 1024-PID limit. Jenkins
+has exactly three tmpfs mounts: 2 GiB each for `/tmp` and `/var/jenkins_home`,
+and 512 MiB for `/var/jenkins_home/plugins`. The separate plugin tmpfs permits
+unpacking beside the ninety unchanged read-only archive binds; otherwise OCI
+creates their parent root-owned with mode 0755. The pinned archives contain
+151,140,522 expanded bytes (about 144 MiB), below the 512 MiB plugin bound.
+The total container memory/swap cap remains 4 GiB. All three mounts require
+`rw,noexec,nosuid,nodev` and mode 1777 without uid/gid options, which the execution
 host's Podman rejects. The sticky, root-owned home is private to this
 disposable container and permits the fixed UID 1000 Jenkins process to initialize
 its files without a root bootstrap. It is not a shared host home or a claim of

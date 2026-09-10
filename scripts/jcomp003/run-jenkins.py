@@ -73,9 +73,10 @@ def verify_boundary(inspect, expected_mounts):
     assert config['Memory'] == 4 * 1024 ** 3 and config['PidsLimit'] == 1024
     assert config['MemorySwap'] == 4 * 1024 ** 3
     assert config['NanoCpus'] == 4 * 10 ** 9
-    assert set(config['Tmpfs']) == {'/tmp', '/var/jenkins_home'}
+    assert set(config['Tmpfs']) == {'/tmp', '/var/jenkins_home', '/var/jenkins_home/plugins'}
     verify_tmpfs(config['Tmpfs']['/tmp'], 2 * 1024 ** 3, 0o1777)
     verify_tmpfs(config['Tmpfs']['/var/jenkins_home'], 2 * 1024 ** 3, 0o1777)
+    verify_tmpfs(config['Tmpfs']['/var/jenkins_home/plugins'], 512 * 1024 ** 2, 0o1777)
     assert config['LogConfig']['Type'] == 'k8s-file'
     assert config['LogConfig']['Size'] in ('16MB', '16mb', '16m', '16777216')
     assert any(limit['Name'] == 'RLIMIT_NOFILE' and limit['Soft'] == 1024 and
@@ -164,6 +165,9 @@ def main():
                    # Podman rejects tmpfs uid/gid options. This private, sticky
                    # home permits UID 1000 writes without a root bootstrap.
                    '--tmpfs=/var/jenkins_home:rw,noexec,nosuid,nodev,size=2g,mode=1777',
+                   # File bind mounts otherwise create a root-owned 0755 parent
+                   # where Jenkins cannot unpack the read-only pinned archives.
+                   '--tmpfs=/var/jenkins_home/plugins:rw,noexec,nosuid,nodev,size=512m,mode=1777',
                    '--env=JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g',
                    '--volume', f'{inputs}:/opt/jcomp/input:ro',
                    '--volume', f'{scratch / "observe-shell"}:/opt/jcomp/observe-shell:ro',

@@ -29,7 +29,8 @@ class BoundaryTests(unittest.TestCase):
                 'LogConfig': {'Type':'k8s-file', 'Size':'16MB'},
                 'Ulimits':[{'Name':'RLIMIT_NOFILE','Soft':1024,'Hard':1024}],
                 'Tmpfs': {'/tmp': 'rw,noexec,nosuid,nodev,size=2g,mode=1777',
-                          '/var/jenkins_home': 'rw,noexec,nosuid,nodev,size=2g,mode=1777'}}}]
+                          '/var/jenkins_home': 'rw,noexec,nosuid,nodev,size=2g,mode=1777',
+                          '/var/jenkins_home/plugins': 'rw,noexec,nosuid,nodev,size=512m,mode=1777'}}}]
 
     def test_expected_boundary(self):
         J.verify_boundary(self.inspect, self.mounts)
@@ -107,6 +108,20 @@ class BoundaryTests(unittest.TestCase):
                 self.assertEqual(json.loads((output / 'launch.json').read_text()), command)
                 self.assertEqual((output / 'launch-failed.stdout').read_bytes(), error.stdout)
                 self.assertEqual((output / 'launch-failed.stderr').read_bytes(), error.stderr)
+
+    def test_private_plugin_tmpfs_mutations(self):
+        for value in [None, 'rw,noexec,nosuid,nodev,size=2g,mode=1777',
+                      'rw,noexec,nosuid,nodev,size=512m,mode=777',
+                      'rw,exec,nosuid,nodev,size=512m,mode=1777']:
+            with self.subTest(value=value):
+                mutated = copy.deepcopy(self.inspect)
+                tmpfs = mutated[0]['HostConfig']['Tmpfs']
+                if value is None:
+                    del tmpfs['/var/jenkins_home/plugins']
+                else:
+                    tmpfs['/var/jenkins_home/plugins'] = value
+                with self.assertRaises(AssertionError):
+                    J.verify_boundary(mutated, self.mounts)
 
 
 if __name__ == '__main__':
