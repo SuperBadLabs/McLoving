@@ -72,6 +72,13 @@ is historical; it must not erase remaining helper gates. The bounded contracts
 are `docs/architecture/CACHE_PRODUCT_PATH_V1.md` and
 `docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
 
+The standalone source-helper custody prerequisite supports a pinned acquisition
+configuration and execution from a sealed caller image while preserving the
+native source boundary. It adds no submitted-job source path. Source-only
+profile selection, nested-process cancellation, retained-tree verification
+and bounded retention ownership remain prerequisites to that integration;
+see `docs/architecture/SOURCE_ACQUISITION_V1.md`.
+
 After M1, the production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`, followed by the existing release, deployment,
 recertification, and separately authorized canary gates. `EXEC-005` now also

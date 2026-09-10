@@ -700,3 +700,25 @@ is added. Controller/agent, deployment owner, kernel, producer and shared HMAC
 verifier remain trusted. Same-UID workload isolation remains SEC-005; hot
 revocation, generalized input consumption, other helper integrations, release
 qualification and JCOMP-003 recertification are unearned. EXEC-005 remains ACTIVE.
+
+
+## EXEC-005 standalone source custody prerequisite review
+
+TM-012/TM-033 are reviewed for the normal acquisition entrypoint's optional
+canonical-config pin before credential, key, marker or state access. Internal
+askpass/resolver/transport admission remains separate. TM-005/TM-007 are reviewed
+for actual running-image identity, original-hash-verified constructor snapshot,
+and preserved derived ELF interpreter/runtime custody. Ordinary file paths
+retain bounded nofollow/nonblocking reads and same-opened-object checks.
+
+The real standalone fixture must execute the sealed source helper under the
+externally selected existing source profile and exact transport filesystem,
+with authenticated read-only Git protocol, native receipt/retained-tree joins
+and adverse pin/file cases. Evidence is tracked in the ACTIVE EXEC-005 review.
+This does not connect source acquisition to an agent or controller. Nested
+process groups require a separate whole-lifetime integration proof; current
+agent outer-group emptiness is insufficient evidence for those descendants.
+No process escape is claimed observed, no profile or process-group authority is
+changed, and retained-root/retention ownership remains separate future work.
+SCM-001's historical isolated boundary and frozen JCOMP-003 evidence are not
+recertified or expanded by this prerequisite.
