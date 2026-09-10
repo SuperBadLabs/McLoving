@@ -1,0 +1,192 @@
+{
+  "schema": "mcloving.jcomp003.xtrace-expectations/1",
+  "status": "authored-preregistration-not-observed-results",
+  "shell_sha256": "a6f559e00b69a4aa4d8cb607be18d9386c5aee55c509e2c075549dcf00e00fc7",
+  "manifest_sha256": "654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727",
+  "records": [
+    {
+      "fixture": "S01",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "c9b839f082e5d9591881d53dffb6da64d6f5c8ea33c8dad829c1ac4087450f1a",
+      "xtrace_utf8": "+ printf hello\\n\n",
+      "xtrace_sha256": "7a689c155b29da53e24204a94eaeb60cda7ab4d0926951dd0115c08df4b06042"
+    },
+    {
+      "fixture": "S02",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "1f6835d47375159fea25e5a39d9d2bf0ea515f9130c8bb793af2e7c04259ae84",
+      "xtrace_utf8": "+ printf build\\n\n",
+      "xtrace_sha256": "197eedda4ec977eb8d4031d5a378aaf33292773542b2caa8e2b47ca67d25e169"
+    },
+    {
+      "fixture": "S02",
+      "stage_ordinal": 2,
+      "step_ordinal": 1,
+      "script_sha256": "687a2bcb41708905c7fa152c7afb88e401685da30ec1a5c88186737593bdba1f",
+      "xtrace_utf8": "+ printf test\\n\n",
+      "xtrace_sha256": "34c1b01e74ec4e710a57269403423b3ff227847e20b59236d892e705da8a1f9c"
+    },
+    {
+      "fixture": "S02",
+      "stage_ordinal": 3,
+      "step_ordinal": 1,
+      "script_sha256": "6d32e51c04476bdce362c3096dc33e3825e252bbe978fc860beeea2fbcbf2241",
+      "xtrace_utf8": "+ printf package\\n\n",
+      "xtrace_sha256": "e4ebd6011c1ab3c769fbf20c0a85f3cb3bb72ad86e0db7ecab4b94b75f8ebb23"
+    },
+    {
+      "fixture": "S03",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "33673a5a801f116c65a20ad6bda2a51fbef9fb2de470fd7e5e39a15f8a2f88b2",
+      "xtrace_utf8": "+ export JCOMP_STEP_SENTINEL=first\n+ mkdir nested\n+ cd nested\n+ printf one\\n\n",
+      "xtrace_sha256": "f20bb0cd3ee6dec7fd8dfd9165cab864bec0369836b28436a86412bf9dd3535c"
+    },
+    {
+      "fixture": "S03",
+      "stage_ordinal": 1,
+      "step_ordinal": 2,
+      "script_sha256": "528d0469b4a9c6e50a4cf2f79e8ff2bdd6d8409e529a35bc62e86fdbd29268d0",
+      "xtrace_utf8": "+ test unset = unset\n+ test -d nested\n+ printf two\\n\n",
+      "xtrace_sha256": "537a4c1321e78535ffb6a84cd3b354f14b3c0ec6a5c2ed3c26355744e9bd068e"
+    },
+    {
+      "fixture": "S03",
+      "stage_ordinal": 1,
+      "step_ordinal": 3,
+      "script_sha256": "28f1cd4871c810436f4fb01a4f74604dce0e565f6e193ca925c4c0cc3a0b3908",
+      "xtrace_utf8": "+ rmdir nested\n+ printf three\\n\n",
+      "xtrace_sha256": "83a3a80088f3f310abb0cbc6311a105b5d90841c9c61ef3e4a9f9e07abf0e601"
+    },
+    {
+      "fixture": "S04",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "c131ae264c662998507cc6b6e0df0aae9af5fb03f15b1e2f7bdb33aaaec2cef5",
+      "xtrace_utf8": "+ printf %s\\n a b single $literal back\\slash\n",
+      "xtrace_sha256": "1675cda9d812bfe3c6ef564424886194b99d9432137f05c3d67b89b0f070c903"
+    },
+    {
+      "fixture": "S05",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "ec45093275abfad536cf9f303c07c978b939614840aaa5675c5d0e006d60f0c6",
+      "xtrace_utf8": "+ printf first\\n\n+ printf %s\\n second line\n",
+      "xtrace_sha256": "fbd86fa445d2470c895d441fd2c6930b681ab5be8478be51f61009772acc486c"
+    },
+    {
+      "fixture": "S06",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "7f278803db7144ec7fcb8123cf53001346e1802e31b511c2ff3dec0bfa74f412",
+      "xtrace_utf8": "+ printf payload\\n\n",
+      "xtrace_sha256": "da3f36ddf74a402db668f8eda35a9baa9b9a60deba55373d64e26505c7b6075a"
+    },
+    {
+      "fixture": "S06",
+      "stage_ordinal": 1,
+      "step_ordinal": 2,
+      "script_sha256": "e779459ee53709a92d7c0794c62f4afc303d4b590a40b9e66d4a275de5e7b2e5",
+      "xtrace_utf8": "+ cat shared.txt\n",
+      "xtrace_sha256": "71efd2e32deed1a70b8ef58e0cc912c2c7922eee4fa4d237d784e2b79a11d17b"
+    },
+    {
+      "fixture": "S07",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "f807211317ea1f6c035323fddad7409969d167794f99e5ae8cf7d77f0aaad143",
+      "xtrace_utf8": "+ mkdir output\n+ printf across\\n\n",
+      "xtrace_sha256": "88b665f98cb78d1c05beace33e9e7fda5a04aec589840c9a618dc1ee27a2cc35"
+    },
+    {
+      "fixture": "S07",
+      "stage_ordinal": 2,
+      "step_ordinal": 1,
+      "script_sha256": "e9830346d8bf87d7b46b257cc4c2cd45cde76413c3a8b775268277cf03786e19",
+      "xtrace_utf8": "+ cat output/value.txt\n",
+      "xtrace_sha256": "f4a38c2c9bd33b5cb20fb1e36d161436d12b19485f7391502afac49a2977bf89"
+    },
+    {
+      "fixture": "S08",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "30ca65c29d0b299ecf6fa475858ac912df8524ef4733eeadf4c8bf532d50c84a",
+      "xtrace_utf8": "+ printf first failed\\n\n+ exit 7\n",
+      "xtrace_sha256": "7d4fcb4d9b3013a45cb9be8e2333d9ed8565bd13d1d3141ad681dd315a9e5206"
+    },
+    {
+      "fixture": "S08",
+      "stage_ordinal": 1,
+      "step_ordinal": 2,
+      "script_sha256": "4a298a58c9c8e49a0edb1fe98274fcf8df51ef627f72af2f6948141f44aa53a8",
+      "xtrace_utf8": "",
+      "xtrace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "fixture": "S08",
+      "stage_ordinal": 2,
+      "step_ordinal": 1,
+      "script_sha256": "4a298a58c9c8e49a0edb1fe98274fcf8df51ef627f72af2f6948141f44aa53a8",
+      "xtrace_utf8": "",
+      "xtrace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "fixture": "S09",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "9dc7e87a53d56f575be2eb7452899ce55d2338b50d1cd9078c73dca60aa3da85",
+      "xtrace_utf8": "+ printf before\\n\n",
+      "xtrace_sha256": "0474f29d8aa104b45c21df13f2bd27275b2eac3c3663c87dae2e5a7a11551b5c"
+    },
+    {
+      "fixture": "S09",
+      "stage_ordinal": 1,
+      "step_ordinal": 2,
+      "script_sha256": "40b93ec68e692da3c2d7a68ac48218f4062cc7a75617a38039f744a9e4b4c0a9",
+      "xtrace_utf8": "+ printf middle failed\\n\n+ exit 7\n",
+      "xtrace_sha256": "6d5d5b2d3c75cef31730c94e09b7b92126d928071da00b66fe91d8f1bcdde119"
+    },
+    {
+      "fixture": "S09",
+      "stage_ordinal": 1,
+      "step_ordinal": 3,
+      "script_sha256": "4a298a58c9c8e49a0edb1fe98274fcf8df51ef627f72af2f6948141f44aa53a8",
+      "xtrace_utf8": "",
+      "xtrace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "fixture": "S09",
+      "stage_ordinal": 2,
+      "step_ordinal": 1,
+      "script_sha256": "4a298a58c9c8e49a0edb1fe98274fcf8df51ef627f72af2f6948141f44aa53a8",
+      "xtrace_utf8": "",
+      "xtrace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "fixture": "S10",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "9dc7e87a53d56f575be2eb7452899ce55d2338b50d1cd9078c73dca60aa3da85",
+      "xtrace_utf8": "+ printf before\\n\n",
+      "xtrace_sha256": "0474f29d8aa104b45c21df13f2bd27275b2eac3c3663c87dae2e5a7a11551b5c"
+    },
+    {
+      "fixture": "S10",
+      "stage_ordinal": 1,
+      "step_ordinal": 2,
+      "script_sha256": "0cf40062ae0968f52c920c11e9c974fd096d76c9519cf20bb0cdef8f54ff5353",
+      "xtrace_utf8": "+ printf last failed\\n\n+ exit 7\n",
+      "xtrace_sha256": "0f1af1c4803f64615e4c43da78aa1a231a7f582596474209c79145358905b256"
+    },
+    {
+      "fixture": "C052",
+      "stage_ordinal": 1,
+      "step_ordinal": 1,
+      "script_sha256": "3d79dd5f231f248c69eea988ec4384e4444aee108b1df59cab4d77e44dfee147",
+      "xtrace_utf8": "+ echo Hello World\n",
+      "xtrace_sha256": "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c"
+    }
+  ]
+}

@@ -212,9 +212,29 @@ def main():
             context_path.chmod(0o400)
             previous = None
             for run in (1, 2):
-                result = subprocess.run([str(ROOT / 'compat/jenkins-worker/run-worker.sh'),
-                    'compile-sequential', str(source_path), 'jcomp-' + identifier.lower(),
-                    str(context_path)], env=environment, capture_output=True, timeout=20)
+                try:
+                    result = subprocess.run([str(ROOT / 'compat/jenkins-worker/run-worker.sh'),
+                        'compile-sequential', str(source_path), 'jcomp-' + identifier.lower(),
+                        str(context_path)], env=environment, capture_output=True, timeout=20)
+                except subprocess.TimeoutExpired as error:
+                    # The outer launcher deadline is not a compiler verdict.
+                    # Preserve partial bytes and stop before any further input;
+                    # container cleanup must be inspected before a new campaign.
+                    stem = f'{identifier}-run-{run}-timeout'
+                    stdout, stderr = error.stdout or b'', error.stderr or b''
+                    (args.output / (stem + '.stdout')).write_bytes(stdout)
+                    (args.output / (stem + '.stderr')).write_bytes(stderr)
+                    (args.output / 'incomplete.json').write_text(json.dumps({
+                        'schema': 'mcloving.jenkins.sequential-contained-incomplete/1',
+                        'fixture': identifier, 'run': run, 'verified': False,
+                        'reason': 'launcher_timeout', 'timeout_seconds': error.timeout,
+                        'worker_image_sha256': args.image_sha256,
+                        'admission_binary_sha256': admission_sha256,
+                        'stdout_sha256': digest(stdout), 'stderr_sha256': digest(stderr),
+                        'completed_records': records, 'cleanup_inspection_required': True,
+                    }, indent=2) + '\n')
+                    raise ValueError(f'{identifier} run {run}: launcher timed out; '
+                                     'partial evidence retained; inspect container cleanup') from error
                 if result.returncode:
                     stem = f'{identifier}-run-{run}-unverified'
                     (args.output / (stem + '.stdout')).write_bytes(result.stdout)
