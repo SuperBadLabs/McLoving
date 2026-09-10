@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod cache;
+pub mod input;
+mod private_helper;
 mod worker;
 
 use mcloving_agent_protocol::wire;
@@ -47,6 +49,7 @@ const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
+    pub input_bindings: Option<input::InputBindings>,
     pub cache_bindings: Option<cache::CacheBindings>,
     pub agent_id: String,
     pub trust_pool: String,
@@ -243,6 +246,17 @@ impl AgentConfig {
             ));
         }
         Ok(Self {
+            input_bindings: match values.get("MCLOVING_AGENT_INPUT_BINDINGS_PATH") {
+                Some(path) if cfg!(target_os = "linux") => Some(input::load_bindings(
+                    Path::new(path),
+                    &required("MCLOVING_AGENT_INPUT_BINDINGS_SHA256")?,
+                )?),
+                Some(_) => return Err(AgentError::InvalidConfig("input helpers require Linux")),
+                None if values.contains_key("MCLOVING_AGENT_INPUT_BINDINGS_SHA256") => {
+                    return Err(AgentError::InvalidConfig("input bindings path missing"));
+                }
+                None => None,
+            },
             cache_bindings: match values.get("MCLOVING_AGENT_CACHE_BINDINGS_PATH") {
                 Some(path) if cfg!(target_os = "linux") => Some(cache::load_bindings(
                     Path::new(path),
@@ -529,6 +543,7 @@ async fn open_session(
             capabilities: {
                 let mut values = session_capabilities();
                 values.extend(cache::scheduling_capabilities(config)?);
+                values.extend(input::scheduling_capabilities(config)?);
                 values
             },
         };

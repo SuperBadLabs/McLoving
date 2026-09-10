@@ -1676,12 +1676,19 @@ mod tests {
             let mut journal = Journal::open(&path).unwrap();
             assert_eq!(journal.journal_mode().unwrap(), "wal");
             let first = journal.accept(&expected).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3));
             let second = journal.accept(&expected).unwrap();
+            assert_eq!(first.accepted_at_unix_ms, second.accepted_at_unix_ms);
             assert_eq!(first, second);
             first
         };
 
-        let reopened = Journal::open(&path).unwrap();
+        let mut reopened = Journal::open(&path).unwrap();
+        let recovered_ack = reopened.accept(&expected).unwrap();
+        assert_eq!(
+            first_ack.accepted_at_unix_ms,
+            recovered_ack.accepted_at_unix_ms
+        );
         let report = reopened.reconcile().unwrap();
         assert_eq!(report.attempts.len(), 1);
         assert_eq!(report.attempts[0].attempt_id, first_ack.attempt_id);

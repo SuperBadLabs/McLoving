@@ -574,7 +574,7 @@ impl InputAdapter {
         }
         let client = builder.build().map_err(|_| AdapterError::InvalidConfig)?;
         ensure_private_spool(&config.spool_dir).await?;
-        drop(lock_spool(&config.spool_dir, true).await?);
+        release_spool_lock(lock_spool(&config.spool_dir, true).await?);
         // A capture claim is useful only if its directory entry can be made
         // durable before source access. Fail adapter construction on platforms
         // without that primitive instead of discovering the limitation after
@@ -633,7 +633,7 @@ impl InputAdapter {
             .matching_claim(request.capture_id, &request_sha256)
             .await?
         {
-            drop(spool_admission);
+            release_spool_lock(spool_admission);
             drop(admission);
             return self
                 .await_claimed_receipt(request.capture_id, &request_sha256, &claim)
@@ -671,7 +671,7 @@ impl InputAdapter {
             self.release_rate_reservation_unlocked(request.capture_id)
                 .await?;
         }
-        drop(spool_admission);
+        release_spool_lock(spool_admission);
         drop(admission);
         if !claimed {
             let existing_claim = self
@@ -861,93 +861,21 @@ impl InputAdapter {
     }
 
     pub fn verify_receipt(&self, receipt: &CaptureReceipt) -> Result<(), AdapterError> {
-        if receipt.adapter_id != self.config.adapter_id
-            || receipt.adapter_implementation_sha256 != self.implementation_sha256
-            || receipt.adapter_config_sha256 != self.config_sha256
-            || receipt.signing_key_id != self.config.signing_key_id
-            || receipt.secret_marker_set_sha256 != self.config.secret_marker_set_sha256
-        {
-            return Err(AdapterError::InvalidStoredReceipt);
-        }
-        let actual = URL_SAFE_NO_PAD
-            .decode(&receipt.signature)
-            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
-        let mut unsigned = receipt.clone();
-        unsigned.signature.clear();
-        let bytes =
-            serde_json::to_vec(&unsigned).map_err(|_| AdapterError::InvalidStoredReceipt)?;
-        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
-            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
-        mac.update(&bytes);
-        mac.verify_slice(&actual)
-            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
-        let canonical_response = serde_json::to_vec(&receipt.response)
-            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
-        if sha256_hex(&canonical_response) != receipt.response_sha256 {
-            return Err(AdapterError::InvalidStoredReceipt);
-        }
-        Ok(())
+        authenticate_receipt(
+            &self.config,
+            &self.implementation_sha256,
+            &self.signing_key,
+            receipt,
+        )
     }
 
     fn validate_request(&self, request: &CaptureRequest) -> Result<(), AdapterError> {
-        let now = now_unix_ms()?;
-        if request.requested_at_unix_ms > now
-            || request.expires_at_unix_ms <= now
-            || request.expires_at_unix_ms <= request.requested_at_unix_ms
-        {
-            return Err(AdapterError::ExpiredRequest);
-        }
-        if self.config.grant_expires_unix_ms <= now {
-            return Err(AdapterError::ExpiredGrant);
-        }
-        if request.capture_id.is_nil()
-            || request.organization_id.is_nil()
-            || request.project_id.is_nil()
-            || request.pipeline_id.is_nil()
-            || request.build_id.is_nil()
-            || request.attempt_id.is_nil()
-            || request.input_name.trim().is_empty()
-            || request.audit_lineage.trim().is_empty()
-            || request.input_name.len() > MAX_BINDING_TEXT_BYTES
-            || request.audit_lineage.len() > MAX_BINDING_TEXT_BYTES
-            || request.adapter_id != self.config.adapter_id
-            || request.expected_implementation_sha256 != self.implementation_sha256
-            || request.expected_config_sha256 != self.config_sha256
-            || request.protocol_version != PROTOCOL_VERSION
-            || request.schema_version != self.config.schema_version
-            || request.expected_generation != self.config.generation
-            || request.endpoint_identity != self.config.endpoint_identity
-            || request.data_source_identity != self.config.data_source_identity
-            || request.grant_id != self.config.grant_id
-            || request.grant_version != self.config.grant_version
-            || request.grant_scope != self.config.grant_scope
-            || request
-                .rollback_from_generation
-                .is_some_and(|generation| generation >= request.expected_generation)
-        {
-            return Err(AdapterError::BindingMismatch);
-        }
-        if request.query.keys().any(|key| {
-            !self
-                .config
-                .allowed_query_keys
-                .iter()
-                .any(|allowed| allowed == key)
-        }) {
-            return Err(AdapterError::QueryDenied);
-        }
-        if request.query.len() > MAX_QUERY_KEYS
-            || request.query.iter().any(|(key, value)| {
-                key.len() > MAX_BINDING_TEXT_BYTES || value.len() > MAX_QUERY_VALUE_BYTES
-            })
-            || request
-                .expected_cursor
-                .as_ref()
-                .is_some_and(|cursor| cursor.len() > MAX_BINDING_TEXT_BYTES)
-        {
-            return Err(AdapterError::QueryDenied);
-        }
-        Ok(())
+        validate_capture_request(
+            &self.config,
+            &self.implementation_sha256,
+            request,
+            now_unix_ms()?,
+        )
     }
 
     async fn reserve_rate_unlocked(
@@ -1391,6 +1319,11 @@ type SpoolLock = nix::fcntl::Flock<std::fs::File>;
 #[cfg(not(unix))]
 struct SpoolLock;
 
+// Returning from this scope releases the Unix Flock at the exact admission
+// boundary. Unsupported platforms cannot acquire a SpoolLock; their sentinel
+// needs no destructor and must not enable a non-durable locking fallback.
+fn release_spool_lock(_lock: SpoolLock) {}
+
 async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, AdapterError> {
     #[cfg(unix)]
     {
@@ -1556,6 +1489,19 @@ fn validate_config(
     signing_key: &[u8],
     secret_markers: &[Vec<u8>],
 ) -> Result<(), AdapterError> {
+    validate_verifier_config(config, implementation_sha256, signing_key, secret_markers)?;
+    if read_token.len() < 32 || content_sha256(read_token.as_bytes()) != config.read_token_sha256 {
+        return Err(AdapterError::InvalidConfig);
+    }
+    Ok(())
+}
+
+pub fn validate_verifier_config(
+    config: &AdapterConfig,
+    implementation_sha256: &str,
+    signing_key: &[u8],
+    secret_markers: &[Vec<u8>],
+) -> Result<(), AdapterError> {
     if config.protocol_version != PROTOCOL_VERSION
         || config.schema_version.trim().is_empty()
         || config.adapter_id.trim().is_empty()
@@ -1583,7 +1529,6 @@ fn validate_config(
         || config.max_age_ms > MAX_AGE_MS
         || config.retry_attempts > 5
         || !is_sha256_hex(implementation_sha256)
-        || read_token.len() < 32
         || signing_key.len() < 32
         || secret_markers.is_empty()
         || secret_markers.len() > MAX_SECRET_MARKERS
@@ -1604,7 +1549,6 @@ fn validate_config(
                     .and_then(|scan_bytes| scan_bytes.checked_mul(marker_bytes))
             })
             .is_none_or(|work| work > MAX_MARKER_COMPARISON_BYTES)
-        || content_sha256(read_token.as_bytes()) != config.read_token_sha256
         || content_sha256(signing_key) != config.signing_key_sha256
         || marker_set_digest(secret_markers) != config.secret_marker_set_sha256
     {
@@ -1673,6 +1617,7 @@ fn validate_config(
     {
         return Err(AdapterError::InvalidConfig);
     }
+    validate_endpoint(&endpoint, config.test_allow_http_loopback)?;
     Ok(())
 }
 
@@ -1874,15 +1819,21 @@ pub async fn read_bounded_regular_file(
 ) -> Result<Vec<u8>, AdapterError> {
     use tokio::io::AsyncReadExt as _;
 
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|_| AdapterError::StateUnavailable)?;
-    if !metadata.file_type().is_file()
-        || metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    #[cfg(not(unix))]
     {
-        return Err(AdapterError::StateUnavailable);
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !metadata.is_file() {
+            return Err(AdapterError::StateUnavailable);
+        }
     }
-    let file = tokio::fs::File::open(path)
+    let file = options
+        .open(path)
         .await
         .map_err(|_| AdapterError::StateUnavailable)?;
     let opened_metadata = file
@@ -1930,7 +1881,9 @@ pub async fn read_private_bounded_regular_file(
         }
 
         let mut options = tokio::fs::OpenOptions::new();
-        options.read(true).custom_flags(nix::libc::O_NOFOLLOW);
+        options
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
         let file = options
             .open(path)
             .await
@@ -2020,22 +1973,52 @@ async fn sync_directory(_path: &Path) -> Result<(), AdapterError> {
 }
 
 pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {
-    use tokio::io::AsyncReadExt as _;
-
-    let metadata = tokio::fs::symlink_metadata(path)
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    #[cfg(not(unix))]
+    if !tokio::fs::symlink_metadata(path)
         .await
-        .map_err(|_| AdapterError::InvalidConfig)?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+        .map_err(|_| AdapterError::InvalidConfig)?
+        .is_file()
+    {
         return Err(AdapterError::InvalidConfig);
     }
-    let mut file = tokio::fs::File::open(path)
+    let file = options
+        .open(path)
         .await
         .map_err(|_| AdapterError::InvalidConfig)?;
+    hash_opened_executable(file).await
+}
+
+/// Linux proc self-image is a kernel-owned deliberate symlink: follow it once
+/// and hash that opened image, including real sealed memfd execution.
+pub async fn running_implementation_sha256() -> Result<String, AdapterError> {
+    #[cfg(target_os = "linux")]
+    {
+        hash_opened_executable(
+            tokio::fs::File::open("/proc/self/exe")
+                .await
+                .map_err(|_| AdapterError::InvalidConfig)?,
+        )
+        .await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        sha256_file(&std::env::current_exe().map_err(|_| AdapterError::InvalidConfig)?).await
+    }
+}
+async fn hash_opened_executable(mut file: tokio::fs::File) -> Result<String, AdapterError> {
+    use tokio::io::AsyncReadExt as _;
     let opened_metadata = file
         .metadata()
         .await
         .map_err(|_| AdapterError::InvalidConfig)?;
-    if !opened_metadata.file_type().is_file() || opened_metadata.len() > MAX_EXECUTABLE_BYTES {
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() == 0
+        || opened_metadata.len() > MAX_EXECUTABLE_BYTES
+    {
         return Err(AdapterError::InvalidConfig);
     }
     let mut hasher = Sha256::new();
@@ -2056,6 +2039,9 @@ pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {
             return Err(AdapterError::InvalidConfig);
         }
         hasher.update(&buffer[..read]);
+    }
+    if total != opened_metadata.len() {
+        return Err(AdapterError::InvalidConfig);
     }
     let digest = hasher.finalize();
     let mut encoded = String::with_capacity(64);
@@ -2325,5 +2311,346 @@ mod tests {
             validate_response_header_work_bound(&headers),
             Err(AdapterError::OversizedResponse)
         ));
+    }
+}
+
+fn authenticate_receipt(
+    config: &AdapterConfig,
+    implementation_sha256: &str,
+    signing_key: &[u8],
+    receipt: &CaptureReceipt,
+) -> Result<(), AdapterError> {
+    if receipt.adapter_id != config.adapter_id
+        || receipt.adapter_implementation_sha256 != implementation_sha256
+        || receipt.adapter_config_sha256 != config.canonical_digest()?
+        || receipt.signing_key_id != config.signing_key_id
+        || receipt.secret_marker_set_sha256 != config.secret_marker_set_sha256
+    {
+        return Err(AdapterError::InvalidStoredReceipt);
+    }
+    let actual = URL_SAFE_NO_PAD
+        .decode(&receipt.signature)
+        .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+    let mut unsigned = receipt.clone();
+    unsigned.signature.clear();
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+    let mut mac =
+        HmacSha256::new_from_slice(signing_key).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+    mac.update(&bytes);
+    mac.verify_slice(&actual)
+        .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+    let canonical_response =
+        serde_json::to_vec(&receipt.response).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+    if sha256_hex(&canonical_response) != receipt.response_sha256 {
+        return Err(AdapterError::InvalidStoredReceipt);
+    }
+    Ok(())
+}
+
+pub fn validate_capture_request(
+    config: &AdapterConfig,
+    implementation_sha256: &str,
+    request: &CaptureRequest,
+    now: i64,
+) -> Result<(), AdapterError> {
+    if request.requested_at_unix_ms > now
+        || request.expires_at_unix_ms <= now
+        || request.expires_at_unix_ms <= request.requested_at_unix_ms
+    {
+        return Err(AdapterError::ExpiredRequest);
+    }
+    if config.grant_expires_unix_ms <= now {
+        return Err(AdapterError::ExpiredGrant);
+    }
+    if request.capture_id.is_nil()
+        || request.organization_id.is_nil()
+        || request.project_id.is_nil()
+        || request.pipeline_id.is_nil()
+        || request.build_id.is_nil()
+        || request.attempt_id.is_nil()
+        || request.input_name.trim().is_empty()
+        || request.audit_lineage.trim().is_empty()
+        || request.input_name.len() > MAX_BINDING_TEXT_BYTES
+        || request.audit_lineage.len() > MAX_BINDING_TEXT_BYTES
+        || request.adapter_id != config.adapter_id
+        || request.expected_implementation_sha256 != implementation_sha256
+        || request.expected_config_sha256 != config.canonical_digest()?
+        || request.protocol_version != PROTOCOL_VERSION
+        || request.schema_version != config.schema_version
+        || request.expected_generation != config.generation
+        || request.endpoint_identity != config.endpoint_identity
+        || request.data_source_identity != config.data_source_identity
+        || request.grant_id != config.grant_id
+        || request.grant_version != config.grant_version
+        || request.grant_scope != config.grant_scope
+        || request
+            .rollback_from_generation
+            .is_some_and(|generation| generation >= request.expected_generation)
+    {
+        return Err(AdapterError::BindingMismatch);
+    }
+    if request.query.keys().any(|key| {
+        !config
+            .allowed_query_keys
+            .iter()
+            .any(|allowed| allowed == key)
+    }) {
+        return Err(AdapterError::QueryDenied);
+    }
+    if request.query.len() > MAX_QUERY_KEYS
+        || request.query.iter().any(|(key, value)| {
+            key.len() > MAX_BINDING_TEXT_BYTES || value.len() > MAX_QUERY_VALUE_BYTES
+        })
+        || request
+            .expected_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.len() > MAX_BINDING_TEXT_BYTES)
+    {
+        return Err(AdapterError::QueryDenied);
+    }
+    Ok(())
+}
+
+/// Strict duplicate-free and trailing-free JSON shared by config, requests and receipts.
+pub fn parse_json_no_duplicates<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, AdapterError> {
+    reject_duplicate_json_members(bytes)?;
+    serde_json::from_slice(bytes).map_err(|_| AdapterError::MalformedResponse)
+}
+
+/// Canonical producer commitment to every request field.
+pub fn capture_request_sha256(request: &CaptureRequest) -> Result<String, AdapterError> {
+    canonical_digest(request)
+}
+
+/// Authenticate a bounded native capture frame without a provider credential,
+/// network client, or any spool creation. The caller supplies its exact durable request.
+#[allow(clippy::too_many_arguments)] // Keep each independent authority/observation explicit.
+pub fn verify_capture_response(
+    config: &AdapterConfig,
+    implementation_sha256: &str,
+    signing_key: &[u8],
+    secret_markers: &[Vec<u8>],
+    request: &CaptureRequest,
+    frame: &[u8],
+    started_at_unix_ms: i64,
+    completed_at_unix_ms: i64,
+) -> Result<CaptureReceipt, AdapterError> {
+    validate_verifier_config(config, implementation_sha256, signing_key, secret_markers)?;
+    validate_capture_request(config, implementation_sha256, request, started_at_unix_ms)?;
+    if frame.len() > 262_144
+        || frame.last() != Some(&b'\n')
+        || frame[..frame.len().saturating_sub(1)].contains(&b'\n')
+        || completed_at_unix_ms < started_at_unix_ms
+        || config.max_confidentiality != Confidentiality::Public
+        || request.confidentiality_ceiling != Confidentiality::Public
+    {
+        return Err(AdapterError::InvalidStoredReceipt);
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Success {
+        ok: bool,
+        receipt: CaptureReceipt,
+    }
+    let result: Success = parse_json_no_duplicates(&frame[..frame.len() - 1])
+        .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+    if !result.ok {
+        return Err(AdapterError::InvalidStoredReceipt);
+    }
+    let receipt = result.receipt;
+    authenticate_receipt(config, implementation_sha256, signing_key, &receipt)?;
+    macro_rules! same_request { ($($field:ident),* $(,)?) => { $(if receipt.$field != request.$field { return Err(AdapterError::BindingMismatch); })* }; }
+    same_request!(
+        capture_id,
+        organization_id,
+        project_id,
+        pipeline_id,
+        build_id,
+        attempt_id,
+        input_name,
+        rollback_from_generation,
+        audit_lineage
+    );
+    macro_rules! same_config { ($($field:ident),* $(,)?) => { $(if receipt.$field != config.$field { return Err(AdapterError::BindingMismatch); })* }; }
+    same_config!(
+        protocol_version,
+        schema_version,
+        adapter_id,
+        deployment_identity,
+        operator_identity,
+        generation,
+        endpoint_identity,
+        data_source_identity,
+        grant_id,
+        grant_version,
+        grant_scope,
+        signing_key_id,
+        secret_marker_set_sha256
+    );
+    if receipt.request_sha256 != capture_request_sha256(request)?
+        || receipt.canonical_query != request.query
+        || request
+            .expected_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor != &receipt.source_cursor)
+        || receipt.confidentiality != Confidentiality::Public
+        || receipt.retry_count > config.retry_attempts
+        || receipt.captured_at_unix_ms < started_at_unix_ms
+        || receipt.captured_at_unix_ms > completed_at_unix_ms
+        || receipt.captured_at_unix_ms >= request.expires_at_unix_ms
+        || receipt.captured_at_unix_ms >= config.grant_expires_unix_ms
+        || completed_at_unix_ms >= request.expires_at_unix_ms
+        || completed_at_unix_ms >= config.grant_expires_unix_ms
+        || completed_at_unix_ms >= receipt.publication_deadline_unix_ms
+        || receipt.captured_at_unix_ms >= receipt.publication_deadline_unix_ms
+        || receipt.publication_deadline_unix_ms
+            < claim_publication_deadline_unix_ms(
+                started_at_unix_ms,
+                config.timeout_ms,
+                config.retry_attempts,
+                request.expires_at_unix_ms,
+                config.grant_expires_unix_ms,
+            )?
+        || receipt.publication_deadline_unix_ms
+            > claim_publication_deadline_unix_ms(
+                receipt.captured_at_unix_ms,
+                config.timeout_ms,
+                config.retry_attempts,
+                request.expires_at_unix_ms,
+                config.grant_expires_unix_ms,
+            )?
+        || [&receipt.source_cursor, &receipt.source_provenance]
+            .into_iter()
+            .any(|value| value.trim().is_empty() || value.len() > MAX_BINDING_TEXT_BYTES)
+        || receipt
+            .source_etag
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_BINDING_TEXT_BYTES)
+    {
+        return Err(AdapterError::BindingMismatch);
+    }
+    validate_source_age(
+        receipt.captured_at_unix_ms,
+        receipt.source_observed_at_unix_ms,
+        config.max_age_ms,
+    )?;
+    validate_source_age(
+        completed_at_unix_ms,
+        receipt.source_observed_at_unix_ms,
+        config.max_age_ms,
+    )?;
+    let body =
+        serde_json::to_vec(&receipt.response).map_err(|_| AdapterError::MalformedResponse)?;
+    if body.len() > config.max_response_bytes {
+        return Err(AdapterError::OversizedResponse);
+    }
+    validate_schema(&receipt.response, &config.response_schema)?;
+    // Scan both serialized bytes and decoded strings/keys: JSON escaping cannot hide a marker.
+    fn contains(markers: &[Vec<u8>], bytes: &[u8]) -> bool {
+        markers
+            .iter()
+            .any(|marker| bytes.windows(marker.len()).any(|part| part == marker))
+    }
+    fn in_json(markers: &[Vec<u8>], value: &Value) -> bool {
+        match value {
+            Value::String(value) => contains(markers, value.as_bytes()),
+            Value::Array(values) => values.iter().any(|value| in_json(markers, value)),
+            Value::Object(values) => values
+                .iter()
+                .any(|(key, value)| contains(markers, key.as_bytes()) || in_json(markers, value)),
+            _ => false,
+        }
+    }
+    if contains(secret_markers, &body)
+        || in_json(secret_markers, &receipt.response)
+        || [&receipt.source_cursor, &receipt.source_provenance]
+            .into_iter()
+            .any(|value| contains(secret_markers, value.as_bytes()))
+        || receipt
+            .source_etag
+            .as_ref()
+            .is_some_and(|value| contains(secret_markers, value.as_bytes()))
+    {
+        return Err(AdapterError::ConfidentialityDenied);
+    }
+    Ok(receipt)
+}
+
+#[cfg(all(test, unix))]
+mod safe_reader_tests {
+    use super::*;
+    #[tokio::test]
+    async fn nofollow_nonblock_readers_refuse_fifo_and_symlink_substitution() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("fifo");
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), read_bounded_regular_file(&fifo, 64))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                read_private_bounded_regular_file(&fifo, 64)
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        let secret = root.path().join("secret");
+        std::fs::write(&secret, b"must-not-follow").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let path = root.path().join("raced");
+        let alternate = root.path().join("alternate");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let raced = path.clone();
+        let writer = std::thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = std::fs::remove_file(&alternate);
+                std::os::unix::fs::symlink(&secret, &alternate).unwrap();
+                std::fs::rename(&alternate, &raced).unwrap();
+                let _ = std::fs::remove_file(&alternate);
+                std::fs::write(&alternate, b"regular").unwrap();
+                std::fs::set_permissions(&alternate, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                std::fs::rename(&alternate, &raced).unwrap();
+                nix::unistd::mkfifo(
+                    &alternate,
+                    nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+                )
+                .unwrap();
+                std::fs::rename(&alternate, &raced).unwrap();
+            }
+        });
+        for _ in 0..100 {
+            if let Ok(bytes) =
+                tokio::time::timeout(Duration::from_secs(1), read_bounded_regular_file(&path, 64))
+                    .await
+                    .unwrap()
+            {
+                assert_eq!(bytes, b"regular");
+            }
+            if let Ok(bytes) = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_private_bounded_regular_file(&path, 64),
+            )
+            .await
+            .unwrap()
+            {
+                assert_eq!(bytes, b"regular");
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        writer.join().unwrap();
     }
 }

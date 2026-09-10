@@ -1,6 +1,7 @@
 //! Shared domain vocabulary. Runtime behavior begins in later tickets.
 
 pub mod cache_intent;
+pub mod input_intent;
 pub mod workspace;
 
 use std::collections::BTreeMap;

@@ -5,7 +5,8 @@ operations through the actual API, controller, mTLS agent and sealed cache
 executable. It verifies read bytes privately and publishes an authenticated
 receipt identity. It does not restore cache content into a downstream workspace
 or artifact, connect the other four helpers, certify Jenkins cache semantics,
-or grant production, canary or cutover authority.
+or grant production, canary or cutover authority. The subsequent bounded input
+capture slice is described separately in `INPUT_PRODUCT_PATH_V1.md`.
 
 ## Submission and deployment authority
 
@@ -162,8 +163,9 @@ The trusted controller, agent, kernel, deployment owner, configured cache
 producer and shared HMAC verifier remain trusted. Same-UID hostile workload
 filesystem/process/IPC isolation is still SEC-005; this integration must not be
 credited as that containment. General cache restore, SCM acquisition, dependency
-resolution, live-input capture and dynamic provisioning remain unsupported
-product capabilities for this slice. Dependency resolution still needs a
+resolution, live-input capture and dynamic provisioning were unsupported
+product capabilities in the cache slice. The input successor has its own
+contract and required evidence; this cache record does not verify it. Dependency resolution still needs a
 reviewed issuer for its full-request source provenance, and provisioning still
 needs its own durable cancel/reconcile effect lifecycle. All five helpers and
 their actual product gates remain EXEC-005 closure requirements. Existing

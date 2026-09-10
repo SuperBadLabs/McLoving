@@ -1,10 +1,6 @@
 //! Deployment-owned cache mediation. No job supplies a path or a principal.
 use std::collections::BTreeSet;
 use std::fs::File;
-#[cfg(unix)]
-use std::io::Read;
-#[cfg(target_os = "linux")]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use mcloving_agent_runtime::executor::PrivateExecutionOutput;
@@ -15,6 +11,7 @@ use mcloving_domain::cache_intent::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::private_helper::{read_private, seal_executable};
 use crate::{AgentConfig, AgentError};
 const MAX_FRAME_BYTES: u64 = 262_144;
 
@@ -150,41 +147,6 @@ pub fn load_bindings(path: &Path, expected_sha256: &str) -> Result<CacheBindings
         }
     }
     Ok(bindings)
-}
-
-#[cfg(unix)]
-fn read_private(path: &Path, maximum: usize, immutable: bool) -> Result<Vec<u8>, AgentError> {
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-    if !path.is_absolute() || path.canonicalize().map_err(|_| denied())? != path {
-        return Err(denied());
-    }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| denied())?;
-    let metadata = file.metadata().map_err(|_| denied())?;
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-        || (immutable && metadata.mode() & 0o777 != 0o400)
-        || metadata.len() > maximum as u64
-    {
-        return Err(denied());
-    }
-    let mut bytes = Vec::new();
-    file.take(maximum as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| denied())?;
-    if bytes.len() > maximum {
-        return Err(denied());
-    }
-    Ok(bytes)
-}
-#[cfg(not(unix))]
-fn read_private(_: &Path, _: usize, _: bool) -> Result<Vec<u8>, AgentError> {
-    Err(denied())
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -349,70 +311,6 @@ impl PreparedCache {
             accepted,
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn seal_executable(path: &Path, expected: &str) -> Result<(File, PathBuf), AgentError> {
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    if !path.is_absolute() || path.canonicalize().map_err(|_| denied())? != path {
-        return Err(denied());
-    }
-    let input = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| denied())?;
-    let metadata = input.metadata().map_err(|_| denied())?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 512 * 1024 * 1024 {
-        return Err(denied());
-    }
-    let fd = nix::sys::memfd::memfd_create(
-        "mcloving-sealed-cache",
-        nix::sys::memfd::MFdFlags::MFD_CLOEXEC | nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
-    )
-    .map_err(|_| denied())?;
-    let mut file = File::from(fd);
-    let mut digest = Sha256::new();
-    let mut input = input.take(512 * 1024 * 1024 + 1);
-    let mut copied = 0u64;
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = input.read(&mut buffer).map_err(|_| denied())?;
-        if count == 0 {
-            break;
-        }
-        copied += count as u64;
-        if copied > metadata.len() {
-            return Err(denied());
-        }
-        digest.update(&buffer[..count]);
-        file.write_all(&buffer[..count]).map_err(|_| denied())?;
-    }
-    if copied != metadata.len() || hex(&digest.finalize()) != expected {
-        return Err(denied());
-    }
-    nix::fcntl::fcntl(
-        &file,
-        nix::fcntl::FcntlArg::F_ADD_SEALS(
-            nix::fcntl::SealFlag::F_SEAL_WRITE
-                | nix::fcntl::SealFlag::F_SEAL_GROW
-                | nix::fcntl::SealFlag::F_SEAL_SHRINK
-                | nix::fcntl::SealFlag::F_SEAL_SEAL,
-        ),
-    )
-    .map_err(|_| denied())?;
-    nix::fcntl::fcntl(
-        &file,
-        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-    )
-    .map_err(|_| denied())?;
-    let program = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-    Ok((file, program))
-}
-#[cfg(not(target_os = "linux"))]
-fn seal_executable(_: &Path, _: &str) -> Result<(File, PathBuf), AgentError> {
-    Err(denied())
 }
 
 fn hex(bytes: &[u8]) -> String {

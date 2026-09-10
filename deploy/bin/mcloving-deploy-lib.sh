@@ -495,6 +495,7 @@ deployment_contract_path_variables() {
         "trust follow MCLOVING_AGENT_CLIENT_CA_PATH file" \
         "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG file" \
         "trust nofollow MCLOVING_CACHE_MAPPING_CATALOG file" \
+        "trust nofollow MCLOVING_INPUT_MAPPING_CATALOG file" \
         "state follow MCLOVING_OBJECT_ROOT directory" \
         "state follow MCLOVING_WORKSPACE_ROOT directory" \
         "state follow MCLOVING_AGENT_JOURNAL file"
@@ -507,6 +508,7 @@ deployment_contract_path_variables() {
       printf '%s\n' \
         "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH file" \
         "secret nofollow MCLOVING_AGENT_CACHE_BINDINGS_PATH file" \
+        "secret nofollow MCLOVING_AGENT_INPUT_BINDINGS_PATH file" \
         "trust follow MCLOVING_CONTROLLER_CA_PATH file" \
         "trust follow MCLOVING_AGENT_CERTIFICATE_PATH file" \
         "state follow MCLOVING_AGENT_WORKSPACE_ROOT directory" \

@@ -343,6 +343,7 @@ jobs:
           bash -n scripts/test-backup-restore.sh
           bash -n scripts/run-verified-rust-test.sh
           bash -n scripts/test-cache-product.sh
+          bash -n scripts/test-input-product.sh
           bash -n scripts/verify-boundary-runtime.sh
           python3 scripts/test-execution-board.py
           python3 scripts/verify-execution-board.py
@@ -483,8 +484,8 @@ jobs:
           bash scripts/run-verified-rust-test.sh \
             2 capability-vocabulary --require-postgres \
             cargo +1.97.1 test --locked -p mcloving-controller --test capability_vocabulary
-      - name: Build shipped controller and cache for remote-agent gates
-        run: cargo +1.97.1 build --locked -p mcloving-controller -p mcloving-cache
+      - name: Build shipped controller and helpers for remote-agent gates
+        run: cargo +1.97.1 build --locked -p mcloving-controller -p mcloving-cache -p mcloving-input-adapter
       - name: Run shipped remote-agent execution gates against PostgreSQL
         env:
           MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
@@ -506,6 +507,11 @@ jobs:
           MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
           MCLOVING_CACHE_BINARY: ${{ github.workspace }}/target/debug/mcloving-cache
         run: bash scripts/test-cache-product.sh
+      - name: Run submitted input product gate
+        env:
+          MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
+          MCLOVING_INPUT_ADAPTER_BINARY: ${{ github.workspace }}/target/debug/mcloving-input-adapter
+        run: bash scripts/test-input-product.sh
       - name: Run contained sequential store and shipped-agent gates
         env:
           MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller

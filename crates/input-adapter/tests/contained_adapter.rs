@@ -139,6 +139,8 @@ async fn read_input(
         "x-mcloving-confidentiality",
         HeaderValue::from_static(if mode == "secret" {
             "secret"
+        } else if mode == "public" {
+            "public"
         } else {
             "internal"
         }),
@@ -1251,4 +1253,389 @@ async fn binary_boundary_uses_files_for_secrets_and_ndjson_for_receipts() {
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("mcloving-secret-marker"));
     assert_eq!(fixture.state.writes.load(Ordering::SeqCst), 0);
+}
+
+fn signed_frame(mut receipt: mcloving_input_adapter::CaptureReceipt) -> Vec<u8> {
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    receipt.signature.clear();
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(SIGNING_KEY).unwrap();
+    mac.update(&serde_json::to_vec(&receipt).unwrap());
+    receipt.signature =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    let mut bytes = serde_json::to_vec(&json!({"ok":true,"receipt":receipt})).unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+
+#[tokio::test]
+async fn pure_capture_verifier_binds_signed_authority_time_and_content_without_provider_state() {
+    use mcloving_input_adapter::{validate_verifier_config, verify_capture_response};
+    let fixture = start_fixture().await;
+    let root = TempDir::new().unwrap();
+    let mut cfg = config(&fixture.endpoint, &root.path().join("native-spool"));
+    cfg.max_confidentiality = Confidentiality::Public;
+    let adapter = make_adapter(cfg.clone(), READ_TOKEN).await;
+    let mut capture = request(&adapter, "main", "public");
+    capture.confidentiality_ceiling = Confidentiality::Public;
+    capture.expected_cursor = Some("main-cursor-v1".into());
+    let started = now_ms();
+    let native = adapter.capture(&capture).await.unwrap();
+    let completed = now_ms();
+    let check = |frame: &[u8]| {
+        verify_capture_response(
+            &cfg,
+            IMPLEMENTATION_SHA256,
+            SIGNING_KEY,
+            &[SECRET_MARKER.to_vec()],
+            &capture,
+            frame,
+            started,
+            completed,
+        )
+    };
+    let good = signed_frame(native.clone());
+    assert_eq!(check(&good).unwrap(), native);
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst), 1);
+    // Structural/config pin validation does not create even a missing spool and
+    // needs no read token value: an opaque token digest is all it receives.
+    let mut pure = cfg.clone();
+    pure.spool_dir = root.path().join("must-not-exist");
+    pure.read_token_sha256 = "b".repeat(64);
+    validate_verifier_config(
+        &pure,
+        IMPLEMENTATION_SHA256,
+        SIGNING_KEY,
+        &[SECRET_MARKER.to_vec()],
+    )
+    .unwrap();
+    assert!(!pure.spool_dir.exists());
+    for field in [
+        "protocol_version",
+        "schema_version",
+        "request_sha256",
+        "input_name",
+        "adapter_id",
+        "adapter_implementation_sha256",
+        "adapter_config_sha256",
+        "deployment_identity",
+        "operator_identity",
+        "endpoint_identity",
+        "data_source_identity",
+        "grant_id",
+        "grant_version",
+        "grant_scope",
+        "audit_lineage",
+        "signing_key_id",
+        "secret_marker_set_sha256",
+        "response_sha256",
+    ] {
+        let mut value = serde_json::to_value(&native).unwrap();
+        value[field] = json!("unrelated");
+        let changed = serde_json::from_value(value).unwrap();
+        assert!(check(&signed_frame(changed)).is_err(), "signed {field}");
+    }
+    for field in [
+        "capture_id",
+        "organization_id",
+        "project_id",
+        "pipeline_id",
+        "build_id",
+        "attempt_id",
+    ] {
+        let mut value = serde_json::to_value(&native).unwrap();
+        value[field] = json!(Uuid::new_v4());
+        assert!(
+            check(&signed_frame(serde_json::from_value(value).unwrap())).is_err(),
+            "signed {field}"
+        );
+    }
+    let mutations = [
+        ("generation", json!(2)),
+        ("rollback_from_generation", json!(1)),
+        ("canonical_query", json!({"branch":"dev"})),
+        ("source_cursor", json!("other-cursor")),
+        ("source_provenance", json!("")),
+        ("source_observed_at_unix_ms", json!(completed + 1)),
+        ("captured_at_unix_ms", json!(started - 1)),
+        ("captured_at_unix_ms", json!(completed + 1)),
+        (
+            "publication_deadline_unix_ms",
+            json!(native.captured_at_unix_ms),
+        ),
+        (
+            "publication_deadline_unix_ms",
+            json!(capture.expires_at_unix_ms + 1),
+        ),
+        ("confidentiality", json!("internal")),
+        ("retry_count", json!(cfg.retry_attempts + 1)),
+        (
+            "source_etag",
+            json!(String::from_utf8(SECRET_MARKER.to_vec()).unwrap()),
+        ),
+    ];
+    for (field, replacement) in mutations {
+        let mut value = serde_json::to_value(&native).unwrap();
+        value[field] = replacement;
+        assert!(
+            check(&signed_frame(serde_json::from_value(value).unwrap())).is_err(),
+            "signed {field}"
+        );
+    }
+    for response in [
+        json!({"enabled":"wrong","value":"public"}),
+        json!({"enabled":true,"value":String::from_utf8(SECRET_MARKER.to_vec()).unwrap()}),
+        json!({"enabled":true,"value":"x".repeat(2048)}),
+    ] {
+        let mut changed = native.clone();
+        changed.response = response;
+        changed.response_sha256 = content_sha256(&serde_json::to_vec(&changed.response).unwrap());
+        assert!(check(&signed_frame(changed)).is_err());
+    }
+    let mut altered_request = capture.clone();
+    altered_request.requested_at_unix_ms -= 1;
+    assert!(
+        verify_capture_response(
+            &cfg,
+            IMPLEMENTATION_SHA256,
+            SIGNING_KEY,
+            &[SECRET_MARKER.to_vec()],
+            &altered_request,
+            &good,
+            started,
+            completed
+        )
+        .is_err()
+    );
+    assert!(
+        verify_capture_response(
+            &cfg,
+            IMPLEMENTATION_SHA256,
+            b"wrong-signing-key-at-least-32-bytes",
+            &[SECRET_MARKER.to_vec()],
+            &capture,
+            &good,
+            started,
+            completed
+        )
+        .is_err()
+    );
+    assert!(
+        verify_capture_response(
+            &cfg,
+            IMPLEMENTATION_SHA256,
+            SIGNING_KEY,
+            &[b"wrong-marker".to_vec()],
+            &capture,
+            &good,
+            started,
+            completed
+        )
+        .is_err()
+    );
+    for bad in [
+        good[..good.len() - 1].to_vec(),
+        b"{malformed}\n".to_vec(),
+        [good[..good.len() - 1].to_vec(), b" {}\n".to_vec()].concat(),
+        [good.clone(), b"{}\n".to_vec()].concat(),
+        b"{\"ok\":true,\"ok\":true,\"receipt\":{}}\n".to_vec(),
+        b"{\"ok\":false,\"code\":\"failure\",\"message\":\"private\"}\n".to_vec(),
+    ] {
+        assert!(matches!(
+            check(&bad),
+            Err(AdapterError::InvalidStoredReceipt)
+        ));
+    }
+    for expired in [
+        capture.expires_at_unix_ms,
+        cfg.grant_expires_unix_ms,
+        native.publication_deadline_unix_ms,
+    ] {
+        assert!(
+            verify_capture_response(
+                &cfg,
+                IMPLEMENTATION_SHA256,
+                SIGNING_KEY,
+                &[SECRET_MARKER.to_vec()],
+                &capture,
+                &good,
+                started,
+                expired
+            )
+            .is_err(),
+            "late completion"
+        );
+    }
+    assert_eq!(
+        fixture.state.reads.load(Ordering::SeqCst),
+        1,
+        "pure verification never reads provider"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sealed_native_helper_hashes_running_image_and_pins_config_before_credentials_or_spool() {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = start_fixture().await;
+    let root = TempDir::new().unwrap();
+    let original = Path::new(env!("CARGO_BIN_EXE_mcloving-input-adapter"));
+    let implementation = sha256_file(original).await.unwrap();
+    let fd = nix::sys::memfd::memfd_create(
+        "input-native-test",
+        nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
+    )
+    .unwrap();
+    let mut sealed = std::fs::File::from(fd);
+    sealed.write_all(&std::fs::read(original).unwrap()).unwrap();
+    nix::fcntl::fcntl(
+        &sealed,
+        nix::fcntl::FcntlArg::F_ADD_SEALS(
+            nix::fcntl::SealFlag::F_SEAL_WRITE
+                | nix::fcntl::SealFlag::F_SEAL_GROW
+                | nix::fcntl::SealFlag::F_SEAL_SHRINK
+                | nix::fcntl::SealFlag::F_SEAL_SEAL,
+        ),
+    )
+    .unwrap();
+    let program = format!("/proc/self/fd/{}", sealed.as_raw_fd());
+    let mut cfg = config(&fixture.endpoint, &root.path().join("spool"));
+    cfg.max_confidentiality = Confidentiality::Public;
+    let config_path = root.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+    let token = root.path().join("token");
+    let key = root.path().join("key");
+    let markers = root.path().join("markers");
+    let command = || {
+        let mut cmd = Command::new(&program);
+        cmd.env_clear()
+            .env("MCLOVING_INPUT_ADAPTER_CONFIG", &config_path)
+            .env("MCLOVING_INPUT_ADAPTER_READ_TOKEN_FILE", &token)
+            .env("MCLOVING_INPUT_ADAPTER_SIGNING_KEY_FILE", &key)
+            .env("MCLOVING_INPUT_ADAPTER_SECRET_MARKERS_FILE", &markers)
+            .env("MCLOVING_INPUT_ADAPTER_TEST_MODE", "1");
+        cmd
+    };
+    // Missing token/key demonstrates the config pin guard executes before credential reads/state.
+    let output = command()
+        .env(
+            "MCLOVING_INPUT_ADAPTER_EXPECTED_CONFIG_SHA256",
+            "0".repeat(64),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!cfg.spool_dir.exists());
+    for (path, bytes) in [
+        (&token, READ_TOKEN.as_bytes()),
+        (&key, SIGNING_KEY),
+        (&markers, SECRET_MARKER),
+    ] {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let output = command()
+        .env(
+            "MCLOVING_INPUT_ADAPTER_EXPECTED_CONFIG_SHA256",
+            "0".repeat(64),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!cfg.spool_dir.exists());
+    use std::os::unix::ffi::OsStringExt as _;
+    let output = command()
+        .env(
+            "MCLOVING_INPUT_ADAPTER_EXPECTED_CONFIG_SHA256",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!cfg.spool_dir.exists());
+    let original_config = std::fs::read(&config_path).unwrap();
+    let mut duplicate = original_config[..original_config.len() - 1].to_vec();
+    duplicate.extend_from_slice(b",\"generation\":1}");
+    std::fs::write(&config_path, duplicate).unwrap();
+    let output = command()
+        .env(
+            "MCLOVING_INPUT_ADAPTER_EXPECTED_CONFIG_SHA256",
+            cfg.canonical_digest().unwrap(),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!cfg.spool_dir.exists());
+    std::fs::write(&config_path, original_config).unwrap();
+    // Build canonical request independently without constructing a credential-bearing adapter.
+    let capture = CaptureRequest {
+        capture_id: Uuid::new_v4(),
+        organization_id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        pipeline_id: Uuid::new_v4(),
+        build_id: Uuid::new_v4(),
+        attempt_id: Uuid::new_v4(),
+        input_name: "release_enabled".into(),
+        adapter_id: cfg.adapter_id.clone(),
+        expected_implementation_sha256: implementation.clone(),
+        expected_config_sha256: cfg.canonical_digest().unwrap(),
+        protocol_version: PROTOCOL_VERSION.into(),
+        schema_version: cfg.schema_version.clone(),
+        expected_generation: cfg.generation,
+        rollback_from_generation: None,
+        endpoint_identity: cfg.endpoint_identity.clone(),
+        data_source_identity: cfg.data_source_identity.clone(),
+        grant_id: cfg.grant_id.clone(),
+        grant_version: cfg.grant_version.clone(),
+        grant_scope: cfg.grant_scope.clone(),
+        query: BTreeMap::from([
+            ("branch".into(), "main".into()),
+            ("mode".into(), "public".into()),
+        ]),
+        expected_cursor: Some("main-cursor-v1".into()),
+        requested_at_unix_ms: now_ms() - 1,
+        expires_at_unix_ms: now_ms() + 10_000,
+        confidentiality_ceiling: Confidentiality::Public,
+        audit_lineage: "sealed-native-fixture".into(),
+    };
+    let started = now_ms();
+    let mut child = command()
+        .env(
+            "MCLOVING_INPUT_ADAPTER_EXPECTED_CONFIG_SHA256",
+            cfg.canonical_digest().unwrap(),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut request = serde_json::to_vec(&capture).unwrap();
+    request.push(b'\n');
+    input.write_all(&request).await.unwrap();
+    drop(input);
+    let output = child.wait_with_output().await.unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let receipt = mcloving_input_adapter::verify_capture_response(
+        &cfg,
+        &implementation,
+        SIGNING_KEY,
+        &[SECRET_MARKER.to_vec()],
+        &capture,
+        &output.stdout,
+        started,
+        now_ms(),
+    )
+    .unwrap();
+    assert_eq!(receipt.adapter_implementation_sha256, implementation);
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst), 1);
 }

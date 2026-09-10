@@ -10,7 +10,7 @@ use crate::model::{
     Provenance, Stage, Step, instantiate_pipeline, validate_pipeline,
 };
 use crate::strict_yaml::SourceSpan;
-use crate::{IR_V1, IR_V1_2, IR_V1_3, IR_V1_4};
+use crate::{IR_V1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5};
 
 const COMPONENT_MAGIC: &[u8] = b"MCLOVING-COMPONENT\0";
 const EXPANSION_MAGIC: &[u8] = b"MCLOVING-EXPANSION\0";
@@ -540,6 +540,13 @@ pub fn expand_component(
         )
     })?;
     let schema = if state.stages.iter().any(|stage| {
+        stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::InputIntent(_)))
+    }) {
+        IR_V1_5
+    } else if state.stages.iter().any(|stage| {
         stage
             .steps
             .iter()

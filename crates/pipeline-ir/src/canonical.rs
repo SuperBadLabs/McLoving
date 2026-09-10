@@ -75,6 +75,12 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
                         None => writer.u8(0),
                     }
                 }
+                Step::InputIntent(input) => {
+                    writer.u8(4);
+                    writer.string(&input.intent.mapping_id);
+                    writer.string(&input.intent.mapping_digest);
+                    writer.u64(input.intent.timeout_seconds);
+                }
                 Step::CacheIntent(cache) => {
                     let intent = &cache.intent;
                     writer.u8(3);
@@ -284,7 +290,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 4 {
+    if schema.major != 1 || schema.minor > 5 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -462,6 +468,21 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                             ));
                         }
                     }
+                }
+                4 if schema.minor >= 5 => {
+                    if stage_steps != 1 {
+                        return Err(CanonicalError::new(
+                            reader.offset,
+                            "input intent stage must contain exactly one step",
+                        ));
+                    }
+                    mcloving_domain::input_intent::InputIntentSpec {
+                        mapping_id: reader.string()?,
+                        mapping_digest: reader.string()?,
+                        timeout_seconds: reader.u64()?,
+                    }
+                    .validate()
+                    .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
                 }
                 3 if schema.minor >= 4 => {
                     use mcloving_domain::cache_intent::{CacheIntentSpec, CacheOperation};

@@ -18,9 +18,9 @@ pub use expression::{
 };
 pub use model::{
     AmbiguityPolicy, CacheIntentStep, CompileError, CompileErrorCategory, CompilerIdentity,
-    ConnectorEffectClass, ConnectorIntentStep, ExpressionBinding, IrValidationError, JsonFieldType,
-    ParameterDefinition, ParameterType, PipelineIr, ProcessMode, ProcessStep, Provenance,
-    SchemaCompatibility, SchemaVersion, Stage, Step, compile_strict_yaml,
+    ConnectorEffectClass, ConnectorIntentStep, ExpressionBinding, InputIntentStep,
+    IrValidationError, JsonFieldType, ParameterDefinition, ParameterType, PipelineIr, ProcessMode,
+    ProcessStep, Provenance, SchemaCompatibility, SchemaVersion, Stage, Step, compile_strict_yaml,
     compile_strict_yaml_with_parameters, instantiate_pipeline, validate_pipeline,
 };
 pub use strict_yaml::{
@@ -42,3 +42,5 @@ pub const IR_V1_3: SchemaVersion = SchemaVersion { major: 1, minor: 3 };
 
 /// Bounded deployment-resolved cache helper intents.
 pub const IR_V1_4: SchemaVersion = SchemaVersion { major: 1, minor: 4 };
+
+pub const IR_V1_5: SchemaVersion = SchemaVersion { major: 1, minor: 5 };
