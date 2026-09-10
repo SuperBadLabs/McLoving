@@ -33,7 +33,9 @@ one that merely looks like it holds.
 ## Why the run starts with a clean baseline
 
 The harness first runs the gate against the **unmutated** client and requires all
-sixteen to pass. Without that step a mutation could "fail correctly" for a reason
+eighteen to pass — the count `mutation-results.json` records as
+`expected_assertions`, read back from that baseline verdict rather than requested
+on the command line. Without that step a mutation could "fail correctly" for a reason
 that had nothing to do with the mutation — a flaky fixture, a port collision, a
 stale container image — and the proof would be worthless while looking perfect.
 

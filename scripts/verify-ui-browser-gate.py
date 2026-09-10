@@ -219,6 +219,45 @@ def main():
                 f"browser gate report failures instead of failing: {line.strip()!r}"
             )
 
+    # Four separate review rounds caught a retained evidence README stating a
+    # count its own gate-results.json contradicted. Fixing the instances did not
+    # stop it recurring, because nothing read the two together. This does: each
+    # retained README must contain the verdict string derived from the JSON
+    # beside it, so a changed count forces the prose to move with it.
+    evidence = repo_root / "docs" / "evidence"
+    for name in ("ui-002-browser-v1", "ui-002-browser-v2"):
+        directory = evidence / name
+        try:
+            verdict = json.loads((directory / "gate-results.json").read_text())
+            readme = (directory / "README.md").read_text()
+        except (OSError, json.JSONDecodeError) as error:
+            failures.append(f"{name}: cannot read its retained evidence: {error}")
+            continue
+        expected = f"{verdict['passed']} of {verdict['observed_assertions']} assertions passed"
+        if expected not in readme:
+            failures.append(
+                f"{name}/README.md does not state the verdict its own "
+                f"gate-results.json records ({expected!r})"
+            )
+    try:
+        mutation = json.loads((evidence / "ui-002-mutation-v1" / "mutation-results.json").read_text())
+        mutation_readme = (evidence / "ui-002-mutation-v1" / "README.md").read_text()
+    except (OSError, json.JSONDecodeError) as error:
+        failures.append(f"ui-002-mutation-v1: cannot read its retained evidence: {error}")
+    else:
+        expected = f"{mutation['caught']} of {mutation['mutations_run']} caught"
+        if expected not in mutation_readme:
+            failures.append(
+                f"ui-002-mutation-v1/README.md does not state the result its own "
+                f"mutation-results.json records ({expected!r})"
+            )
+        if str(mutation["expected_assertions"]) not in mutation_readme:
+            failures.append(
+                f"ui-002-mutation-v1/README.md does not state the assertion count "
+                f"its own mutation-results.json records "
+                f"({mutation['expected_assertions']})"
+            )
+
     if failures:
         for failure in failures:
             print(f"UI browser gate coherence failure: {failure}", file=sys.stderr)

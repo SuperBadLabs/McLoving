@@ -93,7 +93,7 @@ check that could not observe it.
 - **The lane gates merge, and its waiver is explicit.** `ui-browser` is in
   `FOUNDATION_JOBS` and in the `foundation` aggregate's `needs`, so a failure
   blocks. It is also the one Foundation lane that does not always execute: the
-  mutation proof is seventeen browser runs, so `scripts/ui-browser-impact.py`
+  mutation proof is twenty-two browser runs, so `scripts/ui-browser-impact.py`
   classifies whether the change can affect the interface. That is the `TM-052`
   hazard — a skipped required check reads as a pass — so the waiver is wired on
   the Windows-agent pattern rather than as a `paths:` filter. `ui-impact` is
@@ -146,7 +146,7 @@ looking at the surface that matters most:
    list, so those rows never rendered. The repair was real and the evidence for
    it did not exist, which is precisely the defect class this ticket exists to
    correct, reproduced inside the work that corrects it. Review caught it. The
-   fixture now serves two real artifact records, a seventeenth assertion drives
+   fixture now serves two real artifact records, a further assertion drives
    the client's own timer rather than a clicked refresh, and two further
    mutations prove it binds. Running the completed gate against the original
    client then showed this failing there too: the shipped client lost focus on

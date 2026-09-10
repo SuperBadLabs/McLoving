@@ -38,9 +38,14 @@ record asserted and no check in the repository could support:
 | `viewport_390_has_no_horizontal_overflow` | At an inner width of exactly 390px the document overflowed horizontally on two views: **dashboard** `scrollWidth=510` (the recent-builds table) and **pipeline** `scrollWidth=437` (the non-wrapping `.actions` button row). |
 | `console_has_no_unexpected_resource_failures` | `GET /favicon.ico` → **404**, logged SEVERE on every page load. The client declares no icon and the controller serves no such route. |
 
-The fourth failure is why the count here is 17 and not 16: the artifact surface
-was outside the first version of this gate entirely, so `renderArtifacts` and the
-focus behaviour of the build view's own timer were asserted by nothing.
+The fourth failure exists at all because the artifact surface was outside the
+first version of this gate entirely: the fixture served an empty artifact list, so
+`renderArtifacts` never ran and the focus behaviour of the build view's own timer
+was asserted by nothing. Closing that added
+`focus_survives_build_view_live_refresh`, which is the fourth failure above.
+A later review round added `artifact_download_delivers_content`, which brought the
+total to the **18** recorded in `gate-results.json`; that one **passes** here, so
+it is coverage this baseline gained rather than a fifth original defect.
 
 The console assertion is split in two so that neither failure can hide the
 other. `console_has_no_script_errors` **passed**: the client logged no
