@@ -260,8 +260,9 @@ fn renewal_went_unanswered(status: &tonic::Status) -> bool {
 
 /// How often an unanswered renewal is retried: at least once a second, so a
 /// controller that comes back from a short restart is noticed promptly, and
-/// never more often than the agent's own renewal cadence, which the
-/// configuration already forbids from being zero.
+/// ordinarily no more often than the agent's own renewal cadence, which the
+/// configuration already forbids from being zero. The renewal loop can shorten
+/// this interval to leave room for a second ask near the held deadline.
 fn renewal_retry_interval(renewal_interval: Duration) -> Duration {
     renewal_interval.min(Duration::from_secs(1))
 }
@@ -1756,6 +1757,14 @@ async fn renew_lease(
             authority_lost.cancel();
             return Err(AgentError::LeaseRenewalTimeout);
         }
+        // Fix this allowance for the whole retry cycle: one pending response
+        // may use at most half the initially remaining execution budget. Reuse
+        // that duration rather than halving on every retry near the deadline.
+        let response_budget = Duration::from_secs(1)
+            .min(lease_deadline.saturating_duration_since(tokio::time::Instant::now()) / 2);
+        // A long configured cadence must not sleep through the time reserved
+        // for a second ask. Ordinary held terms keep their configured cadence.
+        let retry_interval = retry_interval.min(response_budget);
         let mut unanswered: u64 = 0;
         // Carried out of the loop with the receipt: the term a successful
         // renewal opens is measured from the moment THAT request left, so the
@@ -1775,7 +1784,9 @@ async fn renew_lease(
             // A connected peer may keep one RPC pending through its outage.
             // Bound each ask independently so it cannot consume the entire
             // held term and prevent a later request from observing recovery.
-            let rpc_deadline = (request_sent_at + retry_interval).min(lease_deadline);
+            // Keep the allowance independent of a fast renewal cadence while
+            // leaving room for another ask even in a short usable term.
+            let rpc_deadline = (request_sent_at + response_budget).min(lease_deadline);
             let renewal = tokio::select! {
                 () = stop.cancelled() => return Ok(()),
                 result = tokio::time::timeout_at(
