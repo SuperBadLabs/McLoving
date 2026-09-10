@@ -220,10 +220,21 @@ impl AgentConfig {
             "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS",
             2_000,
         )?;
+        // The termination grace is part of the lease, not something that runs
+        // after it. Cancelling an execution signals the group and waits this
+        // long before `SIGKILL`, so the renewal task must give up early enough
+        // for the workload to be STOPPED before the attempt becomes
+        // reclaimable. A configuration where the renewal cadence and the grace
+        // together do not fit inside the lease cannot honour that, and is
+        // refused here rather than discovered as a duplicated side effect.
         if poll_milliseconds == 0
             || renewal_milliseconds == 0
             || termination_grace_milliseconds == 0
-            || renewal_milliseconds >= u64::from(lease_seconds.saturating_sub(1)) * 1_000
+            || Duration::from_millis(renewal_milliseconds)
+                >= worker::execution_lease_budget(
+                    Duration::from_secs(u64::from(lease_seconds)),
+                    Duration::from_millis(termination_grace_milliseconds),
+                )
         {
             return Err(AgentError::InvalidConfig(
                 "agent polling, renewal, or termination timing",
@@ -768,6 +779,24 @@ async fn send_reconciliation(
                     return Err(AgentError::StaleSession);
                 }
                 let phase = recovered_cancellation_phase(outcome, receipt.disposition)?;
+                if [
+                    CancellationDisposition::RetireStale as i32,
+                    CancellationDisposition::DischargeRecovered as i32,
+                ]
+                .contains(&receipt.disposition)
+                {
+                    // Both replies explicitly refuse this recovered authority.
+                    // Which reply applies depends on whether the journal already
+                    // proves containment, not on a different fencing guarantee.
+                    eprintln!(
+                        "recovered_fence_refused: {:?} {}/{} fence {}",
+                        CancellationDisposition::try_from(receipt.disposition)
+                            .expect("recovered disposition was validated"),
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                    );
+                }
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
@@ -1409,6 +1438,71 @@ mod tests {
                 "agent polling, renewal, or termination timing"
             ))
         ));
+        // AGENT-007, from review. The termination grace is spent INSIDE the
+        // lease: cancelling signals the group and waits it out before
+        // `SIGKILL`. A cadence that fits on its own but not once the grace is
+        // added cannot stop the workload before the attempt is reclaimable, so
+        // it is refused rather than left to duplicate an external effect.
+        let mut grace_overruns_lease = values();
+        grace_overruns_lease.insert("MCLOVING_AGENT_LEASE_SECONDS".to_owned(), "5".to_owned());
+        grace_overruns_lease.insert(
+            "MCLOVING_AGENT_RENEW_MILLISECONDS".to_owned(),
+            "3000".to_owned(),
+        );
+        grace_overruns_lease.insert(
+            "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS".to_owned(),
+            "1500".to_owned(),
+        );
+        assert!(
+            matches!(
+                AgentConfig::from_values(&grace_overruns_lease),
+                Err(AgentError::InvalidConfig(
+                    "agent polling, renewal, or termination timing"
+                ))
+            ),
+            "3000 ms of cadence plus 1500 ms of grace does not fit in a 5 s lease"
+        );
+
+        // The same cadence with a grace that does fit is accepted, so the rule
+        // refuses the configuration rather than the cadence.
+        let mut grace_fits = grace_overruns_lease.clone();
+        grace_fits.insert(
+            "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS".to_owned(),
+            "500".to_owned(),
+        );
+        assert!(AgentConfig::from_values(&grace_fits).is_ok());
+
+        // And the shipped defaults are nowhere near the bound.
+        let defaults = AgentConfig::from_values(&values()).unwrap();
+        assert_eq!(defaults.lease_seconds, 30);
+        assert_eq!(defaults.lease_renewal_interval, Duration::from_secs(5));
+        assert_eq!(defaults.termination_grace, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn configuration_reserves_grace_before_renewal_deadline() {
+        for (grace_ms, renewal_ms, valid) in [
+            ("2000", "5000", true),
+            ("24000", "5000", false),
+            ("24000", "4999", true),
+            ("29000", "1", false),
+            ("18446744073709551615", "1", false),
+        ] {
+            let mut input = values();
+            input.insert(
+                "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS".into(),
+                grace_ms.into(),
+            );
+            input.insert(
+                "MCLOVING_AGENT_RENEW_MILLISECONDS".into(),
+                renewal_ms.into(),
+            );
+            assert_eq!(
+                AgentConfig::from_values(&input).is_ok(),
+                valid,
+                "grace={grace_ms}, renewal={renewal_ms}"
+            );
+        }
     }
 
     #[test]

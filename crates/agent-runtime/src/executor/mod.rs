@@ -93,6 +93,8 @@ pub struct ExecutionOutcome {
 
 #[derive(Debug, Error)]
 pub enum ExecutionError {
+    #[error("execution was cancelled before process spawn")]
+    CancelledBeforeSpawn,
     #[error("workspace transfer failed: {0}")]
     WorkspaceTransfer(String),
     #[error("invalid workspace path: {0}")]

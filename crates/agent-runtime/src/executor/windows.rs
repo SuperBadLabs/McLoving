@@ -115,6 +115,11 @@ where
 
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     let command = windows_command(request)?;
+    // Workspace preparation may await I/O while lease authority is lost.
+    // A cancelled request must not resurrect work after that preparation.
+    if cancellation.is_cancelled() {
+        return Err(ExecutionError::CancelledBeforeSpawn);
+    }
     let mut child = JobProcess::spawn_suspended(&SpawnSpec {
         program: &command.program,
         arguments: &command.arguments,
@@ -139,6 +144,10 @@ where
     if let Err(error) = on_spawn(process_id) {
         terminate_job(&child, process_id).await?;
         return Err(error);
+    }
+    if cancellation.is_cancelled() {
+        terminate_job(&child, process_id).await?;
+        return Err(ExecutionError::CancelledBeforeSpawn);
     }
     if let Err(error) = child.resume() {
         terminate_job(&child, process_id).await?;
@@ -533,6 +542,70 @@ mod tests {
                 reason
             } if reason.contains("QueryInformationJobObject")
         ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_in_spawn_hook_never_resumes_the_suspended_process() {
+        let root = tempfile::tempdir().unwrap();
+        let request = request(
+            root.path(),
+            "cancelled-hook",
+            ExecutionMode::Direct,
+            "cmd.exe",
+            vec![
+                OsString::from("/c"),
+                OsString::from("echo spawned>spawned.marker"),
+            ],
+        );
+        let cancellation = CancellationToken::new();
+        let cancel_at_hook = cancellation.clone();
+        let process_id = AtomicU32::new(0);
+        let result = execute_with_spawn_hook(&request, cancellation, |pid| {
+            process_id.store(pid, Ordering::SeqCst);
+            cancel_at_hook.cancel();
+            Ok(())
+        })
+        .await;
+        assert!(matches!(result, Err(ExecutionError::CancelledBeforeSpawn)));
+        assert!(!root.path().join("cancelled-hook/spawned.marker").exists());
+        let pid = process_id.load(Ordering::SeqCst);
+        assert_ne!(
+            pid, 0,
+            "suspended process must reach the durable spawn hook"
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &format!(
+                "try {{ $p = [System.Diagnostics.Process]::GetProcessById({pid}); if (!$p.HasExited) {{ exit 1 }} }} catch [System.ArgumentException] {{ exit 0 }} catch {{ throw }}"
+            )])
+            .status().unwrap();
+        assert!(
+            status.success(),
+            "suspended workload {pid} must be terminated before return"
+        );
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_execution_never_spawns_a_process() {
+        let root = tempfile::tempdir().unwrap();
+        let request = request(
+            root.path(),
+            "cancelled",
+            ExecutionMode::Direct,
+            "cmd.exe",
+            vec![
+                OsString::from("/c"),
+                OsString::from("echo spawned>spawned.marker"),
+            ],
+        );
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = execute_with_spawn_hook(&request, cancellation, |_| {
+            panic!("cancelled execution must not invoke the spawn hook")
+        })
+        .await;
+        assert!(matches!(result, Err(ExecutionError::CancelledBeforeSpawn)));
+        assert!(!root.path().join("cancelled/child.pid").exists());
+        assert!(!root.path().join("cancelled/spawned.marker").exists());
     }
 
     #[tokio::test]
