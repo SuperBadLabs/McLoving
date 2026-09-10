@@ -2454,7 +2454,8 @@ pub fn verify_capture_response(
         ok: bool,
         receipt: CaptureReceipt,
     }
-    let result: Success = parse_json_no_duplicates(&frame[..frame.len() - 1])?;
+    let result: Success = parse_json_no_duplicates(&frame[..frame.len() - 1])
+        .map_err(|_| AdapterError::InvalidStoredReceipt)?;
     if !result.ok {
         return Err(AdapterError::InvalidStoredReceipt);
     }

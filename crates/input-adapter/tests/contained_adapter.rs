@@ -1435,11 +1435,16 @@ async fn pure_capture_verifier_binds_signed_authority_time_and_content_without_p
     );
     for bad in [
         good[..good.len() - 1].to_vec(),
+        b"{malformed}\n".to_vec(),
+        [good[..good.len() - 1].to_vec(), b" {}\n".to_vec()].concat(),
         [good.clone(), b"{}\n".to_vec()].concat(),
         b"{\"ok\":true,\"ok\":true,\"receipt\":{}}\n".to_vec(),
         b"{\"ok\":false,\"code\":\"failure\",\"message\":\"private\"}\n".to_vec(),
     ] {
-        assert!(check(&bad).is_err());
+        assert!(matches!(
+            check(&bad),
+            Err(AdapterError::InvalidStoredReceipt)
+        ));
     }
     for expired in [
         capture.expires_at_unix_ms,

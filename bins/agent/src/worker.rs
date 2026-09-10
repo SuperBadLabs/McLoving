@@ -684,7 +684,7 @@ fn validate_assignment(
             .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64));
     let calculated: [u8; 32] = if matches!(helper_version, Some(3 | 4)) {
         cache_context.validate().map_err(|_| {
-            AgentError::InvalidAssignment("cache work context is invalid".to_owned())
+            AgentError::InvalidAssignment("helper work context is invalid".to_owned())
         })?;
         if helper_version == Some(4) {
             input_assignment_digest(&assignment.execution_spec_json, &cache_context)
@@ -3187,6 +3187,12 @@ mod tests {
                 "context field {index}"
             );
         }
+        let mut invalid = offer;
+        invalid.project_id.clear();
+        assert!(matches!(
+            validate_assignment(&configured, 4, invalid),
+            Err(AgentError::InvalidAssignment(message)) if message == "helper work context is invalid"
+        ));
     }
 
     #[test]
