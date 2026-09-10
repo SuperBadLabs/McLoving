@@ -1,4 +1,5 @@
 """Owned-file inotify observer; no privileged operations or policy changes."""
+import base64
 import ctypes
 import json
 import os
@@ -9,8 +10,10 @@ libc = ctypes.CDLL(None, use_errno=True)
 watch_fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
 if watch_fd < 0:
     raise OSError(ctypes.get_errno(), "inotify_init1")
+IN_ACCESS = 0x00000001
+IN_OPEN = 0x00000020
 for path in sys.argv[2:5]:
-    if libc.inotify_add_watch(watch_fd, os.fsencode(path), 0x20 | 0x1) < 0:
+    if libc.inotify_add_watch(watch_fd, os.fsencode(path), IN_OPEN | IN_ACCESS) < 0:
         raise OSError(ctypes.get_errno(), "inotify_add_watch")
 
 def drain():
@@ -35,6 +38,6 @@ result = subprocess.run([f"/proc/self/fd/{fd}"], input=b"{}\n", capture_output=T
                         pass_fds=(fd,), timeout=10)
 observed = drain()
 os.close(watch_fd)
-print(json.dumps({"status": result.returncode, "stdout": result.stdout.decode(),
-                  "stderr": result.stderr.decode(), "private_access_event_bytes": observed,
+print(json.dumps({"status": result.returncode, "stdout_base64": base64.b64encode(result.stdout).decode("ascii"),
+                  "stderr_base64": base64.b64encode(result.stderr).decode("ascii"), "private_access_event_bytes": observed,
                   "positive_control_event_bytes": positive_control}))

@@ -305,3 +305,22 @@ transport evidence remained unchanged; no host policy or mount mutation was
 performed. These are standalone source gates, not submitted-job source or
 outer-agent descendant-cancellation evidence. Protected PR and exact-main
 Foundation/native Windows results remain separate required observations.
+
+The standalone fixture preserves the existing host-capability contract. The
+named source-profile gate must complete the authenticated positive acquisition.
+Where the native sealed-launcher probe establishes namespace unavailability,
+the fixture executes the real sealed helper and requires exactly
+`transport_namespace_unavailable`, zero provider requests, and no acquisition,
+claim or staging publication. This is an asserted native refusal, not a skipped
+test. Other capable hosts retain the full positive path and verify the actual
+inherited profile. Foundation runs the named source suite; it syntax-checks the
+separate Podman differential script but does not execute that complete script.
+The startup observer represents arbitrary output bytes losslessly as Base64 and
+names its `IN_OPEN`/`IN_ACCESS` event mask.
+
+Local correction validation exercised three actual routes: named-profile
+authenticated acquisition (one passed), the Podman source invocation with the
+differential lane's security settings on this capable host (one positive passed),
+and the unconfined host's existing namespace restriction (one exact refusal
+passed). Strict Clippy passed. No injected denial or host policy mutation was
+needed, and this targeted container run is not a full differential-lane result.

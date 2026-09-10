@@ -243,7 +243,7 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
         );
         let observed: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_ne!(observed["status"], 0);
-        assert_eq!(observed["stdout"], "");
+        assert_eq!(observed["stdout_base64"], "");
         assert_eq!(observed["private_access_event_bytes"], 0);
         assert!(observed["positive_control_event_bytes"].as_u64().unwrap() > 0);
         assert!(!config.output_root.exists());
@@ -309,6 +309,15 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
         "MCLOVING_SOURCE_ACQUIRER_EXPECTED_CONFIG_SHA256",
         config.canonical_digest().unwrap(),
     );
+    let expected_profile = std::fs::read_to_string("/proc/self/attr/current").unwrap();
+    let named_source_profile =
+        expected_profile.split_whitespace().next() == Some("mcloving-source-acquirer");
+    let namespace_denied = host_denies_sealed_launcher_userns();
+    assert!(
+        !named_source_profile || !namespace_denied,
+        "named source-profile gate owes the full sealed acquisition: {}",
+        userns_policy_diagnostics()
+    );
     let started_ms = now_ms();
     let mut child = command.spawn().unwrap();
     let pid = child.id().unwrap();
@@ -319,6 +328,53 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
         .unwrap();
     stdin.write_all(b"\n").await.unwrap();
     drop(stdin);
+    if namespace_denied {
+        // This is an executed native refusal, not a skipped positive test.
+        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+            .await
+            .expect("namespace refusal is bounded")
+            .unwrap();
+        assert!(output.status.success());
+        assert_private_absent(&output.stdout);
+        assert_private_absent(&output.stderr);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["code"], "transport_namespace_unavailable");
+        assert!(contains(&output.stderr, b"transport_namespace_unusable"));
+        assert_eq!(counts.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.upload_posts.load(Ordering::SeqCst), 0);
+        assert_eq!(authorized_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
+        assert!(
+            !config
+                .output_root
+                .join(request.acquisition_id.to_string())
+                .exists()
+        );
+        assert!(
+            !config
+                .output_root
+                .join(format!("{}.claim.json", request.acquisition_id))
+                .exists()
+        );
+        assert!(
+            std::fs::read_dir(&config.output_root)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".stage-"))
+        );
+        assert_eq!(inventory(&repository.bare), bare_before);
+        scan_private_absent(&config.output_root);
+        server.abort();
+        eprintln!(
+            "sealed source prerequisite: actual sealed helper asserted transport_namespace_unavailable with zero provider requests/publication; positive acquisition remains required in named source host gate"
+        );
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(60), async {
         while counts.reads.load(Ordering::SeqCst) == 0 {
             assert!(
@@ -332,8 +388,8 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
     .expect("authenticated native fetch reaches held provider");
     let profile = std::fs::read_to_string(format!("/proc/{pid}/attr/current")).unwrap();
     assert_eq!(
-        profile.split_whitespace().next(),
-        Some("mcloving-source-acquirer")
+        profile, expected_profile,
+        "native helper retains externally selected profile"
     );
     let running = std::fs::File::open(format!("/proc/{pid}/exe")).unwrap();
     assert_eq!(
