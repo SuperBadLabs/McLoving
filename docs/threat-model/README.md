@@ -601,3 +601,5 @@ the affected scope, owner, review date, and user-visible limitation.
 Threat-model review is required for changes to authentication, authorization,
 protocols, persistence, execution, secrets, connectors, agent pools, supply
 chain, or deployment boundaries.
+
+PR #135 follow-up review identified an earlier malformed interpolation prefix hidden by a later lexical exclusion. The bounded Clojure precheck now follows the existing independent Rust proof before entering dynamic syntax; unknown nested expressions are not guessed. Original `2326a63` receipts remain historical, and fresh exact-source evidence plus protected verification are required for the follow-up. The V2 contract and runtime authority are unchanged; no closure attribution is added.

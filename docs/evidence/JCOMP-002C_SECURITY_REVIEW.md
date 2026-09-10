@@ -4,7 +4,13 @@
 
 JCOMP-002C is ACTIVE. The correction aligns independently checked negative diagnostics without expanding runnable syntax. Protected merge and exact-main verification remain pending. JCOMP-003 remains ACTIVE with new campaigns held until this prerequisite earns closure.
 
-The reviewed execution candidate is `2326a63b6c52a5354a82d58aee9879db046613c9`, tree `035210fe048f45604119f796a18b47070006bff9`, based on earned predecessor closure commit `249d772072530fb511602eb16ed3a1d59732a67b` above verified runtime `44f0498fbdf3a59434176e9d09a52e1260336260`. Later evidence/documentation commits must preserve the tested compiler and policy bytes; candidate receipts do not become new-head execution receipts merely by being copied.
+The historical reviewed execution candidate is `2326a63b6c52a5354a82d58aee9879db046613c9`, tree `035210fe048f45604119f796a18b47070006bff9`, based on earned predecessor closure commit `249d772072530fb511602eb16ed3a1d59732a67b` above verified runtime `44f0498fbdf3a59434176e9d09a52e1260336260`. Later evidence/documentation commits must preserve the tested compiler and policy bytes; candidate receipts do not become new-head execution receipts merely by being copied.
+
+## Follow-up review correction: malformed interpolation prefix
+
+PR #135 review found an additional non-corpus counterexample: a malformed first `$ ` prefix before an escaped physical newline in a triple-quoted literal. Source `2326a63` returned a later lexical exclusion, while pinned Groovy and independent Rust recognized the earlier parse error. The sealed `jcomp-002c-v1` evidence remains a source-qualified historical baseline; it does not validate this additional case or any later compiler source.
+
+The follow-up aligns only the Clojure preflight with Rust's existing known-invalid initial-dollar-tail and initial-interpolation-prefix predicates, before marking the literal dynamic. Unknown nested expressions remain outside that bounded proof. Seven additional shared regressions cover the review case and related initial prefixes; disabling the precheck restores their failures. The V2 contract, Rust classification logic and admitted grammar are unchanged. Fresh exact-candidate build, contained fixture/original-corpus validation and independent results will be bound to the new source in PR receipts and the durable handoff. Protected merge and exact-main verification remain pending; JCOMP-002C and JCOMP-003 stay ACTIVE.
 
 ## Versioned policy and independent boundary
 

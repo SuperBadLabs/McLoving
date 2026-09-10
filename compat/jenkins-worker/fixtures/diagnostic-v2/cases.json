@@ -58,5 +58,47 @@
     "source": "pipeline { agent any; stages { stage('Build') { steps { sh 'bad\\",
     "status": "rejected",
     "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_dollar_before_continuation",
+    "source": "def x = \"\"\"bad$ \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_digit_before_continuation",
+    "source": "def x = \"\"\"bad$1 \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_question_before_continuation",
+    "source": "def x = \"\"\"bad$? \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_hyphen_before_continuation",
+    "source": "def x = \"\"\"bad$- \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_tab_before_continuation",
+    "source": "def x = \"\"\"bad$\t \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_paren_before_continuation",
+    "source": "def x = \"\"\"bad${) \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
+  },
+  {
+    "id": "malformed_bracket_before_continuation",
+    "source": "def x = \"\"\"bad${] \\\n next\"\"\"\n",
+    "status": "rejected",
+    "code": "E_SOURCE_PARSE"
   }
 ]

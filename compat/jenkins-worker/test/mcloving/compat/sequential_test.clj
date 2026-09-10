@@ -197,7 +197,7 @@
 
 (deftest explicit-diagnostic-precedence-preserves-runnable-boundary
   (let [cases (.parseText (JsonSlurper.) (slurp "fixtures/diagnostic-v2/cases.json"))]
-    (is (= 10 (count cases)))
+    (is (= 17 (count cases)))
     (doseq [case cases]
       (testing (get case "id")
         (let [result (response (b (get case "source")))]

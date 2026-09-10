@@ -1003,7 +1003,7 @@ fn explicit_diagnostic_precedence_refuses_forged_status_and_code() {
     )
     .unwrap();
     let cases = cases.as_array().unwrap();
-    assert_eq!(cases.len(), 10);
+    assert_eq!(cases.len(), 17);
     for case in cases {
         let source = case["source"].as_str().unwrap().as_bytes();
         let classification = source::classify(source);
