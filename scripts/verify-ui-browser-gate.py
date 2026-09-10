@@ -81,6 +81,23 @@ def main():
                 f"{len(names)}"
             )
 
+    # The pinned count must live in exactly one place. A second copy -- a
+    # default in the mutation harness, say -- silently disagrees the moment an
+    # assertion is added, and every gate run in the proof then fails the count
+    # check instead of the mutation.
+    harness = (repo_root / "scripts" / "test-ui-browser-mutations.py").read_text()
+    stray = re.search(
+        r'add_argument\(\s*"--expected-assertions".*?default\s*=\s*(\d+)',
+        harness,
+        re.DOTALL,
+    )
+    if stray:
+        failures.append(
+            f"test-ui-browser-mutations.py hardcodes a default assertion count "
+            f"of {stray.group(1)}; the pin in {runner_path.name} is the only "
+            "place that count may live"
+        )
+
     spec = json.loads(mutations_path.read_text())
     mutations = spec["mutations"]
     # An assertion may carry several mutations. Requiring exactly one was itself

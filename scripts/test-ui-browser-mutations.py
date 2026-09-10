@@ -23,19 +23,28 @@ UI_FILES = ("index.html", "app.js", "app.css")
 
 
 def run_gate(repo_root, output_dir, label, expected_assertions):
-    """Run the gate without enforcing, and return its parsed verdict."""
+    """Run the gate without enforcing, and return its parsed verdict.
+
+    `expected_assertions` is normally None, and then nothing is forwarded: the
+    pinned count lives in `test-ui-browser.sh` and must live in exactly one
+    place. A second copy here disagreed with it the moment the gate grew a
+    seventeenth assertion, and every gate run in the proof failed the count
+    check rather than the mutation -- which the exit-status check below caught,
+    but only after CI had run it.
+    """
+    command = [
+        "bash",
+        str(repo_root / "scripts" / "test-ui-browser.sh"),
+        "--output-dir",
+        str(output_dir),
+        "--label",
+        label,
+        "--record-only",
+    ]
+    if expected_assertions is not None:
+        command[-1:-1] = ["--expected-assertions", str(expected_assertions)]
     result = subprocess.run(
-        [
-            "bash",
-            str(repo_root / "scripts" / "test-ui-browser.sh"),
-            "--output-dir",
-            str(output_dir),
-            "--label",
-            label,
-            "--expected-assertions",
-            str(expected_assertions),
-            "--record-only",
-        ],
+        command,
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -63,7 +72,13 @@ def run_gate(repo_root, output_dir, label, expected_assertions):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-assertions", type=int, default=16)
+    parser.add_argument(
+        "--expected-assertions",
+        type=int,
+        default=None,
+        help="override the count pinned in test-ui-browser.sh; omit it, which "
+        "is what CI does, and the pin is the single source of truth",
+    )
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument(
         "--only", action="append", default=[],
@@ -168,7 +183,9 @@ def main():
     escaped = [r for r in records if not r["caught"]]
     summary = {
         "gate_protocol": "mcloving.ui.browser/1",
-        "expected_assertions": arguments.expected_assertions,
+        # The count the gate actually ran, read back from the baseline verdict,
+        # rather than whatever was requested on the command line.
+        "expected_assertions": baseline["observed_assertions"],
         "mutations_run": len(records),
         "caught": len(records) - len(escaped),
         "escaped": [r["mutation"] for r in escaped],
