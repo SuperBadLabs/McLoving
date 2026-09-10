@@ -87,9 +87,25 @@ check that could not observe it.
   that the count pinned in the runner, the assertions `gate.py` emits, and the
   mutation set all agree, that no mutation's find-text is absent from the client
   it targets, and that the Containerfile's base image is the pinned digest.
-- **The lane gates merge.** `ui-browser` is in `FOUNDATION_JOBS` and in the
-  `foundation` aggregate's `needs`, so a failure blocks rather than being a job
-  nobody required.
+- **The lane gates merge, and its waiver is explicit.** `ui-browser` is in
+  `FOUNDATION_JOBS` and in the `foundation` aggregate's `needs`, so a failure
+  blocks. It is also the one Foundation lane that does not always execute: the
+  mutation proof is seventeen browser runs, so `scripts/ui-browser-impact.py`
+  classifies whether the change can affect the interface. That is the `TM-052`
+  hazard — a skipped required check reads as a pass — so the waiver is wired on
+  the Windows-agent pattern rather than as a `paths:` filter. `ui-impact` is
+  itself unconditional, so its failure is caught before its decision is read; the
+  decision must be one of two literal strings; `true` demands `success` and
+  `false` demands `skipped`, and every other pairing is refused. A push with no
+  usable predecessor, and a classifier that cannot classify, both run the full
+  lane rather than guessing. The complete decision-by-result cross product is
+  enumerated in `scripts/test-workflow-aggregate.py`.
+- **The cheap half of the mutation guarantee still runs on every push.** A
+  client change below the threshold does not re-run the twenty-minute proof, but
+  `verify-ui-browser-gate.py` runs unconditionally in the Architecture records
+  lane and fails if any mutation's find-text is absent from the client, so the
+  mutation set cannot rot into targeting nothing. The residual exposure is named
+  under Residual risk below.
 
 ## The validation claim
 
@@ -147,6 +163,16 @@ that no check in this repository could evaluate, and two of them were false.
   holding and the boundary must be revisited.
 - **`--network=host`** means the gate's browser shares the host network
   namespace. It is the price of keeping the fixture on loopback.
+- **A client change below the 20-line mutation threshold ships without the
+  assertions being re-proved.** This is a deliberate cost trade made by the
+  owner, not an oversight. What still holds in that window: the gate itself runs
+  (so the client is still rendered and checked), and every mutation is still
+  verified to target real client text on every push. What does not: nobody
+  re-demonstrates that each assertion *fails* when its property breaks. A small
+  client change that made an assertion vacuous without moving any mutation's
+  find-text would survive until the next above-threshold change. The threshold
+  is the dial; `docs/architecture/UI_BROWSER_GATE_V1.md` argues its value and
+  says to lower it before raising it.
 
 ## Evidence
 

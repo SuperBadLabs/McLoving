@@ -111,6 +111,8 @@ FOUNDATION_RUN = (
     "            architecture=\"${ARCHITECTURE_RESULT}\" \\\n"
     "            formal=\"${FORMAL_RESULT}\" \\\n"
     "            controller-postgres=\"${CONTROLLER_POSTGRES_RESULT}\" \\\n"
+    "            ui-impact=\"${UI_IMPACT_RESULT}\" \\\n"
+    "            run-ui-gate=\"${RUN_UI_GATE}\" \\\n"
     "            ui-browser=\"${UI_BROWSER_RESULT}\" \\\n"
     "            recovery-drill=\"${RECOVERY_DRILL_RESULT}\" \\\n"
     "            deployment=\"${DEPLOYMENT_RESULT}\"\n"
@@ -128,6 +130,8 @@ FOUNDATION_ENV = (
     ("ARCHITECTURE_RESULT", "${{ needs.architecture.result }}"),
     ("FORMAL_RESULT", "${{ needs.formal.result }}"),
     ("CONTROLLER_POSTGRES_RESULT", "${{ needs.controller-postgres.result }}"),
+    ("UI_IMPACT_RESULT", "${{ needs.ui-impact.result }}"),
+    ("RUN_UI_GATE", "${{ needs.ui-impact.outputs.run-ui-gate }}"),
     ("UI_BROWSER_RESULT", "${{ needs.ui-browser.result }}"),
     ("RECOVERY_DRILL_RESULT", "${{ needs.recovery-drill.result }}"),
     ("DEPLOYMENT_RESULT", "${{ needs.deployment.result }}"),
@@ -330,6 +334,9 @@ class AggregateDecisionTests(unittest.TestCase):
                 str(candidate),
                 "foundation",
                 *(f"{job}=success" for job in AGGREGATE.FOUNDATION_JOBS),
+                # The conditional lane needs its classification alongside its
+                # result; `success` on its own is not a complete field set.
+                f"{AGGREGATE.FOUNDATION_DECISION_FIELD}=true",
             ]
             isolated = subprocess.run(valid, capture_output=True, check=False)
             self.assertEqual(isolated.returncode, 0, isolated.stderr)
@@ -356,16 +363,19 @@ class AggregateDecisionTests(unittest.TestCase):
             self.assertEqual(shadowed_impact.returncode, 41)
 
     def test_foundation_accepts_only_all_success(self) -> None:
-        # This is the complete 5^8 state space, not one mutation per lane.
-        # It proves success has exactly one accepting state and that multiple
-        # simultaneous failures cannot interact into an accidental pass.
+        # The complete 5^9 state space of the lanes that must ALWAYS execute,
+        # not one mutation per lane. It proves success has exactly one accepting
+        # state and that multiple simultaneous failures cannot interact into an
+        # accidental pass. The conditional lane is pinned to an accepting pair
+        # here and gets its own complete cross product below.
         # Discard millions of diagnostic lines instead of retaining them in a
         # StringIO while the complete state space is exercised.
+        unconditional = AGGREGATE.FOUNDATION_UNCONDITIONAL_JOBS
         with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink):
-            for combination in itertools.product(
-                RESULTS, repeat=len(AGGREGATE.FOUNDATION_JOBS)
-            ):
-                candidate = dict(zip(AGGREGATE.FOUNDATION_JOBS, combination))
+            for combination in itertools.product(RESULTS, repeat=len(unconditional)):
+                candidate = dict(zip(unconditional, combination))
+                candidate[AGGREGATE.FOUNDATION_DECISION_FIELD] = "true"
+                candidate[AGGREGATE.FOUNDATION_CONDITIONAL_JOB] = "success"
                 accepted = True
                 try:
                     AGGREGATE.require_foundation(candidate)
@@ -376,6 +386,50 @@ class AggregateDecisionTests(unittest.TestCase):
                     all(result == "success" for result in combination),
                     combination,
                 )
+
+    def test_foundation_ui_waiver_must_be_explicit(self) -> None:
+        """The complete decision x result cross product for the UI lane.
+
+        A skipped required check reads as a pass to branch protection, so the
+        only two accepting states are "the classifier asked for it and it
+        succeeded" and "the classifier waived it and it was skipped". Every
+        other pairing -- including an unrecognised or empty decision, which is
+        what a crashed classifier or a renamed output produces -- must be
+        refused rather than treated as a waiver.
+        """
+        decisions = ("true", "false", "", "TRUE", "yes", "skipped")
+        with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink):
+            for decision in decisions:
+                for result in RESULTS:
+                    candidate = {
+                        job: "success"
+                        for job in AGGREGATE.FOUNDATION_UNCONDITIONAL_JOBS
+                    }
+                    candidate[AGGREGATE.FOUNDATION_DECISION_FIELD] = decision
+                    candidate[AGGREGATE.FOUNDATION_CONDITIONAL_JOB] = result
+                    accepted = True
+                    try:
+                        AGGREGATE.require_foundation(candidate)
+                    except AGGREGATE.AggregateError:
+                        accepted = False
+                    expected = (decision == "true" and result == "success") or (
+                        decision == "false" and result == "skipped"
+                    )
+                    self.assertEqual(accepted, expected, (decision, result))
+
+    def test_a_failed_classifier_cannot_waive_the_ui_lane(self) -> None:
+        # The classifier is itself an unconditional lane, so its failure is
+        # caught before its decision is ever read. Without that, a classifier
+        # that crashed after emitting `run-ui-gate=false` would waive the lane.
+        with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink):
+            candidate = {
+                job: "success" for job in AGGREGATE.FOUNDATION_UNCONDITIONAL_JOBS
+            }
+            candidate[AGGREGATE.FOUNDATION_CLASSIFIER_JOB] = "failure"
+            candidate[AGGREGATE.FOUNDATION_DECISION_FIELD] = "false"
+            candidate[AGGREGATE.FOUNDATION_CONDITIONAL_JOB] = "skipped"
+            with self.assertRaises(AGGREGATE.AggregateError):
+                AGGREGATE.require_foundation(candidate)
 
     def test_foundation_refuses_missing_or_unexpected_lanes(self) -> None:
         baseline = {job: "success" for job in AGGREGATE.FOUNDATION_JOBS}
@@ -482,6 +536,7 @@ printf '%s\\n' "${workflow_files[@]}"
                 "architecture",
                 "formal",
                 "controller-postgres",
+                "ui-impact",
                 "ui-browser",
                 "recovery-drill",
                 "deployment",
@@ -512,6 +567,7 @@ printf '%s\\n' "${workflow_files[@]}"
             "architecture": "ARCHITECTURE_RESULT",
             "formal": "FORMAL_RESULT",
             "controller-postgres": "CONTROLLER_POSTGRES_RESULT",
+            "ui-impact": "UI_IMPACT_RESULT",
             "ui-browser": "UI_BROWSER_RESULT",
             "recovery-drill": "RECOVERY_DRILL_RESULT",
             "deployment": "DEPLOYMENT_RESULT",

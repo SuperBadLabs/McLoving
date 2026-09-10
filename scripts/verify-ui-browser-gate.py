@@ -19,6 +19,7 @@ This runs in a second and needs no browser.
 """
 
 import ast
+import importlib.util
 import json
 import pathlib
 import re
@@ -134,11 +135,46 @@ def main():
             "browser-pin.json"
         )
 
+    # The lane is conditional, so the thing that decides whether it runs is now
+    # part of the gate. A classifier watching a path that no longer exists
+    # watches nothing, and the lane it guards stops being re-proved silently.
+    impact_spec = importlib.util.spec_from_file_location(
+        "ui_browser_impact", repo_root / "scripts" / "ui-browser-impact.py"
+    )
+    impact = importlib.util.module_from_spec(impact_spec)
+    assert impact_spec.loader is not None
+    impact_spec.loader.exec_module(impact)
+    watched = impact.GATE_DEFINITION_PATHS | impact.CLIENT_PATHS | impact.SERVING_PATHS
+    absent = sorted(path for path in watched if not (repo_root / path).is_file())
+    if absent:
+        failures.append(
+            f"the impact classifier watches paths that do not exist, so those "
+            f"changes could never trigger the lane: {absent}"
+        )
+    if impact.MUTATION_LINE_THRESHOLD < 1:
+        failures.append(
+            "the mutation line threshold is not positive, which waives the "
+            "mutation proof for every client change"
+        )
+
     # --record-only exists to capture a pre-repair baseline, where the failures
     # are the evidence. In CI it would turn the gate into a reporter.
     workflow_text = workflow.read_text()
     if "test-ui-browser.sh" not in workflow_text:
         failures.append("foundation.yml does not run the browser gate at all")
+    if "scripts/ui-browser-impact.py" not in workflow_text:
+        failures.append(
+            "foundation.yml does not run the impact classifier, so the "
+            "conditional lane has nothing deciding whether it should run"
+        )
+    if "needs.ui-impact.outputs.run-ui-gate == 'true'" not in workflow_text:
+        failures.append(
+            "the ui-browser lane is not gated on the classifier's decision"
+        )
+    if "needs.ui-impact.outputs.run-ui-mutations == 'true'" not in workflow_text:
+        failures.append(
+            "the mutation proof is not gated on the classifier's decision"
+        )
     for line in workflow_text.splitlines():
         if "--record-only" in line and not line.lstrip().startswith("#"):
             failures.append(

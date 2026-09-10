@@ -114,6 +114,64 @@ map it to a subordinate UID that cannot write the mount.
   that assertion claims. `scripts/test-ui-browser-mutations.py` introduces each
   one and requires the named assertion to turn red.
 
+## When the lane runs, and why it is allowed not to
+
+This is the most expensive lane on the board: the mutation proof alone is
+seventeen full browser runs, roughly twenty minutes. Running all of it on every
+push buys nothing on the overwhelming majority of changes, which touch no UI at
+all. So `scripts/ui-browser-impact.py` classifies each change into two separate
+decisions.
+
+| Decision | What it costs | When it is required |
+|---|---|---|
+| `run-ui-gate` | ~6 minutes | any change to the client, to `crates/controller-api/src/lib.rs` (which decides what is served), or to the gate's own definition |
+| `run-ui-mutations` | ~20 minutes | any change to the gate's own definition, or a client change of at least `MUTATION_LINE_THRESHOLD` (20) changed lines |
+
+They are separate because they protect different things. The gate proves the
+**client** still behaves. The mutation proof proves the **assertions still
+bind** — and an assertion stops binding either when the gate's definition
+changes, or when the client drifts so far that a mutation no longer targets
+anything real. **That second case is already refused on every single push**, in
+the Architecture records lane, by `verify-ui-browser-gate.py`, which fails if any
+mutation's find-text is absent from the client. So the expensive proof is
+required when the definition moves, and otherwise only above a threshold.
+
+The threshold is a judgement, and it is the one thing here that trades safety for
+minutes. Twenty lines is about three percent of the 639-line client and is
+smaller than the smallest of the three repairs `UI-002` itself made, so a change
+of the size that has historically broken one of these assertions re-proves them
+while a typo fix does not. **Lower it before raising it.**
+
+### The waiver is explicit, never implicit
+
+A skipped required check reads as a pass to branch protection. That is `TM-052`,
+and it is exactly the hole a naive `paths:` filter would open here — a filtered
+job reports `skipped`, and an aggregate that accepted `skipped` would accept a
+lane that never ran for any reason at all, including a broken one.
+
+So the lane is wired on the same pattern as the Windows agent, and
+`require_foundation` enforces it:
+
+- `ui-impact` is itself an **unconditional** lane. Its failure is caught before
+  its decision is ever read, so a classifier that crashed after emitting
+  `run-ui-gate=false` cannot waive anything.
+- The decision must be one of exactly two literal strings. Empty, misspelled or
+  missing is an error, not a waiver.
+- `run-ui-gate=true` requires `ui-browser` to be **`success`**; `false` requires
+  it to be **`skipped`**. Any other pairing — waived-but-failed,
+  required-but-skipped — is a contradiction and is refused.
+- A push with no usable predecessor (a new branch, a force push, the all-zero
+  sentinel) has nothing to compare, so it runs the full lane rather than
+  guessing.
+- A classifier that cannot classify runs the full lane and says why, rather than
+  answering `false`.
+
+The complete decision-by-result cross product is enumerated in
+`scripts/test-workflow-aggregate.py`, and
+`scripts/test-ui-browser-impact.py` enumerates every gate-definition path rather
+than sampling — a path silently dropped from that set is precisely how a gate
+stops being re-proved.
+
 ## Evidence
 
 - `docs/evidence/ui-002-browser-v1/` — the initial rendered baseline of the

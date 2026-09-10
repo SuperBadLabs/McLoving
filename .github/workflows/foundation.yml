@@ -508,16 +508,62 @@ jobs:
           MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
         run: bash scripts/test-sequential-runtime.sh
 
+  ui-impact:
+    name: Classify UI impact
+    runs-on: ubuntu-24.04
+    outputs:
+      run-ui-gate: ${{ steps.impact.outputs.run-ui-gate }}
+      run-ui-mutations: ${{ steps.impact.outputs.run-ui-mutations }}
+    steps:
+      - name: Check out source and comparison history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # The classifier compares two revisions.
+      - name: Classify exact change
+        id: impact
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            base="${BASE_SHA}"
+          else
+            base="${BEFORE_SHA}"
+          fi
+          # A push can carry no usable predecessor -- a new branch, a force
+          # push, or the all-zero sentinel. There is nothing to compare, so
+          # there is nothing that could justify a waiver: run the whole lane.
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]] \
+            || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            printf 'no usable comparison revision; running the full lane\n' >&2
+            printf 'run-ui-gate=true\n' >> "${GITHUB_OUTPUT}"
+            printf 'run-ui-mutations=true\n' >> "${GITHUB_OUTPUT}"
+          else
+            /usr/bin/python3 -I scripts/ui-browser-impact.py \
+              --base "${base}" \
+              --head "${HEAD_SHA}" \
+              >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Test the impact classifier
+        # The classifier decides whether a required lane runs at all, so it is
+        # tested on every push, including the pushes it waives.
+        run: /usr/bin/python3 -I scripts/test-ui-browser-impact.py
+
   ui-browser:
     name: UI browser gate
+    needs: ui-impact
+    if: needs.ui-impact.outputs.run-ui-gate == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Reclaim runner disk before building
         # Same reason as the other Rust jobs: a full disk surfaces as a linker
-        # SIGBUS rather than a disk error, and this job also pulls a ~200MB
-        # browser archive and builds a container image on top of it.
+        # SIGBUS rather than a disk error, and this job also unpacks a ~200MB
+        # browser and builds a container image on top of it.
         run: |
           set -euo pipefail
           df -h /
@@ -530,6 +576,14 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: foundation-linux-ui-browser
+      - name: Restore the pinned browser archives
+        # Keyed on the pin itself, so a changed pin is a cache miss rather than
+        # a stale browser. The archives are re-verified against their recorded
+        # digests on every run whether they came from the cache or the network.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/mcloving-ui-browser
+          key: ui-browser-${{ hashFiles('scripts/ui-browser/browser-pin.json') }}
       - name: Verify the browser gate's pins agree with each other
         # Cheap and browserless. It runs first so a drifted pin fails in
         # seconds rather than after the image build and the full journey.
@@ -541,8 +595,13 @@ jobs:
         run: bash scripts/test-ui-browser.sh --output-dir "${RUNNER_TEMP}/ui-browser"
       - name: Mutation-prove every browser assertion
         # UI-002 acceptance (4): removed, each gate must turn a named test red.
-        # This introduces one client defect per assertion and requires exactly
-        # that assertion to fail.
+        # Seventeen browser runs, so it is scoped by scripts/ui-browser-impact.py
+        # to changes that can make an assertion stop binding -- any change to the
+        # gate's own definition, or a client change at or above its line
+        # threshold. The cheap half of that guarantee, that every mutation still
+        # targets real client text, is re-checked on every push in the
+        # Architecture records lane.
+        if: needs.ui-impact.outputs.run-ui-mutations == 'true'
         run: >-
           python3 scripts/test-ui-browser-mutations.py
           --output-dir "${RUNNER_TEMP}/ui-mutations"
@@ -724,6 +783,7 @@ jobs:
       - architecture
       - formal
       - controller-postgres
+      - ui-impact
       - ui-browser
       - recovery-drill
       - deployment
@@ -739,6 +799,8 @@ jobs:
           ARCHITECTURE_RESULT: ${{ needs.architecture.result }}
           FORMAL_RESULT: ${{ needs.formal.result }}
           CONTROLLER_POSTGRES_RESULT: ${{ needs.controller-postgres.result }}
+          UI_IMPACT_RESULT: ${{ needs.ui-impact.result }}
+          RUN_UI_GATE: ${{ needs.ui-impact.outputs.run-ui-gate }}
           UI_BROWSER_RESULT: ${{ needs.ui-browser.result }}
           RECOVERY_DRILL_RESULT: ${{ needs.recovery-drill.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
@@ -750,6 +812,8 @@ jobs:
             architecture="${ARCHITECTURE_RESULT}" \
             formal="${FORMAL_RESULT}" \
             controller-postgres="${CONTROLLER_POSTGRES_RESULT}" \
+            ui-impact="${UI_IMPACT_RESULT}" \
+            run-ui-gate="${RUN_UI_GATE}" \
             ui-browser="${UI_BROWSER_RESULT}" \
             recovery-drill="${RECOVERY_DRILL_RESULT}" \
             deployment="${DEPLOYMENT_RESULT}"
