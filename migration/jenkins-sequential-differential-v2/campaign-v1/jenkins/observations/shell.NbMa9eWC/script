@@ -1,0 +1,2 @@
+mkdir output
+printf "across\n" > output/value.txt

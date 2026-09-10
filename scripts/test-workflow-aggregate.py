@@ -678,13 +678,24 @@ printf '%s\\n' "${workflow_files[@]}"
             ("name: Architecture records", "runs-on: ubuntu-24.04", "steps:"),
         )
         architecture_steps = step_blocks(architecture)
-        self.assertEqual(len(architecture_steps), 7)
-        self.assertEqual(architecture_steps[0], SOURCE_CHECKOUT_STEP)
-        self.assertEqual(architecture_steps[1], HOSTED_SUITE_STEP)
-        self.assertEqual(architecture_steps[2],
+        self.assertEqual(len(architecture_steps), 8)
+        self.assertEqual(architecture_steps[0], SOURCE_CHECKOUT_STEP +
+                         "        with:\n"
+                         "          fetch-depth: 0 # Offline retained-source bundle verification needs base ancestry.\n")
+        retained_step = ("      - name: Verify retained Jenkins sequential observations\n"
+                         "        run: bash scripts/verify-jenkins-sequential-retained.sh\n")
+        self.assertEqual(architecture_steps[1], retained_step)
+        retained_local = 'bash "${repo_root}/scripts/verify-jenkins-sequential-retained.sh"'
+        assert_exact_command(self, local, retained_local)
+        with self.assertRaises(AssertionError):
+            assert_exact_command(self, local.replace(retained_local, retained_local + " || true"), retained_local)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(architecture_steps[1].replace(".sh\n", ".sh || true\n"), retained_step)
+        self.assertEqual(architecture_steps[2], HOSTED_SUITE_STEP)
+        self.assertEqual(architecture_steps[3],
                          "      - name: Test sequential runtime gate controls\n"
                          "        run: /usr/bin/python3 -I scripts/test-sequential-runtime-gate.py\n")
-        self.assertEqual(architecture_steps[3], ACTIONLINT_STEP)
+        self.assertEqual(architecture_steps[4], ACTIONLINT_STEP)
         assert_exact_command(self, local, local_command)
         self.assertEqual(local.count(LOCAL_ACTIONLINT_RUN), 1)
 
@@ -692,7 +703,7 @@ printf '%s\\n' "${workflow_files[@]}"
             hosted_command, hosted_command + " || true"
         )
         with self.assertRaises(AssertionError):
-            self.assertEqual(step_blocks(suppressed_hosted)[1], HOSTED_SUITE_STEP)
+            self.assertEqual(step_blocks(suppressed_hosted)[2], HOSTED_SUITE_STEP)
         suppressed_local = local.replace(local_command, local_command + " || true")
         with self.assertRaises(AssertionError):
             assert_exact_command(self, suppressed_local, local_command)

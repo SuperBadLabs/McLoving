@@ -1,0 +1,15 @@
+{
+  "schema": "mcloving.independent-build-review/1",
+  "reviewer": "root/gates_review",
+  "source_head": "f263ad4ae2871e8bb06fe3b5bceef534179a0a88",
+  "source_tree": "f49d17fe0c8e552e7968c83a153153a2fd777e54",
+  "worker_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+  "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "source_archive_sha256": "a7644bd868e7f743fd45651c484e888bcbab08cbe8f2cf3f213e8a78a7ea8d87",
+  "build_inventory_sha256": "394511c34325b65e05bf23746571eac27bf11bdd3d7f2f4b9b8c7f4d490fc0be",
+  "inventory_files": 12,
+  "actual_image_inspect_verified": true,
+  "all_source_inputs_verified": true,
+  "archive_git_tree_reconstructed": true,
+  "status": "approved-fresh-build"
+}

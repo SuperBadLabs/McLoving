@@ -1,0 +1,2 @@
+product-containers-removed=true
+workspaces-and-database-tmpfs-removed=true

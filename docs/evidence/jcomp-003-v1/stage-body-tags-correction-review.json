@@ -1,0 +1,16 @@
+{
+  "schema": "mcloving.independent-tooling-correction-review/1",
+  "reviewer": "root/gates_review",
+  "status": "approved-for-future-freeze",
+  "verified_at_utc": "2026-09-10T06:54:48.749362+00:00",
+  "patch_sha256": "b77cb8a3978e85bdc70256c45684efe2e332cfe0a495073c5c3950f348b8a375",
+  "candidate_sha256": "28c919e012c50e4616dc51e293f0bebfdeb1689a6055db82fe4306dc9517bd07",
+  "diagnostic_sha256": "bfa56f243dcd1517bc65ced9e104f5dc3826dedd3e06508b4f1f776ae94499b9",
+  "mutation_sha256": "3c3f980bb8cca50059059dc442e2ca2cd890d9d2b60c78d54ab2beaa71bdd77d",
+  "root_cause": "Verifier reads outer invocation tags but actual Jenkins tags live on uniquely labeled immediate body-start. Observed S08 outer10/body11 and S09 outer11/body12 carry exact SKIPPED_FOR_FAILURE on body. Observer already correct.",
+  "review": "Unique immediate parent, matching expected stage label, StepStartNode type and BodyInvocationAction join bind body to selected outer invocation. Unique body end linked directly to outer end. Exact SKIPPED_FOR_FAILURE and absence of contained shell work retained; successful stage rejects SKIPPED body tags. No fixture or observation mutation.",
+  "limitations": [
+    "Historical v3 product capture remains failed cleanup and unsealed; semantic diagnostic is not full paired certification.",
+    "Apply only in root-authorized refreshed source freeze; fresh builds/captures/full paired verifier required."
+  ]
+}

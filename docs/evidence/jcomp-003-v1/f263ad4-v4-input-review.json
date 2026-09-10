@@ -1,0 +1,12 @@
+{
+  "source_head": "f263ad4ae2871e8bb06fe3b5bceef534179a0a88",
+  "source_tree": "f49d17fe0c8e552e7968c83a153153a2fd777e54",
+  "reviewer": "root/gates_review",
+  "compiler_campaign_sha256": "913a588775af11b0161f02bbf979229b6b1769d6ad38bbf03a8279cb8f8b217f",
+  "prepared_input_sha256": "26fa52c301ac25b67e73448308b54cbaaf52c6dc2a07f2484abc8bd7531cb147",
+  "independently_replayed_and_regenerated": true,
+  "fixed_fixture_population": 23,
+  "genuine_admission_replays": 46,
+  "status": "approved-input",
+  "qualification": "Compiler-only input pins; product runtime still requires root release."
+}

@@ -1,0 +1,45 @@
+info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+info: downloading component clippy
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded block-buffer v0.10.4
+  Downloaded generic-array v0.14.7
+  Downloaded crypto-common v0.1.7
+  Downloaded cpufeatures v0.2.17
+  Downloaded digest v0.10.7
+  Downloaded arraydeque v0.5.1
+  Downloaded cfg-if v1.0.4
+  Downloaded version_check v0.9.5
+  Downloaded quote v1.0.47
+  Downloaded sha2 v0.10.9
+  Downloaded unicode-ident v1.0.24
+  Downloaded thiserror-impl v2.0.17
+  Downloaded proc-macro2 v1.0.107
+  Downloaded saphyr-parser v0.0.11
+  Downloaded thiserror v2.0.17
+  Downloaded typenum v1.20.1
+  Downloaded syn v2.0.119
+  Downloaded libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling version_check v0.9.5
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling typenum v1.20.1
+   Compiling thiserror v2.0.17
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.2.17
+   Compiling libc v0.2.189
+   Compiling arraydeque v0.5.1
+   Compiling generic-array v0.14.7
+   Compiling syn v2.0.119
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling thiserror-impl v2.0.17
+   Compiling saphyr-parser v0.0.11
+   Compiling mcloving-pipeline-ir v0.0.0 (/work/crates/pipeline-ir)
+   Compiling mcloving-jenkins-compiler-admission v0.0.0 (/work/crates/jenkins-compiler-admission)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.76s

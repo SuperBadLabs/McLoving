@@ -1,0 +1,3 @@
+#!/bin/sh
+export LD_LIBRARY_PATH=/opt/jcomp/tracer/lib
+exec /opt/jcomp/tracer/strace -E LD_LIBRARY_PATH "$@"

@@ -1,0 +1,28 @@
+Started by user unknown or anonymous
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on Jenkins in /var/jenkins_home/workspace/jcomp-S03
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Build)
+[Pipeline] sh
++ export JCOMP_STEP_SENTINEL=first
++ mkdir nested
++ cd nested
++ printf one\n
+one
+[Pipeline] sh
++ test unset = unset
++ test -d nested
++ printf two\n
+two
+[Pipeline] sh
++ rmdir nested
++ printf three\n
+three
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

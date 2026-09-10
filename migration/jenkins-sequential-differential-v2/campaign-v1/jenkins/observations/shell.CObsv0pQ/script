@@ -1,0 +1,1 @@
+printf "middle failed\n"; exit 7

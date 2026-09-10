@@ -1,0 +1,15 @@
+{
+  "base_commit": "01137b54b8fbefdc0deb0214a5d4d8979a773575",
+  "source_commit": "f263ad4ae2871e8bb06fe3b5bceef534179a0a88",
+  "source_tree": "f49d17fe0c8e552e7968c83a153153a2fd777e54",
+  "source_archive_sha256": "a7644bd868e7f743fd45651c484e888bcbab08cbe8f2cf3f213e8a78a7ea8d87",
+  "report_sha256": "b19894eaa818636f670d99a079e83c8dd12b5f6f6defc2cb0cd790e468c2fc6f",
+  "jenkins_inventory_sha256": "d62ec7d0d6f72d01bb98ea2952cc3059021449e534e87f5546b593d5b5e563ca",
+  "product_inventory_sha256": "0cdcc7b7c6ae054e1d36f5a29966e84e853300b7593f9118cd7474aae60228a3",
+  "compiler_campaign_sha256": "913a588775af11b0161f02bbf979229b6b1769d6ad38bbf03a8279cb8f8b217f",
+  "prepared_input_sha256": "26fa52c301ac25b67e73448308b54cbaaf52c6dc2a07f2484abc8bd7531cb147",
+  "worker_sha256": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+  "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "compiler_build_inventory_sha256": "394511c34325b65e05bf23746571eac27bf11bdd3d7f2f4b9b8c7f4d490fc0be",
+  "corpus_campaign_sha256": "0332856ee84aa5035dd65a2ad36bb5c83d17c4f88a77eaad99b37ce67ab20592"
+}

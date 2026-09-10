@@ -1,0 +1,421 @@
+[
+     {
+          "Id": "d1124bcb148e0ce75a80e9d0e945a50f94a7b8c4b3eb20e5dd734c998f1723d2",
+          "Digest": "sha256:b08fde0663233b9112c69eae54b5c6aafb15ae2e0df6eb51e9333301b81a0fcd",
+          "RepoTags": [
+               "localhost/mcloving/jcomp003-compiler:f263ad4ae2871e8bb06fe3b5bceef534179a0a88",
+               "localhost/mcloving/jcomp003-compiler:c94d232af0f0319585e13c72ed5d96cffe04ce33"
+          ],
+          "RepoDigests": [
+               "localhost/mcloving/jcomp003-compiler@sha256:b08fde0663233b9112c69eae54b5c6aafb15ae2e0df6eb51e9333301b81a0fcd"
+          ],
+          "Parent": "1bbe6cc435f0888d198e35ed0799842d9bd7a26cd996b6b99d848dcd331e0f7c",
+          "Comment": "debuerreotype 0.17",
+          "Created": "2026-09-10T07:15:05.171167311Z",
+          "Config": {
+               "User": "1000:1000",
+               "ExposedPorts": {
+                    "50000/tcp": {},
+                    "8080/tcp": {}
+               },
+               "Env": [
+                    "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG=C.UTF-8",
+                    "JENKINS_HOME=/var/jenkins_home",
+                    "JENKINS_SLAVE_AGENT_PORT=50000",
+                    "REF=/usr/share/jenkins/ref",
+                    "JENKINS_UC=https://updates.jenkins.io",
+                    "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+                    "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+                    "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+                    "JAVA_HOME=/opt/java/openjdk",
+                    "JENKINS_VERSION=2.568.1"
+               ],
+               "Entrypoint": [
+                    "/opt/java/openjdk/bin/java",
+                    "-Xms32m",
+                    "-Xmx384m",
+                    "-XX:ActiveProcessorCount=1",
+                    "-cp",
+                    "/opt/mcloving/src:/opt/mcloving/lib/*",
+                    "clojure.main",
+                    "-m",
+                    "mcloving.compat.main"
+               ],
+               "Volumes": {
+                    "/var/jenkins_home": {}
+               },
+               "Labels": {
+                    "io.buildah.version": "1.33.7",
+                    "io.mcloving.compiler.base.digest": "sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+                    "io.mcloving.compiler.profile.id": "mario-jenkins-oracle-228",
+                    "io.mcloving.compiler.profile.sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+                    "io.mcloving.compiler.protocol": "mcloving.jenkins.compiler/1",
+                    "io.mcloving.compiler.sequential.contract.sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+                    "io.mcloving.compiler.sequential.protocol": "mcloving.jenkins.compiler/2",
+                    "org.opencontainers.image.description": "The Jenkins Continuous Integration and Delivery server",
+                    "org.opencontainers.image.licenses": "MIT",
+                    "org.opencontainers.image.revision": "7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+                    "org.opencontainers.image.source": "https://github.com/jenkinsci/docker",
+                    "org.opencontainers.image.title": "McLoving isolated Jenkins compiler worker",
+                    "org.opencontainers.image.url": "https://www.jenkins.io/",
+                    "org.opencontainers.image.vendor": "Jenkins project",
+                    "org.opencontainers.image.version": "2.568.1"
+               }
+          },
+          "Version": "",
+          "Author": "",
+          "Architecture": "amd64",
+          "Os": "linux",
+          "Size": 880118403,
+          "VirtualSize": 880118403,
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/43bec7e6a5b723cfcde280bc3c790b19ad56067e629d9f47e4bc8da425d78c2c/diff:/home/srikanth/.local/share/containers/storage/overlay/787e1a60c8ebb7f5f5b91eab9bc43cd692fcf5a651fbe2e3fbdc07b127761cf3/diff:/home/srikanth/.local/share/containers/storage/overlay/3ff39528d946a22493320991b46eb60c39c5e89115c1724242414985d2408828/diff:/home/srikanth/.local/share/containers/storage/overlay/87c12dc7424e9205839dfb87ea3c283939bebbcabbc8351992085fdfc6894cc9/diff:/home/srikanth/.local/share/containers/storage/overlay/3ad2772d796104e615b98714fd3e582de60bf3ccd5f827b3e5f694abf2e83013/diff:/home/srikanth/.local/share/containers/storage/overlay/51202bc291f76dfd2f508ba408bb1cd5a9ef21fbf2459b5b09bf2350a16b38d4/diff:/home/srikanth/.local/share/containers/storage/overlay/045373659f6a4d4702490bee296a19d58e4cd029a11c4e466bbf624b5ff3cd73/diff:/home/srikanth/.local/share/containers/storage/overlay/16b832a191a560580b7e70299fec1aa12f39907468ad2be18dd6637eb1f931eb/diff:/home/srikanth/.local/share/containers/storage/overlay/112a249acd476dcadcaaa72b48055df8628b150353cd65b2b5b809c6870e93ad/diff:/home/srikanth/.local/share/containers/storage/overlay/d560fefdcc052c874fc2249d4a087fcbb3417a11a3a8f679247944f1e229e59f/diff:/home/srikanth/.local/share/containers/storage/overlay/5ac27957c8d0e5b87ea80fa75f4c135e66c1717619a29de8b5f133fe251e013c/diff:/home/srikanth/.local/share/containers/storage/overlay/49f2b422e96a09d4fbf1371e74bbc6fe806d46d0f082d82384293707e8a96e0f/diff:/home/srikanth/.local/share/containers/storage/overlay/d8b7e33f21b684bf4410d3c156d9d8b1420fb2e4f90c561b892ac5868f53fab9/diff:/home/srikanth/.local/share/containers/storage/overlay/c341432a52d7c55ecf8dd0619c4bb98fa1de1a891ec684b57b8cca188d625453/diff:/home/srikanth/.local/share/containers/storage/overlay/8007431a6be6089f64b17854599eb05ecee65ddd1bf3609dc8248e835570bb65/diff",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/bd722024fc252acfe56c85fa0f25e852601c7a355f256698e60ad37e0e2118af/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/bd722024fc252acfe56c85fa0f25e852601c7a355f256698e60ad37e0e2118af/work"
+               }
+          },
+          "RootFS": {
+               "Type": "layers",
+               "Layers": [
+                    "sha256:8007431a6be6089f64b17854599eb05ecee65ddd1bf3609dc8248e835570bb65",
+                    "sha256:82b5ca86e27110d3384bb031cc4c004054f8c4cf46570fbd33c3139af94643e3",
+                    "sha256:983e21e4a699533f35f37f9b8e7246411dbf62c057b76037ffc77b22d57b968c",
+                    "sha256:7546fd267646f1b4d925813b927f83211c4db00494cf73bc53af903b70d76dc9",
+                    "sha256:ba89bebdb88a1047073566c5382b01bc443ee81692c05ae1eb8e25951dbc12fb",
+                    "sha256:6c269cc49c54b0b142f6037aeb3e16e009ab51f4f93d22532ed496934206b253",
+                    "sha256:5d4864bc469e26764a96287811a506a38d518892fd27f508f91d6780f3e27622",
+                    "sha256:0cd26e70d2e5668859d08a3f1bb5b75ca2dfa85b8f1a22f130ddb1bff4c8783f",
+                    "sha256:30a4483b64bfbb5b1868314cdf5bc3e81de5189f8a6cb98f21164e397b5e075f",
+                    "sha256:584303b0c63157c0df5fef4654d3b91d1224519731bd6959d17ee0f92fdf5df5",
+                    "sha256:d9a714b34e586330e35ec775079dcdf36d4e7b1caa2b3edec134e38aba0fe71c",
+                    "sha256:2b736c873dbf660894b5b3ab770445ab8ba77ae5213abb870546aea1c4d45c47",
+                    "sha256:7b65a9331a18b89d28f3014696cffb7ff34b9bddd427b33f8b03767bea342be6",
+                    "sha256:81d0811560947fca9f4a3fd303e746c40e1cc5ecf4bc5051df15780e4e4fb5f4",
+                    "sha256:1d27f065244af9c73fceb6dc417ffe1ef038ff5737a6d119f4c458b8543b95c7",
+                    "sha256:0a08b75152ba20e1935a5da17b8f4ba6e724f558a6f87876abd21f09ef4ae142"
+               ]
+          },
+          "Labels": {
+               "io.buildah.version": "1.33.7",
+               "io.mcloving.compiler.base.digest": "sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+               "io.mcloving.compiler.profile.id": "mario-jenkins-oracle-228",
+               "io.mcloving.compiler.profile.sha256": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+               "io.mcloving.compiler.protocol": "mcloving.jenkins.compiler/1",
+               "io.mcloving.compiler.sequential.contract.sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+               "io.mcloving.compiler.sequential.protocol": "mcloving.jenkins.compiler/2",
+               "org.opencontainers.image.description": "The Jenkins Continuous Integration and Delivery server",
+               "org.opencontainers.image.licenses": "MIT",
+               "org.opencontainers.image.revision": "7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+               "org.opencontainers.image.source": "https://github.com/jenkinsci/docker",
+               "org.opencontainers.image.title": "McLoving isolated Jenkins compiler worker",
+               "org.opencontainers.image.url": "https://www.jenkins.io/",
+               "org.opencontainers.image.vendor": "Jenkins project",
+               "org.opencontainers.image.version": "2.568.1"
+          },
+          "Annotations": {
+               "org.opencontainers.image.base.digest": "sha256:8279be0a0ed95ad3b67c8677b9e03ff322f61338d39244234a907e9039ac3683",
+               "org.opencontainers.image.base.name": "docker.io/jenkins/jenkins:2.568.1"
+          },
+          "ManifestType": "application/vnd.oci.image.manifest.v1+json",
+          "User": "1000:1000",
+          "History": [
+               {
+                    "created": "2026-06-23T00:00:00Z",
+                    "created_by": "# debian.sh --arch 'amd64' out/ 'trixie' '@1782172800'",
+                    "comment": "debuerreotype 0.17"
+               },
+               {
+                    "created": "2026-07-09T17:39:54.609940801Z",
+                    "created_by": "RUN /bin/sh -c apt-get update   && apt-get install -y --no-install-recommends     ca-certificates     curl     git     libfontconfig1     libfreetype6     procps     ssh-client     tini     unzip     tzdata   && rm -rf /var/lib/apt/lists/* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG GIT_LFS_VERSION=3.7.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "RUN |1 GIT_LFS_VERSION=3.7.1 /bin/sh -c arch=$(uname -m | sed -e 's/x86_64/amd64/g' -e 's/aarch64/arm64/g')   && curl -L -s -o git-lfs.tgz \"https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_VERSION}/git-lfs-linux-${arch}-v${GIT_LFS_VERSION}.tar.gz\"   && tar xzf git-lfs.tgz   && bash git-lfs-*/install.sh   && git lfs install --skip-repo --system   && rm -rf git-lfs* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV LANG=C.UTF-8",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG TARGETARCH=amd64",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG user=jenkins",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG group=jenkins",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG uid=1000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG gid=1000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG http_port=8080",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG agent_port=50000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG JENKINS_HOME=/var/jenkins_home",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG REF=/usr/share/jenkins/ref",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV JENKINS_HOME=/var/jenkins_home",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV JENKINS_SLAVE_AGENT_PORT=50000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV REF=/usr/share/jenkins/ref",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.027776492Z",
+                    "created_by": "RUN |11 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref /bin/sh -c mkdir -p $JENKINS_HOME   && chown ${uid}:${gid} $JENKINS_HOME   && groupadd -g ${gid} ${group}   && useradd -d \"$JENKINS_HOME\" -u ${uid} -g ${gid} -l -m -s /bin/bash ${user} # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:57.027776492Z",
+                    "created_by": "VOLUME [/var/jenkins_home]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "RUN |11 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref /bin/sh -c mkdir -p ${REF}/init.groovy.d # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "ENV JENKINS_UC=https://updates.jenkins.io",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "ENV JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "ENV JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.489305607Z",
+                    "created_by": "RUN |11 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref /bin/sh -c chown -R ${user} \"$JENKINS_HOME\" \"$REF\" # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:57.489305607Z",
+                    "created_by": "ARG PLUGIN_CLI_VERSION=2.15.0",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.489305607Z",
+                    "created_by": "ARG PLUGIN_CLI_URL=https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.15.0/jenkins-plugin-manager-2.15.0.jar",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "RUN |13 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref PLUGIN_CLI_VERSION=2.15.0 PLUGIN_CLI_URL=https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.15.0/jenkins-plugin-manager-2.15.0.jar /bin/sh -c curl -fsSL ${PLUGIN_CLI_URL} -o /opt/jenkins-plugin-manager.jar   && echo \"$(curl -fsSL \"${PLUGIN_CLI_URL}.sha256\")  /opt/jenkins-plugin-manager.jar\" >/tmp/jpm_sha   && sha256sum -c --strict /tmp/jpm_sha   && rm -f /tmp/jpm_sha # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "EXPOSE [8080/tcp]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "EXPOSE [50000/tcp]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "ENV COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "ENV JAVA_HOME=/opt/java/openjdk",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "ENV PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.507791113Z",
+                    "created_by": "COPY /javaruntime /opt/java/openjdk # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.848552155Z",
+                    "created_by": "COPY /war/jenkins.war /usr/share/jenkins/jenkins.war # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.848552155Z",
+                    "created_by": "USER jenkins",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.871707518Z",
+                    "created_by": "COPY jenkins-support /usr/local/bin/jenkins-support # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.900531987Z",
+                    "created_by": "COPY jenkins.sh /usr/local/bin/jenkins.sh # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "COPY jenkins-plugin-cli.sh /bin/jenkins-plugin-cli # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "ARG JENKINS_VERSION=2.568.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "ENV JENKINS_VERSION=2.568.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "ENTRYPOINT [\"/usr/bin/tini\" \"--\" \"/usr/local/bin/jenkins.sh\"]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "LABEL org.opencontainers.image.vendor=Jenkins project org.opencontainers.image.title=Official Jenkins Docker image org.opencontainers.image.description=The Jenkins Continuous Integration and Delivery server org.opencontainers.image.version=2.568.1 org.opencontainers.image.url=https://www.jenkins.io/ org.opencontainers.image.source=https://github.com/jenkinsci/docker org.opencontainers.image.revision=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 org.opencontainers.image.licenses=MIT",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-09-10T06:27:00.136678286Z",
+                    "created_by": "/bin/sh -c #(nop) LABEL org.opencontainers.image.title=\"McLoving isolated Jenkins compiler worker\"       io.mcloving.compiler.protocol=\"mcloving.jenkins.compiler/1\"       io.mcloving.compiler.sequential.protocol=\"mcloving.jenkins.compiler/2\"       io.mcloving.compiler.sequential.contract.sha256=\"264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41\"       io.mcloving.compiler.profile.id=\"mario-jenkins-oracle-228\"       io.mcloving.compiler.profile.sha256=\"feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271\"       io.mcloving.compiler.base.digest=\"sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02\"",
+                    "comment": "FROM docker.io/jenkins/jenkins:2.568.1",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-09-10T06:27:00.149730218Z",
+                    "created_by": "/bin/sh -c #(nop) USER root",
+                    "comment": "FROM 4512c659de0f",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-09-10T06:27:00.236734518Z",
+                    "created_by": "/bin/sh -c #(nop) COPY dir:b085f9c9b5c2c5173976d7fdc53a1d830079953d96d13f235d469899ecc135a6 in /opt/mcloving/lib/ ",
+                    "comment": "FROM 47cce4100ec0"
+               },
+               {
+                    "created": "2026-09-10T06:27:00.475855745Z",
+                    "created_by": "/bin/sh -c #(nop) COPY dir:0a93bc10263e3a33d03264e950a51ae570d2bf59c2293d794939d8e17f975f84 in /opt/mcloving/profile/ ",
+                    "comment": "FROM a64cf280eeff"
+               },
+               {
+                    "created": "2026-09-10T07:15:04.535845817Z",
+                    "created_by": "/bin/sh -c #(nop) COPY dir:93e6c38c1a27d3ee35e5c568eebaec130f6234bfc424844a278bb0eab32a52f4 in /opt/mcloving/src/ ",
+                    "comment": "FROM 66200a0212d9"
+               },
+               {
+                    "created": "2026-09-10T07:15:04.904362117Z",
+                    "created_by": "/bin/sh -c unzip -p /usr/share/jenkins/jenkins.war WEB-INF/lib/groovy-all-2.4.21.jar       > /opt/mcloving/lib/groovy-all-2.4.21.jar     && unzip -p /usr/share/jenkins/jenkins.war WEB-INF/lib/jenkins-core-2.568.1.jar       > /opt/mcloving/lib/jenkins-core-2.568.1.jar     && find /opt/mcloving -type d -exec chmod 0555 {} \\;     && find /opt/mcloving -type f -exec chmod 0444 {} \\;",
+                    "comment": "FROM 449c21a24125"
+               },
+               {
+                    "created": "2026-09-10T07:15:05.158314207Z",
+                    "created_by": "/bin/sh -c #(nop) USER 1000:1000",
+                    "comment": "FROM 717f5ae2e730",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-09-10T07:15:05.171425344Z",
+                    "created_by": "/bin/sh -c #(nop) ENTRYPOINT [\"/opt/java/openjdk/bin/java\", \"-Xms32m\", \"-Xmx384m\", \"-XX:ActiveProcessorCount=1\", \"-cp\", \"/opt/mcloving/src:/opt/mcloving/lib/*\", \"clojure.main\", \"-m\", \"mcloving.compat.main\"]",
+                    "comment": "FROM 1bbe6cc435f0",
+                    "empty_layer": true
+               }
+          ],
+          "NamesHistory": [
+               "localhost/mcloving/jcomp003-compiler:c94d232af0f0319585e13c72ed5d96cffe04ce33",
+               "localhost/mcloving/jcomp003-compiler:f263ad4ae2871e8bb06fe3b5bceef534179a0a88"
+          ]
+     }
+]

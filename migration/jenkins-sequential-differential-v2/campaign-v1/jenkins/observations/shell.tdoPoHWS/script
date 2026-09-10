@@ -1,0 +1,1 @@
+printf "payload\n" > shared.txt

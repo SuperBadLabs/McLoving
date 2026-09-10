@@ -1,0 +1,676 @@
+[
+     {
+          "Id": "a0635962c16d5f26400703edd4317175cf9531f3285d632613f9da227f9c71d1",
+          "Digest": "sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+          "RepoTags": [
+               "docker.io/library/rust:1.97.1-bookworm"
+          ],
+          "RepoDigests": [
+               "docker.io/library/rust@sha256:389c1ae98c20fbcadca68a685482749267cec3c90893ae4671c5a37cc894c416",
+               "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa"
+          ],
+          "Parent": "",
+          "Comment": "debuerreotype 0.17",
+          "Created": "2026-07-16T18:38:51.238511039Z",
+          "Config": {
+               "Env": [
+                    "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "RUSTUP_HOME=/usr/local/rustup",
+                    "CARGO_HOME=/usr/local/cargo",
+                    "RUST_VERSION=1.97.1"
+               ],
+               "Cmd": [
+                    "bash"
+               ],
+               "Labels": {
+                    "org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"
+               }
+          },
+          "Version": "",
+          "Author": "",
+          "Architecture": "amd64",
+          "Os": "linux",
+          "Size": 2233848800,
+          "VirtualSize": 2233848800,
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/a953769aed258014040812d20647d4d6081e3d363c090447570f659515d04183/diff:/home/srikanth/.local/share/containers/storage/overlay/1ca80c2bf88c3fca04d5b1f7ca345a9d6610997edfb4a3f2f0b642560209732e/diff:/home/srikanth/.local/share/containers/storage/overlay/b1a465965094b9af7fff87ee250ecbd82f7b5095ea2dfcc5c695a1b096f068b6/diff:/home/srikanth/.local/share/containers/storage/overlay/f2c42f900cb3b12d5456f76b4fa6454a52df3981323d3a1b1a17fe4c4955ab4a/diff",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/6ed4daeb42f2357dc0b89953b899bda75557667fc332df7059b33fe652fd90be/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/6ed4daeb42f2357dc0b89953b899bda75557667fc332df7059b33fe652fd90be/work"
+               }
+          },
+          "RootFS": {
+               "Type": "layers",
+               "Layers": [
+                    "sha256:f2c42f900cb3b12d5456f76b4fa6454a52df3981323d3a1b1a17fe4c4955ab4a",
+                    "sha256:d13007d6a3979078792cbc2afff5c74eb1a14f5a02394f6cae0a873a0752c104",
+                    "sha256:af68230260cdbb7ac206fc2f95bf67c1a75ebdcf3e4014accffd3c8bcb478e15",
+                    "sha256:ac06852f1f7254083486500d54ef4292d46b2c868df62ba93466e633c78a7cf1",
+                    "sha256:06ef9f8ed5481427ef2829f861e0d1a8665578fc44c9fb50cf4e4e371ff5da70"
+               ]
+          },
+          "Labels": {
+               "org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"
+          },
+          "Annotations": {
+               "com.docker.official-images.bashbrew.arch": "amd64",
+               "org.opencontainers.image.base.digest": "sha256:5009ae2bfc9ff32268f48dd81844776a977a88cdfba28577db9b5857127a044a",
+               "org.opencontainers.image.base.name": "buildpack-deps:bookworm",
+               "org.opencontainers.image.created": "2026-07-16T18:38:04Z",
+               "org.opencontainers.image.revision": "40acf7919e2e27dc706918e42758a6f1c21e806b",
+               "org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust.git#40acf7919e2e27dc706918e42758a6f1c21e806b:stable/bookworm",
+               "org.opencontainers.image.url": "https://hub.docker.com/_/rust",
+               "org.opencontainers.image.version": "1-bookworm"
+          },
+          "ManifestType": "application/vnd.oci.image.manifest.v1+json",
+          "User": "",
+          "History": [
+               {
+                    "created": "2026-07-13T00:00:00Z",
+                    "created_by": "# debian.sh --arch 'amd64' out/ 'bookworm' '@1783900800'",
+                    "comment": "debuerreotype 0.17"
+               },
+               {
+                    "created": "2026-07-14T01:43:17.310166945Z",
+                    "created_by": "RUN /bin/sh -c set -eux; \tapt-get update; \tapt-get install -y --no-install-recommends \t\tca-certificates \t\tcurl \t\tgnupg \t\tnetbase \t\tsq \t\twget \t; \trm -rf /var/lib/apt/lists/* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-14T02:29:39.823261302Z",
+                    "created_by": "RUN /bin/sh -c set -eux; \tapt-get update; \tapt-get install -y --no-install-recommends \t\tgit \t\tmercurial \t\topenssh-client \t\tsubversion \t\t\t\tprocps \t; \trm -rf /var/lib/apt/lists/* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-14T03:17:57.588958361Z",
+                    "created_by": "RUN /bin/sh -c set -ex; \tapt-get update; \tapt-get install -y --no-install-recommends \t\tautoconf \t\tautomake \t\tbzip2 \t\tdefault-libmysqlclient-dev \t\tdpkg-dev \t\tfile \t\tg++ \t\tgcc \t\timagemagick \t\tlibbz2-dev \t\tlibc6-dev \t\tlibcurl4-openssl-dev \t\tlibdb-dev \t\tlibevent-dev \t\tlibffi-dev \t\tlibgdbm-dev \t\tlibglib2.0-dev \t\tlibgmp-dev \t\tlibjpeg-dev \t\tlibkrb5-dev \t\tliblzma-dev \t\tlibmagickcore-dev \t\tlibmagickwand-dev \t\tlibmaxminddb-dev \t\tlibncurses5-dev \t\tlibncursesw5-dev \t\tlibpng-dev \t\tlibpq-dev \t\tlibreadline-dev \t\tlibsqlite3-dev \t\tlibssl-dev \t\tlibtool \t\tlibwebp-dev \t\tlibxml2-dev \t\tlibxslt-dev \t\tlibyaml-dev \t\tmake \t\tpatch \t\tunzip \t\txz-utils \t\tzlib1g-dev \t; \trm -rf /var/lib/apt/lists/* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-16T18:38:51.238511039Z",
+                    "created_by": "LABEL org.opencontainers.image.source=https://github.com/rust-lang/docker-rust",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-16T18:38:51.238511039Z",
+                    "created_by": "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin RUST_VERSION=1.97.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-16T18:38:51.238511039Z",
+                    "created_by": "RUN /bin/sh -c set -eux;         arch=\"$(dpkg --print-architecture)\";     case \"$arch\" in         'amd64')             rustArch='x86_64-unknown-linux-gnu';             rustupSha256='4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10';             ;;         'armhf')             rustArch='armv7-unknown-linux-gnueabihf';             rustupSha256='124e02253af9128f9e27ea1ac929cbb73cf44cf35469d0f594a1b62f7b71fea1';             ;;         'arm64')             rustArch='aarch64-unknown-linux-gnu';             rustupSha256='9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792';             ;;         'i386')             rustArch='i686-unknown-linux-gnu';             rustupSha256='5140e82096f96d1d8077f00eb312648e0e5106d101c9918d086f72cbc69bb3a1';             ;;         'ppc64el')             rustArch='powerpc64le-unknown-linux-gnu';             rustupSha256='4bfff85bd3967d988e14567aa9cc6ab0ea386f0ffeff0f9f14d23f0103bf1f97';             ;;         's390x')             rustArch='s390x-unknown-linux-gnu';             rustupSha256='66c2c132428b6b77803facb02cbdf33b89d20c00bd20da142be8cb651f2e7cd8';             ;;         *)             echo >&2 \"unsupported architecture: $arch\";             exit 1;             ;;     esac;         url=\"https://static.rust-lang.org/rustup/archive/1.29.0/${rustArch}/rustup-init\";     wget --progress=dot:giga \"$url\";     echo \"${rustupSha256} *rustup-init\" | sha256sum -c -;         chmod +x rustup-init;     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${rustArch};     rm rustup-init;     chmod -R a+w $RUSTUP_HOME $CARGO_HOME;         rustup --version;     cargo --version;     rustc --version; # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               }
+          ],
+          "NamesHistory": [
+               "docker.io/library/rust:1.97.1-bookworm",
+               "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa"
+          ]
+     },
+     {
+          "Id": "d741b376874687de90374fd34f55c6b2760e8f7bd7e4ae5cd47f50757fc08cf8",
+          "Digest": "sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+          "RepoTags": [
+               "docker.io/library/postgres:17.6-alpine"
+          ],
+          "RepoDigests": [
+               "docker.io/library/postgres@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be",
+               "docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"
+          ],
+          "Parent": "",
+          "Comment": "buildkit.dockerfile.v0",
+          "Created": "2025-10-15T18:23:03Z",
+          "Config": {
+               "ExposedPorts": {
+                    "5432/tcp": {}
+               },
+               "Env": [
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "GOSU_VERSION=1.19",
+                    "LANG=en_US.utf8",
+                    "PG_MAJOR=17",
+                    "PG_VERSION=17.6",
+                    "PG_SHA256=e0630a3600aea27511715563259ec2111cd5f4353a4b040e0be827f94cd7a8b0",
+                    "DOCKER_PG_LLVM_DEPS=llvm19-dev \t\tclang19",
+                    "PGDATA=/var/lib/postgresql/data"
+               ],
+               "Entrypoint": [
+                    "docker-entrypoint.sh"
+               ],
+               "Cmd": [
+                    "postgres"
+               ],
+               "Volumes": {
+                    "/var/lib/postgresql/data": {}
+               },
+               "WorkingDir": "/",
+               "StopSignal": "SIGINT"
+          },
+          "Version": "",
+          "Author": "",
+          "Architecture": "amd64",
+          "Os": "linux",
+          "Size": 281061311,
+          "VirtualSize": 281061311,
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/bcfc42b40f1dde8a475b12def608e5fe94aa1fb9f0c50107be9eb3e4572dbdce/diff:/home/srikanth/.local/share/containers/storage/overlay/f8e2d9c4486b69618ddebc8ed7b4e0ffeb04dbf7a59506c0f0558480cd4645ce/diff:/home/srikanth/.local/share/containers/storage/overlay/f1423d84e591811ae0af5b2bcd3ba00c8c9d75074e1c6c6efabb86f8efcb9155/diff:/home/srikanth/.local/share/containers/storage/overlay/0785694a578904a4ee0cda18d16270c055d4c1cca90ccda1a97f0e55e72aedca/diff:/home/srikanth/.local/share/containers/storage/overlay/c3fddc88b612c49841e3182b7da0b604ab3af38c9f7d4832597f0ba3496b2176/diff:/home/srikanth/.local/share/containers/storage/overlay/59a8c06e20f397d303a1f0873ed59bca3b17375baa4322c8b007180c5f90fef6/diff:/home/srikanth/.local/share/containers/storage/overlay/440955d129290b124f39f046a186b728e02ff1a0864b164888cc20d806aca8d4/diff:/home/srikanth/.local/share/containers/storage/overlay/2ca6cf62f66718718bda0d45f249846caf2734cd0d46bb915b1f4e22fa467bd5/diff:/home/srikanth/.local/share/containers/storage/overlay/256f393e029fa2063d8c93720da36a74a032bed3355a2bc3e313ad12f8bde9d1/diff",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/bb8f0e8826f26683db6229ae03326954e4b9ce174a6a9a2d720f219321b4aa75/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/bb8f0e8826f26683db6229ae03326954e4b9ce174a6a9a2d720f219321b4aa75/work"
+               }
+          },
+          "RootFS": {
+               "Type": "layers",
+               "Layers": [
+                    "sha256:256f393e029fa2063d8c93720da36a74a032bed3355a2bc3e313ad12f8bde9d1",
+                    "sha256:9a7327a98ddd7ba982480b776e8c9b12a67cc489b9da40d63b077405949a9ffb",
+                    "sha256:2e6b9d28e1528ff15d59d78a1f2033350e28c19eeb50ae9f3335980fe8796442",
+                    "sha256:b6028eb6926cfc2568c2a05f2d8b09c561ea7cd644aea1e70c8f3a4e05d0428f",
+                    "sha256:9f684d2eb39d55094e0d81f98a3cd40e81a8e72a8b69499d6435ce7aa59863c0",
+                    "sha256:a34284fcec52cfafc465f42361d01257e68a584436e77fd79ced8de0032d19c2",
+                    "sha256:bc3518781056ad1368e67f863c964ad2acb3b29fcb484552ebc8793834eec842",
+                    "sha256:f377aa82b1056a3a47b237f9a9d5fcfa7306408f43ee4d099d1ea959f54637c0",
+                    "sha256:95993121100eb5d9b10b946f321176b42b4c4140c668066c64e863c4104d99f5",
+                    "sha256:f3d1ddfd350d4ac5e3ef3fd7ac0a4e5a25fc1135de1f9deaf541f32c84c61edc"
+               ]
+          },
+          "Labels": null,
+          "Annotations": {
+               "com.docker.official-images.bashbrew.arch": "amd64",
+               "org.opencontainers.image.base.digest": "sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f",
+               "org.opencontainers.image.base.name": "alpine:3.22",
+               "org.opencontainers.image.created": "2025-10-15T18:23:03Z",
+               "org.opencontainers.image.revision": "5ec89312491bdaa2c42377a65ec0af2ecb774480",
+               "org.opencontainers.image.source": "https://github.com/docker-library/postgres.git#5ec89312491bdaa2c42377a65ec0af2ecb774480:17/alpine3.22",
+               "org.opencontainers.image.url": "https://hub.docker.com/_/postgres",
+               "org.opencontainers.image.version": "17.6-alpine3.22"
+          },
+          "ManifestType": "application/vnd.oci.image.manifest.v1+json",
+          "User": "",
+          "History": [
+               {
+                    "created": "2025-10-08T11:04:56Z",
+                    "created_by": "ADD alpine-minirootfs-3.22.2-x86_64.tar.gz / # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-08T11:04:56Z",
+                    "created_by": "CMD [\"/bin/sh\"]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c set -eux; \taddgroup -g 70 -S postgres; \tadduser -u 70 -S -D -G postgres -H -h /var/lib/postgresql -s /bin/sh postgres; \tinstall --verbose --directory --owner postgres --group postgres --mode 1777 /var/lib/postgresql # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV GOSU_VERSION=1.19",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c set -eux; \t\tapk add --no-cache --virtual .gosu-deps \t\tca-certificates \t\tdpkg \t\tgnupg \t; \t\tdpkgArch=\"$(dpkg --print-architecture | awk -F- '{ print $NF }')\"; \twget -O /usr/local/bin/gosu \"https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch\"; \twget -O /usr/local/bin/gosu.asc \"https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc\"; \t\texport GNUPGHOME=\"$(mktemp -d)\"; \tgpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \tgpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \tgpgconf --kill all; \trm -rf \"$GNUPGHOME\" /usr/local/bin/gosu.asc; \t\tapk del --no-network .gosu-deps; \t\tchmod +x /usr/local/bin/gosu; \tgosu --version; \tgosu nobody true # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV LANG=en_US.utf8",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c mkdir /docker-entrypoint-initdb.d # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV PG_MAJOR=17",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV PG_VERSION=17.6",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV PG_SHA256=e0630a3600aea27511715563259ec2111cd5f4353a4b040e0be827f94cd7a8b0",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV DOCKER_PG_LLVM_DEPS=llvm19-dev \t\tclang19",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c set -eux; \t\twget -O postgresql.tar.bz2 \"https://ftp.postgresql.org/pub/source/v$PG_VERSION/postgresql-$PG_VERSION.tar.bz2\"; \techo \"$PG_SHA256 *postgresql.tar.bz2\" | sha256sum -c -; \tmkdir -p /usr/src/postgresql; \ttar \t\t--extract \t\t--file postgresql.tar.bz2 \t\t--directory /usr/src/postgresql \t\t--strip-components 1 \t; \trm postgresql.tar.bz2; \t\tapk add --no-cache --virtual .build-deps \t\t$DOCKER_PG_LLVM_DEPS \t\tbison \t\tcoreutils \t\tdpkg-dev dpkg \t\tflex \t\tg++ \t\tgcc \t\tkrb5-dev \t\tlibc-dev \t\tlibedit-dev \t\tlibxml2-dev \t\tlibxslt-dev \t\tlinux-headers \t\tmake \t\topenldap-dev \t\topenssl-dev \t\tperl-dev \t\tperl-ipc-run \t\tperl-utils \t\tpython3-dev \t\ttcl-dev \t\tutil-linux-dev \t\tzlib-dev \t\ticu-dev \t\tlz4-dev \t\tzstd-dev \t; \t\tcd /usr/src/postgresql; \tawk '$1 == \"#define\" && $2 == \"DEFAULT_PGSOCKET_DIR\" && $3 == \"\\\"/tmp\\\"\" { $3 = \"\\\"/var/run/postgresql\\\"\"; print; next } { print }' src/include/pg_config_manual.h > src/include/pg_config_manual.h.new; \tgrep '/var/run/postgresql' src/include/pg_config_manual.h.new; \tmv src/include/pg_config_manual.h.new src/include/pg_config_manual.h; \tgnuArch=\"$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)\"; \t\texport LLVM_CONFIG=\"/usr/lib/llvm19/bin/llvm-config\"; \texport CLANG=clang-19; \t\t./configure \t\t--enable-option-checking=fatal \t\t--build=\"$gnuArch\" \t\t--enable-integer-datetimes \t\t--enable-tap-tests \t\t--disable-rpath \t\t--with-uuid=e2fs \t\t--with-pgport=5432 \t\t--with-system-tzdata=/usr/share/zoneinfo \t\t--prefix=/usr/local \t\t--with-includes=/usr/local/include \t\t--with-libraries=/usr/local/lib \t\t--with-gssapi \t\t--with-icu \t\t--with-ldap \t\t--with-libxml \t\t--with-libxslt \t\t--with-llvm \t\t--with-lz4 \t\t--with-openssl \t\t--with-perl \t\t--with-python \t\t--with-tcl \t\t--with-zstd \t; \tmake -j \"$(nproc)\" world-bin; \tmake install-world-bin; \tmake -C contrib install; \t\trunDeps=\"$( \t\tscanelf --needed --nobanner --format '%n#p' --recursive /usr/local \t\t\t| tr ',' '\\n' \t\t\t| sort -u \t\t\t| awk 'system(\"[ -e /usr/local/lib/\" $1 \" ]\") == 0 { next } { print \"so:\" $1 }' \t\t\t| grep -v -e perl -e python -e tcl \t)\"; \tapk add --no-cache --virtual .postgresql-rundeps \t\t$runDeps \t\tbash \t\ttzdata \t\tzstd \t\ticu-data-full \t\t$([ \"$(apk --print-arch)\" != 'ppc64le' ] && echo 'nss_wrapper') \t; \tapk del --no-network .build-deps; \tcd /; \trm -rf \t\t/usr/src/postgresql \t\t/usr/local/share/doc \t\t/usr/local/share/man \t; \t\tpostgres --version # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c set -eux; \tcp -v /usr/local/share/postgresql/postgresql.conf.sample /usr/local/share/postgresql/postgresql.conf.sample.orig; \tsed -ri \"s!^#?(listen_addresses)\\s*=\\s*\\S+.*!\\1 = '*'!\" /usr/local/share/postgresql/postgresql.conf.sample; \tgrep -F \"listen_addresses = '*'\" /usr/local/share/postgresql/postgresql.conf.sample # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c install --verbose --directory --owner postgres --group postgres --mode 3777 /var/run/postgresql # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENV PGDATA=/var/lib/postgresql/data",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c install --verbose --directory --owner postgres --group postgres --mode 1777 \"$PGDATA\" # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "VOLUME [/var/lib/postgresql/data]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "COPY docker-entrypoint.sh docker-ensure-initdb.sh /usr/local/bin/ # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "RUN /bin/sh -c ln -sT docker-ensure-initdb.sh /usr/local/bin/docker-enforce-initdb.sh # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "ENTRYPOINT [\"docker-entrypoint.sh\"]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "STOPSIGNAL SIGINT",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "EXPOSE map[5432/tcp:{}]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2025-10-15T18:23:03Z",
+                    "created_by": "CMD [\"postgres\"]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               }
+          ],
+          "NamesHistory": [
+               "docker.io/library/postgres:17.6-alpine"
+          ]
+     },
+     {
+          "Id": "3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1",
+          "Digest": "sha256:a1f2ccb71597df989cc082013bfbdad537459d8149a29624ef1849d32178c528",
+          "RepoTags": [
+               "docker.io/jenkins/jenkins:2.568.1"
+          ],
+          "RepoDigests": [
+               "docker.io/jenkins/jenkins@sha256:8279be0a0ed95ad3b67c8677b9e03ff322f61338d39244234a907e9039ac3683",
+               "docker.io/jenkins/jenkins@sha256:a1f2ccb71597df989cc082013bfbdad537459d8149a29624ef1849d32178c528",
+               "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02"
+          ],
+          "Parent": "",
+          "Comment": "debuerreotype 0.17",
+          "Created": "2026-07-09T17:41:26.91306345Z",
+          "Config": {
+               "User": "jenkins",
+               "ExposedPorts": {
+                    "50000/tcp": {},
+                    "8080/tcp": {}
+               },
+               "Env": [
+                    "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG=C.UTF-8",
+                    "JENKINS_HOME=/var/jenkins_home",
+                    "JENKINS_SLAVE_AGENT_PORT=50000",
+                    "REF=/usr/share/jenkins/ref",
+                    "JENKINS_UC=https://updates.jenkins.io",
+                    "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+                    "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+                    "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+                    "JAVA_HOME=/opt/java/openjdk",
+                    "JENKINS_VERSION=2.568.1"
+               ],
+               "Entrypoint": [
+                    "/usr/bin/tini",
+                    "--",
+                    "/usr/local/bin/jenkins.sh"
+               ],
+               "Volumes": {
+                    "/var/jenkins_home": {}
+               },
+               "Labels": {
+                    "org.opencontainers.image.description": "The Jenkins Continuous Integration and Delivery server",
+                    "org.opencontainers.image.licenses": "MIT",
+                    "org.opencontainers.image.revision": "7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+                    "org.opencontainers.image.source": "https://github.com/jenkinsci/docker",
+                    "org.opencontainers.image.title": "Official Jenkins Docker image",
+                    "org.opencontainers.image.url": "https://www.jenkins.io/",
+                    "org.opencontainers.image.vendor": "Jenkins project",
+                    "org.opencontainers.image.version": "2.568.1"
+               }
+          },
+          "Version": "",
+          "Author": "",
+          "Architecture": "amd64",
+          "Os": "linux",
+          "Size": 491140630,
+          "VirtualSize": 491140630,
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/3ad2772d796104e615b98714fd3e582de60bf3ccd5f827b3e5f694abf2e83013/diff:/home/srikanth/.local/share/containers/storage/overlay/51202bc291f76dfd2f508ba408bb1cd5a9ef21fbf2459b5b09bf2350a16b38d4/diff:/home/srikanth/.local/share/containers/storage/overlay/045373659f6a4d4702490bee296a19d58e4cd029a11c4e466bbf624b5ff3cd73/diff:/home/srikanth/.local/share/containers/storage/overlay/16b832a191a560580b7e70299fec1aa12f39907468ad2be18dd6637eb1f931eb/diff:/home/srikanth/.local/share/containers/storage/overlay/112a249acd476dcadcaaa72b48055df8628b150353cd65b2b5b809c6870e93ad/diff:/home/srikanth/.local/share/containers/storage/overlay/d560fefdcc052c874fc2249d4a087fcbb3417a11a3a8f679247944f1e229e59f/diff:/home/srikanth/.local/share/containers/storage/overlay/5ac27957c8d0e5b87ea80fa75f4c135e66c1717619a29de8b5f133fe251e013c/diff:/home/srikanth/.local/share/containers/storage/overlay/49f2b422e96a09d4fbf1371e74bbc6fe806d46d0f082d82384293707e8a96e0f/diff:/home/srikanth/.local/share/containers/storage/overlay/d8b7e33f21b684bf4410d3c156d9d8b1420fb2e4f90c561b892ac5868f53fab9/diff:/home/srikanth/.local/share/containers/storage/overlay/c341432a52d7c55ecf8dd0619c4bb98fa1de1a891ec684b57b8cca188d625453/diff:/home/srikanth/.local/share/containers/storage/overlay/8007431a6be6089f64b17854599eb05ecee65ddd1bf3609dc8248e835570bb65/diff",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/87c12dc7424e9205839dfb87ea3c283939bebbcabbc8351992085fdfc6894cc9/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/87c12dc7424e9205839dfb87ea3c283939bebbcabbc8351992085fdfc6894cc9/work"
+               }
+          },
+          "RootFS": {
+               "Type": "layers",
+               "Layers": [
+                    "sha256:8007431a6be6089f64b17854599eb05ecee65ddd1bf3609dc8248e835570bb65",
+                    "sha256:82b5ca86e27110d3384bb031cc4c004054f8c4cf46570fbd33c3139af94643e3",
+                    "sha256:983e21e4a699533f35f37f9b8e7246411dbf62c057b76037ffc77b22d57b968c",
+                    "sha256:7546fd267646f1b4d925813b927f83211c4db00494cf73bc53af903b70d76dc9",
+                    "sha256:ba89bebdb88a1047073566c5382b01bc443ee81692c05ae1eb8e25951dbc12fb",
+                    "sha256:6c269cc49c54b0b142f6037aeb3e16e009ab51f4f93d22532ed496934206b253",
+                    "sha256:5d4864bc469e26764a96287811a506a38d518892fd27f508f91d6780f3e27622",
+                    "sha256:0cd26e70d2e5668859d08a3f1bb5b75ca2dfa85b8f1a22f130ddb1bff4c8783f",
+                    "sha256:30a4483b64bfbb5b1868314cdf5bc3e81de5189f8a6cb98f21164e397b5e075f",
+                    "sha256:584303b0c63157c0df5fef4654d3b91d1224519731bd6959d17ee0f92fdf5df5",
+                    "sha256:d9a714b34e586330e35ec775079dcdf36d4e7b1caa2b3edec134e38aba0fe71c",
+                    "sha256:2b736c873dbf660894b5b3ab770445ab8ba77ae5213abb870546aea1c4d45c47"
+               ]
+          },
+          "Labels": {
+               "org.opencontainers.image.description": "The Jenkins Continuous Integration and Delivery server",
+               "org.opencontainers.image.licenses": "MIT",
+               "org.opencontainers.image.revision": "7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+               "org.opencontainers.image.source": "https://github.com/jenkinsci/docker",
+               "org.opencontainers.image.title": "Official Jenkins Docker image",
+               "org.opencontainers.image.url": "https://www.jenkins.io/",
+               "org.opencontainers.image.vendor": "Jenkins project",
+               "org.opencontainers.image.version": "2.568.1"
+          },
+          "Annotations": {},
+          "ManifestType": "application/vnd.oci.image.manifest.v1+json",
+          "User": "jenkins",
+          "History": [
+               {
+                    "created": "2026-06-23T00:00:00Z",
+                    "created_by": "# debian.sh --arch 'amd64' out/ 'trixie' '@1782172800'",
+                    "comment": "debuerreotype 0.17"
+               },
+               {
+                    "created": "2026-07-09T17:39:54.609940801Z",
+                    "created_by": "RUN /bin/sh -c apt-get update   && apt-get install -y --no-install-recommends     ca-certificates     curl     git     libfontconfig1     libfreetype6     procps     ssh-client     tini     unzip     tzdata   && rm -rf /var/lib/apt/lists/* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG GIT_LFS_VERSION=3.7.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "RUN |1 GIT_LFS_VERSION=3.7.1 /bin/sh -c arch=$(uname -m | sed -e 's/x86_64/amd64/g' -e 's/aarch64/arm64/g')   && curl -L -s -o git-lfs.tgz \"https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_VERSION}/git-lfs-linux-${arch}-v${GIT_LFS_VERSION}.tar.gz\"   && tar xzf git-lfs.tgz   && bash git-lfs-*/install.sh   && git lfs install --skip-repo --system   && rm -rf git-lfs* # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV LANG=C.UTF-8",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG TARGETARCH=amd64",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG user=jenkins",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG group=jenkins",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG uid=1000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG gid=1000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG http_port=8080",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG agent_port=50000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG JENKINS_HOME=/var/jenkins_home",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ARG REF=/usr/share/jenkins/ref",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV JENKINS_HOME=/var/jenkins_home",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV JENKINS_SLAVE_AGENT_PORT=50000",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:56.687002168Z",
+                    "created_by": "ENV REF=/usr/share/jenkins/ref",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.027776492Z",
+                    "created_by": "RUN |11 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref /bin/sh -c mkdir -p $JENKINS_HOME   && chown ${uid}:${gid} $JENKINS_HOME   && groupadd -g ${gid} ${group}   && useradd -d \"$JENKINS_HOME\" -u ${uid} -g ${gid} -l -m -s /bin/bash ${user} # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:57.027776492Z",
+                    "created_by": "VOLUME [/var/jenkins_home]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "RUN |11 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref /bin/sh -c mkdir -p ${REF}/init.groovy.d # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "ENV JENKINS_UC=https://updates.jenkins.io",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "ENV JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.245784622Z",
+                    "created_by": "ENV JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.489305607Z",
+                    "created_by": "RUN |11 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref /bin/sh -c chown -R ${user} \"$JENKINS_HOME\" \"$REF\" # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:57.489305607Z",
+                    "created_by": "ARG PLUGIN_CLI_VERSION=2.15.0",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:57.489305607Z",
+                    "created_by": "ARG PLUGIN_CLI_URL=https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.15.0/jenkins-plugin-manager-2.15.0.jar",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "RUN |13 GIT_LFS_VERSION=3.7.1 TARGETARCH=amd64 COMMIT_SHA=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 user=jenkins group=jenkins uid=1000 gid=1000 http_port=8080 agent_port=50000 JENKINS_HOME=/var/jenkins_home REF=/usr/share/jenkins/ref PLUGIN_CLI_VERSION=2.15.0 PLUGIN_CLI_URL=https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.15.0/jenkins-plugin-manager-2.15.0.jar /bin/sh -c curl -fsSL ${PLUGIN_CLI_URL} -o /opt/jenkins-plugin-manager.jar   && echo \"$(curl -fsSL \"${PLUGIN_CLI_URL}.sha256\")  /opt/jenkins-plugin-manager.jar\" >/tmp/jpm_sha   && sha256sum -c --strict /tmp/jpm_sha   && rm -f /tmp/jpm_sha # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "EXPOSE [8080/tcp]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "EXPOSE [50000/tcp]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "ENV COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "ENV JAVA_HOME=/opt/java/openjdk",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:39:58.358625191Z",
+                    "created_by": "ENV PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.507791113Z",
+                    "created_by": "COPY /javaruntime /opt/java/openjdk # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.848552155Z",
+                    "created_by": "COPY /war/jenkins.war /usr/share/jenkins/jenkins.war # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.848552155Z",
+                    "created_by": "USER jenkins",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.871707518Z",
+                    "created_by": "COPY jenkins-support /usr/local/bin/jenkins-support # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.900531987Z",
+                    "created_by": "COPY jenkins.sh /usr/local/bin/jenkins.sh # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "COPY jenkins-plugin-cli.sh /bin/jenkins-plugin-cli # buildkit",
+                    "comment": "buildkit.dockerfile.v0"
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "ARG JENKINS_VERSION=2.568.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "ENV JENKINS_VERSION=2.568.1",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "ENTRYPOINT [\"/usr/bin/tini\" \"--\" \"/usr/local/bin/jenkins.sh\"]",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               },
+               {
+                    "created": "2026-07-09T17:41:26.91306345Z",
+                    "created_by": "LABEL org.opencontainers.image.vendor=Jenkins project org.opencontainers.image.title=Official Jenkins Docker image org.opencontainers.image.description=The Jenkins Continuous Integration and Delivery server org.opencontainers.image.version=2.568.1 org.opencontainers.image.url=https://www.jenkins.io/ org.opencontainers.image.source=https://github.com/jenkinsci/docker org.opencontainers.image.revision=7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51 org.opencontainers.image.licenses=MIT",
+                    "comment": "buildkit.dockerfile.v0",
+                    "empty_layer": true
+               }
+          ],
+          "NamesHistory": [
+               "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+               "docker.io/jenkins/jenkins:2.568.1"
+          ]
+     }
+]

@@ -1,0 +1,78 @@
+{
+  "reviewer": "root/gates_review",
+  "source_head": "f263ad4ae2871e8bb06fe3b5bceef534179a0a88",
+  "campaign_sha256": "0332856ee84aa5035dd65a2ad36bb5c83d17c4f88a77eaad99b37ce67ab20592",
+  "compiler_subset_archive_sha256": "a79098106ec44c8768efc279b5f2f1dc2a1c440e0622097b92bb37cc8b43b40a",
+  "inventory_files": 457,
+  "genuine_admission_replays": 228,
+  "records_identical_to_c94": true,
+  "summary": {
+    "population": 228,
+    "exact_original_representations": 226,
+    "retained_redacted_representations": 2,
+    "counts": {
+      "admitted": 1,
+      "unsupported": 216,
+      "rejected": 11,
+      "unverified": 0
+    },
+    "reasons": [
+      {
+        "status": "admitted",
+        "code": null,
+        "count": 1
+      },
+      {
+        "status": "rejected",
+        "code": "E_SOURCE_PARSE",
+        "count": 2
+      },
+      {
+        "status": "rejected",
+        "code": "E_SOURCE_TEXT",
+        "count": 4
+      },
+      {
+        "status": "rejected",
+        "code": "E_SOURCE_TOO_LARGE",
+        "count": 5
+      },
+      {
+        "status": "unsupported",
+        "code": "E_AGENT_UNSUPPORTED",
+        "count": 10
+      },
+      {
+        "status": "unsupported",
+        "code": "E_DECLARATIVE_ROOT",
+        "count": 123
+      },
+      {
+        "status": "unsupported",
+        "code": "E_DIRECTIVE_UNSUPPORTED",
+        "count": 22
+      },
+      {
+        "status": "unsupported",
+        "code": "E_SOURCE_LEXICAL",
+        "count": 44
+      },
+      {
+        "status": "unsupported",
+        "code": "E_STAGE_BODY",
+        "count": 4
+      },
+      {
+        "status": "unsupported",
+        "code": "E_STEP_UNSUPPORTED",
+        "count": 13
+      }
+    ],
+    "classification_complete": true,
+    "workload_executions": 0,
+    "execution_equivalence_claim": false,
+    "production_eligibility_claim": false
+  },
+  "status": "approved-fresh-corpus",
+  "qualification": "Compile-only,226 exact original representations plus2 retained redacted; original228 not execution equivalence."
+}

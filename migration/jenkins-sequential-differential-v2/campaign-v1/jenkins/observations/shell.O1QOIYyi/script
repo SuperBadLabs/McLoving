@@ -1,0 +1,1 @@
+test "${JCOMP_STEP_SENTINEL-unset}" = unset; test -d nested; printf "two\n"

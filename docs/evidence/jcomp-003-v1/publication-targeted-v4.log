@@ -1,0 +1,36 @@
+scripts/jcomp003/test-compiler-timeout.py
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.002s
+
+OK
+scripts/jcomp003/test-jenkins-boundary.py
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.002s
+
+OK
+scripts/jcomp003/test-product-boundary.py
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.001s
+
+OK
+scripts/jcomp003/test-paired-verifier.py
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.005s
+
+OK
+scripts/jcomp003/test-retained.py
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.060s
+
+OK
+scripts/test-jenkins-sequential-corpus.py
+...................
+----------------------------------------------------------------------
+Ran 19 tests in 0.370s
+
+OK

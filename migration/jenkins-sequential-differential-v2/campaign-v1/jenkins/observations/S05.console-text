@@ -1,0 +1,18 @@
+Started by user unknown or anonymous
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on Jenkins in /var/jenkins_home/workspace/jcomp-S05
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Multiline)
+[Pipeline] sh
++ printf first\n
+first
++ printf %s\n second line
+second line
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

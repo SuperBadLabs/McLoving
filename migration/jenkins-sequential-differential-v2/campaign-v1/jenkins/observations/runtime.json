@@ -1,0 +1,557 @@
+{
+    "jenkins": "2.568.1",
+    "java": "21.0.11+10-LTS",
+    "java_vendor": "Eclipse Adoptium",
+    "groovy": "2.4.21",
+    "core_jar_path": "/var/jenkins_home/war/WEB-INF/lib/jenkins-core-2.568.1.jar",
+    "core_jar_sha256": "07511327f8f69b4abdab17705f99c5de16bcb751b79e1403f4ac80ac151b3e6c",
+    "groovy_jar_path": "/var/jenkins_home/war/WEB-INF/lib/groovy-all-2.4.21.jar",
+    "groovy_jar_sha256": "de65260cf2070442e99882f2f3d72e7531725c1e6a257446cc0cea525c607bd0",
+    "war_sha256": "58f24f3965fbef7708629fbe158d51bf138ffd577cadbc86b46367e8ad0beb83",
+    "plugin_files": {
+        "ansicolor.jpi": "695c029c078e91dd423a4f0b98bd4e24a60469826088e7855ad022fc1a134e92",
+        "antisamy-markup-formatter.jpi": "29b4765797f26c44574a2732ddf9d7d98ea0283295352497dd9eef84aed0102f",
+        "apache-httpcomponents-client-4-api.jpi": "cea2f61cc72890b962fd4b767c31778c6cb30015b4a8758b4c26b62e51ca9533",
+        "asm-api.jpi": "292c90d3dfff2e9242f8096707a3fa3d978cb57a6b6a6ce689c69dc21a381be6",
+        "authentication-tokens.jpi": "8069074af688b102703410045a11394fb8d2f52c2cc2d7abd3067e3adff5fc24",
+        "bootstrap5-api.jpi": "4027b4cecbdb400c4cdf6beed351cb27a2e0ef4c39d27618e342fad76a4490df",
+        "bouncycastle-api.jpi": "a31099c54d9b1ac6f88b1336088a73124831532313bf3280e3eb1610300382e1",
+        "branch-api.jpi": "fa9c246644e1b5011241a2e6daded05ac50e59f6b9941871a012b39efe9c8deb",
+        "build-timeout.jpi": "cc67cd99216a726a3218a0b60969221e3021976f1ef8567c661f7ce5d2e2c98f",
+        "caffeine-api.jpi": "40e254ba2f031a6582044e09529b43c9a031bbaf6563a04c3273e045553aaaf1",
+        "checks-api.jpi": "c48335f0fd17e192e82066be5257f5afe1fe1d40f7b47836ee2d93fc161a2749",
+        "cloudbees-folder.jpi": "796f2ce5169f09c943743f056616759e9f51988d6b83140ec4b353cc8d6af3a0",
+        "commons-compress-api.jpi": "8f9022a31ca884d222e9dfe2404427e55261dc156a820d23a5faf83838141609",
+        "commons-lang3-api.jpi": "aa0908e0002c23c329df1f5e36d2ea9af6dfbd7c7f71fcf413cc471f335c2052",
+        "commons-text-api.jpi": "ae2abdf957694f4aa39b9ba0b539edabc384f3da277551879e34ffb22fb13764",
+        "credentials-binding.jpi": "bd7d1a187e35c8e2b6619cd50f2f8c5d28aafc4ef8fd9de572fb2cfa464f466d",
+        "credentials.jpi": "fb9309138872c3f7e5e4f0233b3b91c0fe8d02b01e16d03307d2c86f55d0ec0d",
+        "display-url-api.jpi": "07eeaae738b451bade4756900b48561c6c493a42c7ba07a45b22a2dce71ac0ca",
+        "docker-commons.jpi": "695259df771b9182973cb0bc2f13657bd4f9e9efa9ec88ce65758e29d026fc8b",
+        "docker-workflow.jpi": "ee2b5e57b880a8b3c5dc4e2002d6b9b3e7fb929eb771f6618ec4ccf08b2203c7",
+        "durable-task.jpi": "1f5bb92ee5784ee01a4e4e0307e806fa1e260db8aceba56fe8d277e939278dfa",
+        "echarts-api.jpi": "cf944061e349011873d620898a14f409ae2a1b0e908d0efc0e7bdd5a6df5c997",
+        "font-awesome-api.jpi": "7ee382c678545f5fd5b022e5dbb75d129a97db2b0180fb42f17edcebdfdbbf5a",
+        "git-client.jpi": "69ab80e3bd51e2e4e676a18722c02c7b163eb11a758b52ecf179d58e1ca1738f",
+        "git.jpi": "eb562836855eb8e4155a03154002467051d287ab068b2853cfc1c3b86b669a69",
+        "gson-api.jpi": "6940cd0f795f72371fd5644d885db9ec0a2077985ac55de85d19ab3b1fac2bb7",
+        "instance-identity.jpi": "df2b3205a6177248f12b294650a60405f65ba2cd503ca9599b2dcb72c1de5018",
+        "ionicons-api.jpi": "95f3504375d628d887425ccdf32d5606a230261ee42dc683f13958d8e973ac3f",
+        "jackson-annotations2-api.jpi": "f13d0a17af6f8c8939a6edd30952006b77dca4760b1f40e0289c363918b7d17d",
+        "jackson2-api.jpi": "86198dde394a7c88bcb46f1b017528c19b2e616a4d7d77f99520dbb31b067477",
+        "jackson3-api.jpi": "6d716b72fb70f2f399a628aae858b69e8bfd3ecc5f7e052e8e56b394f843cd87",
+        "jakarta-activation-api.jpi": "e62298341742f14b374045387ba641ad8a19376793c76bdafebb4a05b5099712",
+        "jakarta-mail-api.jpi": "244735ea85a51332c079d235a5713e70d3810bea62332894002acc39914ce11b",
+        "jakarta-xml-bind-api.jpi": "2f59227936687ec00f7ea62b550e7a6e9c86cda3423f3567ffe66bbdf235ffb5",
+        "javax-activation-api.jpi": "e96e88c52edf07ba00fb45b26cc411a7a95fa3d4491aaa1a5d36637665880560",
+        "jaxb.jpi": "38ddf4cf5db61a591044130c2f7ccb2b7aa9abebc8fcd8a6953f8da550d002ed",
+        "joda-time-api.jpi": "9a005fa1abd994829fc895cbe29402ce3c2c5c2f847463e04149b7d347edc4c4",
+        "jquery3-api.jpi": "16716d59a3df872a3b8700337de9e8306b2d5104320e6916731aa7185d3de880",
+        "json-api.jpi": "f79693e3f20ac5d46952840675a8550d6e782a781bf2d9f44a613b6784f096c4",
+        "json-path-api.jpi": "c032db1c87e36a57246bce59837f399f8d5f4f53be3483689a69b5c3ac0a0125",
+        "junit.jpi": "f2a3b39304cc1b3f1596c340bbd72d45a70518b710fda521b9739a3d0b703115",
+        "kubernetes-client-api.jpi": "b2bc226e357f836ae46683014c8de5a081b54957f9877a31935b30bba058b774",
+        "kubernetes-credentials.jpi": "a452602c2a5a1e5103b64560f5c854a05475c31d3941ad84b47409539b71c539",
+        "kubernetes.jpi": "25601c6c30f88a4f655cb74b4006a9de574cf2ba47502672200c7e3f81262239",
+        "lockable-resources.jpi": "b5e77b91ac45a9a0ad7856cba1e7732cf8626d54f953b8041732a17d3278756e",
+        "mailer.jpi": "5426a66a3f879d25fcb4baff678a28422afbabff22cd6e4f0f998fc67a3dc3fa",
+        "matrix-project.jpi": "01f0fc13195e7d9a0fd3ee2d22c1eae29774050c0178d05e91e87c7954e9e263",
+        "metrics.jpi": "68d20b650266fb1cd1bc2123813572312efae6c505d214abd8838fb32d726afb",
+        "mina-sshd-api-common.jpi": "4bf8d267ad9435bf249ebebb6b1b5efc90dd5a1ffd9398931a1ea3c026ec13e8",
+        "mina-sshd-api-core.jpi": "9479d70a69201a0d75f816cfce4d55553402d56e0d480dbeb15f4f7333ec01b4",
+        "okhttp-api.jpi": "22dcd710e2fdf944271123b40aa430435f96f9c83110d48f9239d6712ccdd27d",
+        "pipeline-build-step.jpi": "7aaef526af20b9f034e5c2c649ce454fdad55f5f6bb917e1e2c53c29283ae336",
+        "pipeline-graph-analysis.jpi": "8c89351cb13f694b9cc620501a75aed8bd4acdc0b9a6e6918b5dcb0543f08e7f",
+        "pipeline-groovy-lib.jpi": "4024fc14cb537bb0fef7dfde6e90d9bf8d91d18aef5467e44f3b41cfb179360e",
+        "pipeline-input-step.jpi": "7c61bb745ecd1e4e5c7864dc7c8352148d9b2281bcca5a48fd3a7cca7290a135",
+        "pipeline-milestone-step.jpi": "cb3187809e219f01b42068f277058a818033f3cfd14da7ec59c86f028fc38386",
+        "pipeline-model-api.jpi": "e96ac4c955fca0faac63593a79eb48e99bd106fddc3df6cb27cd1c222ad429f3",
+        "pipeline-model-definition.jpi": "a11506d4adaae0d6603310601cc4d2b1d4bc8ddd7574486d4a63c330d736b873",
+        "pipeline-model-extensions.jpi": "78e1e4027369f00598718afc5f003d519aa91443769057ec4e452c78330e3f0c",
+        "pipeline-rest-api.jpi": "6e463affa43f4013c4b0865d4c0442abd738440c54c8bb0cd70f0c1164743159",
+        "pipeline-stage-step.jpi": "2eba433b28f2dfc90519e233b14264890f97b93b78e25c664d56607141fcd94b",
+        "pipeline-stage-tags-metadata.jpi": "74356942bd9ae3c948c425f96aebdf4f1db9892163f4a0638774fc3dd1936f70",
+        "pipeline-stage-view.jpi": "fbc9dd724278f69b8c7638907363a609a8484cfaaa59321169468ee6c908952f",
+        "pipeline-utility-steps.jpi": "e188b3272dd6dfb0250c7961b016a0e38527a0a2236f5e25fc8c50652582098c",
+        "plain-credentials.jpi": "b5e5e35cf93ad3b818a983916cbcdf3f7866699410a4df923e6a2968ecc3a448",
+        "plugin-util-api.jpi": "6ed91e4b73cae55327b41ab919b53c33b39425727115d6c308f45ae7a6e47837",
+        "prism-api.jpi": "2b7aa7809e0f656afce98c0b6a0a9b62885af6ae85ad90bed67a4f18f18e8354",
+        "resource-disposer.jpi": "2794c871cc479ed37fd04a85fe8d4f4aa7fee1c7929c447c8b8fa239548e3bf2",
+        "scm-api.jpi": "1336472987daa2fa912210aba00e1e37b739ce03f75c973a6794d1a0f55c0326",
+        "script-security.jpi": "c1ae67b350ed0d79a9508800158e771b4518a4ad2dd8cb076232f2d2bda8328d",
+        "snakeyaml-api.jpi": "80edbeec15b9afbca18d000cf367d9e26456aa83100dcdd09ee0ed6a4b98a9c2",
+        "snakeyaml-engine-api.jpi": "dafc5fa060c9589d7b7e85aa8fc49239ad20841cba855e14a7bf7f064a257b0d",
+        "ssh-agent.jpi": "5f833a4ddde334520e87772319418b7a1d57e5c30eb14fe01e5d5e6f64152e32",
+        "ssh-credentials.jpi": "7b4d035b05b331038f3dfa99ddfef0cabbacede8f0ad2a6ca9611fb0844108a9",
+        "structs.jpi": "a0a5db44f2cb082a9ec6572c088340521f033fff8c351fc7eba9ef7f07dbbf8d",
+        "timestamper.jpi": "b4d6589e7a169f06b26bc7e15bc37ef2fb3986dc20b502cb91c2a9918eaf980b",
+        "token-macro.jpi": "ef98e47b467571e7968925ace1c40d1103baefe230f5d4cf44250769b7b6b42b",
+        "variant.jpi": "12e214ea694469a4461b55881ecb4074ae5dfb04797dbc0dad390f6f4bc75aaf",
+        "woodstox-core-api.jpi": "443bb0e652901dbcbf1a6ba8e839351997896bdb7b2c16d36bdc16f5fea33c3e",
+        "workflow-aggregator.jpi": "7b94227c1afa01bb262c14919ad4a333412f1b51d947c0f21909ec2daff357dc",
+        "workflow-api.jpi": "f4adbd6b34a2a0b643a12b898110bd976350142eff6322efda21efacbccb6835",
+        "workflow-basic-steps.jpi": "93449eb494658d065d097e8c54f707c98c9ce3e54da2fb98281b0a0487154eaf",
+        "workflow-cps.jpi": "1116290ef6481331d615678e509cc4111a70c9c387f71724cb76dc40613d4376",
+        "workflow-durable-task-step.jpi": "a0f0f1464ce3592f76d0f0079ce9fc2d4272594f995bf3d1a7ede4cd5031452e",
+        "workflow-job.jpi": "2993f8b613614c2b577dd802e724b0725fbc64ffc9a5bfe73707ac313ac7b461",
+        "workflow-multibranch.jpi": "38cfac453368d0cd2e48f5828de5521df3cd66797552482cfccd6fab963fa1b7",
+        "workflow-scm-step.jpi": "8f35b68153ee8a671d01dcdc3d86dd47837bd2d5fcf9df8d674ff8aeecfba16a",
+        "workflow-step-api.jpi": "887491de444174228471993b0b2db958db2e7fb577857c8516c58e9618049896",
+        "workflow-support.jpi": "914ee717ab8c1d60d0d3ea49a1af11e4ea65c1e74c0b44dc3522f9a2fe5b2a8e",
+        "ws-cleanup.jpi": "3bf5fbc4b6f2f5eaf8bf4d7b02542573ea537a3a38023a3d53cd24520dbecd05"
+    },
+    "step_sentinel_initially_absent": true,
+    "plugins": [
+        {
+            "short_name": "ansicolor",
+            "version": "536.v13fa_b_860c267",
+            "active": true
+        },
+        {
+            "short_name": "antisamy-markup-formatter",
+            "version": "173.v680e3a_b_69ff3",
+            "active": true
+        },
+        {
+            "short_name": "apache-httpcomponents-client-4-api",
+            "version": "4.5.14-269.vfa_2321039a_83",
+            "active": true
+        },
+        {
+            "short_name": "asm-api",
+            "version": "9.10.1-216.va_9256d3b_844b_",
+            "active": true
+        },
+        {
+            "short_name": "authentication-tokens",
+            "version": "1.144.v5ff4a_5ec5c33",
+            "active": true
+        },
+        {
+            "short_name": "bootstrap5-api",
+            "version": "5.3.8-1048.va_c299057e35c",
+            "active": true
+        },
+        {
+            "short_name": "bouncycastle-api",
+            "version": "2.30.1.84-291.v9f17b_21896e2",
+            "active": true
+        },
+        {
+            "short_name": "branch-api",
+            "version": "2.1280.v0d4e5b_b_460ef",
+            "active": true
+        },
+        {
+            "short_name": "build-timeout",
+            "version": "1.40",
+            "active": true
+        },
+        {
+            "short_name": "caffeine-api",
+            "version": "3.2.4-208.v7e2da_a_7db_82b_",
+            "active": true
+        },
+        {
+            "short_name": "checks-api",
+            "version": "415.vf022234a_931d",
+            "active": true
+        },
+        {
+            "short_name": "cloudbees-folder",
+            "version": "6.1100.ve9eed61d16c4",
+            "active": true
+        },
+        {
+            "short_name": "commons-compress-api",
+            "version": "1.28.0-82.v4df6c060eb_66",
+            "active": true
+        },
+        {
+            "short_name": "commons-lang3-api",
+            "version": "3.20.0-109.ve43756e2d2b_4",
+            "active": true
+        },
+        {
+            "short_name": "commons-text-api",
+            "version": "1.15.0-218.va_61573470393",
+            "active": true
+        },
+        {
+            "short_name": "credentials",
+            "version": "1506.v948b_b_b_7dec44",
+            "active": true
+        },
+        {
+            "short_name": "credentials-binding",
+            "version": "728.v902a_273b_8947",
+            "active": true
+        },
+        {
+            "short_name": "display-url-api",
+            "version": "2.217.va_6b_de84cc74b_",
+            "active": true
+        },
+        {
+            "short_name": "docker-commons",
+            "version": "477.v289085a_b_6896",
+            "active": true
+        },
+        {
+            "short_name": "docker-workflow",
+            "version": "634.vedc7242b_eda_7",
+            "active": true
+        },
+        {
+            "short_name": "durable-task",
+            "version": "686.v80ff80875b_82",
+            "active": true
+        },
+        {
+            "short_name": "echarts-api",
+            "version": "6.1.0-1306.vcee1648c16a_4",
+            "active": true
+        },
+        {
+            "short_name": "font-awesome-api",
+            "version": "7.3.1-1013.v0835a_879ec6d",
+            "active": true
+        },
+        {
+            "short_name": "git",
+            "version": "5.10.1",
+            "active": true
+        },
+        {
+            "short_name": "git-client",
+            "version": "6.6.1",
+            "active": true
+        },
+        {
+            "short_name": "gson-api",
+            "version": "2.14.0-201.v8eefe5515533",
+            "active": true
+        },
+        {
+            "short_name": "instance-identity",
+            "version": "203.v15e81a_1b_7a_38",
+            "active": true
+        },
+        {
+            "short_name": "ionicons-api",
+            "version": "94.vcc3065403257",
+            "active": true
+        },
+        {
+            "short_name": "jackson-annotations2-api",
+            "version": "2.22-19.v10a_a_582ea_26e",
+            "active": true
+        },
+        {
+            "short_name": "jackson2-api",
+            "version": "2.22.0-439.vb_b_43658d6176",
+            "active": true
+        },
+        {
+            "short_name": "jackson3-api",
+            "version": "3.2.1-92.vd25c2e23c180",
+            "active": true
+        },
+        {
+            "short_name": "jakarta-activation-api",
+            "version": "2.1.4-1",
+            "active": true
+        },
+        {
+            "short_name": "jakarta-mail-api",
+            "version": "2.1.5-1",
+            "active": true
+        },
+        {
+            "short_name": "jakarta-xml-bind-api",
+            "version": "4.0.9-19.v2b_a_5b_44d9a_1c",
+            "active": true
+        },
+        {
+            "short_name": "javax-activation-api",
+            "version": "1.2.0-8",
+            "active": true
+        },
+        {
+            "short_name": "jaxb",
+            "version": "2.3.9-143.v5979df3304e6",
+            "active": true
+        },
+        {
+            "short_name": "joda-time-api",
+            "version": "2.14.2-193.v422b_efce56e0",
+            "active": true
+        },
+        {
+            "short_name": "jquery3-api",
+            "version": "3.7.1-687.v68d468e40b_30",
+            "active": true
+        },
+        {
+            "short_name": "json-api",
+            "version": "20260719-223.va_81f828cdb_58",
+            "active": true
+        },
+        {
+            "short_name": "json-path-api",
+            "version": "3.0.0-218.vcd4dd1355de2",
+            "active": true
+        },
+        {
+            "short_name": "junit",
+            "version": "1416.vd753e036de5e",
+            "active": true
+        },
+        {
+            "short_name": "kubernetes",
+            "version": "4540.v612369217f87",
+            "active": true
+        },
+        {
+            "short_name": "kubernetes-client-api",
+            "version": "7.3.1-256.v788a_0b_787114",
+            "active": true
+        },
+        {
+            "short_name": "kubernetes-credentials",
+            "version": "207.v492f58828b_ed",
+            "active": true
+        },
+        {
+            "short_name": "lockable-resources",
+            "version": "1539.v4db_b_fc1cc115",
+            "active": true
+        },
+        {
+            "short_name": "mailer",
+            "version": "534.v1b_36f5864073",
+            "active": true
+        },
+        {
+            "short_name": "matrix-project",
+            "version": "870.v9db_fcfc2f45b_",
+            "active": true
+        },
+        {
+            "short_name": "metrics",
+            "version": "4.2.37-494.v06f9a_939d33a_",
+            "active": true
+        },
+        {
+            "short_name": "mina-sshd-api-common",
+            "version": "2.17.1-187.v0341274c2905",
+            "active": true
+        },
+        {
+            "short_name": "mina-sshd-api-core",
+            "version": "2.17.1-187.v0341274c2905",
+            "active": true
+        },
+        {
+            "short_name": "okhttp-api",
+            "version": "5.3.2-200.vedb_720a_cf1f8",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-build-step",
+            "version": "599.v4b_67ea_11b_152",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-graph-analysis",
+            "version": "254.v0f63a_a_447dca_",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-groovy-lib",
+            "version": "798.v5cc688825312",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-input-step",
+            "version": "560.v56198a_642157",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-milestone-step",
+            "version": "152.v6e22b_8cfc66c",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-model-api",
+            "version": "2.2291.v2934911987b_6",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-model-definition",
+            "version": "2.2291.v2934911987b_6",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-model-extensions",
+            "version": "2.2291.v2934911987b_6",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-rest-api",
+            "version": "2.41",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-stage-step",
+            "version": "345.va_96187909426",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-stage-tags-metadata",
+            "version": "2.2291.v2934911987b_6",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-stage-view",
+            "version": "2.41",
+            "active": true
+        },
+        {
+            "short_name": "pipeline-utility-steps",
+            "version": "3.810.va_7672d206740",
+            "active": true
+        },
+        {
+            "short_name": "plain-credentials",
+            "version": "199.v9f8e1f741799",
+            "active": true
+        },
+        {
+            "short_name": "plugin-util-api",
+            "version": "7.1341.v039f146993d9",
+            "active": true
+        },
+        {
+            "short_name": "prism-api",
+            "version": "1.30.0-741.v034eb_0b_0a_a_fa_",
+            "active": true
+        },
+        {
+            "short_name": "resource-disposer",
+            "version": "0.25",
+            "active": true
+        },
+        {
+            "short_name": "scm-api",
+            "version": "728.vc30dcf7a_0df5",
+            "active": true
+        },
+        {
+            "short_name": "script-security",
+            "version": "1402.1405.vc96e74964250",
+            "active": true
+        },
+        {
+            "short_name": "snakeyaml-api",
+            "version": "2.5-149.v72471e9c6371",
+            "active": true
+        },
+        {
+            "short_name": "snakeyaml-engine-api",
+            "version": "3.0.1-5.vd98ea_ff3b_92e",
+            "active": true
+        },
+        {
+            "short_name": "ssh-agent",
+            "version": "405.v67cc4f9764d0",
+            "active": true
+        },
+        {
+            "short_name": "ssh-credentials",
+            "version": "372.va_250881b_08cd",
+            "active": true
+        },
+        {
+            "short_name": "structs",
+            "version": "362.va_b_695ef4fdf9",
+            "active": true
+        },
+        {
+            "short_name": "timestamper",
+            "version": "1.30",
+            "active": true
+        },
+        {
+            "short_name": "token-macro",
+            "version": "477.vd4f0dc3cb_cf1",
+            "active": true
+        },
+        {
+            "short_name": "variant",
+            "version": "70.va_d9f17f859e0",
+            "active": true
+        },
+        {
+            "short_name": "woodstox-core-api",
+            "version": "7.2.1-6.v3718a_a_11f5c4",
+            "active": true
+        },
+        {
+            "short_name": "workflow-aggregator",
+            "version": "608.v67378e9d3db_1",
+            "active": true
+        },
+        {
+            "short_name": "workflow-api",
+            "version": "1413.v2ff1a_5e720fa_",
+            "active": true
+        },
+        {
+            "short_name": "workflow-basic-steps",
+            "version": "1098.v808b_fd7f8cf4",
+            "active": true
+        },
+        {
+            "short_name": "workflow-cps",
+            "version": "4357.vd3195c6b_d381",
+            "active": true
+        },
+        {
+            "short_name": "workflow-durable-task-step",
+            "version": "1479.v56e587f413a_7",
+            "active": true
+        },
+        {
+            "short_name": "workflow-job",
+            "version": "1590.v49101d088542",
+            "active": true
+        },
+        {
+            "short_name": "workflow-multibranch",
+            "version": "841.vec5b_9e1806ec",
+            "active": true
+        },
+        {
+            "short_name": "workflow-scm-step",
+            "version": "466.va_d69e602552b_",
+            "active": true
+        },
+        {
+            "short_name": "workflow-step-api",
+            "version": "724.v538c2362b_dfb_",
+            "active": true
+        },
+        {
+            "short_name": "workflow-support",
+            "version": "1015.v785e5a_b_b_8b_22",
+            "active": true
+        },
+        {
+            "short_name": "ws-cleanup",
+            "version": "0.49",
+            "active": true
+        }
+    ],
+    "shell": "/opt/jcomp/observe-shell"
+}

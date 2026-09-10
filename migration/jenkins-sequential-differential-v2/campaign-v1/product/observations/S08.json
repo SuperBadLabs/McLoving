@@ -1,0 +1,395 @@
+{
+  "attempt_workspace_cleanup": true,
+  "checkpoint_raw_bytes_removed": true,
+  "fixture": "S08",
+  "logs": [
+    {
+      "attempt_id": "de9d029a-ea38-4bb3-b1ca-1d97db9ca018",
+      "chunks": [
+        {
+          "content": [
+            102,
+            105,
+            114,
+            115,
+            116,
+            32,
+            102,
+            97,
+            105,
+            108,
+            101,
+            100,
+            10
+          ],
+          "cursor_id": 25,
+          "digest": "f57097b484b177455e1bf3fe3f9a0091be5d2d674a32ed2e9313a1bb995e1094",
+          "fence": 1,
+          "sequence": 0,
+          "stream": "stdout"
+        },
+        {
+          "content": [
+            43,
+            32,
+            112,
+            114,
+            105,
+            110,
+            116,
+            102,
+            32,
+            102,
+            105,
+            114,
+            115,
+            116,
+            32,
+            102,
+            97,
+            105,
+            108,
+            101,
+            100,
+            92,
+            110,
+            10,
+            43,
+            32,
+            101,
+            120,
+            105,
+            116,
+            32,
+            55,
+            10
+          ],
+          "cursor_id": 26,
+          "digest": "7d4fcb4d9b3013a45cb9be8e2333d9ed8565bd13d1d3141ad681dd315a9e5206",
+          "fence": 1,
+          "sequence": 1,
+          "stream": "stderr"
+        }
+      ]
+    },
+    {
+      "attempt_id": "1ce3e242-fd77-4eb8-b035-1d0eb113e051",
+      "chunks": []
+    },
+    {
+      "attempt_id": "94d1a710-543b-4360-ad23-6746de02e5ed",
+      "chunks": []
+    }
+  ],
+  "result": {
+    "build_id": "f0629a3c-dca0-40ae-adb6-80022af9b0eb",
+    "layout_version": 1,
+    "pipeline_digest": [
+      11,
+      235,
+      54,
+      173,
+      155,
+      248,
+      69,
+      104,
+      132,
+      161,
+      131,
+      62,
+      53,
+      248,
+      174,
+      184,
+      92,
+      194,
+      54,
+      183,
+      140,
+      212,
+      182,
+      212,
+      127,
+      237,
+      71,
+      87,
+      39,
+      116,
+      96,
+      15
+    ],
+    "pipeline_id": "efb5313e-3a1a-4142-b1db-6abd72d57618",
+    "pipeline_operational_generation": 1,
+    "pipeline_revision": 1,
+    "stages": [
+      {
+        "stage_id": "build",
+        "stage_name": "Build",
+        "stage_ordinal": 1,
+        "status": "failed",
+        "steps": [
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "de9d029a-ea38-4bb3-b1ca-1d97db9ca018",
+                  "completed_at_unix_ms": 1789027541243,
+                  "created_at_unix_ms": 1789027541176,
+                  "fence": 1,
+                  "lease_owner": "sequential-2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                  "node_id": "44457283-c238-4ac3-ad81-824bac1c39fd",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": 1789027541176,
+                  "retry_of": null,
+                  "started_at_unix_ms": 1789027541233,
+                  "status": "failed",
+                  "terminal_summary": {
+                    "exit_code": 7,
+                    "result_sha256": "fbb0b08c09ea97273fd58b117af54d69dfcf9c8d3053e01911dadb88efdbe233",
+                    "termination": "exited",
+                    "workspace_transfer": {
+                      "build_id": "f0629a3c-dca0-40ae-adb6-80022af9b0eb",
+                      "error": null,
+                      "generation": 0,
+                      "input_digest": [
+                        139,
+                        202,
+                        225,
+                        129,
+                        210,
+                        19,
+                        33,
+                        183,
+                        158,
+                        28,
+                        238,
+                        73,
+                        118,
+                        166,
+                        201,
+                        117,
+                        154,
+                        15,
+                        3,
+                        118,
+                        157,
+                        222,
+                        100,
+                        182,
+                        248,
+                        33,
+                        171,
+                        93,
+                        34,
+                        163,
+                        57,
+                        33
+                      ],
+                      "namespace_id": "af25b9eb-2b78-4faa-9a7f-ae57c80387ed",
+                      "organization_id": "2ecf2632-aff2-47c1-81ad-1224f1f86e55",
+                      "receipt": {
+                        "digest": [
+                          139,
+                          202,
+                          225,
+                          129,
+                          210,
+                          19,
+                          33,
+                          183,
+                          158,
+                          28,
+                          238,
+                          73,
+                          118,
+                          166,
+                          201,
+                          117,
+                          154,
+                          15,
+                          3,
+                          118,
+                          157,
+                          222,
+                          100,
+                          182,
+                          248,
+                          33,
+                          171,
+                          93,
+                          34,
+                          163,
+                          57,
+                          33
+                        ],
+                        "entries": [],
+                        "total_bytes": 0,
+                        "version": 1
+                      },
+                      "version": 1
+                    }
+                  }
+                },
+                "logs": [
+                  {
+                    "attempt_id": "de9d029a-ea38-4bb3-b1ca-1d97db9ca018",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 1,
+                    "last_sequence": 1,
+                    "stream": "stderr"
+                  },
+                  {
+                    "attempt_id": "de9d029a-ea38-4bb3-b1ca-1d97db9ca018",
+                    "chunk_count": 1,
+                    "fence": 1,
+                    "first_sequence": 0,
+                    "last_sequence": 0,
+                    "stream": "stdout"
+                  }
+                ]
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 1,
+              "node_key": "build[step=01]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 1
+            },
+            "logical_outcome": "failed",
+            "max_attempts": 1,
+            "node_id": "44457283-c238-4ac3-ad81-824bac1c39fd",
+            "status": "failed"
+          },
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "1ce3e242-fd77-4eb8-b035-1d0eb113e051",
+                  "completed_at_unix_ms": 1789027541244,
+                  "created_at_unix_ms": 1789027541176,
+                  "fence": 0,
+                  "lease_owner": null,
+                  "node_id": "118a77f3-7341-4398-bfd7-b6a23e33de24",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": null,
+                  "retry_of": null,
+                  "started_at_unix_ms": null,
+                  "status": "aborted",
+                  "terminal_summary": {
+                    "reason": "dependency_not_succeeded"
+                  }
+                },
+                "logs": []
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 2,
+              "node_key": "build[step=02]",
+              "stage_id": "build",
+              "stage_name": "Build",
+              "stage_ordinal": 1,
+              "step_ordinal": 2
+            },
+            "logical_outcome": "skipped",
+            "max_attempts": 1,
+            "node_id": "118a77f3-7341-4398-bfd7-b6a23e33de24",
+            "status": "skipped"
+          }
+        ]
+      },
+      {
+        "stage_id": "later",
+        "stage_name": "Later",
+        "stage_ordinal": 2,
+        "status": "skipped",
+        "steps": [
+          {
+            "attempts": [
+              {
+                "accounting": {
+                  "attempt_id": "94d1a710-543b-4360-ad23-6746de02e5ed",
+                  "completed_at_unix_ms": 1789027541245,
+                  "created_at_unix_ms": 1789027541177,
+                  "fence": 0,
+                  "lease_owner": null,
+                  "node_id": "30e86a0c-e96f-4e81-aee6-b6837136f8ec",
+                  "ordinal": 1,
+                  "ready_at_unix_ms": null,
+                  "retry_of": null,
+                  "started_at_unix_ms": null,
+                  "status": "aborted",
+                  "terminal_summary": {
+                    "reason": "dependency_not_succeeded"
+                  }
+                },
+                "logs": []
+              }
+            ],
+            "cancellation_requested": false,
+            "layout": {
+              "execution_ordinal": 3,
+              "node_key": "later[step=01]",
+              "stage_id": "later",
+              "stage_name": "Later",
+              "stage_ordinal": 2,
+              "step_ordinal": 1
+            },
+            "logical_outcome": "skipped",
+            "max_attempts": 1,
+            "node_id": "30e86a0c-e96f-4e81-aee6-b6837136f8ec",
+            "status": "skipped"
+          }
+        ]
+      }
+    ],
+    "status": "failed",
+    "workspace_closed": true,
+    "workspace_generation": 1,
+    "workspace_namespace": "af25b9eb-2b78-4faa-9a7f-ae57c80387ed",
+    "workspace_receipt": {
+      "digest": [
+        139,
+        202,
+        225,
+        129,
+        210,
+        19,
+        33,
+        183,
+        158,
+        28,
+        238,
+        73,
+        118,
+        166,
+        201,
+        117,
+        154,
+        15,
+        3,
+        118,
+        157,
+        222,
+        100,
+        182,
+        248,
+        33,
+        171,
+        93,
+        34,
+        163,
+        57,
+        33
+      ],
+      "entries": [],
+      "total_bytes": 0,
+      "version": 1
+    }
+  },
+  "source_sha256": "5363199f442ad074cb5427b0d4c0d82dc8ee1cfb6aed917263c970602d827f99"
+}

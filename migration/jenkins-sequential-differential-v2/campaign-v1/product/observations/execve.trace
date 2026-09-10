@@ -1,0 +1,81 @@
+46    1789027540.049886 execve("\x2f\x74\x6d\x70\x2f\x6a\x63\x6f\x6d\x70\x30\x30\x33\x2d\x74\x61\x72\x67\x65\x74\x2f\x64\x65\x62\x75\x67\x2f\x6d\x63\x6c\x6f\x76\x69\x6e\x67\x2d\x61\x67\x65\x6e\x74", ["\x2f\x74\x6d\x70\x2f\x6a\x63\x6f\x6d\x70\x30\x30\x33\x2d\x74\x61\x72\x67\x65\x74\x2f\x64\x65\x62\x75\x67\x2f\x6d\x63\x6c\x6f\x76\x69\x6e\x67\x2d\x61\x67\x65\x6e\x74"], 0x5e0f1517c0f0 /* 35 vars */) = 0
+55    1789027540.139319 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x68\x65\x6c\x6c\x6f\x5c\x6e\x22"], 0x63292cf43be0 /* 2 vars */) = 0
+55    1789027540.139992 exit_group(0)   = ?
+46    1789027540.140053 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=55, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+72    1789027540.250910 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x62\x75\x69\x6c\x64\x5c\x6e\x22"], 0x63292cf4a8b0 /* 2 vars */) = 0
+72    1789027540.251595 exit_group(0)   = ?
+50    1789027540.251655 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=72, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+90    1789027540.331997 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x74\x65\x73\x74\x5c\x6e\x22"], 0x63292cf61370 /* 2 vars */) = 0
+90    1789027540.332645 exit_group(0)   = ?
+46    1789027540.332698 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=90, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+107   1789027540.410179 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x70\x61\x63\x6b\x61\x67\x65\x5c\x6e\x22"], 0x63292cf63aa0 /* 2 vars */) = 0
+107   1789027540.410825 exit_group(0)   = ?
+48    1789027540.410897 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=107, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+124   1789027540.502803 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x65\x78\x70\x6f\x72\x74\x20\x4a\x43\x4f\x4d\x50\x5f\x53\x54\x45\x50\x5f\x53\x45\x4e\x54\x49\x4e\x45\x4c\x3d\x66\x69\x72\x73\x74\x3b\x20\x6d\x6b\x64\x69\x72\x20\x6e\x65\x73\x74\x65\x64\x3b\x20\x63\x64\x20\x6e\x65\x73\x74\x65\x64\x3b\x20\x70\x72\x69\x6e\x74\x66\x20\x22\x6f\x6e\x65\x5c\x6e\x22"], 0x63292cf600e0 /* 2 vars */) = 0
+125   1789027540.503494 execve("\x2f\x75\x73\x72\x2f\x62\x69\x6e\x2f\x6d\x6b\x64\x69\x72", ["\x6d\x6b\x64\x69\x72", "\x6e\x65\x73\x74\x65\x64"], 0x5d487b7ab5a8 /* 4 vars */) = 0
+125   1789027540.504482 exit_group(0)   = ?
+124   1789027540.504533 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=125, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+124   1789027540.504602 exit_group(0)   = ?
+46    1789027540.504657 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=124, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+148   1789027540.578183 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x74\x65\x73\x74\x20\x22\x24\x7b\x4a\x43\x4f\x4d\x50\x5f\x53\x54\x45\x50\x5f\x53\x45\x4e\x54\x49\x4e\x45\x4c\x2d\x75\x6e\x73\x65\x74\x7d\x22\x20\x3d\x20\x75\x6e\x73\x65\x74\x3b\x20\x74\x65\x73\x74\x20\x2d\x64\x20\x6e\x65\x73\x74\x65\x64\x3b\x20\x70\x72\x69\x6e\x74\x66\x20\x22\x74\x77\x6f\x5c\x6e\x22"], 0x63292cf601d0 /* 2 vars */) = 0
+148   1789027540.578825 exit_group(0)   = ?
+49    1789027540.578870 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=148, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+165   1789027540.646391 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x72\x6d\x64\x69\x72\x20\x6e\x65\x73\x74\x65\x64\x3b\x20\x70\x72\x69\x6e\x74\x66\x20\x22\x74\x68\x72\x65\x65\x5c\x6e\x22"], 0x63292cf6a530 /* 2 vars */) = 0
+166   1789027540.647073 execve("\x2f\x75\x73\x72\x2f\x62\x69\x6e\x2f\x72\x6d\x64\x69\x72", ["\x72\x6d\x64\x69\x72", "\x6e\x65\x73\x74\x65\x64"], 0x56f490fc1960 /* 3 vars */) = 0
+166   1789027540.647913 exit_group(0)   = ?
+165   1789027540.647975 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=166, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+165   1789027540.648030 exit_group(0)   = ?
+46    1789027540.648093 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=165, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+183   1789027540.721908 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x25\x73\x5c\x6e\x22\x20\x22\x61\x20\x62\x22\x20\x27\x73\x69\x6e\x67\x6c\x65\x27\x20\x27\x24\x6c\x69\x74\x65\x72\x61\x6c\x27\x20\x27\x62\x61\x63\x6b\x5c\x73\x6c\x61\x73\x68\x27"], 0x63292cf24dd0 /* 2 vars */) = 0
+183   1789027540.722570 exit_group(0)   = ?
+46    1789027540.722621 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=183, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+200   1789027540.807572 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x66\x69\x72\x73\x74\x5c\x6e\x22\x0a\x70\x72\x69\x6e\x74\x66\x20\x22\x25\x73\x5c\x6e\x22\x20\x22\x73\x65\x63\x6f\x6e\x64\x20\x6c\x69\x6e\x65\x22\x0a"], 0x63292cf0e3b0 /* 2 vars */) = 0
+200   1789027540.808223 exit_group(0)   = ?
+48    1789027540.808270 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=200, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+217   1789027540.891817 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x70\x61\x79\x6c\x6f\x61\x64\x5c\x6e\x22\x20\x3e\x20\x73\x68\x61\x72\x65\x64\x2e\x74\x78\x74"], 0x63292cf68c30 /* 2 vars */) = 0
+217   1789027540.892513 exit_group(0)   = ?
+50    1789027540.892564 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=217, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+234   1789027540.963627 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x63\x61\x74\x20\x73\x68\x61\x72\x65\x64\x2e\x74\x78\x74"], 0x63292cf60320 /* 2 vars */) = 0
+235   1789027540.964175 execve("\x2f\x75\x73\x72\x2f\x62\x69\x6e\x2f\x63\x61\x74", ["\x63\x61\x74", "\x73\x68\x61\x72\x65\x64\x2e\x74\x78\x74"], 0x56da550bb8d0 /* 3 vars */) = 0
+235   1789027540.965323 exit_group(0)   = ?
+234   1789027540.965388 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=235, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+234   1789027540.965418 exit_group(0)   = ?
+46    1789027540.965479 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=234, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+252   1789027541.064133 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x6d\x6b\x64\x69\x72\x20\x6f\x75\x74\x70\x75\x74\x0a\x70\x72\x69\x6e\x74\x66\x20\x22\x61\x63\x72\x6f\x73\x73\x5c\x6e\x22\x20\x3e\x20\x6f\x75\x74\x70\x75\x74\x2f\x76\x61\x6c\x75\x65\x2e\x74\x78\x74"], 0x63292cf5f680 /* 2 vars */) = 0
+253   1789027541.065000 execve("\x2f\x75\x73\x72\x2f\x62\x69\x6e\x2f\x6d\x6b\x64\x69\x72", ["\x6d\x6b\x64\x69\x72", "\x6f\x75\x74\x70\x75\x74"], 0x5798a989b8e8 /* 3 vars */) = 0
+253   1789027541.065966 exit_group(0)   = ?
+252   1789027541.066028 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=253, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+252   1789027541.066145 exit_group(0)   = ?
+49    1789027541.066221 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=252, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+270   1789027541.137043 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x63\x61\x74\x20\x6f\x75\x74\x70\x75\x74\x2f\x76\x61\x6c\x75\x65\x2e\x74\x78\x74"], 0x63292cf50c00 /* 2 vars */) = 0
+271   1789027541.137945 execve("\x2f\x75\x73\x72\x2f\x62\x69\x6e\x2f\x63\x61\x74", ["\x63\x61\x74", "\x6f\x75\x74\x70\x75\x74\x2f\x76\x61\x6c\x75\x65\x2e\x74\x78\x74"], 0x58d6a25178e8 /* 3 vars */) = 0
+271   1789027541.138684 exit_group(0)   = ?
+270   1789027541.138739 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=271, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+270   1789027541.138765 exit_group(0)   = ?
+46    1789027541.138820 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=270, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+288   1789027541.234422 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x66\x69\x72\x73\x74\x20\x66\x61\x69\x6c\x65\x64\x5c\x6e\x22\x3b\x20\x65\x78\x69\x74\x20\x37"], 0x63292cf0b9e0 /* 2 vars */) = 0
+288   1789027541.235270 exit_group(7)   = ?
+50    1789027541.235322 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=288, si_uid=1000, si_status=7, si_utime=0, si_stime=0} ---
+305   1789027541.319030 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x62\x65\x66\x6f\x72\x65\x5c\x6e\x22"], 0x63292cf47af0 /* 2 vars */) = 0
+305   1789027541.319866 exit_group(0)   = ?
+48    1789027541.319915 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=305, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+322   1789027541.386649 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x6d\x69\x64\x64\x6c\x65\x20\x66\x61\x69\x6c\x65\x64\x5c\x6e\x22\x3b\x20\x65\x78\x69\x74\x20\x37"], 0x63292cf48f10 /* 2 vars */) = 0
+322   1789027541.387166 exit_group(7)   = ?
+47    1789027541.387205 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=322, si_uid=1000, si_status=7, si_utime=0, si_stime=0} ---
+339   1789027541.463315 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x62\x65\x66\x6f\x72\x65\x5c\x6e\x22"], 0x63292cf245b0 /* 2 vars */) = 0
+339   1789027541.463743 exit_group(0)   = ?
+46    1789027541.463780 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=339, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+356   1789027541.529409 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x70\x72\x69\x6e\x74\x66\x20\x22\x6c\x61\x73\x74\x20\x66\x61\x69\x6c\x65\x64\x5c\x6e\x22\x3b\x20\x65\x78\x69\x74\x20\x37"], 0x63292cf5f660 /* 2 vars */) = 0
+356   1789027541.530123 exit_group(7)   = ?
+48    1789027541.530169 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=356, si_uid=1000, si_status=7, si_utime=0, si_stime=0} ---
+379   1789027542.224975 execve("\x2f\x62\x69\x6e\x2f\x73\x68", ["\x2f\x62\x69\x6e\x2f\x73\x68", "\x2d\x78\x65", "\x2d\x63", "\x65\x63\x68\x6f\x20\x22\x48\x65\x6c\x6c\x6f\x20\x57\x6f\x72\x6c\x64\x22"], 0x63292cf68d90 /* 2 vars */) = 0
+379   1789027542.225523 exit_group(0)   = ?
+46    1789027542.225560 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=379, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+46    1789027542.251984 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=23, si_uid=1000} ---
+84    1789027542.252026 +++ killed by SIGTERM +++
+51    1789027542.252029 +++ killed by SIGTERM +++
+50    1789027542.252031 +++ killed by SIGTERM +++
+49    1789027542.252033 +++ killed by SIGTERM +++
+48    1789027542.252035 +++ killed by SIGTERM +++
+47    1789027542.252370 +++ killed by SIGTERM +++
+46    1789027542.252372 +++ killed by SIGTERM +++

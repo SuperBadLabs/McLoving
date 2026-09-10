@@ -1,0 +1,1712 @@
+[
+     {
+          "Id": "88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3",
+          "Created": "2026-09-10T03:00:08.147563207-05:00",
+          "Path": "/usr/bin/tini",
+          "Args": [
+               "--",
+               "/usr/bin/timeout",
+               "--signal=TERM",
+               "--kill-after=10s",
+               "540s",
+               "/usr/local/bin/jenkins.sh"
+          ],
+          "State": {
+               "OciVersion": "1.1.0",
+               "Status": "running",
+               "Running": true,
+               "Paused": false,
+               "Restarting": false,
+               "OOMKilled": false,
+               "Dead": false,
+               "Pid": 3592857,
+               "ConmonPid": 3592841,
+               "ExitCode": 0,
+               "Error": "",
+               "StartedAt": "2026-09-10T03:00:08.192470161-05:00",
+               "FinishedAt": "0001-01-01T00:00:00Z",
+               "Health": {
+                    "Status": "",
+                    "FailingStreak": 0,
+                    "Log": null
+               },
+               "CgroupPath": "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3.scope",
+               "CheckpointedAt": "0001-01-01T00:00:00Z",
+               "RestoredAt": "0001-01-01T00:00:00Z"
+          },
+          "Image": "3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1",
+          "ImageDigest": "sha256:a1f2ccb71597df989cc082013bfbdad537459d8149a29624ef1849d32178c528",
+          "ImageName": "sha256:3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1",
+          "Rootfs": "",
+          "Pod": "",
+          "ResolvConfPath": "",
+          "HostnamePath": "/run/user/1000/containers/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata/hostname",
+          "HostsPath": "/run/user/1000/containers/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata/hosts",
+          "StaticDir": "/home/srikanth/.local/share/containers/storage/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata",
+          "OCIConfigPath": "/home/srikanth/.local/share/containers/storage/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata/config.json",
+          "OCIRuntime": "runc",
+          "ConmonPidFile": "/run/user/1000/containers/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata/conmon.pid",
+          "PidFile": "/run/user/1000/containers/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata/pidfile",
+          "Name": "mcloving-jcomp003-jenkins-e325a07ba0b8",
+          "RestartCount": 0,
+          "Driver": "overlay",
+          "MountLabel": "",
+          "ProcessLabel": "",
+          "AppArmorProfile": "",
+          "EffectiveCaps": null,
+          "BoundingCaps": null,
+          "ExecIDs": [],
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/87c12dc7424e9205839dfb87ea3c283939bebbcabbc8351992085fdfc6894cc9/diff:/home/srikanth/.local/share/containers/storage/overlay/3ad2772d796104e615b98714fd3e582de60bf3ccd5f827b3e5f694abf2e83013/diff:/home/srikanth/.local/share/containers/storage/overlay/51202bc291f76dfd2f508ba408bb1cd5a9ef21fbf2459b5b09bf2350a16b38d4/diff:/home/srikanth/.local/share/containers/storage/overlay/045373659f6a4d4702490bee296a19d58e4cd029a11c4e466bbf624b5ff3cd73/diff:/home/srikanth/.local/share/containers/storage/overlay/16b832a191a560580b7e70299fec1aa12f39907468ad2be18dd6637eb1f931eb/diff:/home/srikanth/.local/share/containers/storage/overlay/112a249acd476dcadcaaa72b48055df8628b150353cd65b2b5b809c6870e93ad/diff:/home/srikanth/.local/share/containers/storage/overlay/d560fefdcc052c874fc2249d4a087fcbb3417a11a3a8f679247944f1e229e59f/diff:/home/srikanth/.local/share/containers/storage/overlay/5ac27957c8d0e5b87ea80fa75f4c135e66c1717619a29de8b5f133fe251e013c/diff:/home/srikanth/.local/share/containers/storage/overlay/49f2b422e96a09d4fbf1371e74bbc6fe806d46d0f082d82384293707e8a96e0f/diff:/home/srikanth/.local/share/containers/storage/overlay/d8b7e33f21b684bf4410d3c156d9d8b1420fb2e4f90c561b892ac5868f53fab9/diff:/home/srikanth/.local/share/containers/storage/overlay/c341432a52d7c55ecf8dd0619c4bb98fa1de1a891ec684b57b8cca188d625453/diff:/home/srikanth/.local/share/containers/storage/overlay/8007431a6be6089f64b17854599eb05ecee65ddd1bf3609dc8248e835570bb65/diff",
+                    "MergedDir": "/home/srikanth/.local/share/containers/storage/overlay/ca626b6f8854857d8e4f2070aec003736fe4f48da9b9bd1188cba4f960ad5d36/merged",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/ca626b6f8854857d8e4f2070aec003736fe4f48da9b9bd1188cba4f960ad5d36/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/ca626b6f8854857d8e4f2070aec003736fe4f48da9b9bd1188cba4f960ad5d36/work"
+               }
+          },
+          "Mounts": [
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-scm-step.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-scm-step.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-multibranch.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-multibranch.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/caffeine-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/caffeine-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/script-security.jpi",
+                    "Destination": "/var/jenkins_home/plugins/script-security.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/bouncycastle-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/bouncycastle-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/bootstrap5-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/bootstrap5-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/json-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/json-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/jenkins-init.groovy",
+                    "Destination": "/var/jenkins_home/init.groovy.d/jcomp003.groovy",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/lockable-resources.jpi",
+                    "Destination": "/var/jenkins_home/plugins/lockable-resources.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/timestamper.jpi",
+                    "Destination": "/var/jenkins_home/plugins/timestamper.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ssh-agent.jpi",
+                    "Destination": "/var/jenkins_home/plugins/ssh-agent.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/plugin-util-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/plugin-util-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ws-cleanup.jpi",
+                    "Destination": "/var/jenkins_home/plugins/ws-cleanup.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/scm-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/scm-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes.jpi",
+                    "Destination": "/var/jenkins_home/plugins/kubernetes.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-model-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ionicons-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/ionicons-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/okhttp-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/okhttp-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/checks-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/checks-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/plain-credentials.jpi",
+                    "Destination": "/var/jenkins_home/plugins/plain-credentials.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-support.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-support.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/javax-activation-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/javax-activation-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ansicolor.jpi",
+                    "Destination": "/var/jenkins_home/plugins/ansicolor.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-mail-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jakarta-mail-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/git-client.jpi",
+                    "Destination": "/var/jenkins_home/plugins/git-client.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-step-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-step-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/snakeyaml-engine-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/snakeyaml-engine-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson3-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jackson3-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/asm-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/asm-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-text-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/commons-text-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/branch-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/branch-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-groovy-lib.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-groovy-lib.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/observe-shell",
+                    "Destination": "/opt/jcomp/observe-shell",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-utility-steps.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-utility-steps.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-build-step.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-build-step.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/junit.jpi",
+                    "Destination": "/var/jenkins_home/plugins/junit.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/json-path-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/json-path-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/build-timeout.jpi",
+                    "Destination": "/var/jenkins_home/plugins/build-timeout.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-view.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-stage-view.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/structs.jpi",
+                    "Destination": "/var/jenkins_home/plugins/structs.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ssh-credentials.jpi",
+                    "Destination": "/var/jenkins_home/plugins/ssh-credentials.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/instance-identity.jpi",
+                    "Destination": "/var/jenkins_home/plugins/instance-identity.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-durable-task-step.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-durable-task-step.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-step.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-stage-step.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/git.jpi",
+                    "Destination": "/var/jenkins_home/plugins/git.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-lang3-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/commons-lang3-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/metrics.jpi",
+                    "Destination": "/var/jenkins_home/plugins/metrics.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/echarts-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/echarts-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-aggregator.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-aggregator.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/snakeyaml-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/snakeyaml-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mailer.jpi",
+                    "Destination": "/var/jenkins_home/plugins/mailer.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mina-sshd-api-common.jpi",
+                    "Destination": "/var/jenkins_home/plugins/mina-sshd-api-common.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/docker-workflow.jpi",
+                    "Destination": "/var/jenkins_home/plugins/docker-workflow.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-cps.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-cps.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-tags-metadata.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-stage-tags-metadata.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-basic-steps.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-basic-steps.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/cloudbees-folder.jpi",
+                    "Destination": "/var/jenkins_home/plugins/cloudbees-folder.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jaxb.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jaxb.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/joda-time-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/joda-time-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-input-step.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-input-step.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/woodstox-core-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/woodstox-core-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes-client-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/kubernetes-client-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-rest-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-rest-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes-credentials.jpi",
+                    "Destination": "/var/jenkins_home/plugins/kubernetes-credentials.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/matrix-project.jpi",
+                    "Destination": "/var/jenkins_home/plugins/matrix-project.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/input",
+                    "Destination": "/opt/jcomp/input",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-graph-analysis.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-graph-analysis.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/display-url-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/display-url-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-milestone-step.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-milestone-step.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/apache-httpcomponents-client-4-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/apache-httpcomponents-client-4-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mina-sshd-api-core.jpi",
+                    "Destination": "/var/jenkins_home/plugins/mina-sshd-api-core.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/authentication-tokens.jpi",
+                    "Destination": "/var/jenkins_home/plugins/authentication-tokens.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/durable-task.jpi",
+                    "Destination": "/var/jenkins_home/plugins/durable-task.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jquery3-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jquery3-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/credentials.jpi",
+                    "Destination": "/var/jenkins_home/plugins/credentials.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/resource-disposer.jpi",
+                    "Destination": "/var/jenkins_home/plugins/resource-disposer.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson-annotations2-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jackson-annotations2-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson2-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jackson2-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/variant.jpi",
+                    "Destination": "/var/jenkins_home/plugins/variant.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-xml-bind-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jakarta-xml-bind-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/gson-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/gson-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/font-awesome-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/font-awesome-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-compress-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/commons-compress-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-definition.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-model-definition.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/token-macro.jpi",
+                    "Destination": "/var/jenkins_home/plugins/token-macro.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/docker-commons.jpi",
+                    "Destination": "/var/jenkins_home/plugins/docker-commons.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/credentials-binding.jpi",
+                    "Destination": "/var/jenkins_home/plugins/credentials-binding.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/antisamy-markup-formatter.jpi",
+                    "Destination": "/var/jenkins_home/plugins/antisamy-markup-formatter.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/prism-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/prism-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-extensions.jpi",
+                    "Destination": "/var/jenkins_home/plugins/pipeline-model-extensions.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-job.jpi",
+                    "Destination": "/var/jenkins_home/plugins/workflow-job.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-activation-api.jpi",
+                    "Destination": "/var/jenkins_home/plugins/jakarta-activation-api.jpi",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               }
+          ],
+          "Dependencies": [],
+          "NetworkSettings": {
+               "EndpointID": "",
+               "Gateway": "",
+               "IPAddress": "",
+               "IPPrefixLen": 0,
+               "IPv6Gateway": "",
+               "GlobalIPv6Address": "",
+               "GlobalIPv6PrefixLen": 0,
+               "MacAddress": "",
+               "Bridge": "",
+               "SandboxID": "",
+               "HairpinMode": false,
+               "LinkLocalIPv6Address": "",
+               "LinkLocalIPv6PrefixLen": 0,
+               "Ports": {},
+               "SandboxKey": "/proc/3592857/ns/net",
+               "Networks": {
+                    "none": {
+                         "EndpointID": "",
+                         "Gateway": "",
+                         "IPAddress": "",
+                         "IPPrefixLen": 0,
+                         "IPv6Gateway": "",
+                         "GlobalIPv6Address": "",
+                         "GlobalIPv6PrefixLen": 0,
+                         "MacAddress": "",
+                         "NetworkID": "none",
+                         "DriverOpts": null,
+                         "IPAMConfig": null,
+                         "Links": null
+                    }
+               }
+          },
+          "Namespace": "",
+          "IsInfra": false,
+          "IsService": false,
+          "KubeExitCodePropagation": "invalid",
+          "lockNumber": 0,
+          "Config": {
+               "Hostname": "88db0dfd23f8",
+               "Domainname": "",
+               "User": "1000:1000",
+               "AttachStdin": false,
+               "AttachStdout": false,
+               "AttachStderr": false,
+               "Tty": false,
+               "OpenStdin": false,
+               "StdinOnce": false,
+               "Env": [
+                    "LANG=C.UTF-8",
+                    "JENKINS_UC=https://updates.jenkins.io",
+                    "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+                    "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "JAVA_HOME=/opt/java/openjdk",
+                    "JENKINS_VERSION=2.568.1",
+                    "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+                    "JENKINS_HOME=/var/jenkins_home",
+                    "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g",
+                    "container=podman",
+                    "REF=/usr/share/jenkins/ref",
+                    "JENKINS_SLAVE_AGENT_PORT=50000",
+                    "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+                    "HOME=/var/jenkins_home",
+                    "HOSTNAME=88db0dfd23f8"
+               ],
+               "Cmd": [
+                    "--",
+                    "/usr/bin/timeout",
+                    "--signal=TERM",
+                    "--kill-after=10s",
+                    "540s",
+                    "/usr/local/bin/jenkins.sh"
+               ],
+               "Image": "sha256:3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1",
+               "Volumes": null,
+               "WorkingDir": "/",
+               "Entrypoint": "/usr/bin/tini",
+               "OnBuild": null,
+               "Labels": {
+                    "org.opencontainers.image.description": "The Jenkins Continuous Integration and Delivery server",
+                    "org.opencontainers.image.licenses": "MIT",
+                    "org.opencontainers.image.revision": "7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+                    "org.opencontainers.image.source": "https://github.com/jenkinsci/docker",
+                    "org.opencontainers.image.title": "Official Jenkins Docker image",
+                    "org.opencontainers.image.url": "https://www.jenkins.io/",
+                    "org.opencontainers.image.vendor": "Jenkins project",
+                    "org.opencontainers.image.version": "2.568.1"
+               },
+               "Annotations": {
+                    "io.container.manager": "libpod",
+                    "org.opencontainers.image.stopSignal": "15"
+               },
+               "StopSignal": 15,
+               "HealthcheckOnFailureAction": "none",
+               "CreateCommand": [
+                    "podman",
+                    "run",
+                    "--detach",
+                    "--name",
+                    "mcloving-jcomp003-jenkins-e325a07ba0b8",
+                    "--pull=never",
+                    "--network=none",
+                    "--pid=private",
+                    "--ipc=private",
+                    "--image-volume=ignore",
+                    "--http-proxy=false",
+                    "--read-only",
+                    "--cap-drop=all",
+                    "--security-opt=no-new-privileges",
+                    "--user=1000:1000",
+                    "--cpus=4",
+                    "--memory=4g",
+                    "--memory-swap=4g",
+                    "--pids-limit=1024",
+                    "--ulimit=nofile=1024:1024",
+                    "--log-driver=k8s-file",
+                    "--log-opt=max-size=16mb",
+                    "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=2g,mode=1777",
+                    "--tmpfs=/var/jenkins_home:rw,noexec,nosuid,nodev,size=2g,mode=1777",
+                    "--tmpfs=/var/jenkins_home/plugins:rw,noexec,nosuid,nodev,size=512m,mode=1777",
+                    "--env=JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/input:/opt/jcomp/input:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/observe-shell:/opt/jcomp/observe-shell:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/jenkins-init.groovy:/var/jenkins_home/init.groovy.d/jcomp003.groovy:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ansicolor.jpi:/var/jenkins_home/plugins/ansicolor.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/antisamy-markup-formatter.jpi:/var/jenkins_home/plugins/antisamy-markup-formatter.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/apache-httpcomponents-client-4-api.jpi:/var/jenkins_home/plugins/apache-httpcomponents-client-4-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/asm-api.jpi:/var/jenkins_home/plugins/asm-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/authentication-tokens.jpi:/var/jenkins_home/plugins/authentication-tokens.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/bootstrap5-api.jpi:/var/jenkins_home/plugins/bootstrap5-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/bouncycastle-api.jpi:/var/jenkins_home/plugins/bouncycastle-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/branch-api.jpi:/var/jenkins_home/plugins/branch-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/build-timeout.jpi:/var/jenkins_home/plugins/build-timeout.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/caffeine-api.jpi:/var/jenkins_home/plugins/caffeine-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/checks-api.jpi:/var/jenkins_home/plugins/checks-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/cloudbees-folder.jpi:/var/jenkins_home/plugins/cloudbees-folder.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-compress-api.jpi:/var/jenkins_home/plugins/commons-compress-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-lang3-api.jpi:/var/jenkins_home/plugins/commons-lang3-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-text-api.jpi:/var/jenkins_home/plugins/commons-text-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/credentials-binding.jpi:/var/jenkins_home/plugins/credentials-binding.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/credentials.jpi:/var/jenkins_home/plugins/credentials.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/display-url-api.jpi:/var/jenkins_home/plugins/display-url-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/docker-commons.jpi:/var/jenkins_home/plugins/docker-commons.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/docker-workflow.jpi:/var/jenkins_home/plugins/docker-workflow.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/durable-task.jpi:/var/jenkins_home/plugins/durable-task.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/echarts-api.jpi:/var/jenkins_home/plugins/echarts-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/font-awesome-api.jpi:/var/jenkins_home/plugins/font-awesome-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/git-client.jpi:/var/jenkins_home/plugins/git-client.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/git.jpi:/var/jenkins_home/plugins/git.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/gson-api.jpi:/var/jenkins_home/plugins/gson-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/instance-identity.jpi:/var/jenkins_home/plugins/instance-identity.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ionicons-api.jpi:/var/jenkins_home/plugins/ionicons-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson-annotations2-api.jpi:/var/jenkins_home/plugins/jackson-annotations2-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson2-api.jpi:/var/jenkins_home/plugins/jackson2-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson3-api.jpi:/var/jenkins_home/plugins/jackson3-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-activation-api.jpi:/var/jenkins_home/plugins/jakarta-activation-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-mail-api.jpi:/var/jenkins_home/plugins/jakarta-mail-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-xml-bind-api.jpi:/var/jenkins_home/plugins/jakarta-xml-bind-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/javax-activation-api.jpi:/var/jenkins_home/plugins/javax-activation-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jaxb.jpi:/var/jenkins_home/plugins/jaxb.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/joda-time-api.jpi:/var/jenkins_home/plugins/joda-time-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jquery3-api.jpi:/var/jenkins_home/plugins/jquery3-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/json-api.jpi:/var/jenkins_home/plugins/json-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/json-path-api.jpi:/var/jenkins_home/plugins/json-path-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/junit.jpi:/var/jenkins_home/plugins/junit.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes-client-api.jpi:/var/jenkins_home/plugins/kubernetes-client-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes-credentials.jpi:/var/jenkins_home/plugins/kubernetes-credentials.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes.jpi:/var/jenkins_home/plugins/kubernetes.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/lockable-resources.jpi:/var/jenkins_home/plugins/lockable-resources.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mailer.jpi:/var/jenkins_home/plugins/mailer.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/matrix-project.jpi:/var/jenkins_home/plugins/matrix-project.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/metrics.jpi:/var/jenkins_home/plugins/metrics.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mina-sshd-api-common.jpi:/var/jenkins_home/plugins/mina-sshd-api-common.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mina-sshd-api-core.jpi:/var/jenkins_home/plugins/mina-sshd-api-core.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/okhttp-api.jpi:/var/jenkins_home/plugins/okhttp-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-build-step.jpi:/var/jenkins_home/plugins/pipeline-build-step.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-graph-analysis.jpi:/var/jenkins_home/plugins/pipeline-graph-analysis.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-groovy-lib.jpi:/var/jenkins_home/plugins/pipeline-groovy-lib.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-input-step.jpi:/var/jenkins_home/plugins/pipeline-input-step.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-milestone-step.jpi:/var/jenkins_home/plugins/pipeline-milestone-step.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-api.jpi:/var/jenkins_home/plugins/pipeline-model-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-definition.jpi:/var/jenkins_home/plugins/pipeline-model-definition.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-extensions.jpi:/var/jenkins_home/plugins/pipeline-model-extensions.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-rest-api.jpi:/var/jenkins_home/plugins/pipeline-rest-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-step.jpi:/var/jenkins_home/plugins/pipeline-stage-step.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-tags-metadata.jpi:/var/jenkins_home/plugins/pipeline-stage-tags-metadata.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-view.jpi:/var/jenkins_home/plugins/pipeline-stage-view.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-utility-steps.jpi:/var/jenkins_home/plugins/pipeline-utility-steps.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/plain-credentials.jpi:/var/jenkins_home/plugins/plain-credentials.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/plugin-util-api.jpi:/var/jenkins_home/plugins/plugin-util-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/prism-api.jpi:/var/jenkins_home/plugins/prism-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/resource-disposer.jpi:/var/jenkins_home/plugins/resource-disposer.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/scm-api.jpi:/var/jenkins_home/plugins/scm-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/script-security.jpi:/var/jenkins_home/plugins/script-security.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/snakeyaml-api.jpi:/var/jenkins_home/plugins/snakeyaml-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/snakeyaml-engine-api.jpi:/var/jenkins_home/plugins/snakeyaml-engine-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ssh-agent.jpi:/var/jenkins_home/plugins/ssh-agent.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ssh-credentials.jpi:/var/jenkins_home/plugins/ssh-credentials.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/structs.jpi:/var/jenkins_home/plugins/structs.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/timestamper.jpi:/var/jenkins_home/plugins/timestamper.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/token-macro.jpi:/var/jenkins_home/plugins/token-macro.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/variant.jpi:/var/jenkins_home/plugins/variant.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/woodstox-core-api.jpi:/var/jenkins_home/plugins/woodstox-core-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-aggregator.jpi:/var/jenkins_home/plugins/workflow-aggregator.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-api.jpi:/var/jenkins_home/plugins/workflow-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-basic-steps.jpi:/var/jenkins_home/plugins/workflow-basic-steps.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-cps.jpi:/var/jenkins_home/plugins/workflow-cps.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-durable-task-step.jpi:/var/jenkins_home/plugins/workflow-durable-task-step.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-job.jpi:/var/jenkins_home/plugins/workflow-job.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-multibranch.jpi:/var/jenkins_home/plugins/workflow-multibranch.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-scm-step.jpi:/var/jenkins_home/plugins/workflow-scm-step.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-step-api.jpi:/var/jenkins_home/plugins/workflow-step-api.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-support.jpi:/var/jenkins_home/plugins/workflow-support.jpi:ro",
+                    "--volume",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ws-cleanup.jpi:/var/jenkins_home/plugins/ws-cleanup.jpi:ro",
+                    "--entrypoint=/usr/bin/tini",
+                    "sha256:3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1",
+                    "--",
+                    "/usr/bin/timeout",
+                    "--signal=TERM",
+                    "--kill-after=10s",
+                    "540s",
+                    "/usr/local/bin/jenkins.sh"
+               ],
+               "Umask": "0022",
+               "Timeout": 0,
+               "StopTimeout": 10,
+               "Passwd": true,
+               "sdNotifyMode": "container"
+          },
+          "HostConfig": {
+               "Binds": [
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-scm-step.jpi:/var/jenkins_home/plugins/workflow-scm-step.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-multibranch.jpi:/var/jenkins_home/plugins/workflow-multibranch.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/caffeine-api.jpi:/var/jenkins_home/plugins/caffeine-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/script-security.jpi:/var/jenkins_home/plugins/script-security.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/bouncycastle-api.jpi:/var/jenkins_home/plugins/bouncycastle-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/bootstrap5-api.jpi:/var/jenkins_home/plugins/bootstrap5-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/json-api.jpi:/var/jenkins_home/plugins/json-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/jenkins-init.groovy:/var/jenkins_home/init.groovy.d/jcomp003.groovy:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/lockable-resources.jpi:/var/jenkins_home/plugins/lockable-resources.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/timestamper.jpi:/var/jenkins_home/plugins/timestamper.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ssh-agent.jpi:/var/jenkins_home/plugins/ssh-agent.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/plugin-util-api.jpi:/var/jenkins_home/plugins/plugin-util-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ws-cleanup.jpi:/var/jenkins_home/plugins/ws-cleanup.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/scm-api.jpi:/var/jenkins_home/plugins/scm-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes.jpi:/var/jenkins_home/plugins/kubernetes.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-api.jpi:/var/jenkins_home/plugins/pipeline-model-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ionicons-api.jpi:/var/jenkins_home/plugins/ionicons-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/okhttp-api.jpi:/var/jenkins_home/plugins/okhttp-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/checks-api.jpi:/var/jenkins_home/plugins/checks-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/plain-credentials.jpi:/var/jenkins_home/plugins/plain-credentials.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-support.jpi:/var/jenkins_home/plugins/workflow-support.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/javax-activation-api.jpi:/var/jenkins_home/plugins/javax-activation-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ansicolor.jpi:/var/jenkins_home/plugins/ansicolor.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-mail-api.jpi:/var/jenkins_home/plugins/jakarta-mail-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/git-client.jpi:/var/jenkins_home/plugins/git-client.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-step-api.jpi:/var/jenkins_home/plugins/workflow-step-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/snakeyaml-engine-api.jpi:/var/jenkins_home/plugins/snakeyaml-engine-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson3-api.jpi:/var/jenkins_home/plugins/jackson3-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/asm-api.jpi:/var/jenkins_home/plugins/asm-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-text-api.jpi:/var/jenkins_home/plugins/commons-text-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/branch-api.jpi:/var/jenkins_home/plugins/branch-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-groovy-lib.jpi:/var/jenkins_home/plugins/pipeline-groovy-lib.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/observe-shell:/opt/jcomp/observe-shell:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-utility-steps.jpi:/var/jenkins_home/plugins/pipeline-utility-steps.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-build-step.jpi:/var/jenkins_home/plugins/pipeline-build-step.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/junit.jpi:/var/jenkins_home/plugins/junit.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/json-path-api.jpi:/var/jenkins_home/plugins/json-path-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/build-timeout.jpi:/var/jenkins_home/plugins/build-timeout.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-view.jpi:/var/jenkins_home/plugins/pipeline-stage-view.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/structs.jpi:/var/jenkins_home/plugins/structs.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/ssh-credentials.jpi:/var/jenkins_home/plugins/ssh-credentials.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/instance-identity.jpi:/var/jenkins_home/plugins/instance-identity.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-durable-task-step.jpi:/var/jenkins_home/plugins/workflow-durable-task-step.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-step.jpi:/var/jenkins_home/plugins/pipeline-stage-step.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/git.jpi:/var/jenkins_home/plugins/git.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-lang3-api.jpi:/var/jenkins_home/plugins/commons-lang3-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/metrics.jpi:/var/jenkins_home/plugins/metrics.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/echarts-api.jpi:/var/jenkins_home/plugins/echarts-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-aggregator.jpi:/var/jenkins_home/plugins/workflow-aggregator.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/snakeyaml-api.jpi:/var/jenkins_home/plugins/snakeyaml-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mailer.jpi:/var/jenkins_home/plugins/mailer.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mina-sshd-api-common.jpi:/var/jenkins_home/plugins/mina-sshd-api-common.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/docker-workflow.jpi:/var/jenkins_home/plugins/docker-workflow.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-cps.jpi:/var/jenkins_home/plugins/workflow-cps.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-stage-tags-metadata.jpi:/var/jenkins_home/plugins/pipeline-stage-tags-metadata.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-basic-steps.jpi:/var/jenkins_home/plugins/workflow-basic-steps.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/cloudbees-folder.jpi:/var/jenkins_home/plugins/cloudbees-folder.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jaxb.jpi:/var/jenkins_home/plugins/jaxb.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/joda-time-api.jpi:/var/jenkins_home/plugins/joda-time-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-input-step.jpi:/var/jenkins_home/plugins/pipeline-input-step.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/woodstox-core-api.jpi:/var/jenkins_home/plugins/woodstox-core-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes-client-api.jpi:/var/jenkins_home/plugins/kubernetes-client-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-rest-api.jpi:/var/jenkins_home/plugins/pipeline-rest-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/kubernetes-credentials.jpi:/var/jenkins_home/plugins/kubernetes-credentials.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/matrix-project.jpi:/var/jenkins_home/plugins/matrix-project.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/input:/opt/jcomp/input:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-graph-analysis.jpi:/var/jenkins_home/plugins/pipeline-graph-analysis.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-api.jpi:/var/jenkins_home/plugins/workflow-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/display-url-api.jpi:/var/jenkins_home/plugins/display-url-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-milestone-step.jpi:/var/jenkins_home/plugins/pipeline-milestone-step.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/apache-httpcomponents-client-4-api.jpi:/var/jenkins_home/plugins/apache-httpcomponents-client-4-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/mina-sshd-api-core.jpi:/var/jenkins_home/plugins/mina-sshd-api-core.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/authentication-tokens.jpi:/var/jenkins_home/plugins/authentication-tokens.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/durable-task.jpi:/var/jenkins_home/plugins/durable-task.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jquery3-api.jpi:/var/jenkins_home/plugins/jquery3-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/credentials.jpi:/var/jenkins_home/plugins/credentials.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/resource-disposer.jpi:/var/jenkins_home/plugins/resource-disposer.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson-annotations2-api.jpi:/var/jenkins_home/plugins/jackson-annotations2-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jackson2-api.jpi:/var/jenkins_home/plugins/jackson2-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/variant.jpi:/var/jenkins_home/plugins/variant.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-xml-bind-api.jpi:/var/jenkins_home/plugins/jakarta-xml-bind-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/gson-api.jpi:/var/jenkins_home/plugins/gson-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/font-awesome-api.jpi:/var/jenkins_home/plugins/font-awesome-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/commons-compress-api.jpi:/var/jenkins_home/plugins/commons-compress-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-definition.jpi:/var/jenkins_home/plugins/pipeline-model-definition.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/token-macro.jpi:/var/jenkins_home/plugins/token-macro.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/docker-commons.jpi:/var/jenkins_home/plugins/docker-commons.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/credentials-binding.jpi:/var/jenkins_home/plugins/credentials-binding.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/antisamy-markup-formatter.jpi:/var/jenkins_home/plugins/antisamy-markup-formatter.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/prism-api.jpi:/var/jenkins_home/plugins/prism-api.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/pipeline-model-extensions.jpi:/var/jenkins_home/plugins/pipeline-model-extensions.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/workflow-job.jpi:/var/jenkins_home/plugins/workflow-job.jpi:ro,rprivate,rbind",
+                    "/tmp/mcloving-jcomp003-jenkins-input-9y_66fwv/plugins/jakarta-activation-api.jpi:/var/jenkins_home/plugins/jakarta-activation-api.jpi:ro,rprivate,rbind"
+               ],
+               "CgroupManager": "systemd",
+               "CgroupMode": "private",
+               "ContainerIDFile": "",
+               "LogConfig": {
+                    "Type": "k8s-file",
+                    "Config": null,
+                    "Path": "/home/srikanth/.local/share/containers/storage/overlay-containers/88db0dfd23f8fa9ffb36855aa803895a8739b9afa45f28549e5851aaa77f9ce3/userdata/ctr.log",
+                    "Tag": "",
+                    "Size": "16MB"
+               },
+               "NetworkMode": "none",
+               "PortBindings": {},
+               "RestartPolicy": {
+                    "Name": "",
+                    "MaximumRetryCount": 0
+               },
+               "AutoRemove": false,
+               "VolumeDriver": "",
+               "VolumesFrom": null,
+               "CapAdd": [],
+               "CapDrop": [
+                    "CAP_CHOWN",
+                    "CAP_DAC_OVERRIDE",
+                    "CAP_FOWNER",
+                    "CAP_FSETID",
+                    "CAP_KILL",
+                    "CAP_NET_BIND_SERVICE",
+                    "CAP_SETFCAP",
+                    "CAP_SETGID",
+                    "CAP_SETPCAP",
+                    "CAP_SETUID",
+                    "CAP_SYS_CHROOT"
+               ],
+               "Dns": [],
+               "DnsOptions": [],
+               "DnsSearch": [],
+               "ExtraHosts": [],
+               "GroupAdd": [],
+               "IpcMode": "private",
+               "Cgroup": "",
+               "Cgroups": "default",
+               "Links": null,
+               "OomScoreAdj": 0,
+               "PidMode": "private",
+               "Privileged": false,
+               "PublishAllPorts": false,
+               "ReadonlyRootfs": true,
+               "SecurityOpt": [
+                    "no-new-privileges"
+               ],
+               "Tmpfs": {
+                    "/tmp": "rw,noexec,nosuid,nodev,size=2g,mode=1777,rprivate,tmpcopyup",
+                    "/var/jenkins_home": "rw,noexec,nosuid,nodev,size=2g,mode=1777,rprivate,tmpcopyup",
+                    "/var/jenkins_home/plugins": "rw,noexec,nosuid,nodev,size=512m,mode=1777,rprivate,tmpcopyup"
+               },
+               "UTSMode": "private",
+               "UsernsMode": "",
+               "ShmSize": 65536000,
+               "Runtime": "oci",
+               "ConsoleSize": [
+                    0,
+                    0
+               ],
+               "Isolation": "",
+               "CpuShares": 0,
+               "Memory": 4294967296,
+               "NanoCpus": 4000000000,
+               "CgroupParent": "user.slice",
+               "BlkioWeight": 0,
+               "BlkioWeightDevice": null,
+               "BlkioDeviceReadBps": null,
+               "BlkioDeviceWriteBps": null,
+               "BlkioDeviceReadIOps": null,
+               "BlkioDeviceWriteIOps": null,
+               "CpuPeriod": 100000,
+               "CpuQuota": 400000,
+               "CpuRealtimePeriod": 0,
+               "CpuRealtimeRuntime": 0,
+               "CpusetCpus": "",
+               "CpusetMems": "",
+               "Devices": [],
+               "DiskQuota": 0,
+               "KernelMemory": 0,
+               "MemoryReservation": 0,
+               "MemorySwap": 4294967296,
+               "MemorySwappiness": -1,
+               "OomKillDisable": false,
+               "PidsLimit": 1024,
+               "Ulimits": [
+                    {
+                         "Name": "RLIMIT_NOFILE",
+                         "Soft": 1024,
+                         "Hard": 1024
+                    },
+                    {
+                         "Name": "RLIMIT_NPROC",
+                         "Soft": 468632,
+                         "Hard": 468632
+                    }
+               ],
+               "CpuCount": 0,
+               "CpuPercent": 0,
+               "IOMaximumIOps": 0,
+               "IOMaximumBandwidth": 0,
+               "CgroupConf": null
+          }
+     }
+]

@@ -1,0 +1,462 @@
+{
+    "fixture": "S08",
+    "source_sha256": "5363199f442ad074cb5427b0d4c0d82dc8ee1cfb6aed917263c970602d827f99",
+    "build": 1,
+    "result": "FAILURE",
+    "start_ms": 1789027216475,
+    "duration_ms": 376,
+    "nodes": [
+        {
+            "id": "17",
+            "parents": [
+                "16"
+            ],
+            "display_name": "End of Pipeline",
+            "type": "org.jenkinsci.plugins.workflow.graph.FlowEndNode",
+            "function_name": "End of Pipeline",
+            "arguments": {
+                
+            },
+            "block_start_id": "2",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216848,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "16",
+            "parents": [
+                "15"
+            ],
+            "display_name": "Allocate node : End",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepEndNode",
+            "function_name": "// node",
+            "arguments": {
+                
+            },
+            "block_start_id": "3",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216846,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "15",
+            "parents": [
+                "14"
+            ],
+            "display_name": "Allocate node : Body : End",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepEndNode",
+            "function_name": "}",
+            "arguments": {
+                
+            },
+            "block_start_id": "4",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216844,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.BodyInvocationAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "14",
+            "parents": [
+                "13"
+            ],
+            "display_name": "Stage : End",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepEndNode",
+            "function_name": "// stage",
+            "arguments": {
+                
+            },
+            "block_start_id": "10",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216843,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "13",
+            "parents": [
+                "12"
+            ],
+            "display_name": "Stage : Body : End",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepEndNode",
+            "function_name": "}",
+            "arguments": {
+                
+            },
+            "block_start_id": "11",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216839,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.BodyInvocationAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "12",
+            "parents": [
+                "11"
+            ],
+            "display_name": "Get contextual object from internal APIs",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepAtomNode",
+            "function_name": "getContext",
+            "arguments": {
+                "type": "UNSERIALIZABLE"
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216834,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.cps.actions.ArgumentsActionImpl",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.support.actions.LogStorageAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "11",
+            "parents": [
+                "10"
+            ],
+            "display_name": "Later",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepStartNode",
+            "function_name": "{ (Later)",
+            "arguments": {
+                
+            },
+            "block_start_id": null,
+            "label": "Later",
+            "tags": {
+                "STAGE_STATUS": "SKIPPED_FOR_FAILURE"
+            },
+            "start_ms": 1789027216822,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.BodyInvocationAction",
+                "org.jenkinsci.plugins.workflow.actions.LabelAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.TagsAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "10",
+            "parents": [
+                "9"
+            ],
+            "display_name": "Stage : Start",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepStartNode",
+            "function_name": "stage",
+            "arguments": {
+                "name": "Later"
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216821,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.support.actions.LogStorageAction",
+                "org.jenkinsci.plugins.workflow.cps.actions.ArgumentsActionImpl",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "9",
+            "parents": [
+                "8"
+            ],
+            "display_name": "Stage : End",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepEndNode",
+            "function_name": "// stage",
+            "arguments": {
+                
+            },
+            "block_start_id": "5",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216819,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "8",
+            "parents": [
+                "7"
+            ],
+            "display_name": "Stage : Body : End",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepEndNode",
+            "function_name": "}",
+            "arguments": {
+                
+            },
+            "block_start_id": "6",
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216811,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.BodyInvocationAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "7",
+            "parents": [
+                "6"
+            ],
+            "display_name": "Shell Script",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepAtomNode",
+            "function_name": "sh",
+            "arguments": {
+                "script": "printf \"first failed\\n\"; exit 7"
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216531,
+            "error": {
+                "type": "hudson.AbortException",
+                "message": "script returned exit code 7"
+            },
+            "log_base64": "KyBwcmludGYgZmlyc3QgZmFpbGVkXG4KZmlyc3QgZmFpbGVkCisgZXhpdCA3Cg==",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.cps.actions.ArgumentsActionImpl",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.support.actions.LogStorageAction",
+                "org.jenkinsci.plugins.workflow.actions.ErrorAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "6",
+            "parents": [
+                "5"
+            ],
+            "display_name": "Build",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepStartNode",
+            "function_name": "{ (Build)",
+            "arguments": {
+                
+            },
+            "block_start_id": null,
+            "label": "Build",
+            "tags": {
+                "STAGE_STATUS": "FAILED_AND_CONTINUED"
+            },
+            "start_ms": 1789027216526,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.BodyInvocationAction",
+                "org.jenkinsci.plugins.workflow.actions.LabelAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.actions.TagsAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "5",
+            "parents": [
+                "4"
+            ],
+            "display_name": "Stage : Start",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepStartNode",
+            "function_name": "stage",
+            "arguments": {
+                "name": "Build"
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216526,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.support.actions.LogStorageAction",
+                "org.jenkinsci.plugins.workflow.cps.actions.ArgumentsActionImpl",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "4",
+            "parents": [
+                "3"
+            ],
+            "display_name": "Allocate node : Body : Start",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepStartNode",
+            "function_name": "{",
+            "arguments": {
+                
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216523,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.BodyInvocationAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "3",
+            "parents": [
+                "2"
+            ],
+            "display_name": "Allocate node : Start",
+            "type": "org.jenkinsci.plugins.workflow.cps.nodes.StepStartNode",
+            "function_name": "node",
+            "arguments": {
+                
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216518,
+            "error": null,
+            "log_base64": "UnVubmluZyBvbiBKZW5raW5zIGluIC92YXIvamVua2luc19ob21lL3dvcmtzcGFjZS9qY29tcC1TMDgK",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.support.actions.LogStorageAction",
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "org.jenkinsci.plugins.workflow.support.steps.ExecutorStepExecution$QueueItemActionImpl",
+                "org.jenkinsci.plugins.workflow.support.actions.WorkspaceActionImpl",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        },
+        {
+            "id": "2",
+            "parents": [
+                
+            ],
+            "display_name": "Start of Pipeline",
+            "type": "org.jenkinsci.plugins.workflow.graph.FlowStartNode",
+            "function_name": "Start of Pipeline",
+            "arguments": {
+                
+            },
+            "block_start_id": null,
+            "label": null,
+            "tags": {
+                
+            },
+            "start_ms": 1789027216484,
+            "error": null,
+            "log_base64": "",
+            "actions": [
+                "org.jenkinsci.plugins.workflow.actions.TimingAction",
+                "com.cloudbees.workflow.rest.endpoints.FlowNodeAPI"
+            ]
+        }
+    ],
+    "workspace": [
+        
+    ],
+    "control_entries": [
+        
+    ],
+    "shells": [
+        "shell.KQI9wb7u"
+    ],
+    "workspace_path": "/var/jenkins_home/workspace/jcomp-S08",
+    "console_sha256": "b36fe131ca9d31b5ede2fb6fee793488510e61132fb9754d547006ec37607c8f",
+    "console_text_sha256": "96609665b6de2ad16996334357cf2245d7634434470cea1df07f8c0b4bbf0344",
+    "workspace_cleanup": true,
+    "control_cleanup": true
+}

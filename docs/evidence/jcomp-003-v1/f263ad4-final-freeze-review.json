@@ -1,0 +1,50 @@
+{
+  "schema": "mcloving.independent-source-freeze-review/1",
+  "reviewer": "root/gates_review",
+  "status": "approved",
+  "source_head": "f263ad4ae2871e8bb06fe3b5bceef534179a0a88",
+  "source_tree": "f49d17fe0c8e552e7968c83a153153a2fd777e54",
+  "verified_protected_base": "01137b54b8fbefdc0deb0214a5d4d8979a773575",
+  "postmerge_receipt_sha256": "d10d2965828e40d17673a711cf181a6033aa0a61c2ccc20c920ff9a6605487e6",
+  "prior_preparation_review_sha256": "ea005354a33bdcecea25e73c479a51cfbaacf1c9787858a95de56af0858a515e",
+  "all27_file_sha256": {
+    "bins/agent/tests/jcomp003_paired.rs": "b11463d9ca6bdf49a71e5827dbfa0987bcc0597a175364ef44594acc5644f542",
+    "compat/jenkins-worker/fixtures/sequential-v1/manifest.json": "654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727",
+    "compat/jenkins-worker/profile-v1.properties": "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271",
+    "docs/architecture/JENKINS_SEQUENTIAL_CORPUS_V1.md": "22e85bc0969dcd150fa075ef4537d2bd3a35e97625d2d75fc20da89e0ffaef9f",
+    "docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md": "ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe",
+    "docs/architecture/JENKINS_SEQUENTIAL_DIFFERENTIAL_V2.md": "88997ab6fb2287d32e1d737d132007c42907e14e5d1f994152ef58621047e19f",
+    "rust-toolchain.toml": "8e390d6a0838315f972690f46ef8bae8b7ecc9ee6c1ed70140ef852869c2482e",
+    "scripts/classify-jenkins-sequential-corpus.py": "e66bd62b47b0de8a28830972cf81ef2f2933866060308482a7539ef4383e82fe",
+    "scripts/jcomp003/README.md": "cf01b27a3b0a9614d10b34f2ab58ed8169d2222c7eda5cbad5f49e220abd85f1",
+    "scripts/jcomp003/build-compiler.sh": "875a69f13dd87b6436ac925f4e6e59fce6ade173bb6efc8f442950d3b2d04541",
+    "scripts/jcomp003/jenkins-init.groovy": "8e623b6268f74eb9520ee09494c1243889da6b750a0cece815a29235d7371979",
+    "scripts/jcomp003/observe-shell": "e6d076ed0484ffa935de347f3cfb665f10e069adbb6f33599a3ada2c70f558de",
+    "scripts/jcomp003/prepare-input.py": "309294f426e755277afa9eb0045ce357f1378887bb7de6f4ddd73a154d2fc7b4",
+    "scripts/jcomp003/run-jenkins.py": "dbdd4b8b29a231ad648f41e9985cece144bb6b309b67cb684dcb8c284279f053",
+    "scripts/jcomp003/run-product.sh": "0f95f5166772cf5040219097848c9d695aadc29abe42d0d44298bd5714769210",
+    "scripts/jcomp003/test-compiler-timeout.py": "96f33a870b8e2d48d780abb1c1f19dd8a8beccd08a1fd2f4335d796935243e5a",
+    "scripts/jcomp003/test-jenkins-boundary.py": "05ce6151b0ca29ad88256430498bdd5dd90cccfec482abd0bdb260f9bceb7bf8",
+    "scripts/jcomp003/test-paired-verifier.py": "0c202dd30d753ef78f5f27445c8da2cce2e9e9f9de9eb5bce95cde28476b2d04",
+    "scripts/jcomp003/test-product-boundary.py": "9e2e6bd040db49c51a9375290b1c81a6cf81a25cadee90a995331272a40f66cc",
+    "scripts/jcomp003/test-retained.py": "8967e377f1134ba3e19b06c94496f478d87ed77857916a0984679866d33e44b9",
+    "scripts/jcomp003/verify-paired.py": "28c919e012c50e4616dc51e293f0bebfdeb1689a6055db82fe4306dc9517bd07",
+    "scripts/jcomp003/verify-product-boundary.py": "b0a9007ac8a24431ac2e9c6cbf5c08a7ecc567487a73b8b65db6d0988a78ea3f",
+    "scripts/jcomp003/verify-retained.py": "d8f8b663a84f2dd056c14352dac975f87d337bb97901a22bb1ec274941c614a8",
+    "scripts/jcomp003/xtrace-expectations-v1.json": "cc1ca1b493acf318f4c98d57d6d4d969e60b57d6daae5da9ebea4d59861f0572",
+    "scripts/test-jenkins-sequential-contained.py": "2b45c69d85a6f51baefaa875b9bed4dc09559089d85183a8d573f354c03b0e96",
+    "scripts/test-jenkins-sequential-corpus.py": "97a65f2ba7181238033ace4a04dd479fbe3131f0de947f6ed87619847be3b48f",
+    "tools/versions.env": "3848b71d9e9d083a48f1c9c6f1c34a2daa161ea2d851b6e2d254df478c2ddc20"
+  },
+  "closure_delta": "Six files only; exact earned002C source/merge/main facts and readonly receipt. CLOSED_TICKETS only adds002C, exemptions/debt/floor preserved. Topology003 sole SERIAL remaining,002C DONE.",
+  "board_counts": {
+    "total": 125,
+    "done": 93,
+    "remaining": 32
+  },
+  "compiler_runtime_fixture_tooling_unchanged": true,
+  "qualifications": [
+    "Historical2326 evidence not relabeled; currentc94 fixedP2 and intentional unknown punctuation limit explicit.",
+    "Execution requires root release, fresh source archive/build outputs, independent prepared input and actual Jenkins/product/corpus captures."
+  ]
+}

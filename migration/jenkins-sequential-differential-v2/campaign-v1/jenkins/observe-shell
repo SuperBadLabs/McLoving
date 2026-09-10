@@ -1,0 +1,20 @@
+#!/bin/bash
+# Trusted disposable Jenkins observer; preserve arguments and shell status.
+set -eu
+record=$(mktemp -d /tmp/jcomp-observations/shell.XXXXXXXX)
+printf '%s\0' /bin/sh "$@" > "$record/argv.nul"
+printf '%s\n' "$PWD" > "$record/cwd.txt"
+printf '%s\n' "$$" > "$record/wrapper-pid.txt"
+date +%s%N > "$record/start-ns.txt"
+if [[ $# != 2 || $1 != -xe || ! -f $2 ]]; then
+  printf 'unexpected Jenkins shell invocation\n' >&2
+  exit 125
+fi
+cp -- "$2" "$record/script"
+sha256sum /bin/sh > "$record/interpreter.sha256"
+set +e
+/bin/sh "$@"
+status=$?
+printf '%s\n' "$status" > "$record/exit-code.txt"
+date +%s%N > "$record/end-ns.txt"
+exit "$status"
