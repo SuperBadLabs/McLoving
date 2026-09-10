@@ -584,8 +584,37 @@ fn process_arg(step: &mcloving_pipeline_ir::Step) -> &str {
     match step {
         mcloving_pipeline_ir::Step::Process(process) => &process.args[0],
         mcloving_pipeline_ir::Step::ConnectorIntent(_)
-        | mcloving_pipeline_ir::Step::CacheIntent(_) => {
+        | mcloving_pipeline_ir::Step::CacheIntent(_)
+        | mcloving_pipeline_ir::Step::InputIntent(_) => {
             panic!("fixture contains only process steps")
         }
     }
+}
+
+#[test]
+fn expansion_preserves_input_v15() {
+    let source = format!(
+        "version: 1\nname: input\nstages:\n  - id: input\n    name: Input\n    steps:\n      - input_intent:\n          mapping_id: fixture\n          mapping_digest: sha256:{}\n          timeout_seconds: 30\n",
+        "a".repeat(64)
+    );
+    let item = component(&source, 24);
+    assert_eq!(item.pipeline.schema, mcloving_pipeline_ir::IR_V1_5);
+    let digest = item.semantic_digest().unwrap();
+    let mut catalog = ComponentCatalog::default();
+    catalog.insert_exact(digest, item).unwrap();
+    let expanded = expand_component(
+        ComponentInvocation {
+            digest,
+            inputs: BTreeMap::new(),
+        },
+        &catalog,
+        ExpansionLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(expanded.pipeline().schema, mcloving_pipeline_ir::IR_V1_5);
+    assert!(matches!(
+        expanded.pipeline().stages[0].steps[0],
+        Step::InputIntent(_)
+    ));
+    expanded.pipeline().canonical_bytes().unwrap();
 }

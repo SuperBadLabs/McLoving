@@ -11,7 +11,7 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4};
+use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -133,6 +133,14 @@ pub enum Step {
     Process(ProcessStep),
     ConnectorIntent(ConnectorIntentStep),
     CacheIntent(CacheIntentStep),
+    InputIntent(InputIntentStep),
+}
+
+/// A literal bounded input capture; authority is resolved by deployment catalogs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputIntentStep {
+    pub intent: mcloving_domain::input_intent::InputIntentSpec,
+    pub source_span: SourceSpan,
 }
 
 /// A literal bounded cache intent; authority is resolved by deployment catalogs.
@@ -311,7 +319,14 @@ pub fn compile_strict_yaml_with_parameters(
             .iter()
             .any(|step| matches!(step, Step::CacheIntent(_)))
     });
-    let schema = if has_cache_intent {
+    let schema = if stages.iter().any(|stage| {
+        stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::InputIntent(_)))
+    }) {
+        IR_V1_5
+    } else if has_cache_intent {
         IR_V1_4
     } else if has_connector_intent {
         IR_V1_3
@@ -611,25 +626,51 @@ fn compile_steps(
             let process = step.take("process");
             let connector_intent = step.take("connector_intent");
             let cache_intent = step.take("cache_intent");
+            let input_intent = step.take("input_intent");
             step.finish()?;
-            match (process, connector_intent, cache_intent) {
-                (Some(process), None, None) => {
+            match (process, connector_intent, cache_intent, input_intent) {
+                (Some(process), None, None, None) => {
                     compile_process(process, &path, step_span, parameters, expressions)
                         .map(Step::Process)
                 }
-                (None, Some(intent), None) => {
+                (None, Some(intent), None, None) => {
                     compile_connector_intent(intent, &path, step_span).map(Step::ConnectorIntent)
                 }
-                (None, None, Some(intent)) => {
+                (None, None, Some(intent), None) => {
                     compile_cache_intent(intent, &path, step_span).map(Step::CacheIntent)
                 }
+                (None, None, None, Some(intent)) => compile_input_intent(intent, &path, step_span).map(Step::InputIntent),
                 _ => Err(CompileError::schema(
                     &path,
-                    "exactly one of process, connector_intent or cache_intent is required",
+                    "exactly one of process, connector_intent, cache_intent or input_intent is required",
                 )),
             }
         })
         .collect()
+}
+
+fn compile_input_intent(
+    node: SpannedValue,
+    step_path: &str,
+    source_span: SourceSpan,
+) -> Result<InputIntentStep, CompileError> {
+    let path = format!("{step_path}.input_intent");
+    let mut view = MappingView::new(node, &path)?;
+    let intent = mcloving_domain::input_intent::InputIntentSpec {
+        mapping_id: view.required_string("mapping_id")?,
+        mapping_digest: view.required_string("mapping_digest")?,
+        timeout_seconds: view
+            .optional_u64("timeout_seconds")?
+            .ok_or_else(|| CompileError::schema(&path, "input timeout is required"))?,
+    };
+    view.finish()?;
+    intent
+        .validate()
+        .map_err(|error| CompileError::schema(&path, error.to_string()))?;
+    Ok(InputIntentStep {
+        intent,
+        source_span,
+    })
 }
 
 fn compile_cache_intent(
@@ -869,11 +910,11 @@ fn compile_resolved_string(
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
     if !matches!(
         pipeline.schema,
-        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4
+        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5
     ) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 through v1.4 are accepted",
+            "only Pipeline IR v1.0 through v1.5 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -921,11 +962,12 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 "stage must contain at least one step",
             ));
         }
-        if stage
-            .steps
-            .iter()
-            .any(|step| matches!(step, Step::ConnectorIntent(_) | Step::CacheIntent(_)))
-            && stage.steps.len() != 1
+        if stage.steps.iter().any(|step| {
+            matches!(
+                step,
+                Step::ConnectorIntent(_) | Step::CacheIntent(_) | Step::InputIntent(_)
+            )
+        }) && stage.steps.len() != 1
         {
             return Err(IrValidationError::new(
                 format!("{path}.steps"),
@@ -999,6 +1041,19 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                             value,
                         )?;
                     }
+                }
+                Step::InputIntent(input) => {
+                    let base = format!("{path}.steps[{step_index}].input_intent");
+                    if pipeline.schema.minor < IR_V1_5.minor {
+                        return Err(IrValidationError::new(
+                            &base,
+                            "input intents require Pipeline IR v1.5",
+                        ));
+                    }
+                    input
+                        .intent
+                        .validate()
+                        .map_err(|error| IrValidationError::new(&base, error.to_string()))?;
                 }
                 Step::CacheIntent(cache) => {
                     let base = format!("{path}.steps[{step_index}].cache_intent");

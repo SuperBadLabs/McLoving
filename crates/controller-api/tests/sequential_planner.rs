@@ -170,3 +170,18 @@ fn normalized_stage_collisions_and_empty_stages_are_refused() {
     ir.stages[1].steps.clear();
     assert!(plan_sequential_build(&ir, binding()).is_err());
 }
+
+#[test]
+fn input_capture_does_not_claim_literal_process_migration_semantics() {
+    let source = format!(
+        "version: 1\nname: input\nstages:\n  - id: input\n    name: Input\n    steps:\n      - input_intent:\n          mapping_id: fixture\n          mapping_digest: sha256:{}\n          timeout_seconds: 30\n",
+        "a".repeat(64)
+    );
+    let ir = mcloving_pipeline_ir::compile_strict_yaml(
+        "fixture",
+        &source,
+        mcloving_pipeline_ir::ParseLimits::default(),
+    )
+    .unwrap();
+    assert!(plan_sequential_build(&ir, binding()).is_err());
+}

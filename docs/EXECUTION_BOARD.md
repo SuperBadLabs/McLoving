@@ -39,7 +39,7 @@ Before starting implementation, refresh protected-main custody, open PRs,
 alerts, workflow outcomes and protection settings, then run the full Foundation
 gate. The September 6 thaw is historical evidence; before starting on any new head, observe successful Foundation and Windows Agent runs for that exact head. The
 Jenkins oracle host/profile and contained test environment must also be verified
-before the paired campaign. `JCOMP-001`, `JCOMP-002` and `JCOMP-002A` are `DONE`; `JCOMP-002B` and `AGENT-007` are `DONE`, and `JCOMP-002C` is `DONE`; `JCOMP-003` has earned its separately reviewed contained execution claim; `EXEC-005` is ACTIVE on a bounded cache product-path slice; all five helper gates remain required for its closure.
+before the paired campaign. `JCOMP-001`, `JCOMP-002` and `JCOMP-002A` are `DONE`; `JCOMP-002B` and `AGENT-007` are `DONE`, and `JCOMP-002C` is `DONE`; `JCOMP-003` has earned its separately reviewed contained execution claim; `EXEC-005` is ACTIVE on bounded cache and input product-path slices; all five helper gates remain required for its closure.
 The contract and authored expectations are in
 `docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V1.md` and
 `compat/jenkins-worker/fixtures/sequential-v1/manifest.json`. Their Foundation
@@ -59,16 +59,18 @@ JCOMP-002B; denial of sibling-workspace access by hostile same-UID workloads
 remains SEC-005 and is not an M1 claim. CI-004 is now closed on verified PR #125
 merge and post-merge evidence; see its receipt below.
 
-EXEC-005 implementation now targets Linux cache publish/read through the actual
-submitted-job path, with private response verification and public receipt
-identities. This is an ACTIVE partial implementation, not five-helper closure
-or general cache restoration. SCM acquisition, dependency resolution, live
-input and dynamic provisioning remain unwired and ineligible for CANARY-001
-and CUTOVER-001; cache-to-workspace restoration and all production cache cases
-also remain ineligible pending their missing implementation and downstream
+EXEC-005 implements bounded Linux cache publish/read and adds operator-mapped
+public input capture through the submitted-job path, with private response
+verification and public receipt identities. Input verification is tracked in the
+ACTIVE review; implementation alone earns no product or publication gate. This
+is partial implementation, not five-helper closure, general cache restoration
+or downstream input-value use. SCM acquisition, dependency resolution and
+dynamic provisioning remain unwired. All production cases remain ineligible
+for CANARY-001 and CUTOVER-001 pending their implementation and downstream
 qualification gates. The initial no-caller inspection in the acceptance row
-is historical; it must not be used to erase the four remaining helper gates.
-See `docs/architecture/CACHE_PRODUCT_PATH_V1.md` for the bounded contract.
+is historical; it must not erase remaining helper gates. The bounded contracts
+are `docs/architecture/CACHE_PRODUCT_PATH_V1.md` and
+`docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
 
 After M1, the production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`, followed by the existing release, deployment,

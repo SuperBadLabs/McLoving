@@ -120,9 +120,9 @@ async fn run_peer(
     recovery_delay: Duration,
     immediate_unavailable: bool,
 ) {
-    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
-    drop(socket);
+    // Keep the selected port bound until tonic owns the incoming stream.
     let requests = Arc::new(Mutex::new(Vec::new()));
     let server_stop = CancellationToken::new();
     let _server_guard = server_stop.clone().drop_guard();
@@ -138,7 +138,10 @@ async fn run_peer(
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(wire::agent_control_server::AgentControlServer::new(peer))
-            .serve_with_shutdown(address, server_stop.cancelled_owned())
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(socket),
+                server_stop.cancelled_owned(),
+            )
             .await
             .unwrap();
     });
