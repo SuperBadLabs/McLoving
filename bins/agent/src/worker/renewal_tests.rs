@@ -9,6 +9,8 @@ use std::sync::Mutex;
 struct StallingRenewals {
     requests: Arc<Mutex<Vec<tokio::time::Instant>>>,
     recover_after_first: bool,
+    recovery_delay: Duration,
+    immediate_unavailable: bool,
     healthy_response_delay: Option<Duration>,
     first_response_request_count: Arc<Mutex<Option<usize>>>,
 }
@@ -24,13 +26,19 @@ impl wire::agent_control_server::AgentControl for StallingRenewals {
             requests.push(tokio::time::Instant::now());
             requests.len()
         };
+        if self.immediate_unavailable {
+            return Err(tonic::Status::unavailable("peer has not recovered"));
+        }
         if let Some(delay) = self.healthy_response_delay {
             tokio::time::sleep(delay).await;
             let mut first = self.first_response_request_count.lock().unwrap();
             if first.is_none() {
                 *first = Some(self.requests.lock().unwrap().len());
             }
-        } else if ordinal == 1 || !self.recover_after_first {
+        } else if ordinal == 1
+            || !self.recover_after_first
+            || self.requests.lock().unwrap()[0].elapsed() < self.recovery_delay
+        {
             // Keep a real HTTP/2 request pending. No response/refusal is sent.
             return std::future::pending().await;
         }
@@ -104,7 +112,14 @@ impl wire::agent_control_server::AgentControl for StallingRenewals {
     }
 }
 
-async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Duration>) {
+async fn run_peer(
+    recover_after_first: bool,
+    healthy_response_delay: Option<Duration>,
+    renewal_interval: Duration,
+    termination_grace: Duration,
+    recovery_delay: Duration,
+    immediate_unavailable: bool,
+) {
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = socket.local_addr().unwrap();
     drop(socket);
@@ -115,6 +130,8 @@ async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Dura
     let peer = StallingRenewals {
         requests: requests.clone(),
         recover_after_first,
+        recovery_delay,
+        immediate_unavailable,
         healthy_response_delay,
         first_response_request_count: first_response_request_count.clone(),
     };
@@ -136,8 +153,7 @@ async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Dura
     .await
     .expect("tonic renewal peer must become reachable");
     let started = tokio::time::Instant::now();
-    let deadline =
-        lease_cancellation_deadline(started, Duration::from_secs(5), Duration::from_secs(1));
+    let deadline = lease_cancellation_deadline(started, Duration::from_secs(5), termination_grace);
     let stop = CancellationToken::new();
     let _renewal_guard = stop.clone().drop_guard();
     let execution_cancellation = CancellationToken::new();
@@ -154,14 +170,10 @@ async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Dura
         },
         LeaseRenewalControl {
             lease_seconds: 5,
-            renewal_interval: if healthy_response_delay.is_some() {
-                Duration::from_millis(100)
-            } else {
-                Duration::from_secs(1)
-            },
+            renewal_interval,
             lease_started_at: started,
             lease_window: Duration::from_secs(5),
-            termination_grace: Duration::from_secs(1),
+            termination_grace,
             execution_cancellation: execution_cancellation.clone(),
             authority_lost: authority_lost.clone(),
             stop: stop.clone(),
@@ -187,10 +199,10 @@ async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Dura
         stop.cancel();
         assert!(task.await.unwrap().is_ok());
     } else if recover_after_first {
-        // First request starts at about one second. Its bounded ask expires at
-        // two seconds; a second full sleep would miss the original three-second
-        // cancellation deadline just as surely as one unbounded hanging RPC.
-        tokio::time::timeout_at(deadline - Duration::from_millis(100), async {
+        // A pending first response must leave time for another ask to observe
+        // recovery, including when grace leaves only a one-second usable term.
+        // The peer does not complete that first ask when it recovers.
+        tokio::time::timeout_at(deadline, async {
             loop {
                 if requests.lock().unwrap().len() >= 2 {
                     return;
@@ -221,6 +233,12 @@ async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Dura
             "individual pending requests must be retried"
         );
         assert!(sent.iter().all(|at| *at < deadline));
+        if termination_grace == Duration::from_secs(3) {
+            assert!(
+                sent.len() <= 3,
+                "a short budget must not create a retry flood"
+            );
+        }
     }
     server.abort();
     let _ = server.await;
@@ -228,15 +246,104 @@ async fn run_peer(recover_after_first: bool, healthy_response_delay: Option<Dura
 
 #[tokio::test]
 async fn a_stalled_renewal_response_is_retried_and_recovery_keeps_authority() {
-    run_peer(true, None).await;
+    run_peer(
+        true,
+        None,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::ZERO,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn repeated_stalled_responses_never_extend_the_held_term() {
-    run_peer(false, None).await;
+    run_peer(
+        false,
+        None,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::ZERO,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn healthy_response_slower_than_the_renewal_cadence_is_not_retried() {
-    run_peer(true, Some(Duration::from_millis(200))).await;
+    run_peer(
+        true,
+        Some(Duration::from_millis(200)),
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        Duration::ZERO,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_short_held_budget_leaves_time_to_observe_peer_recovery() {
+    run_peer(
+        true,
+        None,
+        Duration::from_millis(100),
+        Duration::from_secs(3),
+        Duration::from_millis(400),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn repeated_stalled_responses_do_not_extend_a_short_held_budget() {
+    run_peer(
+        false,
+        None,
+        Duration::from_millis(100),
+        Duration::from_secs(3),
+        Duration::ZERO,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_late_first_renewal_leaves_time_to_observe_peer_recovery() {
+    run_peer(
+        true,
+        None,
+        Duration::from_millis(900),
+        Duration::from_secs(3),
+        Duration::from_millis(20),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_late_first_renewal_does_not_flood_or_extend_the_held_budget() {
+    run_peer(
+        false,
+        None,
+        Duration::from_millis(900),
+        Duration::from_secs(3),
+        Duration::ZERO,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn immediate_unavailability_near_expiry_does_not_flood_retries() {
+    run_peer(
+        false,
+        None,
+        Duration::from_millis(900),
+        Duration::from_secs(3),
+        Duration::ZERO,
+        true,
+    )
+    .await;
 }
