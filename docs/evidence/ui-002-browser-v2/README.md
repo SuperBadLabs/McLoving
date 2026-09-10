@@ -25,7 +25,7 @@ ChromeDriver, both pinned by SHA-256 in `scripts/ui-browser/browser-pin.json`.
 
 ## Verdict
 
-**17 of 17 assertions passed.**
+**18 of 18 assertions passed.**
 
 ## What changed from v1, and why
 
@@ -41,7 +41,7 @@ so nothing about the policy moved.
 | `console_has_no_unexpected_resource_failures` | `index.html` declares `<link rel="icon" href="data:,">`, so the browser stops requesting `/favicon.ico` and 404ing on every page load. |
 
 Verification after repair was not a screenshot. The full browser gate was rerun
-(17/17), the existing static contract suite
+(18/18), the existing static contract suite
 `cargo test -p mcloving-controller-api --test route_denials` was rerun (7/7), and
 every assertion was mutation-proved (`../ui-002-mutation-v1/`).
 
@@ -65,7 +65,7 @@ admits nothing.
 - `gate-results.json` — every assertion with its observed detail, the bound
   source manifest, and the browser identity.
 - `console.json` — script errors, provoked network failures, unexpected ones.
-- `screenshots/` — 21 renders across the five views at desktop and 390px widths,
+- `screenshots/` — 22 renders across the five views at desktop and 390px widths,
   including the focus state after the build view's automatic refresh.
 - `fixture.log`, `ARTIFACTS.sha256`, `SCREENSHOTS.sha256`.
 
@@ -76,4 +76,4 @@ bash scripts/test-ui-browser.sh --output-dir OUT --label LABEL
 ```
 
 Exits non-zero on any failing assertion, and on any assertion count other than
-the pinned 17.
+the pinned 18.

@@ -1,9 +1,9 @@
 {
-  "caught": 19,
+  "caught": 20,
   "escaped": [],
-  "expected_assertions": 17,
+  "expected_assertions": 18,
   "gate_protocol": "mcloving.ui.browser/1",
-  "mutations_run": 19,
+  "mutations_run": 20,
   "results": [
     {
       "caught": true,
@@ -180,11 +180,13 @@
     {
       "caught": true,
       "collateral_failures": [
+        "artifact_download_delivers_content",
         "focus_survives_build_view_live_refresh"
       ],
       "expected_red": "desktop_build_view_renders_all_panels",
       "failing_assertions": [
         "desktop_build_view_renders_all_panels",
+        "artifact_download_delivers_content",
         "focus_survives_build_view_live_refresh"
       ],
       "file": "app.js",
@@ -209,6 +211,16 @@
       ],
       "file": "app.js",
       "mutation": "artifact-focus-key-ignores-fence"
+    },
+    {
+      "caught": true,
+      "collateral_failures": [],
+      "expected_red": "artifact_download_delivers_content",
+      "failing_assertions": [
+        "artifact_download_delivers_content"
+      ],
+      "file": "app.js",
+      "mutation": "artifact-download-unwired"
     }
   ]
 }

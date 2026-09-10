@@ -4,7 +4,7 @@
 standard — removed, it turns a named test red.*
 
 An assertion that cannot fail is not a gate, and a gate asserting an unobservable
-property is the exact defect this ticket corrects. So each of the seventeen
+property is the exact defect this ticket corrects. So each of the eighteen
 assertions has, in `scripts/ui-browser/mutations.json`, at least one named client
 defect that breaks precisely what that assertion claims. An assertion may carry
 more than one: requiring exactly one was itself a way to leave a surface
@@ -13,7 +13,7 @@ unproved, because it forbade covering a second call site.
 client, runs the full browser gate, and requires that named assertion to turn
 red.
 
-**Result: 19 of 19 caught. Nothing escaped.**
+**Result: 20 of 20 caught. Nothing escaped.**
 
 ### One escaped first, and that is the point
 
@@ -61,7 +61,7 @@ the run would exit non-zero.
 python3 scripts/test-ui-browser-mutations.py --output-dir OUT
 ```
 
-Roughly 25 minutes: twenty full gate runs, each rebuilding the fixture because
+Roughly 27 minutes: twenty-one full gate runs, each rebuilding the fixture because
 the client is compiled in with `include_str!`. The harness refuses to read a
 verdict from a gate that exited non-zero for any reason other than the assertion
 failures it expected — a pinned-count mismatch or a fixture that never listened

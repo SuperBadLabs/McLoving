@@ -77,7 +77,7 @@ check that could not observe it.
   `scripts/verify-ui-browser-gate.py` refuses the workflow if it ever appears
   there uncommented.
 - **Every assertion is mutation-proved.** `scripts/ui-browser/mutations.json`
-  names, for each of the seventeen assertions, at least one client defect that
+  names, for each of the eighteen assertions, at least one client defect that
   breaks exactly what that assertion claims.
   `scripts/test-ui-browser-mutations.py` introduces each one and requires that
   named assertion to turn red; it first requires the unmutated client to pass
@@ -158,6 +158,18 @@ looking at the surface that matters most:
 4. **A `favicon.ico` 404 on every page load**, logged SEVERE. Fixed by declaring
    an empty `data:` icon, permitted by the existing CSP.
 
+A second coverage gap of the same shape was found by review after the first was
+fixed: the artifact assertion proved rows and Download controls *rendered* but
+never activated one, and the fixture exposed no `/artifacts/content` route at
+all — so the click listener, the URL `downloadArtifact` builds and the response
+handling were outside the gate. `artifact_download_delivers_content` now clicks
+the control and requires the client to report the byte count the listing
+advertised, against a fixture that serves exactly that many bytes. It passes on
+the original client too: that listener was never broken, so this one is coverage
+gained rather than a defect found. Twice now an assertion here stopped one step
+short of the behaviour it implied; when adding one, ask what it would still
+report green through.
+
 A fifth defect was latent rather than observed: the viewport helper folded its
 correction back into the value it compared against, so on any browser with window
 chrome it would never converge on 390 CSS pixels and the assertion would fail on
@@ -200,10 +212,10 @@ see.
 ## Evidence
 
 - `docs/evidence/ui-002-browser-v1/` — initial baseline, pre-repair, retained
-  unchanged; client `83966def…`, 13 of 17 passed, four named failures.
+  unchanged; client `83966def…`, 14 of 18 passed, four named failures.
 - `docs/evidence/ui-002-browser-v2/` — accepted baseline bound to the repaired
   client `5fe7ee2b3e38219606422ce888dc1ed0c66c23cc84f9f5d745063e0e59f09939`;
-  17 of 17. **This digest is what `UI-006` and later work compare against.**
-- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 19 of 19 caught across
-  17 assertions.
+  18 of 18. **This digest is what `UI-006` and later work compare against.**
+- `docs/evidence/ui-002-mutation-v1/` — mutation proof, 20 of 20 caught across
+  18 assertions.
 - `docs/architecture/UI_BROWSER_GATE_V1.md` — the driver and boundary argument.

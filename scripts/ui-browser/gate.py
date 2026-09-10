@@ -660,6 +660,43 @@ class Gate:
             detail = f"focus before {before} -> after {after}"
         self.assertion("focus_survives_repeated_live_updates", ok, detail)
 
+    def check_artifact_download(self):
+        """Activate the Download control, not merely observe that it exists.
+
+        Asserting that rows and buttons render stops one step short of the
+        journey the client advertises: the click listener could be gone, the URL
+        `downloadArtifact` builds could be wrong, or the response could be
+        unusable, and a render-only assertion would stay green through all three.
+        """
+        self.show_view("build")
+        self.settle(0.4)
+        clicked = self.session.script(
+            """
+            const buttons = document.querySelectorAll('#build-artifacts .artifact button');
+            const button = buttons[buttons.length - 1];
+            if (!button) return null;
+            if (button.disabled) return {disabled: true};
+            button.click();
+            return {disabled: false, count: buttons.length};
+            """
+        )
+        self.settle(1.4)
+        result = self.result_text()
+        errored = self.result_is_error()
+        self.capture("artifact-download")
+        # The byte count comes from the rendered listing, and the fixture serves
+        # exactly that many bytes, so a client that fetched a different record
+        # would disagree with what it had just displayed.
+        self.assertion(
+            "artifact_download_delivers_content",
+            clicked is not None
+            and not clicked.get("disabled")
+            and not errored
+            and '"downloaded": "report.txt"' in result
+            and '"bytes": 34' in result,
+            f"clicked={clicked}, error-styled={errored}, result {result[:120]!r}",
+        )
+
     def check_focus_survives_build_view_live_refresh(self):
         """The surface that refreshes *by itself*, not the one you click.
 
@@ -777,6 +814,7 @@ class Gate:
         self.check_accessible_names()
         self.check_keyboard_focus_visible()
         self.check_focus_survives_live_updates()
+        self.check_artifact_download()
         self.check_focus_survives_build_view_live_refresh()
         self.check_live_status_announcements()
         self.check_viewport_390()

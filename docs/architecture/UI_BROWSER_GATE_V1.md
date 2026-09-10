@@ -110,7 +110,7 @@ map it to a subordinate UID that cannot write the mount.
   leaves a stale image that still carries matching browser digests, and the gate
   runs against an environment the repository no longer describes.
 - **Every assertion is mutation-proved.** `scripts/ui-browser/mutations.json`
-  names, for each of the 17 assertions, at least one client defect that breaks
+  names, for each of the 18 assertions, at least one client defect that breaks
   exactly what that assertion claims. `scripts/test-ui-browser-mutations.py`
   introduces each one and requires the named assertion to turn red, and refuses
   to read a verdict from a gate run that exited non-zero for any reason other
@@ -206,6 +206,10 @@ version made sixteen assertions, all passing and all mutation-proved, while the
 entire artifact surface sat outside it — the fixture served `[]`, so
 `renderArtifacts` never ran, and the focus repair claimed for it had no evidence
 behind it. Nothing in the mutation proof could detect that, because a mutation
-can only break code an assertion already reaches. Review caught it. When adding
-an assertion here, ask which call sites it does *not* reach, and prefer the
-surface that changes on its own over the one a test can click.
+can only break code an assertion already reaches. Review caught it, and then caught the
+same shape again one round later: the replacement assertion proved artifact rows
+and Download controls *rendered* but never activated one, leaving the click
+listener, the download URL and the response handling untested. When adding an
+assertion here, ask which call sites it does *not* reach, prefer the surface that
+changes on its own over the one a test can click, and go one step past
+"it rendered" to "it did the thing".

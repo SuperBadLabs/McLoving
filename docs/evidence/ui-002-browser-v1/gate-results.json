@@ -62,8 +62,13 @@
       "passed": false
     },
     {
+      "assertion": "artifact_download_delivers_content",
+      "detail": "clicked={'count': 2, 'disabled': False}, error-styled=False, result '{\\n  \"downloaded\": \"report.txt\",\\n  \"bytes\": 34\\n}'",
+      "passed": true
+    },
+    {
       "assertion": "focus_survives_build_view_live_refresh",
-      "detail": "focus before {'key': None, 'label': ''} -> after {'focusVisible': False, 'isBody': True, 'key': None, 'tag': 'BODY'}",
+      "detail": "focus before {'index': -1, 'key': None, 'label': ''} -> after {'focusVisible': False, 'index': -1, 'isBody': True, 'key': None, 'label': '', 'tag': 'BODY'}",
       "passed": false
     },
     {
@@ -91,7 +96,7 @@
     "chrome": "Google Chrome for Testing 153.0.8010.36",
     "chromedriver": "ChromeDriver 153.0.8010.36 (507c6ee3e2f3b2ca0e660547e5b9ea4820c67f4c-refs/branch-heads/8010@{#906})"
   },
-  "expected_assertions": 17,
+  "expected_assertions": 18,
   "failed": 4,
   "failing_assertions": [
     "focus_survives_repeated_live_updates",
@@ -101,8 +106,8 @@
   ],
   "gate_protocol": "mcloving.ui.browser/1",
   "label": "ui-002-initial-shipped-client",
-  "observed_assertions": 17,
-  "passed": 13,
+  "observed_assertions": 18,
+  "passed": 14,
   "recorded_without_enforcing": true,
   "ui_source": {
     "combined_sha256": "83966def6a24e6bfbcae1354e422784ff09b20f37a6f71524fcfdf078f68826c",

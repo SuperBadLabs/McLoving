@@ -145,6 +145,13 @@
       "file": "app.js",
       "find": "      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.fence}/${artifact.name}`;",
       "replace": "      row.dataset.focusKey = `${artifact.attempt_id}/${artifact.name}`;"
+    },
+    {
+      "name": "artifact-download-unwired",
+      "assertion": "artifact_download_delivers_content",
+      "file": "app.js",
+      "find": "    button.addEventListener(\"click\", () => action(() => downloadArtifact(artifact)));",
+      "replace": "    button.addEventListener(\"click\", () => undefined);"
     }
   ]
 }

@@ -28,7 +28,7 @@ along with the exact Chrome and chromedriver versions that produced the renders.
 
 ## Verdict
 
-**13 of 17 assertions passed. Four failed**, each one a claim `UI-001`'s closure
+**14 of 18 assertions passed. Four failed**, each one a claim `UI-001`'s closure
 record asserted and no check in the repository could support:
 
 | Failing assertion | What the browser observed |
@@ -56,7 +56,7 @@ and a correct 422 is the point of that probe rather than a defect.
   browser identity.
 - `console.json` — every SEVERE console entry, separated into script errors,
   deliberately provoked network failures, and unexpected ones.
-- `screenshots/` — 21 renders: each of the five views at desktop width, each at a
+- `screenshots/` — 22 renders: each of the five views at desktop width, each at a
   390px viewport, the accepted and refused validation results, the keyboard-focus
   state per view, and the focus loss after both a manual dashboard refresh and
   the build view's automatic one.

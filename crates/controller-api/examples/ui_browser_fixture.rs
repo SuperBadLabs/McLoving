@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::Json as JsonBody;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use mcloving_controller_api::static_ui_router;
@@ -34,6 +34,7 @@ async fn main() {
         .route(&format!("{build}/logs"), get(logs))
         .route(&format!("{build}/tests"), get(tests))
         .route(&format!("{build}/artifacts"), get(artifacts))
+        .route(&format!("{build}/artifacts/content"), get(artifact_content))
         .route(&format!("{build}/approvals"), get(approvals).post(approve))
         .route(&format!("{build}/cancel"), post(cancel))
         .route(
@@ -288,6 +289,25 @@ async fn artifacts(headers: HeaderMap) -> impl IntoResponse {
             }
         ]),
     )
+}
+
+// The client's Download control fetches this route and reports the byte count it
+// received. Without it the download journey could not be driven at all, so the
+// click listener, the URL `downloadArtifact` builds and the response handling
+// were all outside the gate.
+async fn artifact_content(headers: HeaderMap) -> Response {
+    if let Some(denial) = unauthorized(&headers) {
+        return denial;
+    }
+    // Exactly the 34 bytes the fence-2 listing advertises, so a client that
+    // fetched a different record would disagree with what it rendered.
+    let body = "browser fixture artifact bytes\n123";
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        body,
+    )
+        .into_response()
 }
 
 async fn approvals(headers: HeaderMap) -> impl IntoResponse {
