@@ -78,6 +78,19 @@ SERVING_PATHS = frozenset({"crates/controller-api/src/lib.rs"})
 # rather than a file list, because the crate is the unit that has this property.
 SERVING_PREFIXES = ("crates/pipeline-ir/",)
 
+# The lane rebuilds `ui_browser_fixture` from these, so a dependency bump can
+# change the fixture's HTTP or parsing behaviour -- and therefore the rendered
+# journey -- with no file the classifier otherwise watches having moved.
+BUILD_INPUT_PATHS = frozenset(
+    {
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/controller-api/Cargo.toml",
+        "crates/pipeline-ir/Cargo.toml",
+        "rust-toolchain.toml",
+    }
+)
+
 # Changed lines across the client files, added plus removed, at or above which
 # the mutation proof is required even though the gate definition did not move.
 #
@@ -158,8 +171,10 @@ def classify(base: str, head: str, repository: Path) -> tuple[bool, bool, str]:
         )
 
     client = sorted(paths & CLIENT_PATHS)
-    serving = sorted(paths & SERVING_PATHS) + sorted(
-        path for path in paths if path.startswith(SERVING_PREFIXES)
+    serving = (
+        sorted(paths & SERVING_PATHS)
+        + sorted(path for path in paths if path.startswith(SERVING_PREFIXES))
+        + sorted(paths & BUILD_INPUT_PATHS)
     )
     if not client and not serving:
         return False, False, "no UI, serving or gate path changed"

@@ -104,6 +104,15 @@ map it to a subordinate UID that cannot write the mount.
   baseline, where the failures *are* the evidence. `scripts/validate-foundation.sh`
   asserts the workflow does not pass it, so the flag cannot drift into the
   enforcing path.
+- **The package closure is pinned, not just the browser.** The image installs
+  Chrome's shared-library closure from the same immutable Debian snapshot the
+  base image was built from, which the base records in its own apt sources.
+  Without that, `apt-get update` resolves whatever the archive holds that day, so
+  one commit and one set of pinned Chrome archives could still yield different
+  NSS, font, rendering and Python environments on different days — layout results
+  could move, or the gate could break, with nothing in the repository having
+  changed. Review found this; the digest pinning had covered the browser and the
+  base image but stopped at the packages between them.
 - **The image is rebuilt when its recipe changes.** The cached image is reused
   only when the browser digests *and* the SHA-256 of the Containerfile itself
   match what is pinned. Without the recipe digest, editing the Containerfile

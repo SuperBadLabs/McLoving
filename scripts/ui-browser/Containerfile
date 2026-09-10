@@ -19,11 +19,39 @@ LABEL org.opencontainers.image.title="McLoving contained UI browser gate" \
       io.mcloving.ui.chrome.sha256="167a098c4fdec156b58a9f678c90a84f9072d789f9c6e7b35496a6987b8b7ef8" \
       io.mcloving.ui.chromedriver.sha256="c05f3bfb501b37b12b7fa2a54b8b30b51d089a64389898362aeb2785f12ac83f" \
       io.mcloving.ui.base.digest="sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171" \
-      io.mcloving.ui.recipe.sha256="RECIPE_DIGEST_PLACEHOLDER"
+      io.mcloving.ui.recipe.sha256="RECIPE_DIGEST_PLACEHOLDER" \
+      io.mcloving.ui.debian.snapshot="20260824T000000Z"
 
 # Chrome's shared-library closure plus python3 for the gate itself. The gate
 # imports only the standard library, so no package index is consulted for it.
-RUN apt-get update \
+#
+# The package closure is pinned to the same Debian snapshot the base image was
+# built from -- the image records those timestamps in its own
+# /etc/apt/sources.list.d/debian.sources comments. Without this, `apt-get update`
+# resolves whatever the archive holds on the day it runs, so one commit and one
+# set of pinned Chrome archives could still produce different NSS, font,
+# rendering and Python environments on different days: layout results could move,
+# or the gate could break, with nothing in the repository having changed. A
+# snapshot archive is immutable, so the closure is now as fixed as the browser.
+# Release files in a snapshot are past their Valid-Until by construction, which
+# is what Check-Valid-Until disables; integrity still comes from the archive
+# signature via the base image's keyring.
+RUN printf '%s\n' \
+      'Types: deb' \
+      'URIs: http://snapshot.debian.org/archive/debian/20260824T000000Z' \
+      'Suites: bookworm bookworm-updates' \
+      'Components: main' \
+      'Check-Valid-Until: no' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      '' \
+      'Types: deb' \
+      'URIs: http://snapshot.debian.org/archive/debian-security/20260824T000000Z' \
+      'Suites: bookworm-security' \
+      'Components: main' \
+      'Check-Valid-Until: no' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         ca-certificates \
         fonts-liberation \

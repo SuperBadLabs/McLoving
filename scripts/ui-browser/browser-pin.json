@@ -21,6 +21,12 @@
     }
   },
   "base_image": {
+    "comment": [
+      "debian_snapshot is the archive timestamp the base image itself records in",
+      "/etc/apt/sources.list.d/debian.sources. The Containerfile installs from",
+      "that snapshot so the package closure is as immutable as the base digest."
+    ],
+    "debian_snapshot": "20260824T000000Z",
     "reference": "docker.io/library/debian:bookworm-slim",
     "manifest_digest": "sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
     "image_id": "160466e67bb85a4099d9d9c2356b4a6a64747b281a22c142efbd4539db1b8525"

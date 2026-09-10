@@ -171,7 +171,12 @@ def main():
     impact = importlib.util.module_from_spec(impact_spec)
     assert impact_spec.loader is not None
     impact_spec.loader.exec_module(impact)
-    watched = impact.GATE_DEFINITION_PATHS | impact.CLIENT_PATHS | impact.SERVING_PATHS
+    watched = (
+        impact.GATE_DEFINITION_PATHS
+        | impact.CLIENT_PATHS
+        | impact.SERVING_PATHS
+        | impact.BUILD_INPUT_PATHS
+    )
     absent = sorted(path for path in watched if not (repo_root / path).is_file())
     absent += sorted(
         prefix

@@ -2,7 +2,7 @@
 
 This is the **accepted** baseline required by `UI-002` acceptance clause (3):
 every view as a real browser rendered it after the minimal served-client repairs,
-with all sixteen assertions passing. **`UI-006` and every later comparison use
+with all eighteen assertions passing. **`UI-006` and every later comparison use
 this one.**
 
 The pre-repair baseline is a separate directory,
