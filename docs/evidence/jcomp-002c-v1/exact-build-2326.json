@@ -1,0 +1,12 @@
+{
+  "head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+  "tree": "035210fe048f45604119f796a18b47070006bff9",
+  "source_archive_sha256": "52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9",
+  "contract_v2_sha256": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+  "worker_image_sha256": "8380567bcea6319ad204adfa1c319d715a0233f451cb7bf7ddce837f874949d0",
+  "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "build_artifacts_verified": 11,
+  "external_corpus_tool_original_sha256": "88b90a66d6d4f3db5ee91d954180a9fac1e4cb0559c26c8950679d759ece2239",
+  "external_corpus_tool_sha256": "0b8462cb2b5993017fb30716c0c5a3739ecdd37b5cc2426c2849714e71c7f64c",
+  "external_tool_changes": "Only root path bound to clean classifier checkout and current V2 contract hash. Same original population, launcher and genuine admission checks; compile-only no workloads."
+}

@@ -1,0 +1,9 @@
+
+Testing mcloving.compat.sequential-test
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by groovy.json.internal.FastStringUtils (file:/home/srikanth/.m2/repository/org/codehaus/groovy/groovy-all/2.4.21/groovy-all-2.4.21.jar)
+WARNING: Please consider reporting this to the maintainers of class groovy.json.internal.FastStringUtils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+
+Ran 13 tests containing 257 assertions.
+0 failures, 0 errors.

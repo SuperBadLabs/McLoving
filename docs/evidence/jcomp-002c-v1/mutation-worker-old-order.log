@@ -1,0 +1,30 @@
+
+Testing mcloving.compat.sequential-test
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by groovy.json.internal.FastStringUtils (file:/home/srikanth/.m2/repository/org/codehaus/groovy/groovy-all/2.4.21/groovy-all-2.4.21.jar)
+WARNING: Please consider reporting this to the maintainers of class groovy.json.internal.FastStringUtils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+
+FAIL in (explicit-diagnostic-precedence-preserves-runnable-boundary) (sequential_test.clj:204)
+excluded_before_bad_closer
+expected: (= (keyword (get case "status")) (:status result))
+  actual: (not (= :unsupported :rejected))
+
+FAIL in (explicit-diagnostic-precedence-preserves-runnable-boundary) (sequential_test.clj:205)
+excluded_before_bad_closer
+expected: (= (get case "code") (get-in result [:diagnostic :code]))
+  actual: (not (= "E_SOURCE_LEXICAL" "E_SOURCE_PARSE"))
+
+FAIL in (explicit-diagnostic-precedence-preserves-runnable-boundary) (sequential_test.clj:204)
+excluded_before_placeholder
+expected: (= (keyword (get case "status")) (:status result))
+  actual: (not (= :unsupported :rejected))
+
+FAIL in (explicit-diagnostic-precedence-preserves-runnable-boundary) (sequential_test.clj:205)
+excluded_before_placeholder
+expected: (= (get case "code") (get-in result [:diagnostic :code]))
+  actual: (not (= "E_SOURCE_LEXICAL" "E_SOURCE_PARSE"))
+
+Ran 13 tests containing 257 assertions.
+4 failures, 0 errors.
+sequential test population/failure gate: {:test 13, :pass 253, :fail 4, :error 0, :type :summary}

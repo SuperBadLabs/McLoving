@@ -1,0 +1,24 @@
+{
+  "schema": "mcloving.jcomp002c.independent-build-review/1",
+  "reviewer": "root/gates_review",
+  "status": "verified",
+  "verified_at": "2026-09-10T06:29:29.585273+00:00",
+  "source_commit": "2326a63b6c52a5354a82d58aee9879db046613c9",
+  "source_tree": "035210fe048f45604119f796a18b47070006bff9",
+  "worker_sha256": "8380567bcea6319ad204adfa1c319d715a0233f451cb7bf7ddce837f874949d0",
+  "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "source_archive_sha256": "52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9",
+  "build_inventory_sha256": "f2a447d951f3f1aebb2f60d60efa2a7cf49a8bc9a05f7042ffd1573296dff8fe",
+  "external_tools": {
+    "/tmp/mcloving-jcomp002c-evidence/build-compiler-exact.sh": "839b0bc49199c95c2349117cc52d57276da49a9f7b314dbda582e282896b6c7f",
+    "/tmp/mcloving-jcomp002c-evidence/classify-candidate-corpus.py": "0b8462cb2b5993017fb30716c0c5a3739ecdd37b5cc2426c2849714e71c7f64c"
+  },
+  "observations": [
+    "Independentlyrehashedcompletebuildinventory, physicaladmission and sourceinputhashes; archivereflects exactreviewedGit tree.",
+    "Actualretainedimageinspect pins newworker/V2contract264436; externalbuildhelper onlychangesrepositoryroot, corpustool onlychangesroot+V2contractpin. No boundary/population/outcome relaxation.",
+    "Meaningfulmutations inspected: oldworkerparseordering produces4failedassertions; oldRustinterpolation handling fails flatGStringcase. Restoredsourcecleanreviewbinds2326."
+  ],
+  "limitations": [
+    "Candidateauthored46/full228 exactcapture results stillpending; no protectedmergeorJCOMP003runtimeclaim."
+  ]
+}

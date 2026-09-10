@@ -1,16 +1,24 @@
 # JCOMP-002C independent negative diagnostic correction
 
-## Status and bounded claim
+## Status and bounded result
 
-JCOMP-002C is ACTIVE. This record identifies the observed mismatch and the correction's acceptance boundary; it does not assert corrected outcomes, protected merge or earned closure. JCOMP-003 remains ACTIVE with new campaigns held on this prerequisite.
+JCOMP-002C is ACTIVE. The correction aligns independently checked negative diagnostics without expanding runnable syntax. Protected merge and exact-main verification remain pending. JCOMP-003 remains ACTIVE with new campaigns held until this prerequisite earns closure.
 
-The intended implementation changes negative diagnostic precedence and bounded recognition only. It must not expand admitted shell/DSL syntax, execute Groovy, normalize original source bytes, enable an imported definition or grant runtime/production authority. Lexical exclusion before whole-source parsing means outside the protected lexical language; it does not certify that the excluded document is valid Groovy. Every potentially admitted candidate must still pass full Groovy parsing and bounded lexical/AST agreement, followed by independent Rust source-to-output admission.
+The reviewed execution candidate is `2326a63b6c52a5354a82d58aee9879db046613c9`, tree `035210fe048f45604119f796a18b47070006bff9`, based on earned predecessor closure commit `249d772072530fb511602eb16ed3a1d59732a67b` above verified runtime `44f0498fbdf3a59434176e9d09a52e1260336260`. Later evidence/documentation commits must preserve the tested compiler and policy bytes; candidate receipts do not become new-head execution receipts merely by being copied.
 
-## Observed pre-correction evidence
+## Versioned policy and independent boundary
 
-The original228 capture used reviewed source `2eadf80ec99f362d901a01a074b79e669a7fe3a9`, built worker `08774d9d01ab47864d447f915f84bc48b424b13b844c69087ff3987a55d00380` and admission executable `137adcb4b9af2c24dddd5dc2bb2e281f64b8caaed2472a5bd94771482ff890ba`. Six original cases remained `unverified` under `E_SOURCE_CLASSIFICATION`; a diagnostic capture then retained actual worker replies and genuine Rust admission refusal. These observations do not earn negative classifications.
+`JENKINS_SEQUENTIAL_DECLARATIVE_V2.md` binds the revised negative diagnostic policy at SHA-256 `264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41`. V1 remains unchanged at `ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe`; the original 23-fixture manifest remains `654898829f31872d471db88830414b23a9453e021bec281f05ac1aa4175de727`.
 
-| Original record | Repository source | Worker observation | Rust diagnostic observation |
+Source byte/text bounds and raw Unicode-introducer preflight precede a source-order lexical scan. Its first independently established malformed protected literal or lexical exclusion determines the negative diagnostic. Lexical exclusion means outside the protected lexical language, not that the entire excluded document is valid Groovy. The slash exclusion applies only at a parenthesized argument start. Flat identifier/property interpolation boundaries are recognized only to locate subsequent excluded literal-segment escapes; unknown nested-expression interiors remain unverified.
+
+Every potentially admitted candidate still requires full Groovy parsing, bounded lexical/AST agreement, independent Rust source classification and exact output validation. No Groovy evaluation, source allowlist, admission exemption, source normalization, new executable grammar, runtime change or production authority is introduced. Definitions remain disabled; authored fixtures and original corpus identities retain separate denominators.
+
+## Observed pre-correction failures
+
+The original corpus capture at `2eadf80ec99f362d901a01a074b79e669a7fe3a9` used worker `08774d9d01ab47864d447f915f84bc48b424b13b844c69087ff3987a55d00380` and admission `137adcb4b9af2c24dddd5dc2bb2e281f64b8caaed2472a5bd94771482ff890ba`. Six rows remained unverified under `E_SOURCE_CLASSIFICATION`. A separate diagnostic capture preserved actual worker responses and genuine admission refusal:
+
+| Original record | Source file | Worker observation | Rust diagnostic observation |
 |---|---|---|---|
 | 018 | `Romeh_spring-boot-ignite.Jenkinsfile` | unsupported / E_SOURCE_LEXICAL | Unclassified |
 | 019 | `Romeh_spring-boot-sample-app.Jenkinsfile` | unsupported / E_SOURCE_LEXICAL | Unclassified |
@@ -19,16 +27,26 @@ The original228 capture used reviewed source `2eadf80ec99f362d901a01a074b79e669a
 | 160 | `jussaragranja_SeleniumEasyTest2.Jenkinsfile` | unsupported / E_SOURCE_LEXICAL | Rejected / E_SOURCE_PARSE |
 | 162 | `k11h-de_zap-jenkins.Jenkinsfile` | rejected / E_SOURCE_PARSE | Unsupported / E_SOURCE_LEXICAL |
 
-All six real admission invocations exited nonzero. The failed launcher observations remain unverified even where the worker returned a negative status. Preserve all228 identities, including226 unchanged originals and2 previously typed-redacted representations. The authored23-fixture denominator remains separate.
+All six genuine admission invocations exited nonzero. These old observations remain unverified; later corrected classifications do not rewrite them. Original sources remain under `migration/mario-jenkins-oracle-228/corpus-v1/sources/`, with 226 unchanged originals and two previously typed-redacted representations. Source paths and hashes identify the six cases without republishing duplicate source bodies.
 
-## Correction and evidence required before closure
+## Exact candidate verification
 
-Use reduced cases for the actual slashy-literal, flat-interpolation/literal-segment and diagnostic-precedence mismatches. A slash alone, uncertain nested interpolation or an arbitrary unknown classification must not become a generic denial shortcut. Keep unproved forms unverified; keep malformed protected literals and existing known malformed-fixture diagnostics independently checked. Preserve the full parsing and AST checks for every potentially admitted document.
+The complete Rust admission package passed 34 tests across four nonempty test binaries (18 + 4 + 8 + 4), with zero failed or ignored tests; strict Clippy passed. The Clojure suite passed 13 tests and 257 assertions with zero failures or errors. Ten reduced regressions cover the observed exclusions, known malformed literals and Unicode precedence. Restoring the old worker parse order caused four failed assertions; restoring old Rust interpolation handling failed the flat GString case as Unclassified. Both mutation failures are retained separately from restored-source results.
 
-The implementation review must bind exact corrected compiler/Rust source and policy pins, reduced regression results, a mutation that restores the mismatch, genuine independent admission agreement for the six original bytes, and existing supported/negative fixture behavior. Record only observed results when those artifacts exist. The separate JCOMP-003 campaign must refresh its frozen source and regenerate affected compiler and runtime evidence after this correction earns closure.
+A fresh build from the candidate Git archive produced worker `8380567bcea6319ad204adfa1c319d715a0233f451cb7bf7ddce837f874949d0` and admission `d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915`. The archived source SHA-256 is `52a07eab89d3c3d64d6458d621e14f11eaf7b9b1b867a4614d054247d0423dd9`; the original complete build inventory is `f2a447d951f3f1aebb2f60d60efa2a7cf49a8bc9a05f7042ffd1573296dff8fe`.
 
-TM-008's parser-resource boundary and TM-020's independent compiler/admission authority boundary apply. This ticket retains no Groovy evaluation, source allowlist, admission exemption, network/controller/credential access or runtime change. Existing host/container assumptions and jointly flawed recognizer risk remain explicit. Optional model output, synthetic expectations and worker self-reports cannot substitute for independent admission evidence.
+The fixed 23 inputs compiled twice, producing 46 matching expected responses under authored campaign SHA-256 `292ff5bab314058cbc6cdf5ed83cdc12fb00e8cb55a004b259028d10f4719954`. The independent reviewer replayed all 46 through the actual admission binary and verified unchanged admitted pipeline YAML and semantic IR hashes against the historical campaign. Disabled-definition hashes change because those bytes embed the V2 contract hash; genuine Rust admission independently reconstructs and checks the exact new disabled definitions. This expected metadata change is not executable grammar expansion.
 
-## Review and protected boundary
+The exact-candidate original corpus capture completed with 1 admitted, 216 unsupported, 11 rejected and zero unverified records. All 228 original identities remain intact. The six previously unverified records now have independently agreed `unsupported / E_SOURCE_LEXICAL` receipts; all other classifications are unchanged. The runtime owner and independent reviewer each replayed all 228 through the genuine admission binary; the reviewer also rehashed all 457 raw capture files. The campaign SHA-256 is `172cc8c7e429e63159464ee9efc3ca7b92185975a8fe5bc8b0a1c158e01997c2`, and the local verification receipt is `ffab35cce3a8d358ed91792c42b5198eb9e2e3f4386613445ef86e24fd343feb`. These are compile-only classifications, with zero workload executions or execution-equivalence claims.
 
-Implementation, focused evidence and independent final-source review are in progress. Protected merge and exact-main Foundation/native Windows verification remain required. JCOMP-002C must not be added to the closed-ticket set or closure-attribution table until these are earned. The already earned JCOMP-002B and AGENT-007 closures retain their original exact-main receipts; they do not verify this correction.
+Intermediate failed attempts remain qualified separately: an initial Clojure command used the wrong directory; an expanded passing suite initially hit the old twelve-test population assertion; an intermediate lexer syntax error was corrected before the candidate; and an initial authored comparison incorrectly required unchanged disabled-definition hashes despite their new V2 binding. The final exact-candidate checks above supersede those attempts without relabeling them as passes.
+
+## Independent review and retained evidence
+
+The retained [independent static review](jcomp-002c-v1/2326a63-independent-review.json) binds the exact candidate at SHA-256 `e52e5e301bdb8e4881542e32dcf96038f9c780bb5693decf0c78c18098bb50cb`. Independent build review is `73c97c3e24e873b345c27374e1cba43531c3b21b8e7990cdcbafcb124b9374dc`; independent authored replay is `b06bec8cc98b4683f123f95e801d1365dc78bf42d9fa2cc742787b6fe01b997d`. The [independent corpus review](jcomp-002c-v1/2326-corpus-final-review.json) is `271f657e8f3aac3f48478c9484d7c02d9cc4c463830aef1983abfbbcdd3bb432`.
+
+The [bounded public evidence directory](jcomp-002c-v1/README.md) retains source/build/test/mutation summaries and review receipts, the six before/after response and admission records, and the whole 228 campaign manifest/counts. The 53-file directory’s [checksum manifest](jcomp-002c-v1/ARTIFACTS.sha256) has SHA-256 `7e6ceb456234abaed40257d3fc9c5bd4333c505eaabc8bc0ba2ac7c774fc304d` and covers only that subset. An incremental [source bundle and recovery receipt](jcomp-002c-v1/source-bundle-recovery.json) preserve exact tested source 2326 independently of future squash history; isolated recovery reproduced its commit, tree and full source archive hash.
+
+Full authored and original-corpus response sets, the full source archive, admission executable and container images remain local custody artifacts for the durable handoff. This public subset is not a complete offline campaign replay inventory. JCOMP-003 must publish fresh full runtime/corpus evidence separately after recapture.
+
+TM-008 and TM-020 were reviewed for the parser-resource and independent-admission boundaries above. Jointly flawed recognizers and existing host/container assumptions remain residual risks. There is no new controller, credential, scheduling, migration or production authority. Protected implementation review, normal merge and successful exact-main Foundation/native Windows gates remain required before JCOMP-002C closure; no closure-attribution table entry or closed-ticket exemption is earned by this local evidence alone.

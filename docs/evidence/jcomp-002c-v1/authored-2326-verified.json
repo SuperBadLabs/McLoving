@@ -1,0 +1,287 @@
+{
+  "source_head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+  "campaign_sha256": "292ff5bab314058cbc6cdf5ed83cdc12fb00e8cb55a004b259028d10f4719954",
+  "admission_sha256": "d7e9c82e7a4c5c27d9410d1508ce240adf1e3670af2afa187a0439d37d63f915",
+  "historical_comparison_campaign_sha256": "b5c40b736e75a49c7f647ec10609c972f2acd6c27913a891fb6e9c43b8aad3b7",
+  "replays": 46,
+  "unchanged_admitted_semantic_ir_and_pipeline_yaml_hashes": true,
+  "definition_yaml_hash_changes_expected": "Disabled definition embeds current contract_sha256; current genuine admission independently reconstructs and verifies exact definition bytes.",
+  "records": [
+    {
+      "fixture": "S01",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S01",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S02",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S02",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S03",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S03",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S04",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S04",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S05",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S05",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S06",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S06",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S07",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S07",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S08",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S08",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S09",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S09",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S10",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "S10",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N01",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N01",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N02",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N02",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N03",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N03",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N04",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N04",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N05",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N05",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N06",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N06",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N07",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N07",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N08",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N08",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N09",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N09",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N10",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N10",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N11",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N11",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N12",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "N12",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "C052",
+      "run": 1,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    },
+    {
+      "fixture": "C052",
+      "run": 2,
+      "replay_verified": true,
+      "historical_result_bindings_unchanged_except_contract_binaries_and_contract_bound_definition": true
+    }
+  ]
+}

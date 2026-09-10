@@ -1,0 +1,45 @@
+{
+  "schema": "mcloving.independent-review/1",
+  "reviewer": "root/gates_review",
+  "status": "approved",
+  "finding_status": "no-actionable-findings",
+  "verified_at_utc": "2026-09-10T06:27:39.768975+00:00",
+  "candidate": {
+    "head": "2326a63b6c52a5354a82d58aee9879db046613c9",
+    "tree": "035210fe048f45604119f796a18b47070006bff9",
+    "base": "44f0498fbdf3a59434176e9d09a52e1260336260",
+    "parent": "249d772072530fb511602eb16ed3a1d59732a67b",
+    "worktree_clean": true,
+    "source_sha256": {
+      "compat/jenkins-worker/Containerfile": "0f50df6686d8759d676dfafbf3ee7261d0d84d1ba1dd9a25581abecef5415c70",
+      "compat/jenkins-worker/fixtures/diagnostic-v2/cases.json": "9f84dd202a4f9a2c7cdfc504203a5359e3c370fec8bb28bdc71ac60e2d28832f",
+      "compat/jenkins-worker/src/mcloving/compat/sequential_compiler.clj": "e77d857269c1e18b08450f05df27a98a038dff1c88e8bb137657d0f62bb6a2ca",
+      "compat/jenkins-worker/src/mcloving/compat/sequential_lexer.clj": "c14bfa7789cda8918328f43c225dbc76fbf20711793b35fe5625ae537d6f4faf",
+      "compat/jenkins-worker/test/mcloving/compat/sequential_test.clj": "ec4c74fd072d64cd94505028104aefd7a7a9d28b3300eda3f82e4b3f36adcae1",
+      "compat/jenkins-worker/test/mcloving/compat/sequential_test_runner.clj": "2cb81760ca46580c30cf182411d806bbc0a294be0de87fcf5d714e6ecf20f628",
+      "crates/jenkins-compiler-admission/src/sequential/mod.rs": "95311ca21b275be6afe235f7299dcb739b1f3bf8426d0da19584933972bf67de",
+      "crates/jenkins-compiler-admission/src/sequential/source.rs": "cacd92060f3332fac147200f68a8c4be82682aa2692408ec0c81d20c8e238a76",
+      "crates/jenkins-compiler-admission/src/sequential/tests.rs": "3299fb42703b84118cbf55a87f6599898b81ee63c58692e4b011eb4df7a01fb0",
+      "docs/EXECUTION_BOARD.md": "7395be2d8acc8c40990e90518d6edb12b1044187a8a15319bccdda262d1e9d7b",
+      "docs/architecture/JENKINS_SEQUENTIAL_DECLARATIVE_V2.md": "264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41",
+      "docs/evidence/AGENT-007_SECURITY_REVIEW.md": "5da7ab46fb3aab8fd9cf2ed620fa9217f61cf436fb07fdd6fd27ab5a39e58aed",
+      "docs/evidence/JCOMP-002B_SECURITY_REVIEW.md": "4e372ab02a4797f0e2abd711998d3d1c735ab1df64f0b1474a41868a98d033bd",
+      "docs/evidence/JCOMP-002C_SECURITY_REVIEW.md": "8acb425f35f28fa6a6437025ddb34557a3f3bc69ebf824d8459f1154adc3a5ba",
+      "docs/handoffs/CURRENT.md": "0982c5e48ab872c848348dff03d8bf0956939eeacbecdfa757dafdc863fe717d",
+      "docs/threat-model/README.md": "17cb28ef5f9132f8ac49b8f1ed01601e1bce9ecc13f325179001ed36efd251bd",
+      "scripts/test-jenkins-sequential-contained.py": "7ecdbb7050dda8d7697b6b5f7289c9fb5e95f68dcf3706d241c012bbbbfdaf30",
+      "scripts/verify-ticket-closure-receipts.py": "a4c193704b361da762555e99716f810c9fb3a25ca041d87d1c019c717c6e0d25"
+    }
+  },
+  "scope": [
+    "Independentlyreviewed boundedClojure/Rustnegative diagnostic policy: sourcebyte/text+wholeUnicodeintroducerpreflight thenfirstboundedlexfailure, fullGroovyparseandASTagreement retainedforeveryeligibleadmittedsource.",
+    "Contextualslashafterparenthesizedargument andflatbracedidentifier/propertyboundary recognitiononlyforlexicalexclusion; uncertainnested remainsUnclassified andcannotborrowworkerdenial. Exactsource/status/code/IRauthorityunchanged.",
+    "Tenreduceddiagnosticregressions cover sixobservedclasses, knownmalformedliteral/Unicodeprecedence andordinarydanglingescape; forgedstatus/codeandunknownnested denialrejected.",
+    "V1contracthashae47... and23fixturemanifestbytesunchanged; V2hash264436... consistentcurrentworker/Rust/image/liveverifier, historicalverifier retainsV1.",
+    "JCOMP002C ACTIVE, JCOMP003campaignsheld;125ticketfloor only deliberateaddition, oldclosureexemptions/debtunchanged. Includedpriorreviewed249d predecessorclosurebytes."
+  ],
+  "limitations": [
+    "Staticreview approval only; exactcandidateauthored46/six/full228agreement+mutationvalidation mustcompletebeforepublicationclaim.",
+    "CurrentRust18 andClojure13/257 results ownedbyruntimeagent; exactprotectedPR/mainFoundation/nativeWindows stillrequired."
+  ]
+}
