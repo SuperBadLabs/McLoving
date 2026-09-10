@@ -27,7 +27,7 @@ PINS = {
     'typed-redactions.tsv': 'f76fd92c95f93b5b8b0b9c2e1dad6322e9afcbb263d5d022186d127960abe223',
     'jenkins-source-normalization.tsv': 'ea69f40a53da5f177678d989677d112ef13da768f4c8ff8bd01c93eb2b28ac45',
 }
-CONTRACT = 'ae47b3f3cc58d6a66cec6d73832a189417864df74110c83bf1f656840c5d5dfe'
+CONTRACT = '264436c57b3aa82810f7041515c924b38a5a5e4be1f60fb6987151d1e8336a41'
 PROFILE = 'feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271'
 STATUSES = ('admitted', 'unsupported', 'rejected', 'unverified')
 COMPILER_PATHS = ('compat/jenkins-worker', 'crates/jenkins-compiler-admission',
