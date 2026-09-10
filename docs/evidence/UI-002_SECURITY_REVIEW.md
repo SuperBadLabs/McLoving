@@ -174,7 +174,11 @@ delivery journey now drives a uniquely named row, and the deliberately ambiguous
 `artifact_download_delivers_content` clicks
 the control and reads **the bytes that actually arrived on disk** — Chrome is
 given a download directory the gate inspects — requiring the file to be named
-`report.txt` and to hold exactly the 34 bytes the fixture serves. Asserting the
+`build.log` and to hold exactly the 26 bytes the fixture serves for it. It drives
+that row and not `report.txt` deliberately: `report.txt` is the same-name,
+different-fence pair, which production's fence-free lookup cannot disambiguate,
+so a delivery assertion through it would only ever assert whatever the fixture
+chose to answer. Asserting the
 client's reported byte count alone proved nothing, because the client reports
 `artifact.bytes` straight from the listing it already rendered: that stays true
 if the click never fires, if the endpoint answers empty, or if it answers

@@ -194,6 +194,32 @@ def main():
             "mutation proof for every client change"
         )
 
+    # The receipt describes the delivery probe in prose, and it has already
+    # described a different artifact and byte count than the gate actually
+    # downloads. Read both literals out of the assertion and require the receipt
+    # to name them, so the description cannot drift from the probe.
+    gate_text = gate_path.read_text()
+    downloaded = re.search(r'delivered\.name == "([^"]+)"', gate_text)
+    payload_bytes = re.search(r"len\(payload\) == (\d+)", gate_text)
+    receipt = repo_root / "docs" / "evidence" / "UI-002_SECURITY_REVIEW.md"
+    if downloaded is None or payload_bytes is None:
+        failures.append(
+            "gate.py no longer asserts a downloaded filename and byte count as "
+            "literals, so the receipt's description of the probe cannot be checked"
+        )
+    else:
+        receipt_text = receipt.read_text()
+        if downloaded.group(1) not in receipt_text:
+            failures.append(
+                f"UI-002_SECURITY_REVIEW.md does not name the artifact the gate "
+                f"actually downloads ({downloaded.group(1)})"
+            )
+        if f"{payload_bytes.group(1)} bytes" not in receipt_text:
+            failures.append(
+                f"UI-002_SECURITY_REVIEW.md does not state the payload size the "
+                f"gate actually requires ({payload_bytes.group(1)} bytes)"
+            )
+
     # --record-only exists to capture a pre-repair baseline, where the failures
     # are the evidence. In CI it would turn the gate into a reporter.
     workflow_text = workflow.read_text()
