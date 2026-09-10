@@ -22,6 +22,19 @@ cache state in the product caller. The existing context-bound durable journal
 commitment supplies the deterministic invocation identity without a new sidecar
 ledger or a false claim that native cache receipts carry attempt identity.
 
+Protected PR verification exposed two additional integration gaps: Windows
+agent Clippy now compiles the cache dependency and rejected its unconditional
+Unix-only import, and the deployment environment classifier did not recognize
+the new cache catalog/binding paths. The import is now Unix-gated. Deployment
+classification explicitly treats the controller catalog as no-follow trust
+material and agent bindings as no-follow secret material, with private mode,
+service ownership, single-link and canonical-path checks. Regression fixtures
+cover valid deployment paths and mode, symlink, FIFO and hardlink refusals.
+An external review also found that CLI validate/plan could not supply the
+required pipeline scope; both now expose optional `--pipeline-id`, with actual
+HTTP request coverage for scoped and legacy unscoped use. These findings are
+retained as failed-candidate evidence, not relabeled as passing gates.
+
 ## Verification scope
 
 Focused verification covers agent scope/payload mutations, sealed original-path

@@ -1868,6 +1868,77 @@ grep -q "not a regular file: fifo" "${workdir}/logs/guard-catalog-fifo.log" || {
 }
 rm -f "${effect_env}" "${catalog_env}" "${effect_plan}"
 
+# Newly optional cache catalogs participate in the same guard and deployed
+# digest inventory authority. Controller catalogs are public to read; agent
+# bindings are immutable private authority. Exercise real guard invocations.
+for cache_service in controller agent; do
+  cache_path="${home}/cache-${cache_service}.json"
+  cache_env="${home}/cache-${cache_service}.env"
+  if [[ "${cache_service}" == controller ]]; then
+    cache_variable=MCLOVING_CACHE_MAPPING_CATALOG
+    cache_mode=0644
+  else
+    cache_variable=MCLOVING_AGENT_CACHE_BINDINGS_PATH
+    cache_mode=0400
+  fi
+  printf '{}' > "${cache_path}"
+  chmod "${cache_mode}" "${cache_path}"
+  cp "${config}/${cache_service}.env" "${cache_env}"
+  printf '%s=%s\n' "${cache_variable}" "${cache_path}" >> "${cache_env}"
+  chmod 0600 "${cache_env}"
+  "${libexec}/helpers/mcloving-env-guard" "${cache_service}" "${cache_env}" >/dev/null
+  if [[ "${cache_service}" == controller ]]; then
+    chmod 0664 "${cache_path}"
+  else
+    chmod 0600 "${cache_path}"
+  fi
+  if "${libexec}/helpers/mcloving-env-guard" "${cache_service}" "${cache_env}" \
+    > "${workdir}/logs/guard-cache-${cache_service}-mode.log" 2>&1; then
+    echo "env guard accepted writable cache authority: ${cache_variable}" >&2
+    exit 1
+  fi
+  if [[ "${cache_service}" == agent ]]; then
+    grep -q "requires mode 400, service owner and one link" \
+      "${workdir}/logs/guard-cache-${cache_service}-mode.log"
+  else
+    grep -q "mode 664" "${workdir}/logs/guard-cache-${cache_service}-mode.log"
+  fi
+  chmod "${cache_mode}" "${cache_path}"
+  mv "${cache_path}" "${cache_path}.real"
+  ln -s "${cache_path}.real" "${cache_path}"
+  if "${libexec}/helpers/mcloving-env-guard" "${cache_service}" "${cache_env}" \
+    > "${workdir}/logs/guard-cache-${cache_service}-symlink.log" 2>&1; then
+    echo "env guard accepted symlink cache authority: ${cache_variable}" >&2
+    exit 1
+  fi
+  grep -q "${cache_variable} must not be a symlink" \
+    "${workdir}/logs/guard-cache-${cache_service}-symlink.log"
+  rm "${cache_path}"
+  mkfifo "${cache_path}"
+  chmod "${cache_mode}" "${cache_path}"
+  if "${libexec}/helpers/mcloving-env-guard" "${cache_service}" "${cache_env}" \
+    > "${workdir}/logs/guard-cache-${cache_service}-fifo.log" 2>&1; then
+    echo "env guard accepted FIFO cache authority: ${cache_variable}" >&2
+    exit 1
+  fi
+  grep -q "not a regular file: fifo" \
+    "${workdir}/logs/guard-cache-${cache_service}-fifo.log"
+  rm "${cache_path}"
+  mv "${cache_path}.real" "${cache_path}"
+  if [[ "${cache_service}" == agent ]]; then
+    ln "${cache_path}" "${cache_path}.link"
+    if "${libexec}/helpers/mcloving-env-guard" "${cache_service}" "${cache_env}" \
+      > "${workdir}/logs/guard-cache-agent-hardlink.log" 2>&1; then
+      echo "env guard accepted multiply-linked cache bindings" >&2
+      exit 1
+    fi
+    grep -q "requires mode 400, service owner and one link" \
+      "${workdir}/logs/guard-cache-agent-hardlink.log"
+    rm "${cache_path}.link"
+  fi
+  rm "${cache_env}" "${cache_path}"
+done
+
 run_with_env() { # ENV_FILE COMMAND...
   local env_file="$1"
   shift

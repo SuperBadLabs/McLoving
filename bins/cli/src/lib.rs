@@ -58,11 +58,17 @@ pub struct Arguments {
 pub enum Command {
     Validate {
         pipeline: PathBuf,
+        /// Authoritative pipeline scope for operator-mapped helper intents.
+        #[arg(long)]
+        pipeline_id: Option<Uuid>,
         #[arg(long = "parameter", value_name = "NAME=JSON")]
         parameters: Vec<String>,
     },
     Plan {
         pipeline: PathBuf,
+        /// Authoritative pipeline scope for operator-mapped helper intents.
+        #[arg(long)]
+        pipeline_id: Option<Uuid>,
         #[arg(long = "parameter", value_name = "NAME=JSON")]
         parameters: Vec<String>,
     },
@@ -242,9 +248,10 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
     let output = match &arguments.command {
         Command::Validate {
             pipeline,
+            pipeline_id,
             parameters,
         } => {
-            let request = submission_request(pipeline, parameters).await?;
+            let request = submission_request(pipeline, *pipeline_id, parameters).await?;
             to_value(
                 client
                     .validate_pipeline(
@@ -257,9 +264,10 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
         }
         Command::Plan {
             pipeline,
+            pipeline_id,
             parameters,
         } => {
-            let request = submission_request(pipeline, parameters).await?;
+            let request = submission_request(pipeline, *pipeline_id, parameters).await?;
             to_value(
                 client
                     .plan_pipeline(
@@ -585,11 +593,15 @@ pub fn render(mode: OutputMode, output: CommandOutput) -> Result<String> {
     }
 }
 
-async fn submission_request(path: &PathBuf, parameters: &[String]) -> Result<SubmissionRequest> {
+async fn submission_request(
+    path: &PathBuf,
+    pipeline_id: Option<Uuid>,
+    parameters: &[String],
+) -> Result<SubmissionRequest> {
     let source = read_pipeline_source(path).await?;
     Ok(SubmissionRequest {
         source,
-        pipeline_id: None,
+        pipeline_id,
         parameters: parse_parameters(parameters)?,
     })
 }

@@ -210,6 +210,7 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
         output: OutputMode::Json,
         command: Command::Validate {
             pipeline: pipeline.clone(),
+            pipeline_id: None,
             parameters: vec!["count=3".to_owned()],
         },
     })

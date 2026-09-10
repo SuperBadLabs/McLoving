@@ -34,6 +34,10 @@ refused before queueing. Nodes require `sealed-cache-v1` in the exact allowed
 trust pool; only a Linux agent with configured cache bindings advertises it.
 Catalogs do not promise hot revocation: changing them requires service restart.
 
+The CLI accepts `validate pipeline.yaml --pipeline-id <uuid>` and
+`plan pipeline.yaml --pipeline-id <uuid>` to send the required scope through
+the same public API. Process-only validation/planning can omit that option.
+
 The agent loads `MCLOVING_AGENT_CACHE_BINDINGS_PATH` with exact raw-byte
 `MCLOVING_AGENT_CACHE_BINDINGS_SHA256`. The file is owner-private, single-link,
 mode 0400, bounded at 256 KiB and strictly duplicate/unknown-field rejecting.
