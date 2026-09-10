@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::private_helper::PreparedHelper;
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
@@ -29,6 +30,7 @@ use mcloving_agent_runtime::{
 };
 use mcloving_domain::ConnectorIntentSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
+use mcloving_domain::input_intent::{InputIntentSpec, InputWorkContext, input_assignment_digest};
 use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
 use serde::Deserialize;
 use serde_json::json;
@@ -138,8 +140,20 @@ enum ProcessMode {
     PowerShell,
 }
 
+enum HelperIntent {
+    Cache(CacheIntentSpec, CacheWorkContext),
+    Input(InputIntentSpec, InputWorkContext),
+}
+impl HelperIntent {
+    fn binding_failure(&self) -> &'static str {
+        match self {
+            Self::Cache(..) => "cache_binding_rejected",
+            Self::Input(..) => "input_binding_rejected",
+        }
+    }
+}
 struct ValidatedAssignment {
-    cache: Option<(CacheIntentSpec, CacheWorkContext)>,
+    helper: Option<HelperIntent>,
     workspace_grant: Option<WorkspaceGrant>,
     authority: WorkAuthority,
     workspace: PathBuf,
@@ -664,17 +678,19 @@ fn validate_assignment(
         attempt_id: assignment.attempt_id.clone(),
         fence_token: assignment.fence_token,
     };
-    let cache_version =
+    let helper_version =
         serde_json::from_slice::<serde_json::Value>(&assignment.execution_spec_json)
             .ok()
-            .is_some_and(|value| {
-                value.get("version").and_then(serde_json::Value::as_u64) == Some(3)
-            });
-    let calculated: [u8; 32] = if cache_version {
+            .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64));
+    let calculated: [u8; 32] = if matches!(helper_version, Some(3 | 4)) {
         cache_context.validate().map_err(|_| {
             AgentError::InvalidAssignment("cache work context is invalid".to_owned())
         })?;
-        cache_assignment_digest(&assignment.execution_spec_json, &cache_context)
+        if helper_version == Some(4) {
+            input_assignment_digest(&assignment.execution_spec_json, &cache_context)
+        } else {
+            cache_assignment_digest(&assignment.execution_spec_json, &cache_context)
+        }
     } else {
         Sha256::digest(&assignment.execution_spec_json).into()
     };
@@ -730,7 +746,7 @@ fn validate_assignment(
                     }));
                 }
                 AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
-                    cache: None,
+                    helper: None,
                     workspace_grant,
                     authority,
                     workspace,
@@ -762,7 +778,40 @@ fn validate_assignment(
                         timeout_seconds: Some(intent.timeout_seconds),
                     };
                     AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
-                        cache: Some((intent, cache_context)),
+                        helper: Some(HelperIntent::Cache(intent, cache_context)),
+                        workspace_grant,
+                        authority,
+                        workspace,
+                        payload_digest,
+                        process,
+                    }))
+                }
+            }
+            SpecClassification::Input(intent) => {
+                if !cfg!(target_os = "linux")
+                    || config.input_bindings.is_none()
+                    || workspace_grant.is_some()
+                {
+                    AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                        authority,
+                        workspace,
+                        payload_digest,
+                        detail:
+                            "input runtime binding unavailable or workspace transfer unsupported"
+                                .to_owned(),
+                    })
+                } else {
+                    let process = ProcessSpec {
+                        kind: "input_intent".to_owned(),
+                        mode: ProcessMode::Direct,
+                        program: String::new(),
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        credentials: Vec::new(),
+                        timeout_seconds: Some(intent.timeout_seconds),
+                    };
+                    AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                        helper: Some(HelperIntent::Input(intent, cache_context)),
                         workspace_grant,
                         authority,
                         workspace,
@@ -788,6 +837,7 @@ fn validate_assignment(
 
 /// What this agent can make of a digest-verified execution payload.
 enum SpecClassification {
+    Input(InputIntentSpec),
     Cache(CacheIntentSpec),
     Process(ProcessSpec),
     ForAnotherRuntime(&'static str),
@@ -867,6 +917,37 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
                 }
             }
             _ => SpecClassification::Unsupported("invalid cache execution envelope".to_owned()),
+        };
+    }
+    if serde_json::from_slice::<serde_json::Value>(execution_spec_json)
+        .ok()
+        .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(4))
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Envelope {
+            version: u16,
+            steps: Vec<InputStep>,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum InputStep {
+            InputIntent(InputIntentSpec),
+        }
+        let decoded =
+            mcloving_input_adapter::parse_json_no_duplicates::<Envelope>(execution_spec_json);
+        return match decoded {
+            Ok(mut envelope) if envelope.version == 4 && envelope.steps.len() == 1 => {
+                let Some(InputStep::InputIntent(intent)) = envelope.steps.pop() else {
+                    unreachable!()
+                };
+                if intent.validate().is_ok() {
+                    SpecClassification::Input(intent)
+                } else {
+                    SpecClassification::Unsupported("invalid input intent".to_owned())
+                }
+            }
+            _ => SpecClassification::Unsupported("invalid input execution envelope".to_owned()),
         };
     }
     if connector_intent_payload(execution_spec_json) {
@@ -1094,7 +1175,7 @@ async fn run_assignment(
     let attempt = assignment.authority.attempt_id.clone();
     let fence = assignment.authority.fence_token;
     let mut journal = Journal::open(&config.journal_path)?;
-    journal.accept(&Acceptance {
+    let durable_acceptance = journal.accept(&Acceptance {
         organization_id: organization.clone(),
         attempt_id: attempt.clone(),
         fence_token: fence,
@@ -1201,11 +1282,24 @@ async fn run_assignment(
             loss_reason: lease_loss_reason.clone(),
         },
     ));
-    let prepared_cache = match assignment
-        .cache
+    let prepared_helper = match assignment
+        .helper
         .as_ref()
-        .map(|(intent, context)| {
-            crate::cache::prepare(config, intent, context, &assignment.payload_digest)
+        .map(|helper| match helper {
+            HelperIntent::Cache(intent, context) => {
+                crate::cache::prepare(config, intent, context, &assignment.payload_digest)
+                    .map(Box::new)
+                    .map(PreparedHelper::Cache)
+            }
+            HelperIntent::Input(intent, context) => crate::input::prepare(
+                config,
+                intent,
+                context,
+                &assignment.payload_digest,
+                durable_acceptance.accepted_at_unix_ms,
+            )
+            .map(Box::new)
+            .map(PreparedHelper::Input),
         })
         .transpose()
     {
@@ -1220,7 +1314,11 @@ async fn run_assignment(
                     workspace: &assignment.workspace,
                     session_epoch,
                     outcome: WorkOutcome::Failed,
-                    reason: "cache_binding_rejected".to_owned(),
+                    reason: assignment
+                        .helper
+                        .as_ref()
+                        .map_or("helper_binding_rejected", HelperIntent::binding_failure)
+                        .to_owned(),
                 },
                 AuthorityRpcControl {
                     authority_lost: &authority_lost,
@@ -1238,13 +1336,16 @@ async fn run_assignment(
         }
     };
     let mut process = assignment.process;
-    if let Some(prepared) = &prepared_cache {
-        process.program = prepared.program.to_string_lossy().into_owned();
+    if let Some(prepared) = &prepared_helper {
+        process.program = prepared.program().to_string_lossy().into_owned();
         process.args = prepared
-            .arguments
+            .arguments()
             .iter()
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
+    }
+    if let Some(prepared) = &prepared_helper {
+        process.env = prepared.environment();
     }
     let credentials = if process.credentials.is_empty() {
         Vec::new()
@@ -1367,9 +1468,9 @@ async fn run_assignment(
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
         output_limit_bytes: Some(
-            prepared_cache
+            prepared_helper
                 .as_ref()
-                .map_or(MAX_ATTEMPT_OUTPUT_BYTES, |cache| cache.output_limit),
+                .map_or(MAX_ATTEMPT_OUTPUT_BYTES, |helper| helper.output_limit()),
         ),
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
@@ -1404,7 +1505,7 @@ async fn run_assignment(
         &request,
         execution_cancellation.clone(),
         &execution_environment.redactions,
-        prepared_cache.as_ref(),
+        prepared_helper.as_ref(),
         on_spawn,
     )
     .await;
@@ -1479,7 +1580,7 @@ async fn run_assignment(
             }
         };
         #[cfg(debug_assertions)]
-        if prepared_cache.is_some()
+        if prepared_helper.is_some()
             && outcome.private_response_accepted == Some(true)
             && std::env::var("MCLOVING_TEST_CRASH_AFTER_HELPER_RECEIPT").as_deref() == Ok("1")
         {
@@ -1492,8 +1593,11 @@ async fn run_assignment(
             Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
             Termination::Exited => WorkOutcome::Failed,
         };
-        let helper_failure =
-            (outcome.private_response_accepted == Some(false)).then_some("cache_response_rejected");
+        let helper_failure = (outcome.private_response_accepted == Some(false)).then(|| {
+            prepared_helper
+                .as_ref()
+                .map_or("helper_response_rejected", PreparedHelper::response_failure)
+        });
         if helper_failure.is_some() && terminal == WorkOutcome::Succeeded {
             terminal = WorkOutcome::Failed;
         }
@@ -2957,6 +3061,7 @@ mod tests {
 
     fn config() -> AgentConfig {
         AgentConfig {
+            input_bindings: None,
             cache_bindings: None,
             agent_id: "agent-1".to_owned(),
             trust_pool: "trusted".to_owned(),
@@ -3011,6 +3116,52 @@ mod tests {
         let mut configured = config();
         configured.cache_bindings = Some(crate::cache::CacheBindings {
             schema_version: "mcloving.agent-cache-bindings/v1".into(),
+            mappings: Vec::new(),
+        });
+        #[cfg(target_os = "linux")]
+        assert!(matches!(
+            validate_assignment(&configured, 4, offer.clone()).unwrap(),
+            AssignmentDisposition::Runnable(_)
+        ));
+        for index in 0..8 {
+            let mut changed = offer.clone();
+            let replacement = "00000000-0000-0000-0000-000000000129".to_owned();
+            match index {
+                0 => changed.organization_id = replacement,
+                1 => changed.project_id = replacement,
+                2 => changed.pipeline_id = replacement,
+                3 => changed.build_id = replacement,
+                4 => changed.node_id = replacement,
+                5 => changed.attempt_id = replacement,
+                6 => changed.fence_token += 1,
+                _ => changed.execution_spec_json.push(b' '),
+            }
+            assert!(
+                validate_assignment(&configured, 4, changed).is_err(),
+                "context field {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_context_substitution_is_rejected_before_runnable_assignment() {
+        let spec=serde_json::to_vec(&json!({"version":4,"steps":[{"kind":"input_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"timeout_seconds":10}]})).unwrap();
+        let mut offer = assignment(&spec);
+        offer.project_id = "00000000-0000-0000-0000-000000000127".to_owned();
+        offer.pipeline_id = "00000000-0000-0000-0000-000000000128".to_owned();
+        let context = InputWorkContext {
+            organization_id: offer.organization_id.clone(),
+            project_id: offer.project_id.clone(),
+            pipeline_id: offer.pipeline_id.clone(),
+            build_id: offer.build_id.clone(),
+            node_id: offer.node_id.clone(),
+            attempt_id: offer.attempt_id.clone(),
+            fence_token: offer.fence_token,
+        };
+        offer.payload_digest = input_assignment_digest(&spec, &context).to_vec();
+        let mut configured = config();
+        configured.input_bindings = Some(crate::input::InputBindings {
+            schema_version: "mcloving.agent-input-bindings/v1".into(),
             mappings: Vec::new(),
         });
         #[cfg(target_os = "linux")]
@@ -4492,20 +4643,20 @@ async fn execute_prepared<F>(
     request: &ExecutionRequest,
     cancellation: CancellationToken,
     redactions: &[Vec<u8>],
-    cache: Option<&crate::cache::PreparedCache>,
+    helper: Option<&PreparedHelper>,
     on_spawn: F,
 ) -> Result<mcloving_agent_runtime::executor::ExecutionOutcome, ExecutionError>
 where
     F: FnOnce(u32) -> Result<(), ExecutionError>,
 {
     #[cfg(target_os = "linux")]
-    if let Some(cache) = cache {
-        let transform = |stdout: &[u8], stderr: &[u8]| cache.transform(stdout, stderr);
+    if let Some(helper) = helper {
+        let transform = |stdout: &[u8], stderr: &[u8]| helper.transform(stdout, stderr);
         return mcloving_agent_runtime::executor::execute_with_spawn_hook_and_private_io(
             request,
             cancellation,
             mcloving_agent_runtime::executor::PrivateExecutionIo {
-                request: &cache.request,
+                request: helper.request(),
                 transform: &transform,
             },
             on_spawn,
@@ -4513,7 +4664,7 @@ where
         .await;
     }
     #[cfg(not(target_os = "linux"))]
-    if cache.is_some() {
+    if helper.is_some() {
         return Err(ExecutionError::InvalidPrivateIo);
     }
     execute_with_spawn_hook_and_redactions(request, cancellation, redactions, on_spawn).await

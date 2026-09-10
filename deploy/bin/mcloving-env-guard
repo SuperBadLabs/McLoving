@@ -499,6 +499,14 @@ if [[ "${service}" == agent ]]; then
     [[ "$(realpath -e -- "${cache_bindings_path}")" == "${cache_bindings_path}" ]] ||
       fail "MCLOVING_AGENT_CACHE_BINDINGS_PATH requires a canonical path without symlink components (${cache_bindings_path})"
   fi
+  contract_into input_bindings_path MCLOVING_AGENT_INPUT_BINDINGS_PATH
+  if [[ -n "${input_bindings_path}" ]]; then
+    input_bindings_metadata="$(stat -Lc '%a %u %h' -- "${input_bindings_path}")"
+    [[ "${input_bindings_metadata}" == "400 ${EUID} 1" ]] ||
+      fail "MCLOVING_AGENT_INPUT_BINDINGS_PATH requires mode 400, service owner and one link (${input_bindings_path})"
+    [[ "$(realpath -e -- "${input_bindings_path}")" == "${input_bindings_path}" ]] ||
+      fail "MCLOVING_AGENT_INPUT_BINDINGS_PATH requires a canonical path without symlink components (${input_bindings_path})"
+  fi
 fi
 
 echo "mcloving-env-guard[${service}]: contract satisfied (${env_file})"

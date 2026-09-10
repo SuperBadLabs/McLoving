@@ -283,6 +283,15 @@ excluded_patterns = [
     r"_SHA256$",                # digest strings pinning a path variable's content
 ]
 excluded_literals = {
+    # The agent synthesizes these only for the sealed input helper from the
+    # validated startup-frozen bindings. They are never read from agent or
+    # controller service contracts; the bindings path is classified above.
+    "MCLOVING_INPUT_ADAPTER_CONFIG": "sealed child env from pinned input binding",
+    "MCLOVING_INPUT_ADAPTER_READ_TOKEN_FILE": "sealed child env from pinned input binding",
+    "MCLOVING_INPUT_ADAPTER_SECRET_MARKERS_FILE": "sealed child env from pinned input binding",
+    "MCLOVING_INPUT_ADAPTER_SIGNING_KEY_FILE": "sealed child env from pinned input binding",
+    "MCLOVING_INPUT_ADAPTER_TEST_MODE": "sealed child loopback flag from pinned input binding",
+
     # Compile-time-only provenance inputs consumed by build.rs and embedded in
     # the binaries. Runtime contract files neither read nor set them.
     "MCLOVING_BUILD_SOURCE_HEAD": "build-time source commit, not a runtime value or path",
@@ -1937,6 +1946,77 @@ for cache_service in controller agent; do
     rm "${cache_path}.link"
   fi
   rm "${cache_env}" "${cache_path}"
+done
+
+# Newly optional input catalogs participate in the same guard and deployed
+# digest inventory authority. Controller catalogs are public to read; agent
+# bindings are immutable private authority. Exercise real guard invocations.
+for input_service in controller agent; do
+  input_path="${home}/input-${input_service}.json"
+  input_env="${home}/input-${input_service}.env"
+  if [[ "${input_service}" == controller ]]; then
+    input_variable=MCLOVING_INPUT_MAPPING_CATALOG
+    input_mode=0644
+  else
+    input_variable=MCLOVING_AGENT_INPUT_BINDINGS_PATH
+    input_mode=0400
+  fi
+  printf '{}' > "${input_path}"
+  chmod "${input_mode}" "${input_path}"
+  cp "${config}/${input_service}.env" "${input_env}"
+  printf '%s=%s\n' "${input_variable}" "${input_path}" >> "${input_env}"
+  chmod 0600 "${input_env}"
+  "${libexec}/helpers/mcloving-env-guard" "${input_service}" "${input_env}" >/dev/null
+  if [[ "${input_service}" == controller ]]; then
+    chmod 0664 "${input_path}"
+  else
+    chmod 0600 "${input_path}"
+  fi
+  if "${libexec}/helpers/mcloving-env-guard" "${input_service}" "${input_env}" \
+    > "${workdir}/logs/guard-input-${input_service}-mode.log" 2>&1; then
+    echo "env guard accepted writable input authority: ${input_variable}" >&2
+    exit 1
+  fi
+  if [[ "${input_service}" == agent ]]; then
+    grep -q "requires mode 400, service owner and one link" \
+      "${workdir}/logs/guard-input-${input_service}-mode.log"
+  else
+    grep -q "mode 664" "${workdir}/logs/guard-input-${input_service}-mode.log"
+  fi
+  chmod "${input_mode}" "${input_path}"
+  mv "${input_path}" "${input_path}.real"
+  ln -s "${input_path}.real" "${input_path}"
+  if "${libexec}/helpers/mcloving-env-guard" "${input_service}" "${input_env}" \
+    > "${workdir}/logs/guard-input-${input_service}-symlink.log" 2>&1; then
+    echo "env guard accepted symlink input authority: ${input_variable}" >&2
+    exit 1
+  fi
+  grep -q "${input_variable} must not be a symlink" \
+    "${workdir}/logs/guard-input-${input_service}-symlink.log"
+  rm "${input_path}"
+  mkfifo "${input_path}"
+  chmod "${input_mode}" "${input_path}"
+  if "${libexec}/helpers/mcloving-env-guard" "${input_service}" "${input_env}" \
+    > "${workdir}/logs/guard-input-${input_service}-fifo.log" 2>&1; then
+    echo "env guard accepted FIFO input authority: ${input_variable}" >&2
+    exit 1
+  fi
+  grep -q "not a regular file: fifo" \
+    "${workdir}/logs/guard-input-${input_service}-fifo.log"
+  rm "${input_path}"
+  mv "${input_path}.real" "${input_path}"
+  if [[ "${input_service}" == agent ]]; then
+    ln "${input_path}" "${input_path}.link"
+    if "${libexec}/helpers/mcloving-env-guard" "${input_service}" "${input_env}" \
+      > "${workdir}/logs/guard-input-agent-hardlink.log" 2>&1; then
+      echo "env guard accepted multiply-linked input bindings" >&2
+      exit 1
+    fi
+    grep -q "requires mode 400, service owner and one link" \
+      "${workdir}/logs/guard-input-agent-hardlink.log"
+    rm "${input_path}.link"
+  fi
+  rm "${input_env}" "${input_path}"
 done
 
 run_with_env() { # ENV_FILE COMMAND...

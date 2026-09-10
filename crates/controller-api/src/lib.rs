@@ -2,6 +2,9 @@
 //! Versioned public HTTP API and its Rust client.
 
 mod cache_intent;
+mod input_intent;
+use input_intent::validate_input_mappings;
+pub use input_intent::{INPUT_MAPPING_CATALOG_V1, InputMappingCatalog, InputMappingRecord};
 mod oidc;
 use cache_intent::validate_cache_mappings;
 pub use cache_intent::{CACHE_MAPPING_CATALOG_V1, CacheMappingCatalog, CacheMappingRecord};
@@ -83,6 +86,7 @@ pub struct ApiState {
     oidc_clients: BTreeMap<(Uuid, Uuid), oidc::OidcClient>,
     connector_mapping_catalog: ConnectorMappingCatalog,
     cache_mapping_catalog: CacheMappingCatalog,
+    input_mapping_catalog: InputMappingCatalog,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -186,6 +190,7 @@ impl ApiState {
             oidc_clients: BTreeMap::new(),
             connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
+            input_mapping_catalog: InputMappingCatalog::deny_all(),
         })
     }
 
@@ -206,6 +211,7 @@ impl ApiState {
             oidc_clients: BTreeMap::new(),
             connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
+            input_mapping_catalog: InputMappingCatalog::deny_all(),
         }
     }
 
@@ -352,6 +358,15 @@ impl ApiState {
             usize::try_from(object_store.quota().max_object_bytes).unwrap_or(usize::MAX);
         self.object_store = Some(object_store);
         self
+    }
+
+    pub fn with_input_mapping_catalog(
+        mut self,
+        catalog: InputMappingCatalog,
+    ) -> Result<Self, ApiError> {
+        catalog.validate()?;
+        self.input_mapping_catalog = catalog;
+        Ok(self)
     }
 
     pub fn with_cache_mapping_catalog(
@@ -913,6 +928,8 @@ pub struct PipelineStagePlan {
     pub connector_intent_steps: usize,
     #[serde(default)]
     pub cache_intent_steps: usize,
+    #[serde(default)]
+    pub input_intent_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2422,6 +2439,14 @@ async fn validate_pipeline(
         request.pipeline_id,
         &headers,
     )?;
+    validate_input_scope_headers(
+        &pipeline,
+        &state.input_mapping_catalog,
+        organization_id,
+        project_id,
+        request.pipeline_id,
+        &headers,
+    )?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     Ok(Json(ValidationResponse {
         valid: true,
@@ -2454,6 +2479,14 @@ async fn plan_pipeline(
         request.pipeline_id,
         &headers,
     )?;
+    validate_input_scope_headers(
+        &pipeline,
+        &state.input_mapping_catalog,
+        organization_id,
+        project_id,
+        request.pipeline_id,
+        &headers,
+    )?;
     Ok(Json(pipeline_plan(&pipeline)?))
 }
 
@@ -2478,6 +2511,14 @@ async fn put_pipeline(
     validate_cache_scope_headers(
         &pipeline,
         &state.cache_mapping_catalog,
+        organization_id,
+        project_id,
+        Some(pipeline_id),
+        &headers,
+    )?;
+    validate_input_scope_headers(
+        &pipeline,
+        &state.input_mapping_catalog,
         organization_id,
         project_id,
         Some(pipeline_id),
@@ -4295,6 +4336,15 @@ async fn admit_pipeline_parameters(
         &required_platform,
         &required_trust_pool,
     )?;
+    validate_input_mappings(
+        &pipeline,
+        &state.input_mapping_catalog,
+        organization_id,
+        project_id,
+        Some(pipeline_id),
+        &required_platform,
+        &required_trust_pool,
+    )?;
     // Revalidated here, not only at ingress. A delivery captured by an earlier
     // release can carry a platform outside the closed set, and every admission
     // path — header submission, claimed processing, and replay — funnels
@@ -4505,6 +4555,33 @@ fn validate_cache_scope_headers(
     )
 }
 
+fn validate_input_scope_headers(
+    pipeline: &PipelineIr,
+    catalog: &InputMappingCatalog,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Option<Uuid>,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    if !pipeline
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.steps)
+        .any(|step| matches!(step, Step::InputIntent(_)))
+    {
+        return Ok(());
+    }
+    validate_input_mappings(
+        pipeline,
+        catalog,
+        organization_id,
+        project_id,
+        pipeline_id,
+        &submission_platform(headers)?,
+        &submission_trust_pool(headers)?,
+    )
+}
+
 fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<String> {
     use mcloving_domain::cache_intent::{CACHE_CAPABILITY, cache_binding_capability};
     let mut required = Vec::new();
@@ -4526,10 +4603,25 @@ fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<Strin
             );
         }
     }
+    for step in &stage.steps {
+        if let Step::InputIntent(input) = step {
+            required.push(mcloving_domain::input_intent::INPUT_CAPABILITY.to_owned());
+            required.push(
+                mcloving_domain::input_intent::input_binding_capability(
+                    &input.intent.mapping_id,
+                    &input.intent.mapping_digest,
+                )
+                .expect("compiled input intent has validated mapping authority"),
+            );
+        }
+    }
     required
 }
 
 fn execution_spec(steps: &[Step]) -> Value {
+    let contains_input_intent = steps
+        .iter()
+        .any(|step| matches!(step, Step::InputIntent(_)));
     let contains_cache_intent = steps
         .iter()
         .any(|step| matches!(step, Step::CacheIntent(_)));
@@ -4547,6 +4639,11 @@ fn execution_spec(steps: &[Step]) -> Value {
                 "env": process.env,
                 "timeout_seconds": process.timeout_seconds,
             }),
+            Step::InputIntent(input) => {
+                let mut value = serde_json::to_value(&input.intent).expect("input intent contains serializable literal fields");
+                value["kind"] = json!("input_intent");
+                value
+            },
             Step::CacheIntent(cache) => {
                 let mut value = serde_json::to_value(&cache.intent).expect("cache intent contains serializable literal fields");
                 value["kind"] = json!("cache_intent");
@@ -4571,7 +4668,7 @@ fn execution_spec(steps: &[Step]) -> Value {
             }),
         })
         .collect::<Vec<_>>();
-    json!({"version": if contains_cache_intent { 3 } else if contains_connector_intent { 2 } else { 1 }, "steps": steps})
+    json!({"version": if contains_input_intent { 4 } else if contains_cache_intent { 3 } else if contains_connector_intent { 2 } else { 1 }, "steps": steps})
 }
 
 fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
@@ -4651,6 +4748,7 @@ fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
                 Step::Process(process) => ("process", process.timeout_seconds),
                 Step::ConnectorIntent(intent) => ("connector-intent", Some(intent.timeout_seconds)),
                 Step::CacheIntent(cache) => ("cache-intent", Some(cache.intent.timeout_seconds)),
+                Step::InputIntent(input) => ("input-intent", Some(input.intent.timeout_seconds)),
             };
             if !matches!(
                 timeout_seconds,
@@ -4702,7 +4800,7 @@ fn validate_connector_mappings(
         .flat_map(|stage| &stage.steps)
         .filter_map(|step| match step {
             Step::ConnectorIntent(intent) => Some(intent),
-            Step::Process(_) | Step::CacheIntent(_) => None,
+            Step::Process(_) | Step::CacheIntent(_) | Step::InputIntent(_) => None,
         })
     {
         let Some(mapping) = catalog
@@ -4843,6 +4941,11 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
                     .steps
                     .iter()
                     .filter(|step| matches!(step, Step::Process(_)))
+                    .count(),
+                input_intent_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::InputIntent(_)))
                     .count(),
                 cache_intent_steps: stage
                     .steps

@@ -23,9 +23,10 @@ use mcloving_agent_protocol::{
     WORK_COMPLETION_SUBSTITUTION_FEATURE, WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{
-    ApiState, CacheMappingCatalog, ConnectorMappingCatalog, InsecureLoopbackPolicy,
-    MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
-    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
+    ApiState, CacheMappingCatalog, ConnectorMappingCatalog, InputMappingCatalog,
+    InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
+    MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
+    OidcClientConfig, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -129,6 +130,7 @@ async fn main() -> Result<()> {
     let worker = EmbeddedWorker::from_environment()?;
     let connector_mapping_catalog = connector_mapping_catalog_from_environment()?;
     let cache_mapping_catalog = cache_mapping_catalog_from_environment()?;
+    let input_mapping_catalog = input_mapping_catalog_from_environment()?;
     validate_effect_mapping_configuration(
         worker.config.effect_plan.as_ref().map(|plan| {
             (
@@ -213,6 +215,11 @@ async fn main() -> Result<()> {
         state = state
             .with_cache_mapping_catalog(catalog)
             .context("configure cache mapping admission catalog")?;
+    }
+    if let Some(catalog) = input_mapping_catalog {
+        state = state
+            .with_input_mapping_catalog(catalog)
+            .context("configure input mapping admission catalog")?;
     }
     if let Some(oidc) = &oidc {
         state = state
@@ -1621,6 +1628,14 @@ async fn try_assign_work(
     {
         assignment.payload_digest = cache_work_assignment_digest(&assignment)?.to_vec();
     }
+    if execution
+        .execution_spec
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(4)
+    {
+        assignment.payload_digest = input_work_assignment_digest(&assignment)?.to_vec();
+    }
     Ok(Some(assignment))
 }
 
@@ -1672,6 +1687,60 @@ fn cache_work_assignment_digest(assignment: &WorkAssignment) -> Result<[u8; 32],
         .validate()
         .map_err(|_| Status::failed_precondition("invalid cache work authority"))?;
     Ok(cache_assignment_digest(
+        &assignment.execution_spec_json,
+        &context,
+    ))
+}
+
+fn input_work_assignment_digest(assignment: &WorkAssignment) -> Result<[u8; 32], Status> {
+    use mcloving_domain::input_intent::{
+        InputIntentSpec, InputWorkContext, input_assignment_digest,
+    };
+    let value: serde_json::Value =
+        mcloving_external_connector::parse_json_no_duplicates(&assignment.execution_spec_json)
+            .map_err(|_| Status::failed_precondition("invalid input execution spec"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Status::failed_precondition("invalid input execution spec"))?;
+    if object.len() != 2 || value["version"].as_u64() != Some(4) {
+        return Err(Status::failed_precondition(
+            "invalid input spec version or fields",
+        ));
+    }
+    let steps = value["steps"]
+        .as_array()
+        .filter(|steps| steps.len() == 1)
+        .ok_or_else(|| Status::failed_precondition("invalid input step count"))?;
+    let mut step = steps[0]
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Status::failed_precondition("invalid input step"))?;
+    if step
+        .remove("kind")
+        .and_then(|kind| kind.as_str().map(str::to_owned))
+        .as_deref()
+        != Some("input_intent")
+    {
+        return Err(Status::failed_precondition("invalid input step kind"));
+    }
+    let intent: InputIntentSpec = serde_json::from_value(serde_json::Value::Object(step))
+        .map_err(|_| Status::failed_precondition("invalid input intent"))?;
+    intent
+        .validate()
+        .map_err(|_| Status::failed_precondition("invalid bounded input intent"))?;
+    let context = InputWorkContext {
+        organization_id: assignment.organization_id.clone(),
+        project_id: assignment.project_id.clone(),
+        pipeline_id: assignment.pipeline_id.clone(),
+        build_id: assignment.build_id.clone(),
+        node_id: assignment.node_id.clone(),
+        attempt_id: assignment.attempt_id.clone(),
+        fence_token: assignment.fence_token,
+    };
+    context
+        .validate()
+        .map_err(|_| Status::failed_precondition("invalid input work authority"))?;
+    Ok(input_assignment_digest(
         &assignment.execution_spec_json,
         &context,
     ))
@@ -2465,6 +2534,81 @@ fn load_cache_mapping_catalog(
     bail!("cache catalog is supported only on Linux controllers")
 }
 
+fn input_mapping_catalog_from_environment() -> Result<Option<InputMappingCatalog>> {
+    let path = match std::env::var("MCLOVING_INPUT_MAPPING_CATALOG") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_INPUT_MAPPING_CATALOG must not be empty"),
+        Err(std::env::VarError::NotPresent) => {
+            if std::env::var_os("MCLOVING_INPUT_MAPPING_CATALOG_SHA256").is_some() {
+                bail!("input catalog digest requires catalog path");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read input mapping catalog path"),
+    };
+    let expected = required("MCLOVING_INPUT_MAPPING_CATALOG_SHA256")?;
+    load_input_mapping_catalog(&path, &expected).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn load_input_mapping_catalog(
+    path: &std::path::Path,
+    expected: &str,
+) -> Result<InputMappingCatalog> {
+    use std::io::Read as _;
+    if !path.is_absolute() || !mcloving_domain::cache_intent::canonical_sha256(expected) {
+        bail!("input catalog needs absolute path and canonical SHA-256");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .context("open pinned input mapping catalog")?;
+    let metadata = file.metadata().context("inspect opened input catalog")?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("input catalog must be bounded regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o022 != 0 {
+            bail!("input catalog must not be writable by group or other users");
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .context("read opened input catalog")?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("input catalog grew beyond bound");
+    }
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        bail!("input catalog digest mismatch");
+    }
+    let catalog: InputMappingCatalog =
+        mcloving_external_connector::parse_json_no_duplicates(&bytes)
+            .context("parse strict input catalog")?;
+    catalog.validate().context("validate input catalog")?;
+    Ok(catalog)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_input_mapping_catalog(
+    _path: &std::path::Path,
+    _expected: &str,
+) -> Result<InputMappingCatalog> {
+    bail!("input catalog is supported only on Linux controllers")
+}
+
 fn connector_mapping_catalog_from_environment() -> Result<Option<ConnectorMappingCatalog>> {
     let path = match std::env::var("MCLOVING_EFFECT_MAPPING_CATALOG") {
         Ok(path) if !path.is_empty() => PathBuf::from(path),
@@ -3049,5 +3193,176 @@ mod cache_intent_tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&path, b"{}").unwrap();
         assert!(load_cache_mapping_catalog(&path, &digest).is_err());
+    }
+}
+
+#[cfg(test)]
+mod input_intent_tests {
+    use super::*;
+    fn assignment() -> WorkAssignment {
+        let id = |v| Uuid::from_u128(v).to_string();
+        WorkAssignment {organization_id:id(1),project_id:id(2),pipeline_id:id(3),build_id:id(4),node_id:id(5),attempt_id:id(6),fence_token:1,execution_spec_json:serde_json::to_vec(&serde_json::json!({"version":4,"steps":[{"kind":"input_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"timeout_seconds":30}]})).unwrap(),payload_digest:Vec::new(),workspace_transfer_json:Vec::new()}
+    }
+    #[test]
+    fn input_wire_digest_requires_complete_authority_and_exact_typed_payload() {
+        let a = assignment();
+        let digest = input_work_assignment_digest(&a).unwrap();
+        for n in 0..7 {
+            let mut changed = a.clone();
+            let replacement = Uuid::from_u128(99).to_string();
+            match n {
+                0 => changed.organization_id = replacement,
+                1 => changed.project_id = replacement,
+                2 => changed.pipeline_id = replacement,
+                3 => changed.build_id = replacement,
+                4 => changed.node_id = replacement,
+                5 => changed.attempt_id = replacement,
+                _ => changed.fence_token += 1,
+            };
+            assert_ne!(digest, input_work_assignment_digest(&changed).unwrap());
+        }
+        let mut missing = a.clone();
+        missing.pipeline_id.clear();
+        assert!(input_work_assignment_digest(&missing).is_err());
+        for (field, value) in [
+            ("kind", serde_json::json!("process")),
+            ("program", serde_json::json!("/bin/true")),
+            ("timeout_seconds", serde_json::json!(61)),
+        ] {
+            let mut changed = a.clone();
+            let mut spec: serde_json::Value =
+                serde_json::from_slice(&changed.execution_spec_json).unwrap();
+            spec["steps"][0][field] = value;
+            changed.execution_spec_json = serde_json::to_vec(&spec).unwrap();
+            assert!(input_work_assignment_digest(&changed).is_err());
+        }
+    }
+    #[test]
+    fn input_wire_rejects_ambiguous_envelopes_and_commits_exact_bytes() {
+        let a = assignment();
+        let value: serde_json::Value = serde_json::from_slice(&a.execution_spec_json).unwrap();
+        for spec in [
+            {
+                let mut v = value.clone();
+                v["version"] = serde_json::json!(3);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["extra"] = serde_json::json!(true);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["steps"] = serde_json::json!([]);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["steps"] = serde_json::json!([v["steps"][0], v["steps"][0]]);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["steps"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("mapping_digest");
+                v
+            },
+        ] {
+            let mut changed = a.clone();
+            changed.execution_spec_json = serde_json::to_vec(&spec).unwrap();
+            assert!(input_work_assignment_digest(&changed).is_err());
+        }
+        let original = String::from_utf8(a.execution_spec_json.clone()).unwrap();
+        for text in [
+            original.replacen("\"version\":4", "\"version\":3,\"version\":4", 1),
+            original.replacen(
+                "\"timeout_seconds\":30",
+                "\"timeout_seconds\":0,\"timeout_seconds\":30",
+                1,
+            ),
+            original.clone() + "{}",
+        ] {
+            let mut changed = a.clone();
+            changed.execution_spec_json = text.into_bytes();
+            assert!(input_work_assignment_digest(&changed).is_err());
+        }
+        let mut spaced = a.clone();
+        spaced.execution_spec_json = serde_json::to_vec_pretty(&value).unwrap();
+        assert_ne!(
+            input_work_assignment_digest(&a).unwrap(),
+            input_work_assignment_digest(&spaced).unwrap()
+        );
+        for field in 0..7 {
+            let mut bad = a.clone();
+            match field {
+                0 => bad.organization_id = Uuid::nil().to_string(),
+                1 => bad.project_id = Uuid::nil().to_string(),
+                2 => bad.pipeline_id = Uuid::nil().to_string(),
+                3 => bad.build_id = Uuid::nil().to_string(),
+                4 => bad.node_id = Uuid::nil().to_string(),
+                5 => bad.attempt_id = Uuid::nil().to_string(),
+                _ => bad.fence_token = 0,
+            };
+            assert!(input_work_assignment_digest(&bad).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_catalog_loader_reads_one_pinned_regular_file_and_refuses_unsafe_paths() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.json");
+        let bytes=serde_json::to_vec(&serde_json::json!({"schema_version":"mcloving.input-mapping-catalog/v1","profile":"contained","generation":1,"mappings":[{"mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"organization_id":Uuid::from_u128(1).to_string(),"project_id":Uuid::from_u128(2).to_string(),"pipeline_id":Uuid::from_u128(3).to_string(),"trust_pool":"contained"}]})).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        load_input_mapping_catalog(&path, &digest).unwrap();
+        assert!(load_input_mapping_catalog(&path, &"0".repeat(64)).is_err());
+        let link = root.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(load_input_mapping_catalog(&link, &digest).is_err());
+        assert!(load_input_mapping_catalog(root.path(), &digest).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(load_input_mapping_catalog(&path, &digest).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(load_input_mapping_catalog(&path, &digest).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_catalog_refuses_fifo_oversize_and_duplicate_json_without_blocking() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog");
+        let fifo = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(fifo.success());
+        assert!(load_input_mapping_catalog(&path, &"a".repeat(64)).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let valid = serde_json::json!({"schema_version":"mcloving.input-mapping-catalog/v1","profile":"fixture","generation":1,"mappings":[{"mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"organization_id":Uuid::from_u128(1),"project_id":Uuid::from_u128(2),"pipeline_id":Uuid::from_u128(3),"trust_pool":"contained"}]});
+        serde_json::from_value::<InputMappingCatalog>(valid.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        let duplicate = serde_json::to_string(&valid).unwrap().replacen(
+            "\"profile\":\"fixture\"",
+            "\"profile\":\"other\",\"profile\":\"fixture\"",
+            1,
+        );
+        for bytes in [vec![b' '; 1024 * 1024 + 1], duplicate.into_bytes()] {
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            assert!(load_input_mapping_catalog(&path, &digest).is_err());
+        }
     }
 }

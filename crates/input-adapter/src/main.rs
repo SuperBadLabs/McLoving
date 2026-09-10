@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use mcloving_input_adapter::{
     AdapterConfig, CaptureRequest, InputAdapter, read_bounded_regular_file,
-    read_private_bounded_regular_file, sha256_file,
+    read_private_bounded_regular_file,
 };
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -41,7 +41,13 @@ async fn run() -> Result<(), ()> {
     let config_bytes = read_bounded_regular_file(&config_path, MAX_CONFIG_BYTES)
         .await
         .map_err(|_| ())?;
-    let config: AdapterConfig = serde_json::from_slice(&config_bytes).map_err(|_| ())?;
+    let config: AdapterConfig =
+        mcloving_input_adapter::parse_json_no_duplicates(&config_bytes).map_err(|_| ())?;
+    match std::env::var("MCLOVING_INPUT_ADAPTER_EXPECTED_CONFIG_SHA256") {
+        Ok(expected) if config.canonical_digest().map_err(|_| ())? == expected => {}
+        Err(std::env::VarError::NotPresent) => {}
+        _ => return Err(()),
+    }
     if config.test_allow_http_loopback
         && std::env::var("MCLOVING_INPUT_ADAPTER_TEST_MODE").as_deref() != Ok("1")
     {
@@ -65,7 +71,7 @@ async fn run() -> Result<(), ()> {
         .filter(|marker| !marker.is_empty())
         .map(<[u8]>::to_vec)
         .collect::<Vec<_>>();
-    let implementation_sha256 = sha256_file(&std::env::current_exe().map_err(|_| ())?)
+    let implementation_sha256 = mcloving_input_adapter::running_implementation_sha256()
         .await
         .map_err(|_| ())?;
     let adapter = InputAdapter::new(
@@ -97,24 +103,25 @@ async fn run() -> Result<(), ()> {
                 return Err(());
             }
         };
-        let response = match serde_json::from_slice::<CaptureRequest>(&line) {
-            Ok(request) => match adapter.capture(&request).await {
-                Ok(receipt) => Output::Success {
-                    ok: true,
-                    receipt: Box::new(receipt),
+        let response =
+            match mcloving_input_adapter::parse_json_no_duplicates::<CaptureRequest>(&line) {
+                Ok(request) => match adapter.capture(&request).await {
+                    Ok(receipt) => Output::Success {
+                        ok: true,
+                        receipt: Box::new(receipt),
+                    },
+                    Err(error) => Output::Failure {
+                        ok: false,
+                        code: error.code(),
+                        message: error.to_string(),
+                    },
                 },
-                Err(error) => Output::Failure {
+                Err(_) => Output::Failure {
                     ok: false,
-                    code: error.code(),
-                    message: error.to_string(),
+                    code: "malformed_request",
+                    message: "capture request is malformed".to_owned(),
                 },
-            },
-            Err(_) => Output::Failure {
-                ok: false,
-                code: "malformed_request",
-                message: "capture request is malformed".to_owned(),
-            },
-        };
+            };
         write_output(&mut output, &response).await?;
     }
     Ok(())

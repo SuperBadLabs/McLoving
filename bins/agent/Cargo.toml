@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+mcloving-input-adapter = { version = "0.0.0", path = "../../crates/input-adapter" }
 mcloving-cache = { version = "0.0.0", path = "../../crates/cache" }
 base64 = "=0.22.1"
 mcloving-agent-protocol = { version = "0.0.0", path = "../../crates/agent-protocol" }

@@ -654,7 +654,49 @@ or production authority. Actual gate and residual-scope details are recorded in
 Residual trust includes the controller/agent, deployment owner, kernel, selected
 cache producer and shared HMAC verifier. Same-UID hostile workload containment
 remains SEC-005, startup catalogs do not promise hot revocation, and cached bytes
-are not restored to a downstream workspace. Four other helper product paths
-remain refused; all five end-to-end gates and normal protected-main verification
+are not restored to a downstream workspace. At the cache review, four other
+helper product paths remained refused; the input successor review follows.
+All five end-to-end gates and normal protected-main verification
 are still required before EXEC-005 can close. This is a partial implementation
 boundary review, not ticket closure or production qualification.
+
+## EXEC-005 input capture integration review, ticket ACTIVE
+
+The bounded input contract is `docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
+TM-008/TM-026 are reviewed for closed literal input intents, canonical IR 1.5
+and envelope 4. Default-deny startup catalogs bind exact tenant/project/pipeline,
+mapping digest, Linux platform and trust pool across submission routes. Exact
+mapping capabilities prevent incompatible same-pool agents from consuming an
+otherwise eligible attempt; agent-side checks remain mandatory.
+
+TM-012/TM-033 are reviewed for operator-owned query,
+cursor, endpoint, public confidentiality, grant and immutable configuration.
+Provider tokens remain helper-owned. Pure verification creates no adapter,
+network client or spool. The helper checks the same parsed config pin before
+credential/state creation; sealed execution hashes the actual running image.
+Special-file access is bounded, nonblocking and checked on the opened file.
+
+TM-005/TM-007/TM-011 are reviewed for authoritative assignment hashing,
+original durable acceptance time, deterministic capture UUIDv8 and full-digest
+audit lineage. Expiry uses checked arithmetic capped by grant expiry; recovery
+cannot mint fresh identity or time. Closed cache/input dispatch retains private
+IO, spawn journaling, lease renewal and containment. Pure receipt verification
+authenticates the full request, scope, configuration, schema/content, cursor,
+provenance, grant, confidentiality and observed timing before public completion.
+Raw helper output and provider contents do not enter public attempt spools.
+Unresolved post-capture recovery parks/refuses without blind redispatch;
+terminal replay remains a distinct durable-result path.
+
+Review found and corrected a non-Unicode optional config pin being ignored,
+general symlink refusal blocking `/proc/self/exe` hashing, and missing completion
+deadline checks. Focused and actual-product verification receipts are tracked
+in `docs/evidence/EXEC-005_SECURITY_REVIEW.md`; source review alone earns no gate.
+The counted provider, native receipt/journal linkage, private-output checks and
+both crash windows require real API/controller/remote-agent/helper execution.
+
+TM-014/TM-051 retain existing artifact and effect-authority semantics: captured
+values do not feed downstream workspaces or branching, and no production grant
+is added. Controller/agent, deployment owner, kernel, producer and shared HMAC
+verifier remain trusted. Same-UID workload isolation remains SEC-005; hot
+revocation, generalized input consumption, other helper integrations, release
+qualification and JCOMP-003 recertification are unearned. EXEC-005 remains ACTIVE.

@@ -1,11 +1,15 @@
-# EXEC-005 security review — ACTIVE cache product slice
+# EXEC-005 security review — ACTIVE cache and input product slices
 
-EXEC-005 is ACTIVE. This receipt records review of a bounded Linux cache
-publish/read integration; it does not close the ticket. SCM acquisition,
-dependency resolution, live-input capture and dynamic provisioning remain
-unwired. General cache-to-workspace restoration is also unimplemented. All five
-actual helper product gates and normal protected-main verification remain
-closure requirements; no canary, cutover or production authority is granted.
+EXEC-005 is ACTIVE. This receipt records bounded Linux cache publish/read and
+input-capture integration work; it does not close the ticket. SCM acquisition,
+dependency resolution and dynamic provisioning remain unwired. General
+cache-to-workspace restoration and downstream input-value use remain
+unimplemented. All five actual helper product gates and normal protected-main
+verification remain closure requirements; no canary, cutover or production
+authority is granted.
+
+The cache review below retains its historical findings. Input implementation,
+review and verification are recorded separately at the end of this receipt.
 
 ## Boundary and independent review
 
@@ -132,3 +136,75 @@ recertification gates; it does not extend the frozen JCOMP-003 equivalence claim
 The dependency full-request provenance producer and provisioner lifecycle are
 separate unresolved integration obligations, not reasons to weaken their
 standalone contracts.
+
+## Input successor review and verification
+
+The successor contract is `docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
+Independent domain/runtime review and chief review cover default-deny scoped
+admission, exact scheduling eligibility, IR 1.5/envelope 4, deterministic UUIDv8
+and original durable acceptance time, same-parsed configuration custody and
+pure verification without provider-token access or adapter construction. The
+chief separately reviewed the actual submitted-job harness and its independent
+request recomputation, native HMAC authentication, private-output scans and
+crash observations. Qwen assisted only with extracting a design checklist;
+its output was checked against the plans and is not verification evidence.
+
+Review corrected three implementation defects before publication: an optional
+expected-config environment pin initially ignored non-Unicode values; the
+general symlink-refusing executable hasher could not open `/proc/self/exe`;
+and receipt verification checked capture time but omitted completion-time
+expiry checks. Present malformed config pins now refuse startup before
+credential/state access. A separate bounded opened-image reader deliberately
+follows the kernel self-image link while general file readers remain no-follow
+and nonblocking. Pure verification now checks completion against request,
+grant and native publication deadlines, in addition to source freshness and
+capture timing.
+
+The first actual product run failed in the independent audit observer because
+it used standard Base64 for a native URL-safe, unpadded signature. That failed
+run earned no positive gate. The corrected gate passed, then a strengthened
+run independently observed the real running helper's memfd image digest and
+all four immutable seals before releasing the counted provider response. The
+strengthened local run passed one comprehensive test in 14.50 seconds. Its
+scope includes real API save/submit/replay, incompatible same-pool agent
+exclusion, exact provider GET/query/token/grant identity, zero provider writes,
+native signed receipt/journal/full-request linkage, an exact six-field public
+summary and private payload/key/token/marker/cursor/provenance/hash absence.
+The final strengthened run passed in 16.92 seconds and separately proved
+ineligibility for both a different mapping ID and the same ID with a different
+mapping digest, retaining full positive linkage and privacy checks for each.
+
+Negative product fixtures reject unknown or mismatched mappings and client
+authority overrides before queueing; expired configured grants and unapproved
+operator queries fail before provider access. Actual provider responses cover
+wrong cursor, stale/future observation, secret confidentiality, raw/escaped
+secret markers, duplicate/trailing JSON and wrong schema. Configuration, key,
+token, marker and executable substitutions cannot produce successful work or
+downstream execution. These tests use the real sealed helper, not a fake
+positive implementation.
+
+The real post-helper/pre-result crash preserves native receipt count, full
+assignment digest, capture ID and original journal acceptance time. Restart
+observes the named parked-recovery refusal without another provider read or a
+successful terminal inference. A separate fresh fixture exercises the
+terminal-commit crash and proves one durable terminal replay without recapture.
+No fixture clears the unresolved journal to obtain replay success.
+
+Focused producer and agent tests additionally bind every signed authority field,
+request/content commitment, confidentiality and timing. Whole-cache product
+regression and private-IO suites remain required because executable/file custody
+is shared. Local Foundation, protected PR checks and exact-main Foundation/native
+Windows results must be observed on the final candidate; the local product
+observations above do not substitute for those gates. EXEC-005 remains ACTIVE
+regardless of this slice's publication, until all helper integrations earn their
+own required evidence.
+
+Focused local receipts record 25 adapter tests, 77 agent unit tests plus the
+subsequently added version-4 context mutation test, four private-IO tests and
+the durable acceptance/reopen timestamp test passing, with final all-target
+agent/adapter Clippy clean. Initial sandbox socket refusals and two new fixtures
+that inherited internal confidentiality were corrected or rerun under the proper
+test environment; they are not counted as passing evidence. A Linux-hosted
+Windows cross-check could not build its C dependency because MinGW GCC was
+missing. This is an unavailable local check, not a Windows pass or a waiver of
+the required native Windows gate.

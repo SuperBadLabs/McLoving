@@ -1337,6 +1337,7 @@ dependencies = [
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-domain",
+ "mcloving-input-adapter",
  "mcloving-pipeline-ir",
  "nix",
  "serde",

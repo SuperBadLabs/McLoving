@@ -1486,3 +1486,109 @@ impl RouteCase {
         self
     }
 }
+
+#[tokio::test]
+async fn input_validate_plan_and_save_enforce_pipeline_scope_before_database_io() {
+    use mcloving_controller_api::{
+        INPUT_MAPPING_CATALOG_V1, InputMappingCatalog, InputMappingRecord,
+    };
+    let organization_id = Uuid::from_u128(1);
+    let project_id = Uuid::from_u128(2);
+    let pipeline_id = Uuid::from_u128(3);
+    let principal = Principal {
+        subject: "service:input-admission".into(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: [ServiceScope::ProjectAdmin].into_iter().collect(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let state = ApiState::new(Store::new(pool), TOKEN, principal).unwrap();
+    let catalog = InputMappingCatalog {
+        schema_version: INPUT_MAPPING_CATALOG_V1.into(),
+        profile: "fixture".into(),
+        generation: 1,
+        mappings: vec![InputMappingRecord {
+            mapping_id: "fixture".into(),
+            mapping_digest: format!("sha256:{}", "a".repeat(64)),
+            organization_id,
+            project_id,
+            pipeline_id,
+            trust_pool: "contained".into(),
+        }],
+    };
+    let denied = router(state.clone());
+    let allowed = router(state.with_input_mapping_catalog(catalog).unwrap());
+    let source = format!(
+        "version: 1\nname: input\nstages:\n  - id: input\n    name: Input\n    steps:\n      - input_intent:\n          mapping_id: fixture\n          mapping_digest: sha256:{}\n          timeout_seconds: 30\n",
+        "a".repeat(64)
+    );
+    for endpoint in ["validate", "plan"] {
+        let path = format!(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{endpoint}"
+        );
+        for (app, scope, status) in [
+            (
+                denied.clone(),
+                Some(pipeline_id),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (allowed.clone(), None, StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                allowed.clone(),
+                Some(Uuid::from_u128(4)),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (allowed.clone(), Some(pipeline_id), StatusCode::OK),
+        ] {
+            let response = app
+                .oneshot(
+                    Request::post(&path)
+                        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(PLATFORM_HEADER, "linux")
+                        .header(TRUST_POOL_HEADER, "contained")
+                        .body(Body::from(
+                            serde_json::to_vec(&json!({"source":source,"pipeline_id":scope}))
+                                .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{endpoint} scope {scope:?}");
+            if status != StatusCode::OK {
+                let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                    "input_mapping_denied"
+                );
+            }
+        }
+    }
+    // Save takes the authoritative pipeline identity from its path. The wrong
+    // path must refuse before trying the intentionally unavailable database.
+    let response = allowed
+        .oneshot(
+            Request::put(format!(
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{}",
+                Uuid::from_u128(4)
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::IF_MATCH, "\"0\"")
+            .header(PLATFORM_HEADER, "linux")
+            .header(TRUST_POOL_HEADER, "contained")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"slug":"input","source":source})).unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
