@@ -30,8 +30,13 @@ and frozen at startup. Every validation, plan, save, submission and saved-replay
 checks scope and the exact mapping. Validate/plan requests containing a cache
 intent must supply `pipeline_id`; saved pipeline and build paths use their
 authoritative identities. Unsupported Windows and mixed/unbounded forms are
-refused before queueing. Nodes require `sealed-cache-v1` in the exact allowed
-trust pool; only a Linux agent with configured cache bindings advertises it.
+refused before queueing. Nodes require `sealed-cache-v1` and a domain-separated
+capability digest binding the exact mapping id, full mapping digest and operation
+in the allowed trust pool. Linux agents advertise those exact capabilities only
+for their configured operations and matching pool. A same-pool agent with a
+different mapping, digest or operation cannot claim the attempt; the generic
+protocol capability alone is insufficient. Agent-side authority checks remain
+mandatory after scheduling.
 Catalogs do not promise hot revocation: changing them requires service restart.
 
 The CLI accepts `validate pipeline.yaml --pipeline-id <uuid>` and

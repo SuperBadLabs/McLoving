@@ -627,7 +627,11 @@ operation/key/content binding is checked. Conflict/corruption never imply succes
 
 TM-007 and TM-011 are reviewed for the new private IO path: existing mTLS,
 capability/pool matching, lease renewal/reserve, process identity journaling and
-whole-group cleanup remain mandatory. Concurrent bounded input/output avoids
+whole-group cleanup remain mandatory. Scheduling prevents incompatible claims
+through exact mapping/digest/operation capabilities in
+addition to the generic protocol and pool requirements. The actual mixed-agent
+gate requires mismatched agents to leave the attempt unclaimed before a matching
+agent completes it. Concurrent bounded input/output avoids
 pipe deadlock; no request precedes durable spawn journaling. Raw output remains
 memory-only until containment and successful protocol verification; failure,
 overflow or incomplete input emits no raw spool. Actual post-helper/pre-result

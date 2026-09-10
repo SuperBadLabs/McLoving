@@ -46,6 +46,32 @@ pub fn canonical_mapping_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// Exact scheduling eligibility, independent of the broader protocol capability.
+pub fn cache_binding_capability(
+    mapping_id: &str,
+    mapping_digest: &str,
+    operation: CacheOperation,
+) -> Result<String, CacheIntentError> {
+    if !canonical_mapping_id(mapping_id)
+        || !mapping_digest
+            .strip_prefix("sha256:")
+            .is_some_and(canonical_sha256)
+    {
+        return Err(CacheIntentError("mapping capability identity"));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"mcloving.cache-binding-capability/v1\0");
+    for field in [mapping_id.as_bytes(), mapping_digest.as_bytes()] {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field);
+    }
+    hash.update([match operation {
+        CacheOperation::Read => 1,
+        CacheOperation::Publish => 2,
+    }]);
+    Ok(format!("sealed-cache-binding-v1-{:x}", hash.finalize()))
+}
+
 impl CacheIntentSpec {
     pub fn validate(&self) -> Result<(), CacheIntentError> {
         if !canonical_mapping_id(&self.mapping_id) {
@@ -152,6 +178,32 @@ mod tests {
             content_base64: Some(STANDARD.encode(b"public fixture")),
             timeout_seconds: 30,
         }
+    }
+    #[test]
+    fn scheduling_capability_binds_mapping_digest_and_operation() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let original = cache_binding_capability("fixture", &digest, CacheOperation::Read).unwrap();
+        assert_eq!(original.len(), "sealed-cache-binding-v1-".len() + 64);
+        assert_ne!(original, CACHE_CAPABILITY);
+        assert_ne!(
+            original,
+            cache_binding_capability("other", &digest, CacheOperation::Read).unwrap()
+        );
+        assert_ne!(
+            original,
+            cache_binding_capability(
+                "fixture",
+                &format!("sha256:{}", "b".repeat(64)),
+                CacheOperation::Read
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            original,
+            cache_binding_capability("fixture", &digest, CacheOperation::Publish).unwrap()
+        );
+        assert!(cache_binding_capability("", &digest, CacheOperation::Read).is_err());
+        assert!(cache_binding_capability("fixture", "malformed", CacheOperation::Read).is_err());
     }
     #[test]
     fn bounded_literal_contract_refuses_ambiguity_and_authority_fields() {

@@ -61,6 +61,32 @@ fn denied() -> AgentError {
     AgentError::InvalidConfig("sealed cache deployment binding")
 }
 
+pub(crate) fn scheduling_capabilities(config: &AgentConfig) -> Result<Vec<String>, AgentError> {
+    let mut capabilities = BTreeSet::new();
+    if cfg!(target_os = "linux")
+        && let Some(bindings) = &config.cache_bindings
+    {
+        capabilities.insert(mcloving_domain::cache_intent::CACHE_CAPABILITY.to_owned());
+        for binding in &bindings.mappings {
+            if binding.trust_pool != config.trust_pool {
+                continue;
+            }
+            let digest = binding.mapping_digest()?;
+            for operation in &binding.allowed_operations {
+                capabilities.insert(
+                    mcloving_domain::cache_intent::cache_binding_capability(
+                        &binding.mapping_id,
+                        &digest,
+                        *operation,
+                    )
+                    .map_err(|_| denied())?,
+                );
+            }
+        }
+    }
+    Ok(capabilities.into_iter().collect())
+}
+
 pub fn load_bindings(path: &Path, expected_sha256: &str) -> Result<CacheBindings, AgentError> {
     let bytes = read_private(path, MAX_FRAME_BYTES as usize, true)?;
     if !canonical_sha256(expected_sha256) || hex(&Sha256::digest(&bytes)) != expected_sha256 {

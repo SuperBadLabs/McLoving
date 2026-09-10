@@ -121,7 +121,9 @@ pub(super) fn validate_cache_mappings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcloving_domain::cache_intent::{CACHE_CAPABILITY, CacheIntentSpec};
+    use mcloving_domain::cache_intent::{
+        CACHE_CAPABILITY, CacheIntentSpec, cache_binding_capability,
+    };
     fn catalog() -> CacheMappingCatalog {
         CacheMappingCatalog {
             schema_version: CACHE_MAPPING_CATALOG_V1.into(),
@@ -220,9 +222,82 @@ mod tests {
             .unwrap();
         assert_eq!(
             super::super::stage_required_capabilities(&p.stages[0]),
-            vec![CACHE_CAPABILITY.to_owned()]
+            vec![
+                CACHE_CAPABILITY.to_owned(),
+                cache_binding_capability(
+                    "fixture",
+                    &format!("sha256:{}", "a".repeat(64)),
+                    CacheOperation::Read
+                )
+                .unwrap(),
+            ]
         );
     }
+    #[test]
+    fn cache_scheduling_requires_exact_mapping_digest_and_operation_support() {
+        let p = pipeline();
+        let required = super::super::stage_required_capabilities(&p.stages[0]);
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let token = |mapping: &str, digest: &str, operation| {
+            cache_binding_capability(mapping, digest, operation).unwrap()
+        };
+        // These agents share platform, trust pool and generic cache support.
+        // Only the exact mapping/digest/operation may satisfy the DAG's
+        // existing all-required-capabilities scheduling predicate.
+        for advertised in [
+            vec![CACHE_CAPABILITY.to_owned()],
+            vec![
+                CACHE_CAPABILITY.to_owned(),
+                token("other", &digest, CacheOperation::Read),
+            ],
+            vec![
+                CACHE_CAPABILITY.to_owned(),
+                token(
+                    "fixture",
+                    &format!("sha256:{}", "b".repeat(64)),
+                    CacheOperation::Read,
+                ),
+            ],
+            vec![
+                CACHE_CAPABILITY.to_owned(),
+                token("fixture", &digest, CacheOperation::Publish),
+            ],
+        ] {
+            assert!(
+                !required
+                    .iter()
+                    .all(|capability| advertised.contains(capability))
+            );
+        }
+        let capable = [
+            CACHE_CAPABILITY.to_owned(),
+            token("fixture", &digest, CacheOperation::Read),
+        ];
+        assert!(
+            required
+                .iter()
+                .all(|capability| capable.contains(capability))
+        );
+        let mut publishing = p.stages[0].clone();
+        let Step::CacheIntent(cache) = &mut publishing.steps[0] else {
+            panic!("cache fixture")
+        };
+        cache.intent.operation = CacheOperation::Publish;
+        cache.intent.content_base64 = Some(String::new());
+        cache.intent.validate().unwrap();
+        let publish_required = super::super::stage_required_capabilities(&publishing);
+        assert_eq!(publish_required[0], CACHE_CAPABILITY);
+        assert_eq!(
+            publish_required[1],
+            token("fixture", &digest, CacheOperation::Publish)
+        );
+        assert!(
+            !publish_required
+                .iter()
+                .all(|capability| capable.contains(capability))
+        );
+    }
+
     #[test]
     fn noncache_validation_preserves_legacy_header_behavior() {
         let p=super::super::compile_source_with_parameters("version: 1\nname: process\nstages:\n  - id: run\n    name: Run\n    steps:\n      - process:\n          program: /bin/true\n",Default::default()).unwrap();

@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 const TOKEN: &str = "contained-cache-product-test-token";
 const AGENT: &str = "cache-product-agent";
+const OTHER_AGENT: &str = "cache-product-ineligible-agent";
 const CONTENT: &[u8] = b"distinctive-cache-content-not-public-result-1957";
 const RECEIPT_KEY: &[u8] = b"synthetic-cache-fixture-receipt-key-32-bytes";
 
@@ -33,6 +34,8 @@ struct Harness {
     revision: i64,
     binding: CacheBinding,
     tls: MtlsFiles,
+    other_tls: MtlsFiles,
+    other_agent: Option<Child>,
     agent_port: u16,
     controller: Child,
     agent: Option<Child>,
@@ -152,6 +155,7 @@ impl Harness {
         let catalog_path = root.path().join("catalog.json");
         write_private(&catalog_path, &serde_json::to_vec(&catalog).unwrap(), 0o400);
         let tls = create_mtls(root.path(), org, AGENT);
+        let other_tls = create_additional_agent(root.path(), &tls, org);
         let api_port = free_port();
         let mut agent_port = free_port();
         while agent_port == api_port {
@@ -213,6 +217,8 @@ impl Harness {
             revision: 0,
             binding,
             tls,
+            other_tls,
+            other_agent: None,
             agent_port,
             controller,
             agent: None,
@@ -434,6 +440,9 @@ print(json.dumps(result))"#;
     }
     async fn finish(mut self) {
         self.stop_agent().await;
+        if let Some(mut agent) = self.other_agent.take() {
+            stop(&mut agent).await;
+        }
         stop(&mut self.controller).await;
     }
 }
@@ -444,6 +453,7 @@ impl Drop for Harness {
         for child in self
             .agent
             .iter_mut()
+            .chain(self.other_agent.iter_mut())
             .chain(std::iter::once(&mut self.controller))
         {
             if child.try_wait().ok().flatten().is_none() {
@@ -467,6 +477,8 @@ impl Drop for Harness {
                 "agent-errors.log",
                 "controller.log",
                 "controller-errors.log",
+                "other-agent.log",
+                "other-agent-errors.log",
             ] {
                 let source = self.root.path().join(name);
                 if source.is_file() {
@@ -516,6 +528,115 @@ fn assert_denied<T>(result: Result<T, ClientError>, codes: &[&str]) {
     }
 }
 
+async fn mixed_agent_mapping_eligibility(database: &str) {
+    let mut h = Harness::new(database).await;
+    let cache_source = h.source(&[("read", "eligibility", None)]);
+    h.save(cache_source).await;
+    let cache_build = h.submit("eligibility-cache-first").await;
+    let before_agent: Vec<(Uuid, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT a.id,a.status,a.lease_owner,a.fence FROM attempts a JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id WHERE a.organization_id=$1 AND n.build_id=$2",
+    ).bind(h.org).bind(cache_build).fetch_all(&h.pool).await.unwrap();
+    assert_eq!(before_agent.len(), 1);
+    assert_eq!(before_agent[0].1, "queued");
+    assert!(before_agent[0].2.is_none());
+    assert_eq!(before_agent[0].3, 0);
+    // Queue a real ordinary job AFTER cache. Its completed attempt proves the
+    // mismatched agent actually polled/claimed work while cache stayed queued.
+    h.save("version: 1\nname: barrier\nstages:\n  - id: barrier\n    name: Barrier\n    steps:\n      - process:\n          program: /bin/true\n          timeout_seconds: 30\n".to_owned()).await;
+    let barrier = h.submit("eligibility-process-barrier").await;
+    let mut wrong = h.binding.clone();
+    wrong.mapping_id = "disjoint-cache".into();
+    let bindings = h.root.path().join("other-bindings.json");
+    write_private(
+        &bindings,
+        &serde_json::to_vec(&CacheBindings {
+            schema_version: "mcloving.agent-cache-bindings/v1".into(),
+            mappings: vec![wrong],
+        })
+        .unwrap(),
+        0o400,
+    );
+    let workspace = h.root.path().join("other-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    h.other_agent = Some(
+        agent_command(
+            OTHER_AGENT,
+            h.org,
+            h.agent_port,
+            &h.other_tls,
+            &h.root.path().join("other-agent.db"),
+            &workspace,
+        )
+        .env("MCLOVING_AGENT_CACHE_BINDINGS_PATH", &bindings)
+        .env(
+            "MCLOVING_AGENT_CACHE_BINDINGS_SHA256",
+            digest(&std::fs::read(&bindings).unwrap()),
+        )
+        .stdout(std::fs::File::create(h.root.path().join("other-agent.log")).unwrap())
+        .stderr(std::fs::File::create(h.root.path().join("other-agent-errors.log")).unwrap())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap(),
+    );
+    assert_eq!(h.terminal(barrier).await, "succeeded");
+    let owner: String = sqlx::query_scalar("SELECT a.lease_owner FROM attempts a JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id WHERE a.organization_id=$1 AND n.build_id=$2 AND a.status='succeeded'")
+        .bind(h.org).bind(barrier).fetch_one(&h.pool).await.unwrap();
+    assert_eq!(
+        owner, OTHER_AGENT,
+        "ineligible agent must actually complete scheduler barrier"
+    );
+    let queued: Vec<(Uuid,String,Option<String>,i64)> = sqlx::query_as("SELECT a.id,a.status,a.lease_owner,a.fence FROM attempts a JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id WHERE a.organization_id=$1 AND n.build_id=$2")
+        .bind(h.org).bind(cache_build).fetch_all(&h.pool).await.unwrap();
+    assert_eq!(
+        queued.len(),
+        1,
+        "only original admitted queued attempt exists"
+    );
+    assert_eq!(
+        queued, before_agent,
+        "real ineligible polling leaves original cache attempt untouched"
+    );
+    assert_eq!(queued[0].1, "queued");
+    assert!(
+        queued[0].2.is_none(),
+        "mismatched agent must never claim cache"
+    );
+    assert_eq!(queued[0].3, 0);
+    assert!(
+        h.audit().is_empty(),
+        "ineligible agent performs no cache operation"
+    );
+    let other_attempts = python_json(
+        "import sqlite3,sys,json,pathlib\nc=sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)\nprint(json.dumps([r[0] for r in c.execute('SELECT attempt_id FROM attempts')]))",
+        &[&h.root.path().join("other-agent.db")],
+    );
+    assert!(
+        !other_attempts
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str() == Some(&queued[0].0.to_string())),
+        "cache assignment never reaches ineligible journal"
+    );
+    h.start_agent(None);
+    assert_eq!(h.terminal(cache_build).await, "succeeded");
+    assert!(
+        h.other_agent
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none(),
+        "ineligible agent remains live in same pool"
+    );
+    let claimed: (Uuid,String) = sqlx::query_as("SELECT a.id,a.lease_owner FROM attempts a JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id WHERE a.organization_id=$1 AND n.build_id=$2 AND a.status='succeeded'")
+        .bind(h.org).bind(cache_build).fetch_one(&h.pool).await.unwrap();
+    assert_eq!(claimed, (queued[0].0, AGENT.to_owned()));
+    assert_eq!(h.audit().len(), 1);
+    assert_eq!(h.summaries(cache_build).await[0]["outcome"], "miss");
+    h.finish().await;
+}
+
 #[tokio::test]
 async fn submitted_cache_jobs_execute_real_helper_without_authority_or_output_bypass() {
     let Ok(database) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
@@ -524,6 +645,7 @@ async fn submitted_cache_jobs_execute_real_helper_without_authority_or_output_by
         );
         return;
     };
+    mixed_agent_mapping_eligibility(&database).await;
     let mut h = Harness::new(&database).await;
     let source = h.source(&[
         ("read", "main", None),
@@ -1016,6 +1138,62 @@ fn create_mtls(root: &Path, organization_id: Uuid, agent_id: &str) -> MtlsFiles 
         agent_certificate,
         agent_key,
         bindings,
+    }
+}
+
+fn create_additional_agent(root: &Path, tls: &MtlsFiles, organization: Uuid) -> MtlsFiles {
+    use std::io::Write as _;
+    let key = root.join("other-agent-key.pem");
+    let csr = root.join("other-agent.csr");
+    let certificate = root.join("other-agent.pem");
+    let extensions = root.join("other-agent.ext");
+    std::fs::write(&extensions, "extendedKeyUsage=clientAuth\n").unwrap();
+    openssl([
+        "req",
+        "-new",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-subj",
+        &format!("/CN={OTHER_AGENT}"),
+        "-keyout",
+        path(&key),
+        "-out",
+        path(&csr),
+    ]);
+    sign(
+        &csr,
+        &certificate,
+        &extensions,
+        &tls.ca_certificate,
+        &root.join("ca-key.pem"),
+    );
+    let der = root.join("other-agent.der");
+    openssl([
+        "x509",
+        "-in",
+        path(&certificate),
+        "-outform",
+        "DER",
+        "-out",
+        path(&der),
+    ]);
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&tls.bindings)
+            .unwrap(),
+        "{} {OTHER_AGENT} trusted-linux {organization}",
+        digest(&std::fs::read(der).unwrap())
+    )
+    .unwrap();
+    MtlsFiles {
+        ca_certificate: tls.ca_certificate.clone(),
+        server_certificate: tls.server_certificate.clone(),
+        server_key: tls.server_key.clone(),
+        agent_certificate: certificate,
+        agent_key: key,
+        bindings: tls.bindings.clone(),
     }
 }
 

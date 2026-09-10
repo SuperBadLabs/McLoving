@@ -528,9 +528,7 @@ async fn open_session(
             trust_pool: config.trust_pool.clone(),
             capabilities: {
                 let mut values = session_capabilities();
-                if config.cache_bindings.is_some() && cfg!(target_os = "linux") {
-                    values.push(mcloving_domain::cache_intent::CACHE_CAPABILITY.to_owned());
-                }
+                values.extend(cache::scheduling_capabilities(config)?);
                 values
             },
         };

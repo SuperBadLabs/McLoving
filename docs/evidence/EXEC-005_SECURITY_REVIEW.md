@@ -47,6 +47,19 @@ private-response refusal and empty output before timing. Runtime timeouts and
 containment behavior are unchanged; the hostile helper still has a 30-second
 lifetime. Final candidate Foundation verification must pass independently.
 
+A further external review found that a generic cache capability let an agent
+with different configured mappings in the same pool claim and terminally refuse
+an otherwise authorized one-attempt job. Scheduling now requires an additional
+domain-separated capability binding the exact mapping id, full mapping digest
+and operation; agents advertise only their configured operation/pool bindings.
+This prevents incompatible assignment before the unchanged agent authority
+checks. The revised actual product gate passed one comprehensive test in 9.58
+seconds: a same-pool agent with a disjoint mapping completed a process barrier
+while leaving the original cache attempt unclaimed, with no cache audit or
+ineligible journal entry. The matching agent then completed that same attempt
+while the other agent remained live. Focused capability tests additionally
+cover mapping-digest and operation mismatches.
+
 ## Verification scope
 
 Focused verification covers agent scope/payload mutations, sealed original-path

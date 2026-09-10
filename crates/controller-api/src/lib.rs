@@ -4505,15 +4505,27 @@ fn validate_cache_scope_headers(
 }
 
 fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<String> {
-    if stage
-        .steps
-        .iter()
-        .any(|step| matches!(step, Step::CacheIntent(_)))
-    {
-        vec![mcloving_domain::cache_intent::CACHE_CAPABILITY.to_owned()]
-    } else {
-        Vec::new()
+    use mcloving_domain::cache_intent::{CACHE_CAPABILITY, cache_binding_capability};
+    let mut required = Vec::new();
+    for step in &stage.steps {
+        if let Step::CacheIntent(cache) = step {
+            if required.is_empty() {
+                required.push(CACHE_CAPABILITY.to_owned());
+            }
+            // Admission has validated the typed IR and its semantic digest.
+            // Never omit the binding requirement on a derivation failure:
+            // generic cache support alone cannot authorize this mapping/op.
+            required.push(
+                cache_binding_capability(
+                    &cache.intent.mapping_id,
+                    &cache.intent.mapping_digest,
+                    cache.intent.operation,
+                )
+                .expect("compiled cache intent has validated mapping authority"),
+            );
+        }
     }
+    required
 }
 
 fn execution_spec(steps: &[Step]) -> Value {
