@@ -68,6 +68,19 @@ Actual HTTP tests cover default Linux, custom-pool Linux, explicit Windows
 transport, pipeline scope, apply revision/slug/parameters and malformed platform
 refusal. Windows transport coverage does not grant Windows cache admission.
 
+Native Windows verification later returned the expected cancellation outcome
+but failed a separate PowerShell numeric-PID disappearance probe. Its output
+did not distinguish an original surviving process from PID reuse or observer
+failure; this differs from the earlier pre-PID startup timeout and its cause
+remains unproven. Three equivalent probes now hold a read-only native process
+handle obtained while the original process is alive, then require that same
+handle to be signaled with the termination exit code after execution. The
+observer is feature-gated test support in the existing Win32 FFI capsule,
+enabled by a Windows-only development dependency. It cannot terminate or
+modify a process. Production Job Object creation, termination and empty-job
+verification are unchanged. Cross-compilation checks cover the observer with
+the feature on and off; actual native runtime verification remains required.
+
 ## Verification scope
 
 Focused verification covers agent scope/payload mutations, sealed original-path
