@@ -1685,6 +1685,11 @@ async fn run_assignment(
                 .cloned()
                 .collect::<Vec<_>>();
             let execution_environment = execution_environment(process.env, step_credentials)?;
+            // Journaled before the spawn so recovery reaps exactly the
+            // container this step launched, and only when it launched one.
+            let step_container = container_runtime
+                .as_ref()
+                .map(|_| crate::container::container_name(&attempt, ordinal));
             if multi_step {
                 // Durable before the spawn: a crash anywhere after this point
                 // names this step as interrupted, because the journal cannot
@@ -1695,6 +1700,7 @@ async fn run_assignment(
                     fence,
                     session_epoch,
                     ordinal,
+                    step_container.as_deref(),
                 )?;
             }
             let request = ExecutionRequest {
@@ -1707,13 +1713,13 @@ async fn run_assignment(
                     None
                 },
                 step_ordinal: multi_step.then_some(ordinal),
-                container: container_runtime.as_ref().map(|(runtime, image)| {
-                    mcloving_agent_runtime::executor::ContainerSpec {
+                container: container_runtime.as_ref().zip(step_container.as_ref()).map(
+                    |((runtime, image), name)| mcloving_agent_runtime::executor::ContainerSpec {
                         runtime: runtime.clone(),
                         image: image.clone(),
-                        name: crate::container::container_name(&attempt, ordinal),
-                    }
-                }),
+                        name: name.clone(),
+                    },
+                ),
                 workspace_root: config.workspace_root.clone(),
                 workspace: assignment.workspace.clone(),
                 mode: match process.mode {
@@ -2341,7 +2347,13 @@ fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
 }
 
 fn requires_processless_reconciliation(error: &ExecutionError) -> bool {
-    matches!(error, ExecutionError::ReplacedWorkspaceRoot)
+    // A container that cannot be proven gone may still be running with the
+    // workspace mounted even though its client's process group is empty; that
+    // is reconciliation, never a terminal spawn failure (PAR-011).
+    matches!(
+        error,
+        ExecutionError::ReplacedWorkspaceRoot | ExecutionError::ContainerUnverified { .. }
+    )
 }
 
 async fn renew_lease(
@@ -4902,6 +4914,7 @@ mod tests {
             process_id: None,
             process_birth_identity: None,
             current_step: None,
+            container_name: None,
             logs: Vec::new(),
             result: Some(result),
         };

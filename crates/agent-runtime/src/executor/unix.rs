@@ -1,7 +1,8 @@
 //! Unix process-group execution.
 
 use std::fs::File;
-use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
 use std::process::Stdio;
 use std::time::Duration;
@@ -194,6 +195,9 @@ where
     // attempt workspace its working directory. Nothing else of the host is
     // mounted. Environment reaches the container only by name, so secret
     // values never appear in the podman argument vector.
+    // Held only until the podman client has been spawned with its inherited
+    // copy; no other child may inherit it.
+    let mut env_transport: Option<File> = None;
     let mut command = match &request.container {
         Some(container) => {
             if private_io.is_some() || request.workspace_seed.is_some() {
@@ -206,12 +210,14 @@ where
                     "image reference is not digest-pinned",
                 ));
             }
-            // Workload variables travel in an agent-owned env file the
-            // podman client never interprets itself: they must not share the
-            // client's own environment, where names such as CONTAINERS_CONF,
-            // HOME or XDG_RUNTIME_DIR would redirect the runtime, and they
-            // must not enter the argument vector, where values are visible.
-            let env_file = spool.join("container.env");
+            // Workload variables travel in a memory-only env file the podman
+            // client reads through an inherited descriptor: they never share
+            // the client's own environment, where names such as
+            // CONTAINERS_CONF, HOME or XDG_RUNTIME_DIR would redirect the
+            // runtime; they never enter the argument vector, where values are
+            // visible; and they never touch the workspace or any durable
+            // path, so a crash retains nothing and the container cannot read
+            // the file back through /workspace.
             let mut env_lines = Vec::new();
             for (key, value) in &request.environment {
                 let (key, value) = (key.to_string_lossy(), value.to_string_lossy());
@@ -222,18 +228,21 @@ where
                 }
                 env_lines.push(format!("{key}={value}\n"));
             }
-            {
-                use std::io::Write as _;
-                let mut file = std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&env_file)?;
+            let transport = {
+                use std::io::{Seek as _, Write as _};
+                let fd = nix::sys::memfd::memfd_create(
+                    c"mcloving-container-env",
+                    nix::sys::memfd::MFdFlags::empty(),
+                )?;
+                let mut file = File::from(fd);
                 for line in &env_lines {
                     file.write_all(line.as_bytes())?;
                 }
-                file.sync_all()?;
-            }
+                file.seek(std::io::SeekFrom::Start(0))?;
+                file
+            };
+            let env_path = format!("/proc/self/fd/{}", transport.as_raw_fd());
+            env_transport = Some(transport);
             let mut command = Command::new(&container.runtime);
             command
                 .arg("run")
@@ -248,7 +257,7 @@ where
                 .arg("--workdir")
                 .arg("/workspace")
                 .arg("--env-file")
-                .arg(&env_file)
+                .arg(&env_path)
                 .arg("--entrypoint")
                 .arg(&request.program)
                 .arg(&container.image)
@@ -297,6 +306,9 @@ where
     }
     let mut child = command.spawn()?;
     drop(command);
+    // The client holds its own descriptor now; closing ours means no later
+    // child of this process can inherit the credential-bearing transport.
+    drop(env_transport.take());
     let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
         (Some(stdout), Some(stderr), Some(limit)) => {
             Some(OutputCapture::start(stdout, stderr, limit, redactions))

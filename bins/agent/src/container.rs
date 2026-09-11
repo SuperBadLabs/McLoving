@@ -49,21 +49,20 @@ pub(crate) fn container_name(attempt_id: &str, ordinal: u32) -> String {
 ///
 /// Restart recovery terminates the journaled process group, which is only
 /// the podman client; the container it started outlives that client. The
-/// journal knows the attempt and its current step, so the container's name
-/// is derivable without the cidfile. Returns `true` only when `container
-/// exists` answers "no" afterwards; any other outcome leaves containment
-/// unverified and the caller parks the attempt.
-pub(crate) fn reap_recovered_container(runtime: &Path, attempt_id: &str, ordinal: u32) -> bool {
-    let name = container_name(attempt_id, ordinal);
+/// journal recorded the container's name before the spawn, so only attempts
+/// that actually launched one reach here. Returns `true` only when
+/// `container exists` answers "no" afterwards; any other outcome leaves
+/// containment unverified and the caller parks the attempt.
+pub(crate) fn reap_recovered_container(runtime: &Path, name: &str) -> bool {
     let removed = bounded_status(
-        runtime_command(runtime).args(["rm", "--force", "--ignore", &name]),
+        runtime_command(runtime).args(["rm", "--force", "--ignore", name]),
         REAP_DEADLINE,
     );
     if !removed.is_some_and(|status| status.success()) {
         return false;
     }
     bounded_status(
-        runtime_command(runtime).args(["container", "exists", &name]),
+        runtime_command(runtime).args(["container", "exists", name]),
         PROBE_DEADLINE,
     )
     .is_some_and(|status| status.code() == Some(1))

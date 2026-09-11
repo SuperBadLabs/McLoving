@@ -915,8 +915,11 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         // Reap it by its derived name and require proof it is gone, or park
         // the attempt exactly as an unverifiable process group would.
         if outcome != RecoveredCancellation::ReconciliationRequired
-            && let (Some(runtime), Some(step)) = (&config.podman_path, attempt.current_step)
-            && !container::reap_recovered_container(runtime, &attempt.attempt_id, step)
+            && let Some(name) = &attempt.container_name
+            && !config
+                .podman_path
+                .as_deref()
+                .is_some_and(|runtime| container::reap_recovered_container(runtime, name))
         {
             journal.transition(
                 &attempt.organization_id,
@@ -927,12 +930,13 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
                 attempt.process_id,
             )?;
             eprintln!(
-                "recovered attempt {}/{} fence {}: container {} could not be proven gone; \
-                 parked reconciliation-required",
+                "recovered attempt {}/{} fence {}: container {} could not be proven gone \
+                 (runtime configured: {}); parked reconciliation-required",
                 attempt.organization_id,
                 attempt.attempt_id,
                 attempt.fence_token,
-                container::container_name(&attempt.attempt_id, step)
+                attempt.container_name.as_deref().unwrap_or("?"),
+                config.podman_path.is_some()
             );
             outcome = RecoveredCancellation::ReconciliationRequired;
         }
@@ -1857,6 +1861,7 @@ mod tests {
             process_id: Some(42),
             process_birth_identity: None,
             current_step: None,
+            container_name: None,
             logs: Vec::new(),
             result: None,
         };
@@ -2057,6 +2062,7 @@ mod tests {
                 process_id: Some(42),
                 process_birth_identity: Some("linux-proc-v1:boot:42".to_owned()),
                 current_step: None,
+                container_name: None,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2099,6 +2105,7 @@ mod tests {
             process_id: None,
             process_birth_identity: None,
             current_step: None,
+            container_name: None,
             logs: Vec::new(),
             result: None,
         };
