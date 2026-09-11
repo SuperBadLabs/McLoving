@@ -601,6 +601,7 @@ had never claimed one.
 | SHADOW-001 | `docs/architecture/SHADOW_QUALIFICATION_V1.md` |
 | TRIG-001 | `docs/evidence/TRIG-001_SECURITY_REVIEW.md` |
 | UI-002 | `docs/evidence/UI-002_SECURITY_REVIEW.md` |
+| PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -792,3 +793,36 @@ Actual fixture outcomes are recorded in the ACTIVE EXEC-005 security receipt.
 No result here closes source product support, held retained-tree custody, finite
 retention/crash reconciliation, general workload containment or EXEC-005 itself.
 The source/native and frozen compatibility denominators remain separate.
+
+## PAR-000 product-parity re-orientation review (earned closure)
+
+`docs/evidence/PAR-000_SECURITY_REVIEW.md` records the docs-only
+re-orientation merged as PR #143. No runtime, protocol, persistence, identity,
+secret, connector, compiler, deployment or migration boundary changed; the
+board's `DEFERRED` moves and verifier pins alter which tickets are dispatched,
+not what any executable does. Every threat row was reviewed and needs no
+semantic change. Residual: the parity tickets that follow each carry their own
+review before closure.
+
+## PAR-010 multi-step stage execution review, ticket ACTIVE
+
+The version-5 envelope runs one to sixteen ordered process steps of one stage
+inside one attempt. Boundaries touched: TM-003 (agent runtime and lease: one
+lease, one journal row, `Running -> Running` rebinds the leader identity per
+step and `attempts.current_step` is durable before every spawn); TM-005/TM-006
+(execution and log evidence: per-step spools under `spool/step-N/`, journal
+sequences `2N` and `2N+1`, the wire and store `step_ordinal` bounded below
+65536, the 96-chunk cap enforced on both sides); TM-023 (workspace: later
+steps re-enter the workspace by `lstat`-checked components with symlinks
+refused; steps share the workload's own identity, so a step may alter what a
+later step sees exactly as a single process could alter its own workspace, and
+hostile same-UID isolation remains SEC-005); TM-052 (routing: the
+`multi-step-v1` capability keeps the envelope away from agents that cannot run
+it, and an agent that receives it without the negotiated feature refuses
+terminally). Crash between a step's exit and its finalization parks the attempt
+reconciliation-required naming the step; nothing is re-run or skipped. Focused
+unit tests and the shipped controller/agent integration tests cover the ordered
+run, the first-failure stop, the capability requirement and the exact crash
+point. Closure requires the reviewed merge, exact-main Foundation and native
+Windows runs, and a receipt in `docs/evidence/PAR-010_SECURITY_REVIEW.md`.
+

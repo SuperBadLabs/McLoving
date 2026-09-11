@@ -429,6 +429,7 @@ pub async fn run_claim(
     ));
     let request = ExecutionRequest {
         workspace_seed: None,
+        step_ordinal: None,
         workspace_root: config.workspace_root.clone(),
         workspace: workspace.clone(),
         mode: match process.mode {
@@ -1792,6 +1793,7 @@ async fn commit_log(
             restore_epoch: claim.restore_epoch,
             agent_id: &config.agent_id,
             sequence: i64::try_from(entry.sequence).map_err(|_| SpineError::FenceOverflow)?,
+            step_ordinal: 0,
             stream,
             content: &content,
         })

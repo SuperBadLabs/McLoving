@@ -121,20 +121,40 @@ where
     let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
-    let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
+    // A later step of a multi-step attempt re-enters the workspace its first
+    // step created; every other execution gets a fresh one.
+    let workspace = match request.step_ordinal {
+        Some(ordinal) if ordinal > 0 => {
+            super::open_step_workspace(&request.workspace_root, &request.workspace)?
+        }
+        _ => create_workspace(&request.workspace_root, &request.workspace)?,
+    };
     let workspace_control = File::open(&workspace)?;
     if let Some(seed) = &request.workspace_seed {
         super::workspace_transfer::seed(&workspace, seed)
             .map_err(ExecutionError::WorkspaceTransfer)?;
     }
-    let spool = workspace.join("spool");
-    tokio::fs::create_dir(&spool).await?;
+    let attempt_spool = workspace.join("spool");
+    if !matches!(request.step_ordinal, Some(ordinal) if ordinal > 0) {
+        tokio::fs::create_dir(&attempt_spool).await?;
+    }
+    let (spool, spool_suffix) = match request.step_ordinal {
+        None => (attempt_spool.clone(), "spool".to_owned()),
+        Some(ordinal) => {
+            let step = attempt_spool.join(format!("step-{ordinal}"));
+            tokio::fs::create_dir(&step).await?;
+            (step, format!("spool/step-{ordinal}"))
+        }
+    };
     // Keep handles to every agent-owned directory before untrusted code starts.
     // A workload runs as the agent OS user and can revoke pathname traversal;
     // retained handles let the agent restore the minimum owner access only
     // after containment has been proven empty.
-    let directory_controls =
+    let mut directory_controls =
         retain_workspace_directory_chain(&request.workspace_root, &request.workspace, &spool)?;
+    if request.step_ordinal.is_some() {
+        directory_controls.push(File::open(&attempt_spool)?);
+    }
 
     let stdout_path = spool.join("stdout.log");
     let stderr_path = spool.join("stderr.log");
@@ -346,7 +366,7 @@ where
     // flushes are independent of one another, so they run as one batch.
     sync_boundaries(
         &[&stdout_control, &stderr_control],
-        &[spool.clone(), workspace.clone()],
+        &[spool.clone(), attempt_spool.clone(), workspace.clone()],
     )?;
 
     let workspace_snapshot = request.workspace_seed.as_ref().map(|_| {
@@ -362,8 +382,20 @@ where
         exit_code: termination.1.code(),
         process_id,
         containment: Containment::UnixProcessGroup,
-        stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_control).await?,
-        stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_control).await?,
+        stdout: spool_entry(
+            &request.workspace,
+            &format!("{spool_suffix}/stdout.log"),
+            0,
+            &stdout_control,
+        )
+        .await?,
+        stderr: spool_entry(
+            &request.workspace,
+            &format!("{spool_suffix}/stderr.log"),
+            1,
+            &stderr_control,
+        )
+        .await?,
     })
 }
 
@@ -935,6 +967,7 @@ mod tests {
     fn request(root: &Path, workspace: &str, timeout: Duration) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode: ExecutionMode::Direct,
@@ -953,6 +986,7 @@ mod tests {
     fn resistant_request(root: &Path, workspace: &str) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode: ExecutionMode::Direct,
@@ -1182,6 +1216,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/success"),
             mode: ExecutionMode::Direct,
@@ -1207,6 +1242,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/long-running-success"),
             mode: ExecutionMode::Direct,
@@ -1237,6 +1273,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/revoked-spool-mode"),
             mode: ExecutionMode::Direct,
@@ -1268,6 +1305,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/environment"),
             mode: ExecutionMode::Direct,
@@ -1302,6 +1340,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/inherited-handle"),
             mode: ExecutionMode::Direct,
@@ -1344,6 +1383,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/quota"),
             mode: ExecutionMode::Direct,
@@ -1368,6 +1408,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/renamed-log"),
             mode: ExecutionMode::Direct,
@@ -1408,6 +1449,7 @@ mod tests {
         std::fs::create_dir(root.path().join("existing")).unwrap();
         let existing = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("existing"),
             mode: ExecutionMode::Direct,
@@ -1426,6 +1468,7 @@ mod tests {
         std::os::unix::fs::symlink("/tmp", root.path().join("linked")).unwrap();
         let linked = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace: PathBuf::from("linked/escape"),
             ..existing
         };
@@ -1447,6 +1490,7 @@ mod tests {
 
         let request = ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: workspace_root.clone(),
             workspace: PathBuf::from("org/replaced-root"),
             mode: ExecutionMode::Direct,
@@ -1504,6 +1548,7 @@ mod private_io_tests {
     fn request(root: &Path, script: &str) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.to_owned(),
             workspace: "org/private".into(),
             mode: ExecutionMode::Direct,

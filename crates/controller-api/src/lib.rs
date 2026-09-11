@@ -3059,6 +3059,10 @@ pub struct LogResponse {
     pub attempt_id: Uuid,
     pub fence: i64,
     pub sequence: i64,
+    /// Which step of a multi-step stage wrote the chunk; zero for a
+    /// single-step stage. Defaulted so an older client still decodes.
+    #[serde(default)]
+    pub step_ordinal: i32,
     pub stream: String,
     pub text: Option<String>,
     pub content_hex: String,
@@ -4585,6 +4589,12 @@ fn validate_input_scope_headers(
 fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<String> {
     use mcloving_domain::cache_intent::{CACHE_CAPABILITY, cache_binding_capability};
     let mut required = Vec::new();
+    // The version-5 envelope must never reach an agent that cannot run it:
+    // such an agent refuses terminally, and a refusal is permanent for the
+    // payload. Routing on the capability keeps old agents out of the offer.
+    if stage.steps.len() > 1 {
+        required.push(mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned());
+    }
     for step in &stage.steps {
         if let Step::CacheIntent(cache) = step {
             if required.is_empty() {
@@ -4668,7 +4678,21 @@ fn execution_spec(steps: &[Step]) -> Value {
             }),
         })
         .collect::<Vec<_>>();
-    json!({"version": if contains_input_intent { 4 } else if contains_cache_intent { 3 } else if contains_connector_intent { 2 } else { 1 }, "steps": steps})
+    // Version 5 is the multi-step process envelope. It is emitted only when a
+    // stage actually needs it, so a single process step keeps the version-1
+    // shape every deployed agent already runs.
+    let version = if contains_input_intent {
+        4
+    } else if contains_cache_intent {
+        3
+    } else if contains_connector_intent {
+        2
+    } else if steps.len() > 1 {
+        5
+    } else {
+        1
+    };
+    json!({"version": version, "steps": steps})
 }
 
 fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
@@ -4693,6 +4717,20 @@ fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
 
 fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<(), ApiError> {
     if platform == "windows" {
+        // The shipped Windows agent never advertises `multi-step-v1`, so a
+        // multi-step node submitted for Windows would queue forever. Refuse it
+        // here with the same actionable diagnostic as other unrunnable shapes.
+        if let Some(stage) = pipeline.stages.iter().find(|stage| stage.steps.len() > 1) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares {} steps; multi-step stages run on platform linux only",
+                    stage.id,
+                    stage.steps.len()
+                ),
+            ));
+        }
         return Ok(());
     }
     let windows_mode = pipeline
@@ -4727,13 +4765,32 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
+    use mcloving_domain::multi_step::MAX_STEPS_PER_STAGE;
     for stage in &pipeline.stages {
-        if stage.steps.len() != 1 {
+        // A stage of several process steps runs as one attempt under the
+        // version-5 envelope (PAR-010). Every other step kind still needs a
+        // runtime of its own and therefore a stage of its own.
+        let all_process = stage
+            .steps
+            .iter()
+            .all(|step| matches!(step, Step::Process(_)));
+        if stage.steps.len() != 1 && !all_process {
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unsupported_execution_spec",
                 format!(
-                    "stage {} declares {} steps; the execution machinery runs exactly one step per stage",
+                    "stage {} declares {} steps; only process steps may share a stage",
+                    stage.id,
+                    stage.steps.len()
+                ),
+            ));
+        }
+        if stage.steps.len() > MAX_STEPS_PER_STAGE {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares {} steps; a stage runs at most {MAX_STEPS_PER_STAGE} steps",
                     stage.id,
                     stage.steps.len()
                 ),
@@ -5741,6 +5798,7 @@ async fn logs(
                 attempt_id: entry.attempt_id,
                 fence: entry.fence,
                 sequence: entry.sequence,
+                step_ordinal: entry.step_ordinal,
                 stream: entry.stream,
                 text,
                 content_hex,
@@ -8129,6 +8187,21 @@ stages:
         validate_execution_platform(&pipeline, "windows").expect("Windows accepts direct mode");
     }
 
+    #[test]
+    fn multi_step_stages_are_linux_only_at_admission() {
+        let pipeline = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
+            .expect("two process steps validate");
+        validate_execution_platform(&pipeline, "linux").expect("Linux runs multi-step stages");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("no shipped Windows agent advertises multi-step-v1");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "stage build declares 2 steps; multi-step stages run on platform linux only"
+        );
+    }
+
     fn single_stage_source(step_count: usize) -> String {
         let mut source = String::from(
             "version: 1\nname: dense\nstages:\n  - id: build\n    name: Build\n    steps:\n",
@@ -8148,20 +8221,56 @@ stages:
         // compile through compile_source_with_parameters, so this rejection
         // proves validate and admission agree exactly.
         let error = compile_source_with_parameters(&single_stage_source(100), BTreeMap::new())
-            .expect_err("multi-step stages are not executable and must not validate");
+            .expect_err("a stage beyond the step bound is not executable and must not validate");
         assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error.code, "unsupported_execution_spec");
         assert_eq!(
             error.message,
-            "stage build declares 100 steps; the execution machinery runs exactly one step per stage"
+            "stage build declares 100 steps; a stage runs at most 16 steps"
         );
 
-        let error = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
-            .expect_err("two steps in one stage are equally unsupported");
+        let error = compile_source_with_parameters(&single_stage_source(17), BTreeMap::new())
+            .expect_err("one past the bound is equally unsupported");
         assert_eq!(error.code, "unsupported_execution_spec");
 
-        compile_source_with_parameters(&single_stage_source(1), BTreeMap::new())
+        // PAR-010: several process steps share one stage under the
+        // version-5 envelope and route on the multi-step capability.
+        let pipeline = compile_source_with_parameters(&single_stage_source(16), BTreeMap::new())
+            .expect("sixteen process steps in one stage are admissible");
+        let stage = &pipeline.stages[0];
+        assert_eq!(execution_spec(&stage.steps)["version"], 5);
+        assert_eq!(
+            execution_spec(&stage.steps)["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            16
+        );
+        assert_eq!(
+            stage_required_capabilities(stage),
+            vec![mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned()]
+        );
+
+        let pipeline = compile_source_with_parameters(&single_stage_source(1), BTreeMap::new())
             .expect("exactly one process step per stage remains admissible");
+        let stage = &pipeline.stages[0];
+        assert_eq!(execution_spec(&stage.steps)["version"], 1);
+        assert!(stage_required_capabilities(stage).is_empty());
+    }
+
+    #[test]
+    fn intent_steps_never_share_a_stage_with_a_process_step() {
+        let source = "version: 1\nname: mixed\nstages:\n  - id: build\n    name: Build\n    steps:\n      - process:\n          program: /bin/a\n      - connector_intent:\n          mapping_id: notification.v1\n          mapping_digest: 0000000000000000000000000000000000000000000000000000000000000000\n          effect_class: idempotent\n          effect_key_template: k\n          public_input_schema: {}\n          protected_secret_ref_schema: {}\n          expected_public_result_schema: {}\n          ambiguity_policy: observe_then_reconcile\n          timeout_seconds: 10\n          downstream_control_digest: 0000000000000000000000000000000000000000000000000000000000000000\n";
+        // The IR refuses the shape before the execution-support gate sees it,
+        // so relaxing that gate for process-only stages opened nothing here.
+        let error = compile_source_with_parameters(source, BTreeMap::new())
+            .expect_err("a connector intent beside a process step is not one runtime");
+        assert_eq!(error.code, "pipeline_rejected");
+        assert!(
+            error.message.contains("exactly one connector intent"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

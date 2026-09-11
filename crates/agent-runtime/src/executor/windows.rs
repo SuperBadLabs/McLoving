@@ -74,6 +74,11 @@ where
             "unsupported_platform".to_owned(),
         ));
     }
+    // The Windows agent does not advertise the multi-step capability, so a
+    // stepped request here is a routing defect rather than a workload to run.
+    if let Some(ordinal) = request.step_ordinal {
+        return Err(ExecutionError::MultiStepUnsupported(ordinal));
+    }
     let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
@@ -536,6 +541,7 @@ mod tests {
     ) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            step_ordinal: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode,

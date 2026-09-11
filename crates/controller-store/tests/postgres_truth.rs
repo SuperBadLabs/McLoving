@@ -1551,6 +1551,7 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
         restore_epoch: claim.restore_epoch,
         agent_id: &agent_id,
         sequence: 0,
+        step_ordinal: 0,
         stream: "stdout",
         content: b"session-fenced",
     };
@@ -5397,6 +5398,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                 restore_epoch: first.restore_epoch,
                 agent_id: "agent-a",
                 sequence: 0,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"superseded\n",
             })
@@ -5467,6 +5469,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                 restore_epoch: second.restore_epoch,
                 agent_id: "agent-b",
                 sequence: 0,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"current\n",
             })
@@ -5486,6 +5489,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                     restore_epoch: second.restore_epoch,
                     agent_id: "agent-b",
                     sequence,
+                    step_ordinal: 0,
                     stream,
                     content,
                 })
@@ -5501,7 +5505,8 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                 fence: second.fence,
                 restore_epoch: second.restore_epoch,
                 agent_id: "agent-b",
-                sequence: 66,
+                sequence: 96,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"",
             })
@@ -7124,6 +7129,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
                 restore_epoch: first.restore_epoch,
                 agent_id: "agent-a",
                 sequence: 0,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"first attempt\n",
             })
@@ -7241,6 +7247,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
                 restore_epoch: second.restore_epoch,
                 agent_id: "agent-b",
                 sequence: 0,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"second attempt\n",
             })
@@ -9022,6 +9029,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
                     restore_epoch: claim.restore_epoch,
                     agent_id: "agent-protected",
                     sequence: 0,
+                    step_ordinal: 0,
                     stream: "stdout",
                     content: b"before marker-secret-value after",
                 },
@@ -9259,6 +9267,7 @@ async fn dag_log_cursor_never_hides_later_node_output() {
                 restore_epoch: first.restore_epoch,
                 agent_id: &first.agent_id,
                 sequence: 20,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"stage-a\n",
             })
@@ -9295,6 +9304,7 @@ async fn dag_log_cursor_never_hides_later_node_output() {
                 restore_epoch: second.restore_epoch,
                 agent_id: &second.agent_id,
                 sequence: 0,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: b"stage-b\n",
             })

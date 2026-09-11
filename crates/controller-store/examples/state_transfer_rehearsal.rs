@@ -1484,6 +1484,7 @@ async fn run_effect_free_build(
                 restore_epoch: claim.restore_epoch,
                 agent_id: "mig005a-agent",
                 sequence: 0,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: content.as_bytes(),
             })

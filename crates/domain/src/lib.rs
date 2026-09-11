@@ -338,3 +338,23 @@ mod tests {
         ));
     }
 }
+
+/// Multi-step stages: one node and one attempt per stage, several ordered
+/// process steps inside the attempt, distinguished in durable truth by a step
+/// ordinal rather than by a second attempt.
+pub mod multi_step {
+    /// Scheduler capability a node requires when its stage carries more than
+    /// one step. Only an agent that can run the version-5 envelope advertises
+    /// it, so an older agent is never offered such a node and never has to
+    /// refuse it.
+    pub const MULTI_STEP_CAPABILITY: &str = "multi-step-v1";
+    /// Wire feature: the peer understands the version-5 execution envelope
+    /// and the `step_ordinal` field on log chunks.
+    pub const MULTI_STEP_EXECUTION_FEATURE: &str = "multi-step-execution-v1";
+    /// Upper bound on steps in one stage. Sixteen keeps the terminal summary
+    /// far below its 64 KiB cap and bounds the spool count per attempt.
+    pub const MAX_STEPS_PER_STAGE: usize = 16;
+    /// Exclusive upper bound on a step ordinal carried on the wire and stored
+    /// in PostgreSQL; the schema check mirrors it.
+    pub const MAX_STEP_ORDINAL_EXCLUSIVE: u32 = 65_536;
+}

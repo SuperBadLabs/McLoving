@@ -1,0 +1,21 @@
+# PAR-010 proof fixture: three process steps in one stage. The second step
+# fails, so a run shows step 0 and step 1 output under their own ordinals and
+# never runs step 2. Submit with the CLI, then read `logs` and `status`.
+version: 1
+name: parity-three-steps
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'step zero ran\n'"]
+          timeout_seconds: 30
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'step one failing\n' >&2; false"]
+          timeout_seconds: 30
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'step two never runs\n'"]
+          timeout_seconds: 30

@@ -56,6 +56,15 @@ pub enum ExecutionMode {
 pub struct ExecutionRequest {
     /// Optional verified file state copied into this fresh attempt directory.
     pub workspace_seed: Option<mcloving_domain::workspace::WorkspaceSnapshot>,
+    /// Position of this process within a multi-step attempt (PAR-010).
+    ///
+    /// `None` is the single-step layout every earlier release used: a fresh
+    /// workspace and `spool/{stdout,stderr}.log`. `Some(0)` creates the
+    /// workspace and writes under `spool/step-0/`; `Some(n > 0)` reuses the
+    /// workspace an earlier step of the same attempt created and writes
+    /// under `spool/step-n/`, so every step's output survives as its own
+    /// journaled spool.
+    pub step_ordinal: Option<u32>,
     pub workspace_root: PathBuf,
     pub workspace: PathBuf,
     pub mode: ExecutionMode,
@@ -135,6 +144,8 @@ pub enum ExecutionError {
     ContainmentUnverified { process_id: u32, reason: String },
     #[error("execution mode {0:?} is unsupported on this platform")]
     UnsupportedMode(ExecutionMode),
+    #[error("multi-step execution (step {0}) is unsupported on this platform")]
+    MultiStepUnsupported(u32),
     #[error("cmd.exe program or argument contains unsupported shell metacharacters")]
     UnsafeWindowsShellArgument,
     #[error("Windows Job Object operation failed: {0}")]
@@ -385,6 +396,39 @@ pub async fn execute_portable(
     cancellation: CancellationToken,
 ) -> Result<ExecutionOutcome, ExecutionError> {
     execute(request, cancellation).await
+}
+
+/// Re-enters the workspace an earlier step of the same attempt created.
+///
+/// Every component is judged by `lstat` so a step that swapped part of the
+/// chain for a symlink is refused rather than followed, and the leaf must be a
+/// directory that exists: a missing workspace means no earlier step ran here.
+#[cfg(unix)]
+fn open_step_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionError> {
+    validate_relative_path(relative)?;
+    let root = root
+        .canonicalize()
+        .map_err(|_| ExecutionError::InvalidWorkspaceRoot)?;
+    if !root.is_dir() || is_link_or_reparse_point(&std::fs::symlink_metadata(&root)?) {
+        return Err(ExecutionError::InvalidWorkspaceRoot);
+    }
+    let mut current = root;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(ExecutionError::InvalidWorkspace(
+                JournalError::InvalidRelativePath,
+            ));
+        };
+        current.push(name);
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if is_link_or_reparse_point(&metadata) {
+            return Err(ExecutionError::SymlinkWorkspaceComponent);
+        }
+        if !metadata.is_dir() {
+            return Err(ExecutionError::InvalidWorkspaceRoot);
+        }
+    }
+    Ok(current)
 }
 
 fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionError> {

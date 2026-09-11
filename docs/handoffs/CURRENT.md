@@ -15,15 +15,16 @@ ticket, in this order:
 `PAR-000` -> `PAR-010` -> `PAR-011` -> `PAR-012` -> `PAR-001` -> `PAR-013` ->
 `PAR-014` -> `PAR-004` -> `PAR-005` -> `PAR-003` -> `PAR-002` -> `PAR-015`
 
-`PAR-000` (this re-orientation) is `ACTIVE` in slot 1. `EXEC-005` stays
+`PAR-000` closed on PR #143 (`aeb6dd85`, Foundation `34560483683`, Windows `34560483674`); `PAR-010` is `ACTIVE` in slot 1. `EXEC-005` stays
 `ACTIVE` but rescoped: its cache and input slices are merged, its source slice
 is delivered by `PAR-012`, and its dependency-resolver and provisioner slices
 are dropped. The `JCOMP-001` through `JCOMP-003` milestone is complete and its
 receipts stand as bounded evidence.
 
 **Progress metric: distance.** Count the unclosed tickets from the head of the
-chain to `PAR-005`. Today it is 9 (`PAR-000`, `PAR-010`, `PAR-011`, `PAR-012`,
-`PAR-001`, `PAR-013`, `PAR-014`, `PAR-004`, `PAR-005`). Report it here every
+chain to `PAR-005`. It was 9 on 2026-09-10 and is 8 after `PAR-000` closed
+(`PAR-010`, `PAR-011`, `PAR-012`, `PAR-001`, `PAR-013`, `PAR-014`, `PAR-004`,
+`PAR-005`). Report it here every
 two weeks; it must fall. A ticket added to the chain is reported as a
 regression in this file, not filed silently.
 
