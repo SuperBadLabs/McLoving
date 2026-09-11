@@ -130,9 +130,10 @@ the terminal drain. An agent that negotiated
 follower sees a line within about a second of the step writing it (a step
 with a multi-day timeout is paced to a few seconds so its sequence budget
 lasts); `mcloving
-logs --follow` prints the stream and exits when the build is terminal (with
-`--output json` it prints one document carrying every chunk at the end
-instead), and refuses a controller that does not answer the follow fields.
+logs --follow` prints the stream and exits when the build is terminal; it
+is a human-output command (a single JSON document would have to hold the
+whole build log, so JSON callers page with the cursor instead), and it
+refuses a controller that does not answer the follow fields.
 Errors have stable `code` and `message` fields.
 
 External read-side migration uses only this API. The CLI exposes `pipelines`

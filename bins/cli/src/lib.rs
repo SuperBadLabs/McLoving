@@ -707,11 +707,12 @@ fn parse_parameters(parameters: &[String]) -> Result<BTreeMap<String, Value>> {
 /// Follows a build's log as chunks commit: each request waits up to ten
 /// seconds for new chunks, so a line shows within about a quarter second of
 /// its commit; the loop ends once the build is terminal and a read after
-/// that returns nothing more. In human output the text streams to stdout as
-/// it arrives and the returned value summarizes the follow; in JSON output
-/// nothing is printed until the end, and the returned document carries every
-/// chunk, so stdout stays one JSON document. A controller that does not
-/// answer the follow fields is refused rather than re-read forever.
+/// that returns nothing more. The text streams to stdout as it arrives and
+/// the returned value summarizes the follow. Only human output follows: a
+/// single JSON document would have to hold the whole build log in memory
+/// (an attempt may contribute 64 MiB) and could not be streamed, so JSON
+/// callers page with the cursor instead. A controller that does not answer
+/// the follow fields is refused rather than re-read forever.
 async fn follow_logs(
     client: &Client,
     organization_id: Uuid,
@@ -722,10 +723,14 @@ async fn follow_logs(
     output: OutputMode,
 ) -> Result<Value> {
     use std::io::Write as _;
-    let stream_text = output == OutputMode::Human;
+    if output != OutputMode::Human {
+        bail!(
+            "--follow streams text and is not available with --output json; use --output human, \
+             or read pages without --follow"
+        );
+    }
     let mut cursor = after_cursor;
     let mut chunks = 0_u64;
-    let mut collected = Vec::new();
     let mut stdout = std::io::stdout();
     loop {
         let page = client
@@ -745,48 +750,29 @@ async fn follow_logs(
         };
         for item in &page.items {
             chunks += 1;
-            if stream_text {
-                match &item.text {
-                    Some(text) => write!(stdout, "{text}")?,
-                    None => writeln!(
-                        stdout,
-                        "[{} step {} binary {}]",
-                        item.stream, item.step_ordinal, item.content_hex
-                    )?,
-                }
+            match &item.text {
+                Some(text) => write!(stdout, "{text}")?,
+                None => writeln!(
+                    stdout,
+                    "[{} step {} binary {}]",
+                    item.stream, item.step_ordinal, item.content_hex
+                )?,
             }
         }
-        if stream_text {
-            stdout.flush()?;
-        } else {
-            collected.extend(
-                page.items
-                    .iter()
-                    .map(to_value)
-                    .collect::<Result<Vec<_>>>()?,
-            );
-        }
+        stdout.flush()?;
         let drained = page.items.is_empty();
         cursor = next_cursor;
         if drained && !live {
             break;
         }
     }
-    Ok(if stream_text {
-        json!({
-            "build_id": build_id,
-            "chunks": chunks,
-            "next_cursor": cursor,
-        })
-    } else {
-        json!({
-            "build_id": build_id,
-            "chunks": chunks,
-            "next_cursor": cursor,
-            "items": collected,
-        })
-    })
+    Ok(json!({
+        "build_id": build_id,
+        "chunks": chunks,
+        "next_cursor": cursor,
+    }))
 }
+
 fn cursor(
     attempt_id: Option<Uuid>,
     fence: Option<i64>,
