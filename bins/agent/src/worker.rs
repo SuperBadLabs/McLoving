@@ -1099,6 +1099,20 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<Vec<ProcessSp
             ));
         }
     }
+    // Credentials are redeemed once per attempt as the union of every step's
+    // targets, and the controller bounds that request at eight, so the union
+    // is checked here rather than discovered as a refused redemption later.
+    let union = spec
+        .steps
+        .iter()
+        .flat_map(|process| process.credentials.iter())
+        .collect::<std::collections::BTreeSet<_>>();
+    if union.len() > 8 {
+        return Err(format!(
+            "credential targets across all steps ({}) exceed the per-attempt bound of 8",
+            union.len()
+        ));
+    }
     Ok(spec.steps)
 }
 
@@ -1815,6 +1829,15 @@ async fn run_assignment(
                 {
                     std::process::exit(88);
                 }
+            }
+            if multi_step {
+                relocate_step_spool(
+                    &config.workspace_root,
+                    &assignment.workspace,
+                    ordinal,
+                    &mut outcome,
+                )
+                .await?;
             }
             // Journal spool sequences are per attempt, and the executor
             // numbers each execution's streams 0 and 1; give every step its
@@ -2976,6 +2999,53 @@ async fn write_result(
     })
 }
 
+/// Moves a finished step's spool directory out of the workload-visible
+/// workspace into the agent-owned result area (PAR-010). Every later step runs
+/// with the same workspace as its working directory, so a cleanup such as
+/// `rm -rf spool` in step N would otherwise destroy step N-1's already-hashed
+/// evidence and leave finalization unable to publish. The move is a rename
+/// within the workspace root, so the hashed bytes are untouched, and both
+/// directory entries are flushed before the journal may reference the new
+/// path. A hostile same-UID workload can still reach the result area by
+/// absolute path; that remains SEC-005.
+async fn relocate_step_spool(
+    workspace_root: &Path,
+    workspace: &Path,
+    ordinal: u32,
+    outcome: &mut mcloving_agent_runtime::executor::ExecutionOutcome,
+) -> Result<(), AgentError> {
+    let relative_parent = PathBuf::from(AGENT_RESULT_DIRECTORY)
+        .join(workspace)
+        .join(Uuid::new_v4().simple().to_string());
+    let (parent, changed_parents) =
+        create_result_directory(workspace_root, &relative_parent).await?;
+    let step_directory = format!("step-{ordinal}");
+    let attempt_spool = workspace_root.join(workspace).join("spool");
+    let source = attempt_spool.join(&step_directory);
+    let destination = parent.join(&step_directory);
+    let source_metadata = fs::symlink_metadata(&source).await?;
+    if !source_metadata.is_dir() || is_link_or_reparse_point(&source_metadata) {
+        return Err(AgentError::InvalidAssignment(
+            "step spool directory was replaced before relocation".to_owned(),
+        ));
+    }
+    fs::rename(&source, &destination).await?;
+    let mut boundaries = changed_parents;
+    boundaries.push(parent);
+    boundaries.push(attempt_spool);
+    tokio::task::spawn_blocking(move || {
+        mcloving_agent_runtime::executor::sync_directories(&boundaries)
+    })
+    .await
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!("durability flush failed: {error}"))
+    })??;
+    let relative_step = relative_parent.join(&step_directory);
+    outcome.stdout.relative_path = relative_step.join("stdout.log");
+    outcome.stderr.relative_path = relative_step.join("stderr.log");
+    Ok(())
+}
+
 async fn create_result_directory(
     workspace_root: &Path,
     relative_parent: &Path,
@@ -3499,6 +3569,31 @@ mod tests {
             refusal.detail.contains("step 1 timeout"),
             "{}",
             refusal.detail
+        );
+
+        // Eight per step is fine; nine distinct targets across the attempt is
+        // the controller's redemption bound and must be refused up front.
+        let step = |names: &[&str]| json!({"kind": "process", "program": "/bin/true", "credentials": names});
+        let split = serde_json::to_vec(&json!({"version": 5, "steps": [
+            step(&["A1", "A2", "A3", "A4", "A5"]),
+            step(&["B1", "B2", "B3", "B4"])
+        ]}))
+        .unwrap();
+        let refusal = unsupported(
+            validate_assignment_with_features(&config(), 4, assignment(&split), features).unwrap(),
+        );
+        assert!(
+            refusal.detail.contains("across all steps (9)"),
+            "{}",
+            refusal.detail
+        );
+        let shared = serde_json::to_vec(&json!({"version": 5, "steps": [
+            step(&["A1", "A2", "A3", "A4", "A5"]),
+            step(&["A1", "A2", "A3", "B4"])
+        ]}))
+        .unwrap();
+        runnable(
+            validate_assignment_with_features(&config(), 4, assignment(&shared), features).unwrap(),
         );
     }
 

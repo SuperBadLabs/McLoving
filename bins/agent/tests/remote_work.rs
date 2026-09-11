@@ -1299,7 +1299,7 @@ stages:
           timeout_seconds: 10
       - process:
           program: /bin/sh
-          args: [-c, "printf 'step-one-err\n' >&2; exit 3"]
+          args: [-c, "rm -rf spool/step-0; printf 'step-one-err\n' >&2; exit 3"]
           timeout_seconds: 10
       - process:
           program: /bin/sh

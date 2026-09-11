@@ -260,7 +260,10 @@ discharge a parked reconciliation).
   `multi-step-v1` capability, the controller emits the version-5 envelope:
   one to sixteen ordered process steps of one stage run inside one attempt
   under one lease (PAR-010). Every step's streams are their own journaled
-  spools under `spool/step-N/`, every chunk carries the step ordinal on the
+  spools, written under `spool/step-N/` and moved by rename into the
+  agent-owned result area the moment the step ends, so a later step's
+  working-directory cleanup cannot destroy hashed evidence (a hostile same-UID
+  workload reaching it by absolute path remains SEC-005); every chunk carries the step ordinal on the
   wire and in `attempt_log_chunks.step_ordinal`, the journal records each
   step's start (`attempts.current_step`) before its spawn, and execution stops
   at the first step that does not succeed; the per-step outcomes ride the
