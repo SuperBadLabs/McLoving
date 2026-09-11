@@ -1035,6 +1035,17 @@ fn validate_assignment_with_features(
                         "multi-step work requires a session that negotiated multi-step-execution-v1",
                     ));
                 }
+                if !artifacts.is_empty() && !features.artifact_upload {
+                    // The same rule for declared artifacts (PAR-014): a
+                    // previous-release replica that never negotiated the
+                    // upload stream may still hand this session an artifact
+                    // node another replica admitted. Decline it before
+                    // running anything rather than run the steps and fail
+                    // the attempt for good at the upload.
+                    return Ok(AssignmentDisposition::ForAnotherRuntime(
+                        "artifact work requires a session that negotiated artifact-upload-v1",
+                    ));
+                }
                 if workspace_grant.is_some() {
                     return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
                         authority,
@@ -3241,10 +3252,15 @@ async fn collect_and_upload_artifacts(
     for file in files {
         // A cancellation that lands after the last step returned stops the
         // collection where it is: a cancelled attempt collects nothing more.
-        if cancellation.is_cancelled()
-            || !upload_artifact(client, &assignment.authority, control, cancellation, file).await?
-        {
+        if cancellation.is_cancelled() {
             return Ok(Some("artifact_collection_cancelled".to_owned()));
+        }
+        match upload_artifact(client, &assignment.authority, control, cancellation, file).await? {
+            UploadOutcome::Uploaded => {}
+            UploadOutcome::Cancelled => {
+                return Ok(Some("artifact_collection_cancelled".to_owned()));
+            }
+            UploadOutcome::Refused(reason) => return Ok(Some(bounded_refusal_detail(reason))),
         }
     }
     Ok(None)
@@ -3269,7 +3285,9 @@ async fn collect_and_upload_artifacts(
 /// budget grows with the length so a large file on a slow link is not cut
 /// short by the lease-sized default; the lease is renewed meanwhile and its
 /// loss, a stop, or the attempt's cancellation still ends the upload.
-/// `Ok(false)` is a cancellation observed before the receipt.
+/// A cancellation observed before the receipt, and a file whose length
+/// changed under the read, are outcomes the attempt records, not errors
+/// that end the session.
 #[cfg(unix)]
 async fn upload_artifact(
     client: &mut AgentControlClient<Channel>,
@@ -3277,13 +3295,13 @@ async fn upload_artifact(
     control: AuthorityRpcControl<'_>,
     cancellation: &CancellationToken,
     mut file: crate::artifacts::CollectedFile,
-) -> Result<bool, AgentError> {
+) -> Result<UploadOutcome, AgentError> {
     use mcloving_agent_protocol::wire::artifact_upload_frame::Frame;
     use mcloving_agent_protocol::wire::{ArtifactUploadFrame, ArtifactUploadHeader};
     use mcloving_domain::artifacts::{ARTIFACT_MEDIA_TYPE, MAX_ARTIFACT_FRAME_BYTES};
     use std::io::{Read as _, Seek as _};
 
-    let digest: [u8; 32] = tokio::task::block_in_place(|| -> Result<[u8; 32], std::io::Error> {
+    let digest = tokio::task::block_in_place(|| -> Result<Option<[u8; 32]>, std::io::Error> {
         // From the start whatever the description's offset: the same file
         // may be emitted under several declarations.
         file.file.seek(std::io::SeekFrom::Start(0))?;
@@ -3304,14 +3322,19 @@ async fn upload_artifact(
         }
         let mut probe = [0_u8; 1];
         if remaining != 0 || file.file.read(&mut probe)? != 0 {
-            return Err(std::io::Error::other(format!(
-                "artifact {} changed length while being read",
-                file.relative_path
-            )));
+            return Ok(None);
         }
         file.file.seek(std::io::SeekFrom::Start(0))?;
-        Ok(digest.finalize().into())
+        Ok(Some(digest.finalize().into()))
     })?;
+    // A writer the step left behind changed the file under the read: the
+    // step's doing, recorded as the attempt's refusal by name.
+    let Some(digest) = digest else {
+        return Ok(UploadOutcome::Refused(format!(
+            "artifact_refused:changed_length:{}",
+            file.relative_path
+        )));
+    };
     let (frames, receiver) = tokio::sync::mpsc::channel::<ArtifactUploadFrame>(4);
     let header = ArtifactUploadFrame {
         frame: Some(Frame::Header(ArtifactUploadHeader {
@@ -3366,12 +3389,20 @@ async fn upload_artifact(
     };
     reader.abort();
     let Some(receipt) = receipt? else {
-        return Ok(false);
+        return Ok(UploadOutcome::Cancelled);
     };
     if !receipt.accepted {
         return Err(AgentError::StaleAuthority);
     }
-    Ok(true)
+    Ok(UploadOutcome::Uploaded)
+}
+
+/// How one artifact upload ended short of an error.
+#[cfg(unix)]
+enum UploadOutcome {
+    Uploaded,
+    Cancelled,
+    Refused(String),
 }
 
 /// The lease-sized authority budget plus one second per MiB, bounded at
@@ -4947,6 +4978,50 @@ mod tests {
             })
             .collect::<Vec<_>>();
         serde_json::to_vec(&json!({"version": 5, "steps": steps})).unwrap()
+    }
+
+    /// PAR-014: a stage that declares artifacts is runnable only under a
+    /// session that negotiated the upload stream; otherwise it is declined
+    /// back to the queue before a step runs, never run and then failed at
+    /// the upload.
+    #[test]
+    fn artifact_envelope_runs_only_when_the_upload_feature_was_negotiated() {
+        let spec = serde_json::to_vec(&json!({
+            "version": 5,
+            "steps": [{"kind": "process", "program": "/bin/true", "timeout_seconds": 10}],
+            "artifacts": [{"name": "outputs", "paths": ["out/*"]}]
+        }))
+        .unwrap();
+        let without = SessionFeatures {
+            multi_step: true,
+            ..SessionFeatures::default()
+        };
+        assert!(matches!(
+            validate_assignment_with_features(&config(), 4, assignment(&spec), without).unwrap(),
+            AssignmentDisposition::ForAnotherRuntime(reason)
+                if reason.contains("artifact-upload-v1")
+        ));
+        let with = SessionFeatures {
+            multi_step: true,
+            artifact_upload: true,
+            ..SessionFeatures::default()
+        };
+        let validated = runnable(
+            validate_assignment_with_features(&config(), 4, assignment(&spec), with).unwrap(),
+        );
+        assert_eq!(validated.artifacts.len(), 1);
+        assert_eq!(validated.artifacts[0].name, "outputs");
+        // A bad declaration is a permanent refusal of the payload.
+        let bad = serde_json::to_vec(&json!({
+            "version": 5,
+            "steps": [{"kind": "process", "program": "/bin/true", "timeout_seconds": 10}],
+            "artifacts": [{"name": "outputs", "paths": ["../escape/*"]}]
+        }))
+        .unwrap();
+        let refusal = unsupported(
+            validate_assignment_with_features(&config(), 4, assignment(&bad), with).unwrap(),
+        );
+        assert!(refusal.detail.contains("artifacts"), "{}", refusal.detail);
     }
 
     /// PAR-010: the version-5 envelope is runnable only once the controller

@@ -156,7 +156,16 @@ pub fn collect(
             Err(nix::errno::Errno::ELOOP | nix::errno::Errno::ENOTDIR) => {
                 return Err(CollectionRefusal::Link(format!("<workspace>/{reached}")).into());
             }
-            Err(error) => return Err(error.into()),
+            // The workspace is the step's to make unreadable (a `chmod 000
+            // "$PWD"` before exiting): the step's refusal by name, not the
+            // agent's session to end.
+            Err(error) => {
+                return Err(CollectionRefusal::Unreadable(
+                    format!("<workspace>/{reached}"),
+                    error.desc().to_owned(),
+                )
+                .into());
+            }
         };
     }
     let mut walk = Walk {
@@ -570,6 +579,29 @@ mod tests {
                 &error,
                 CollectionError::Refused(CollectionRefusal::Unreadable(path, cause))
                     if path == "other/secret.xml" && cause.contains("denied")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_the_step_made_unreadable_is_a_named_refusal() {
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("skipped: root reads everything");
+            return;
+        }
+        let directory = workspace();
+        let root = directory.path().join(WORKSPACE);
+        std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+        let error = collect_in(&directory, &[spec("all", &["**/*"])]).unwrap_err();
+        std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        assert!(
+            matches!(
+                &error,
+                CollectionError::Refused(CollectionRefusal::Unreadable(path, cause))
+                    if path == "<workspace>/org/attempt/1" && cause.contains("denied")
             ),
             "{error:?}"
         );

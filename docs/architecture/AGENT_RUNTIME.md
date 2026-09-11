@@ -445,7 +445,8 @@ discharge a parked reconciliation).
   attempt's quota in an in-process ledger of streams still in flight before
   staging (so concurrent streams for one attempt cannot each pass the
   committed figure; an exact retry of an object the attempt already holds
-  is neither pre-checked nor charged), and bounds the header and the whole
+  is answered from the ledger without receiving a byte when the object is
+  available, and charged once, not twice, while it is pending), and bounds the header and the whole
   receive phase by the declared length (thirty seconds for the header,
   thirty seconds plus one second per MiB for the data, at most fifteen
   minutes; a stalled stream releases its reservation), registers it through
@@ -462,7 +463,12 @@ discharge a parked reconciliation).
   `artifact-upload-v1` capability on Unix, the controller keeps it for
   scheduling only when the feature was negotiated, and a node whose stage
   declares artifacts requires it, so an older agent or a session with an
-  older peer is never offered such a node. A crash between the steps and
+  older peer is never offered such a node; an artifact node that reaches a
+  session without the feature anyway (a mixed rollout) is declined back to
+  the queue before a step runs, as a multi-step node is. A file whose
+  length changes under the digest read, and a workspace the step made
+  unreadable before exiting, are named refusals (`changed_length`,
+  `unreadable:<workspace>/...`) recorded as the attempt's reason. A crash between the steps and
   the terminal leaves the objects already committed registered under the
   attempt and reports the attempt interrupted as before; recovery does not
   resume uploads. A Windows agent advertises no collector and a stage that

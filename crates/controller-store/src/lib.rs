@@ -5246,11 +5246,12 @@ impl Store {
         Ok(used)
     }
 
-    /// Whether exactly this artifact (name, digest and length) is already
-    /// registered under the attempt and fence: a retry of an upload whose
-    /// receipt was lost, which the registration admits idempotently and no
-    /// quota check should count twice.
-    pub async fn artifact_registered(
+    /// The status (`pending` or `available`) under which exactly this
+    /// artifact (name, digest and length) is already registered for the
+    /// attempt and fence, if it is: a retry of an upload whose receipt was
+    /// lost. An available object needs no bytes at all; a pending one is
+    /// already counted in the attempt's byte figure.
+    pub async fn artifact_registration_status(
         &self,
         organization_id: Uuid,
         attempt_id: Uuid,
@@ -5258,21 +5259,19 @@ impl Store {
         name: &str,
         digest: [u8; 32],
         bytes: i64,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<String>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let registered = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM attempt_objects
-                 WHERE organization_id = $1
-                   AND attempt_id = $2
-                   AND fence = $3
-                   AND kind = 'artifact'
-                   AND name = $4
-                   AND object_digest = $5
-                   AND bytes = $6
-                   AND status IN ('pending', 'available')
-             )",
+        let registered = sqlx::query_scalar::<_, String>(
+            "SELECT status
+             FROM attempt_objects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'
+               AND name = $4
+               AND object_digest = $5
+               AND bytes = $6
+               AND status IN ('pending', 'available')",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -5280,7 +5279,7 @@ impl Store {
         .bind(name)
         .bind(digest.as_slice())
         .bind(bytes)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(registered)

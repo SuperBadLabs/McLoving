@@ -973,7 +973,9 @@ transactions themselves, so a session superseded during a long stream cannot
 register after its replacement,
 is accepted only for a session that negotiated `artifact-upload-v1`, and
 the scheduling capability is kept only for such a session, so an older
-agent or peer is never offered a stage that declares artifacts and never
+agent or peer is never offered a stage that declares artifacts, an artifact
+node that reaches a session without the feature in a mixed rollout is
+declined before a step runs, and never
 strands its files); TM-013 (credential and host exposure: the collector
 resolves the agent-owned workspace root from the filesystem root one
 component at a time without following a link in any of them, so a writable
@@ -994,8 +996,9 @@ routed such work); TM-006 (durable evidence: the controller stages each
 object into the same content-addressed store the public upload routes use,
 with the declared length charged against the attempt's quota in an
 in-process ledger of streams in flight and then reserved against the store
-quota before the first byte (an exact retry of a held object is neither
-pre-checked nor charged), the header and the receive phase bounded so a
+quota before the first byte (an exact retry of an available object is
+answered without receiving a byte, so retries cannot stage; a pending one is
+charged once), the header and the receive phase bounded so a
 stream opened and never written or stalled mid-way releases the reservation,
 and a short or mismatching upload discarded, registers it through the
 same fenced `register_artifact` predicate under an attempt-scoped

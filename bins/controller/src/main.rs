@@ -1566,11 +1566,14 @@ impl AgentControl for ControllerAgentService {
         let mut digest = [0_u8; 32];
         digest.copy_from_slice(&header.sha256);
         // A retry of an upload whose receipt was lost names an object the
-        // attempt already holds: the registration admits it idempotently,
-        // so the quota is neither pre-checked nor charged for it again.
-        let exact_retry = self
+        // attempt already holds. An available one is committed: the receipt
+        // is answered without receiving a byte, so a retry can stage nothing.
+        // A pending one is registered but not yet committed: its bytes
+        // already count in the attempt's figure, so the stream is charged
+        // like any other but not twice.
+        let registered = self
             .store
-            .artifact_registered(
+            .artifact_registration_status(
                 context.organization_id,
                 context.attempt_id,
                 context.fence,
@@ -1580,26 +1583,35 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
-        let _reservation = if exact_retry {
-            None
+        if registered.as_deref() == Some("available") {
+            return Ok(Response::new(WorkReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: true,
+                published_outcome: WorkOutcome::Unspecified as i32,
+                cancellation_requested: false,
+            }));
+        }
+        let used = self
+            .store
+            .attempt_artifact_bytes(context.organization_id, context.attempt_id, context.fence)
+            .await
+            .map_err(internal_store_error)?;
+        let committed = if registered.is_some() {
+            used.saturating_sub(declared)
         } else {
-            let used = self
-                .store
-                .attempt_artifact_bytes(context.organization_id, context.attempt_id, context.fence)
-                .await
-                .map_err(internal_store_error)?;
-            // The committed figure plus every stream this process is still
-            // receiving for the attempt, charged before staging so
-            // concurrent streams cannot each fit and together reserve the
-            // store; released when this stream ends however it ends.
-            Some(ArtifactReservation::take(
-                &self.artifact_reservations,
-                (context.organization_id, context.attempt_id, context.fence),
-                used,
-                declared,
-                i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX),
-            )?)
+            used
         };
+        // The committed figure plus every stream this process is still
+        // receiving for the attempt, charged before staging so concurrent
+        // streams cannot each fit and together reserve the store; released
+        // when this stream ends however it ends.
+        let _reservation = ArtifactReservation::take(
+            &self.artifact_reservations,
+            (context.organization_id, context.attempt_id, context.fence),
+            committed,
+            declared,
+            i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX),
+        )?;
         let mut writer = self
             .object_store
             .begin_artifact(&context.organization_id.to_string(), header.bytes)
