@@ -243,7 +243,8 @@ them for longer than the deadline; a saturated route answers 503
 outlives the deadline answers 408 `webhook_timeout`, and either refused
 delivery is redeliverable. The OpenAPI
 operation `receiveGithubDelivery` declares the three headers, the
-`GithubDelivery` body and the 200/201/202/422 answers. The secret-bearing
+`GithubDelivery` body and the 200/201/202/422 answers, plus the 408 and
+503 backpressure answers with their `Retry-After` header. The secret-bearing
 `GET .../webhook` answer is marked `Cache-Control: no-store`. A `push` to a
 branch maps to the SCM payload `repository_identity` (the repository's
 `full_name`, which the trigger's `repository_identity` must equal),

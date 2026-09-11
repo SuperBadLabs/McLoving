@@ -2494,6 +2494,22 @@ fn github_delivery_operation() -> Value {
     });
     operation["responses"]["422"] =
         admission("Delivery is durably dead-lettered and carries its terminal state");
+    let error = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+        })
+    };
+    operation["responses"]["408"] = error(
+        "webhook_timeout: the body was not received within the delivery deadline; the permit is released and the delivery is redeliverable",
+    );
+    let mut busy = error(
+        "webhook_busy: too many deliveries in flight; the body is not read and the delivery is redeliverable",
+    );
+    busy["headers"] = json!({
+        "Retry-After": {"description": "Seconds to wait before redelivering", "schema": {"type": "string"}}
+    });
+    operation["responses"]["503"] = busy;
     operation
 }
 
