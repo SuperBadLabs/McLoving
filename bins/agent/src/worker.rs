@@ -1861,6 +1861,7 @@ async fn run_assignment(
         let mut logs: Vec<SpoolEntry> = Vec::with_capacity(steps.len() * 2);
         let mut output_budget = MAX_ATTEMPT_OUTPUT_BYTES;
         let mut last_outcome: Option<mcloving_agent_runtime::executor::ExecutionOutcome> = None;
+        let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
         for (index, process) in steps.into_iter().enumerate() {
             let ordinal = u32::try_from(index).expect("step count is bounded");
             let step_credentials = credentials
@@ -2061,6 +2062,7 @@ async fn run_assignment(
                             output_limit: step_output_limit,
                             deadline: step_deadline,
                             floors: output_floors.clone(),
+                            steps_remaining: step_count.saturating_sub(ordinal).max(1),
                         },
                         live_spool.clone(),
                     )?;
@@ -3252,13 +3254,13 @@ impl SpoolPublisher<'_> {
 /// tail; the terminal pass still verifies every streamed range against the
 /// executor's own durable spool before the attempt completes.
 struct LiveSpool {
-    stdout: fs::File,
-    stderr: fs::File,
+    stdout: std::fs::File,
+    stderr: std::fs::File,
 }
 
 impl LiveSpool {
     fn open(spool: &Path) -> Result<Self, std::io::Error> {
-        let open = |name: &str| -> Result<fs::File, std::io::Error> {
+        let open = |name: &str| -> Result<std::fs::File, std::io::Error> {
             let path = spool.join(name);
             // No pathname pre-check: the open itself refuses a link, does not
             // block on a FIFO, and the descriptor is then judged, so nothing
@@ -3279,13 +3281,43 @@ impl LiveSpool {
                     path.display()
                 )));
             }
-            Ok(fs::File::from_std(file))
+            Ok(file)
         };
         Ok(Self {
             stdout: open("stdout.log")?,
             stderr: open("stderr.log")?,
         })
     }
+}
+
+/// Reads exactly `bytes` bytes at `offset` without moving the descriptor's
+/// own position, synchronously: it runs under the floors lock, which the
+/// executor's quota cut also takes from synchronous code.
+fn read_range_sync(file: &std::fs::File, offset: u64, bytes: u64) -> std::io::Result<Vec<u8>> {
+    let expected = usize::try_from(bytes)
+        .map_err(|_| std::io::Error::other("log length exceeds platform bounds"))?;
+    let mut content = vec![0_u8; expected];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt as _;
+        file.read_exact_at(&mut content, offset)?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt as _;
+        let mut filled = 0_usize;
+        while filled < expected {
+            let read = file.seek_read(&mut content[filled..], offset + filled as u64)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "spool shorter than its measured length",
+                ));
+            }
+            filled += read;
+        }
+    }
+    Ok(content)
 }
 
 /// What one live tail publishes for: the attempt's authority, the step and
@@ -3301,6 +3333,10 @@ struct LiveTailScope<'a> {
     deadline: tokio::time::Instant,
     /// Where the executor's quota cut learns what was already published.
     floors: Arc<OutputFloors>,
+    /// This step and the steps after it: the attempt-wide live sequence
+    /// budget is shared out so a long early step cannot spend what the later
+    /// steps need to stay visible.
+    steps_remaining: u32,
 }
 
 struct LiveStream {
@@ -3331,6 +3367,9 @@ struct LiveTail {
     output_limit: u64,
     deadline: tokio::time::Instant,
     floors: Arc<OutputFloors>,
+    /// First sequence this step's tail will not reserve: its share of the
+    /// attempt-wide live budget, taken at the step's start.
+    step_ceiling: u64,
 }
 
 impl LiveTail {
@@ -3349,9 +3388,16 @@ impl LiveTail {
             output_limit,
             deadline,
             floors,
+            steps_remaining,
         } = scope;
+        let journal = Journal::open(&config.journal_path)?;
+        // Share the remaining live budget across this and the later steps.
+        let next = journal.next_log_sequence(organization_id, attempt_id, fence_token)?;
+        let ceiling = live_tail_sequence_ceiling();
+        let share = ceiling.saturating_sub(next) / u64::from(steps_remaining.max(1));
+        let step_ceiling = next.saturating_add(share).min(ceiling);
         Ok(Self {
-            journal: Journal::open(&config.journal_path)?,
+            journal,
             organization_id: organization_id.to_owned(),
             attempt_id: attempt_id.to_owned(),
             fence_token,
@@ -3376,6 +3422,7 @@ impl LiveTail {
             output_limit,
             deadline,
             floors,
+            step_ceiling,
         })
     }
 
@@ -3383,9 +3430,7 @@ impl LiveTail {
     /// before it is flushed: one second, stretched so that the remaining
     /// sequence budget (two streams) lasts until the step's deadline.
     fn flush_interval(&self, next_sequence: u64) -> Duration {
-        let remaining = live_tail_sequence_ceiling()
-            .saturating_sub(next_sequence)
-            .max(1);
+        let remaining = self.step_ceiling.saturating_sub(next_sequence).max(1);
         let left = self
             .deadline
             .saturating_duration_since(tokio::time::Instant::now());
@@ -3474,40 +3519,52 @@ impl LiveTail {
         };
         for index in 0..2 {
             let file = if index == 0 {
-                &mut spool.stdout
+                &spool.stdout
             } else {
-                &mut spool.stderr
+                &spool.stderr
             };
-            let stream = &mut self.streams[index];
-            let length = file.metadata().await?.len();
-            let available = length.saturating_sub(stream.offset);
-            if available == 0
-                || (available < LIVE_CHUNK_TARGET_BYTES
-                    && stream.last_flush.elapsed() < flush_interval)
-            {
-                continue;
-            }
             // Never past the aggregate limit: the executor retains at most
             // that many bytes across both streams, and the terminal pass can
             // only vouch for what it retained.
             let streamed = self.streams[0].offset + self.streams[1].offset;
             let headroom = self.output_limit.saturating_sub(streamed);
-            if headroom == 0 {
-                self.stopped = true;
-                return Ok(());
-            }
-            let bytes = available.min(MAX_LOG_CHUNK_BYTES as u64).min(headroom);
             let stream = &mut self.streams[index];
-            let content = read_spool_range(file, stream.offset, bytes).await?;
+            // Under the floors lock, so the length seen, the bytes read and
+            // the floor raised are one step the executor's quota cut cannot
+            // interleave with: it either cuts before this (and the length
+            // seen is the cut length) or after it (and keeps the floor).
+            let (bytes, content) = {
+                let mut floors = self.floors.lock();
+                let length = file.metadata()?.len();
+                let available = length.saturating_sub(stream.offset);
+                if available == 0
+                    || (available < LIVE_CHUNK_TARGET_BYTES
+                        && stream.last_flush.elapsed() < flush_interval)
+                {
+                    continue;
+                }
+                if headroom == 0 {
+                    self.stopped = true;
+                    return Ok(());
+                }
+                let bytes = available.min(MAX_LOG_CHUNK_BYTES as u64).min(headroom);
+                let content = read_range_sync(file, stream.offset, bytes)?;
+                if index == 0 {
+                    floors.0 = stream.offset + bytes;
+                } else {
+                    floors.1 = stream.offset + bytes;
+                }
+                (bytes, content)
+            };
             let sequence = self.journal.next_log_sequence(
                 &self.organization_id,
                 &self.attempt_id,
                 self.fence_token,
             )?;
             // Leave the terminal pass room to publish every stream's
-            // remainder: stop reserving live well below the bound rather than
-            // spend the last sequences on heartbeats and strand the attempt.
-            if sequence >= live_tail_sequence_ceiling() {
+            // remainder, and the later steps their share: stop reserving at
+            // this step's ceiling rather than spend the budget on heartbeats.
+            if sequence >= self.step_ceiling {
                 eprintln!(
                     "live log tail paused for step {}: sequence {sequence} reaches the live \
                      ceiling; the remainder publishes after the step",
@@ -3534,13 +3591,6 @@ impl LiveTail {
             )?;
             stream.offset += bytes;
             stream.last_flush = tokio::time::Instant::now();
-            // The executor's quota cut keeps everything reserved so far.
-            let floor = if index == 0 {
-                &self.floors.stdout
-            } else {
-                &self.floors.stderr
-            };
-            floor.store(stream.offset, std::sync::atomic::Ordering::SeqCst);
             match publish_reserved_chunk(
                 publication,
                 &mut self.journal,

@@ -359,11 +359,15 @@ discharge a parked reconciliation).
   the terminal pass always has room for every stream's remainder, it never
   streams past the step's aggregate output limit, and it paces its flushes
   (one second, stretched up to a minute) so the sequence budget lasts the
-  step's whole timeout. Each reservation also raises the stream's retention
-  floor the executor reads at its quota cut: a step that exceeds the
-  aggregate limit keeps every byte already published (stdout still
-  preserved first among the unpublished remainder), so the terminal pass's
-  strict coverage and digest checks hold for a quota-terminated step too. The terminal pass then
+  step's whole timeout, that budget shared out across the remaining steps
+  of the attempt so an early step cannot spend what later steps need. Each
+  chunk also raises the stream's retention floor under one lock the
+  executor's quota cut takes as well, so the length measured, the bytes
+  read and the floor raised are one step the cut cannot interleave with: a
+  step that exceeds the aggregate limit keeps every byte already published
+  (stdout still preserved first among the unpublished remainder), so the
+  terminal pass's strict coverage and digest checks hold for a
+  quota-terminated step too. The terminal pass then
   verifies the executor's durable spool as before, checks every streamed
   range is contiguous from zero and still hashes to what was sent (a spool
   rewritten after streaming fails the attempt by name), sends only ranges

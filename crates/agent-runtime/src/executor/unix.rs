@@ -756,6 +756,9 @@ fn truncate_output_to_limit(
     let Some(limit) = limit else {
         return Ok(());
     };
+    // Held through the cut: a publisher cannot read a range and raise its
+    // floor between this measurement and the truncation.
+    let held = floors.map(|floors| floors.lock());
     let stdout_bytes = stdout.metadata()?.len();
     let stderr_bytes = stderr.metadata()?.len();
     // stdout is preserved first, but never below what a live publisher
@@ -763,7 +766,7 @@ fn truncate_output_to_limit(
     // ledger and the durable spool must keep vouching for them. The floors'
     // sum stays within the limit by the publisher's own bound, so the
     // aggregate still fits.
-    let (stdout_floor, stderr_floor) = floors.map(|floors| floors.load()).unwrap_or((0, 0));
+    let (stdout_floor, stderr_floor) = held.as_deref().copied().unwrap_or((0, 0));
     let stdout_floor = stdout_floor.min(stdout_bytes).min(limit);
     let stderr_floor = stderr_floor
         .min(stderr_bytes)
@@ -1698,8 +1701,7 @@ mod tests {
         let stdout = write("stdout.log", 20);
         let stderr = write("stderr.log", 12);
         let floors = super::super::OutputFloors::default();
-        floors.stderr.store(10, std::sync::atomic::Ordering::SeqCst);
-        floors.stdout.store(4, std::sync::atomic::Ordering::SeqCst);
+        *floors.lock() = (4, 10);
         truncate_output_to_limit(&stdout, &stderr, Some(16), Some(&floors)).unwrap();
         assert_eq!(stdout.metadata().unwrap().len(), 6);
         assert_eq!(stderr.metadata().unwrap().len(), 10);

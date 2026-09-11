@@ -87,21 +87,26 @@ pub struct ExecutionRequest {
     pub termination_grace: Duration,
 }
 
-/// Per-stream byte counts a live publisher has already sent, read by the
-/// output-quota cut so it never removes a byte the controller already holds.
+/// Per-stream byte counts (stdout, stderr) a live publisher has already
+/// sent, read by the output-quota cut so it never removes a byte the
+/// controller already holds. One lock serializes the two: the publisher
+/// holds it while it measures a stream, reads the bytes it will send and
+/// raises the floor; the cut holds it while it measures and truncates, so a
+/// range can never be read on one side and cut on the other in between.
 #[derive(Debug, Default)]
 pub struct OutputFloors {
-    pub stdout: std::sync::atomic::AtomicU64,
-    pub stderr: std::sync::atomic::AtomicU64,
+    floors: std::sync::Mutex<(u64, u64)>,
 }
 
 impl OutputFloors {
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, (u64, u64)> {
+        self.floors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub fn load(&self) -> (u64, u64) {
-        use std::sync::atomic::Ordering;
-        (
-            self.stdout.load(Ordering::SeqCst),
-            self.stderr.load(Ordering::SeqCst),
-        )
+        *self.lock()
     }
 }
 

@@ -12491,7 +12491,13 @@ async fn a_live_log_session_may_number_chunks_past_the_terminal_bound() {
     );
     assert!(
         !store
-            .append_log_in_session(&chunk(65_536, b"beyond"), 1)
+            .append_log_in_session(
+                &chunk(
+                    mcloving_domain::live_logs::MAX_LIVE_ATTEMPT_LOG_CHUNKS,
+                    b"beyond",
+                ),
+                1,
+            )
             .await
             .expect("the live bound still holds")
     );
