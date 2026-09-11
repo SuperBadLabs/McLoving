@@ -1,7 +1,8 @@
-# EXEC-005 security review — ACTIVE cache and input product slices
+# EXEC-005 security review — ACTIVE cache/input slices and source prerequisites
 
 EXEC-005 is ACTIVE. This receipt records bounded Linux cache publish/read and
-input-capture integration work; it does not close the ticket. SCM acquisition,
+input-capture integration work plus standalone source prerequisites; it does not
+close the ticket. SCM acquisition,
 dependency resolution and dynamic provisioning remain unwired. General
 cache-to-workspace restoration and downstream input-value use remain
 unimplemented. All five actual helper product gates and normal protected-main
@@ -324,3 +325,131 @@ differential lane's security settings on this capable host (one positive passed)
 and the unconfined host's existing namespace restriction (one exact refusal
 passed). Strict Clippy passed. No injected denial or host policy mutation was
 needed, and this targeted container run is not a full differential-lane result.
+
+## Pure source receipt authentication prerequisite, ACTIVE scope
+
+The source verifier now accepts explicit immutable authority snapshots and the
+complete original acquisition request without constructing a native acquirer or
+opening provider credentials/runtime paths. Shared native configuration shape,
+authority hashes, signing-key and marker-set checks remain in force; filesystem
+canonicalization stays in native construction. The key-bearing verifier has no
+`Debug` implementation and does not retain marker bytes. Typed authority inputs
+are caller size-controlled; hostile stored receipt bytes use a strict 64 MiB
+bounded parser with duplicate, unknown and trailing-data refusal.
+
+Independent chief review required complete signed-field binding, separation of
+historical authentication from current admission, preserved native constructor
+checks and refusal of impossible zero-file receipts. The implementation compares
+the complete canonical original-request digest plus repeated context/config,
+grant, primary/submodule repository and output identities. HMAC verification is
+constant-time. Historical authenticated receipts may outlive their original
+window; native replay still checks current request/grant admission first. No
+receipt changes a request timestamp or authorizes a new provider operation.
+
+Focused local validation: `RUSTC_WRAPPER= cargo test --locked -p
+mcloving-source-acquirer --lib receipt_auth` passed eight tests with zero failed
+or ignored. The denominator includes every original request field, 39 correctly
+re-signed receipt context/authority/limit substitutions with an independently
+successful HMAC check, primary/submodule identity and graph substitution, time
+boundaries (including nonnegative native acquisition time and the checked native
+publication-lifetime upper bound), zero-file refusal,
+malformed/duplicate/unknown/trailing/oversize frames, key/marker/config drift,
+native credential-marker size admission, and positive historical authentication using
+absent native-state/runtime paths. These are pure unit tests, not a submitted-job
+or retained-tree custody gate. A separate direct runtime-loader unit test passed
+with a correct-hash caller-owned regular file and executed the ordinary
+non-root-owner refusal branch; strict source all-targets Clippy also passed.
+Actual native fixture results are recorded with
+the source launch verification below when executed.
+
+Held-directory root binding, descriptor-relative complete inventory, finite
+retained-state accounting/crash reconciliation and submitted-job source wiring
+remain outstanding. Existing pathname-based tree verification and cooperative
+read-only sealing modes do not isolate a fully compromised same-UID actor.
+EXEC-005 remains ACTIVE; all existing production/canary/cutover exclusions and
+frozen compatibility denominators remain in force.
+
+
+## Closed standalone source lifetime and runtime custody review, ACTIVE scope
+
+The bounded contract is `docs/architecture/SOURCE_CONTAINMENT_V1.md`. Independent
+review identified that original agent process-group emptiness cannot cover native
+source children that create new groups. The standalone fixed source path selects
+its exact source-only profile, uses a private namespace PID1 and staged control
+pipes, and requires the caller to retain/join the exact init pidfd before any
+native response can be accepted. A normal outer `waitpid(init)` is a completion
+proof; outer death by itself is not. Durable agent dispatch/recovery is not added.
+
+A real native acquisition attempt exposed another boundary: root-owned host
+libraries become an unmapped UID in the caller-only user namespace. An earlier
+review of generic executable readers missed the dedicated runtime-loader owner
+check; the observed failure was preserved and the review corrected. The fix
+does not accept overflow ownership. The original full-identity outer process
+checks root-owned, non-group/world-writable exact runtime files through held
+opens before namespace creation. A typed receiver checks live sealed supervisor
+lineage and the parent-held sealed manifest before consuming those descriptors.
+Ordinary construction preserves native root-ownership admission and all existing
+runtime path-drift and derived loader/snapshot checks.
+
+Independent adversarial review required guarded proc authority reads: plain
+UID/GID map paths can be forged with static bind overlays before launch. Held
+proc root/task descriptors, pinned kernel self links and same-mount `openat2`
+reads now protect map/status/environment/fdinfo interpretation. The fixed
+profile transition and label checks also use same-mount guarded task
+`attr/current` opens; this closes an independent review finding where plain
+profile paths could overclaim early P/N evidence under static overlays. Final genuine
+proc executable/FD links cross mounts when followed, so static overlays are
+rejected with pinned before/after leaf checks; active same-UID mount/ptrace
+interference remains outside the claimed boundary. The operator launcher must
+clear the initial dynamic-loader environment before first exec; an environment
+check after startup cannot establish that no loader injection already occurred.
+Neither supervisor reads credential/key/marker files. The selected profile is
+unconfined, not a restrictive workload sandbox.
+
+After guarded profile/parent checks and the deliberate separate-session
+heartbeat fixture were added, an earlier pre-freeze targeted matrix passed eleven
+tests with zero failures or ignored tests. Each of the three authenticated
+cancellation routes joined the exact init pidfd and observed seven pinned native
+descendants exit, including the deliberately detached process; its observed
+heartbeat stopped and the provider count stayed stable. Normal native completion
+also authenticated the receipt/tree and joined init with the deliberate separate
+group present. Eight direct init/worker forged-parent launches refused before
+parent lineage could authorize a capsule; these cases do not claim downstream
+capsule-parser mutation coverage. The eleven Rust tests group five real native acquisition/lifetime scenarios,
+twelve setup paths, eight early-parent exits, eight initial caller-identity
+refusals, three root-custody refusals, one static-map scenario with two installed
+UID/GID overlays, and eight forged private-entry launches. All executed the
+supported-host routes without unavailable-host fallbacks. This is a targeted dirty-candidate
+result, with exact reviewed-path/log hashes retained in the independent review;
+complete frozen-suite and protected-main evidence remain separate obligations.
+An earlier ticker observation failed because Linux truncated its process name;
+that failed attempt and its weaker cleanup evidence remain separately retained.
+Later successful pidfd joins do not retroactively establish teardown authority
+for the failed attempt. Fixture-only offline transport retirement after proven
+init exit preserves synthetic claims and does not implement product reclamation.
+
+PR 144 review then identified a missed admission topology: distinct readiness and
+gate descriptor numbers could refer to opposite ends of one pipe, allowing the
+supervisor to consume its own phase bytes as caller acknowledgements. The actual
+old-source regression used valid pinned configuration and private authority,
+asserted different descriptor numbers but equal held device/inode identity, and
+sent no acknowledgements or request. A calibrated inotify watch observed private
+credential/key/marker access (160 event bytes after a 32-byte positive control),
+and the old source exited successfully. No provider request or acquisition was
+claimed by that EOF-driven reproduction.
+
+Both supervisors now compare the held FIFO device/inode identities, with the
+outer check before profile/P/config and the init check before profile/custody/R.
+The same regression then refused before P with zero watched private-authority
+access, no output and a still-working positive watch control. The corrected
+complete targeted matrix passed twelve tests with zero failures or ignored tests,
+including the distinct-pipe authenticated positives and all eleven earlier
+tests. The watch observes private authority files, not configuration; the
+earlier configuration boundary is established by the code placement. Prior
+candidate validation remains evidence for its observed cases and omitted this
+alias case; corrected frozen-candidate full-suite and protected-main results
+must be recorded separately. No broader source integration gate is earned.
+Held acquisition-directory custody, finite retained-state reservations and crash
+reconciliation, controller/agent wiring and actual submitted-job replay remain
+open. EXEC-005 remains ACTIVE and no production/canary/cutover or frozen JCOMP
+claim is expanded.

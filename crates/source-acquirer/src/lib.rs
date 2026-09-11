@@ -26,6 +26,9 @@ use unicode_normalization::UnicodeNormalization as _;
 use url::Url;
 use uuid::Uuid;
 
+pub mod receipt_auth;
+pub mod runtime_custody;
+
 pub const PROTOCOL_VERSION: &str = "mcloving.source-acquirer/v1";
 
 const MAX_BINDING_TEXT_BYTES: usize = 4 * 1_024;
@@ -49,12 +52,13 @@ const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
 const FILTER_IGNORED_WARNING: &[u8] = b"warning: filtering not recognized by server, ignoring";
+#[cfg(target_os = "linux")]
 const SYSTEM_PRELOAD_PATH: &[u8] = b"/etc/ld.so.preload\0";
 const MAX_RESOLVER_OUTPUT_BYTES: usize = 4 * 1_024;
 const MAX_RESOLVER_STDERR_BYTES: usize = 4 * 1_024;
 const MAX_RESOLVER_ADDRESSES: usize = 32;
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const TRANSPORT_NAMESPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
@@ -75,11 +79,15 @@ struct VerifiedFile {
 }
 
 struct VerifiedRuntimeFile {
+    #[cfg(target_os = "linux")]
     binding: RuntimeBinding,
+    #[cfg(target_os = "linux")]
     file: std::fs::File,
+    #[cfg(target_os = "linux")]
     metadata: RuntimeMetadata,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Eq, PartialEq)]
 struct RuntimeMetadata {
     device: u64,
@@ -94,6 +102,7 @@ struct RuntimeMetadata {
 }
 
 struct RuntimeDirectory {
+    #[cfg(unix)]
     path: PathBuf,
     _directory: std::fs::File,
     invocation_path: PathBuf,
@@ -172,6 +181,7 @@ impl Drop for RuntimeDirectory {
 }
 
 struct GitExecDirectory {
+    #[cfg(unix)]
     path: PathBuf,
     _directory: std::fs::File,
     invocation_path: PathBuf,
@@ -647,147 +657,200 @@ impl SourceAcquirer {
         signing_key: Vec<u8>,
         secret_markers: Vec<Vec<u8>>,
     ) -> Result<Self, SourceError> {
-        validate_config(
-            &config,
-            &implementation_sha256,
-            credential,
-            &signing_key,
-            &secret_markers,
-        )?;
-        let credential_on_disk =
-            read_private_bounded_regular_file(&credential_path, MAX_AUTHORITY_BYTES).await?;
-        if credential_on_disk != credential {
-            return Err(SourceError::InvalidConfig);
-        }
-        ensure_private_output_root(&config.output_root).await?;
-        validate_transport_filesystem(
-            &config.transport_root,
-            &config.output_root,
-            config.max_transport_bytes,
-        )?;
-        let source_git_executable = snapshot_verified_file(
-            &config.git_executable_path,
-            &config.git_executable_sha256,
-            "mcloving-git",
-            0o500,
-        )
-        .await?;
-        let source_git_remote_https_executable = snapshot_verified_file(
-            &config.git_remote_https_executable_path,
-            &config.git_remote_https_executable_sha256,
-            "mcloving-git-remote-https",
-            0o500,
-        )
-        .await?;
-        let source_askpass_executable = snapshot_running_executable(&implementation_sha256).await?;
-        let ca_bundle = match (&config.ca_bundle_path, &config.ca_bundle_sha256) {
-            (Some(path), Some(expected)) => {
-                let snapshot =
-                    snapshot_verified_file(path, expected, "mcloving-source-ca", 0o400).await?;
-                Some(inherit_verified_file(snapshot)?)
-            }
-            (None, None) => None,
-            _ => return Err(SourceError::InvalidConfig),
-        };
-        let interpreter_paths = [
-            verified_elf_interpreter(&source_git_executable).await?,
-            verified_elf_interpreter(&source_git_remote_https_executable).await?,
-            verified_elf_interpreter(&source_askpass_executable).await?,
-        ]
-        .into_iter()
-        .map(std::fs::canonicalize)
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|_| SourceError::InvalidConfig)?;
-        let preload_file =
-            inherited_sealed_verified_file(b"", "mcloving-source-empty-loader-preload", 0o400)
-                .await?;
-        let preload_path = PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            std::os::fd::AsRawFd::as_raw_fd(&preload_file.file)
-        ));
-        let runtime_closure =
-            open_runtime_closure(&config.runtime_closure, &interpreter_paths, &preload_path)
-                .await?;
-        let git_interpreter =
-            bound_runtime_interpreter(&source_git_executable, &runtime_closure).await?;
-        let helper_interpreter =
-            bound_runtime_interpreter(&source_git_remote_https_executable, &runtime_closure)
-                .await?;
-        let askpass_interpreter =
-            bound_runtime_interpreter(&source_askpass_executable, &runtime_closure).await?;
-        let git_executable = snapshot_with_bound_interpreter(
-            &source_git_executable,
-            &config.git_executable_sha256,
-            "mcloving-git-bound",
-            &git_interpreter,
-        )
-        .await?;
-        let git_remote_https_executable = snapshot_with_bound_interpreter(
-            &source_git_remote_https_executable,
-            &config.git_remote_https_executable_sha256,
-            "mcloving-git-remote-https-bound",
-            &helper_interpreter,
-        )
-        .await?;
-        let askpass_executable = snapshot_with_bound_interpreter(
-            &source_askpass_executable,
-            &implementation_sha256,
-            "mcloving-source-askpass-bound",
-            &askpass_interpreter,
-        )
-        .await?;
-        let runtime_directory = create_runtime_directory(&config.output_root, &runtime_closure)?;
-        let observed_runtime = trace_runtime_closure(
-            &[
-                git_executable.invocation_path.clone(),
-                git_remote_https_executable.invocation_path.clone(),
-                askpass_executable.invocation_path.clone(),
-            ],
-            Some(&runtime_directory),
-        )
-        .await?;
-        let configured_runtime = config
-            .runtime_closure
-            .iter()
-            .map(|binding| binding.path.clone())
-            .collect::<BTreeSet<_>>();
-        if observed_runtime != configured_runtime {
-            return Err(SourceError::InvalidConfig);
-        }
-        let git_exec_directory = create_git_exec_directory(
-            &config.output_root,
-            &git_executable.invocation_path,
-            &git_remote_https_executable.invocation_path,
-        )?;
-        let config_sha256 = config.canonical_digest()?;
-        let secret_marker_matcher =
-            AhoCorasick::new(&secret_markers).map_err(|_| SourceError::InvalidConfig)?;
-        let acquirer = Self {
+        Self::new_with_runtime_custody(
             config,
-            config_sha256,
             implementation_sha256,
-            git_executable,
-            git_remote_https_executable,
-            askpass_executable,
-            ca_bundle,
-            preload_file,
-            runtime_closure,
-            runtime_directory,
-            git_exec_directory,
             credential_path,
+            credential,
             signing_key,
-            secret_marker_matcher,
-            transport_namespace_ready: AtomicBool::new(false),
-            admission: Mutex::new(()),
-        };
-        let version = acquirer
-            .run_git(vec![OsString::from("--version")], MAX_BINDING_TEXT_BYTES)
-            .await?;
-        let version = String::from_utf8(version).map_err(|_| SourceError::InvalidConfig)?;
-        if version.trim() != acquirer.config.git_version {
-            return Err(SourceError::InvalidConfig);
+            secret_markers,
+            None,
+        )
+        .await
+    }
+
+    /// Closed launcher constructor. A custody value can only be captured in
+    /// the original identity context or received through verified live source
+    /// supervisor lineage; ordinary construction never consults environment
+    /// variables to waive runtime ownership checks.
+    pub async fn new_with_runtime_custody(
+        config: SourceConfig,
+        implementation_sha256: String,
+        credential_path: PathBuf,
+        credential: &[u8],
+        signing_key: Vec<u8>,
+        secret_markers: Vec<Vec<u8>>,
+        runtime_custody: Option<runtime_custody::RuntimeCustody>,
+    ) -> Result<Self, SourceError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (
+                config,
+                implementation_sha256,
+                credential_path,
+                credential,
+                signing_key,
+                secret_markers,
+                runtime_custody,
+            );
+            Err(SourceError::InvalidConfig)
         }
-        Ok(acquirer)
+        #[cfg(target_os = "linux")]
+        {
+            if runtime_custody
+                .as_ref()
+                .is_some_and(|custody| !custody.matches(&config))
+            {
+                return Err(SourceError::InvalidConfig);
+            }
+            validate_config(
+                &config,
+                &implementation_sha256,
+                credential,
+                &signing_key,
+                &secret_markers,
+            )?;
+            let credential_on_disk =
+                read_private_bounded_regular_file(&credential_path, MAX_AUTHORITY_BYTES).await?;
+            if credential_on_disk != credential {
+                return Err(SourceError::InvalidConfig);
+            }
+            ensure_private_output_root(&config.output_root).await?;
+            validate_transport_filesystem(
+                &config.transport_root,
+                &config.output_root,
+                config.max_transport_bytes,
+            )?;
+            let source_git_executable = snapshot_verified_file(
+                &config.git_executable_path,
+                &config.git_executable_sha256,
+                "mcloving-git",
+                0o500,
+            )
+            .await?;
+            let source_git_remote_https_executable = snapshot_verified_file(
+                &config.git_remote_https_executable_path,
+                &config.git_remote_https_executable_sha256,
+                "mcloving-git-remote-https",
+                0o500,
+            )
+            .await?;
+            let source_askpass_executable =
+                snapshot_running_executable(&implementation_sha256).await?;
+            let ca_bundle = match (&config.ca_bundle_path, &config.ca_bundle_sha256) {
+                (Some(path), Some(expected)) => {
+                    let snapshot =
+                        snapshot_verified_file(path, expected, "mcloving-source-ca", 0o400).await?;
+                    Some(inherit_verified_file(snapshot)?)
+                }
+                (None, None) => None,
+                _ => return Err(SourceError::InvalidConfig),
+            };
+            let interpreter_paths = [
+                verified_elf_interpreter(&source_git_executable).await?,
+                verified_elf_interpreter(&source_git_remote_https_executable).await?,
+                verified_elf_interpreter(&source_askpass_executable).await?,
+            ]
+            .into_iter()
+            .map(std::fs::canonicalize)
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|_| SourceError::InvalidConfig)?;
+            let preload_file =
+                inherited_sealed_verified_file(b"", "mcloving-source-empty-loader-preload", 0o400)
+                    .await?;
+            let preload_path = PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                std::os::fd::AsRawFd::as_raw_fd(&preload_file.file)
+            ));
+            let runtime_closure = open_runtime_closure(
+                &config.runtime_closure,
+                &interpreter_paths,
+                &preload_path,
+                runtime_custody.as_ref(),
+            )
+            .await?;
+            let git_interpreter =
+                bound_runtime_interpreter(&source_git_executable, &runtime_closure).await?;
+            let helper_interpreter =
+                bound_runtime_interpreter(&source_git_remote_https_executable, &runtime_closure)
+                    .await?;
+            let askpass_interpreter =
+                bound_runtime_interpreter(&source_askpass_executable, &runtime_closure).await?;
+            let git_executable = snapshot_with_bound_interpreter(
+                &source_git_executable,
+                &config.git_executable_sha256,
+                "mcloving-git-bound",
+                &git_interpreter,
+            )
+            .await?;
+            let git_remote_https_executable = snapshot_with_bound_interpreter(
+                &source_git_remote_https_executable,
+                &config.git_remote_https_executable_sha256,
+                "mcloving-git-remote-https-bound",
+                &helper_interpreter,
+            )
+            .await?;
+            let askpass_executable = snapshot_with_bound_interpreter(
+                &source_askpass_executable,
+                &implementation_sha256,
+                "mcloving-source-askpass-bound",
+                &askpass_interpreter,
+            )
+            .await?;
+            let runtime_directory =
+                create_runtime_directory(&config.output_root, &runtime_closure)?;
+            let observed_runtime = trace_runtime_closure(
+                &[
+                    git_executable.invocation_path.clone(),
+                    git_remote_https_executable.invocation_path.clone(),
+                    askpass_executable.invocation_path.clone(),
+                ],
+                Some(&runtime_directory),
+            )
+            .await?;
+            let configured_runtime = config
+                .runtime_closure
+                .iter()
+                .map(|binding| binding.path.clone())
+                .collect::<BTreeSet<_>>();
+            if observed_runtime != configured_runtime {
+                return Err(SourceError::InvalidConfig);
+            }
+            let git_exec_directory = create_git_exec_directory(
+                &config.output_root,
+                &git_executable.invocation_path,
+                &git_remote_https_executable.invocation_path,
+            )?;
+            let config_sha256 = config.canonical_digest()?;
+            let secret_marker_matcher =
+                AhoCorasick::new(&secret_markers).map_err(|_| SourceError::InvalidConfig)?;
+            let acquirer = Self {
+                config,
+                config_sha256,
+                implementation_sha256,
+                git_executable,
+                git_remote_https_executable,
+                askpass_executable,
+                ca_bundle,
+                preload_file,
+                runtime_closure,
+                runtime_directory,
+                git_exec_directory,
+                credential_path,
+                signing_key,
+                secret_marker_matcher,
+                transport_namespace_ready: AtomicBool::new(false),
+                admission: Mutex::new(()),
+            };
+            let version = acquirer
+                .run_git(vec![OsString::from("--version")], MAX_BINDING_TEXT_BYTES)
+                .await?;
+            let version = String::from_utf8(version).map_err(|_| SourceError::InvalidConfig)?;
+            if version.trim() != acquirer.config.git_version {
+                return Err(SourceError::InvalidConfig);
+            }
+            Ok(acquirer)
+        }
     }
 
     pub fn config_sha256(&self) -> &str {
@@ -823,6 +886,14 @@ impl SourceAcquirer {
             if receipt.request_sha256 != request_sha256 {
                 return Err(SourceError::ReplayMismatch);
             }
+            receipt_auth::authenticate_request(
+                &self.config,
+                &self.config_sha256,
+                &self.implementation_sha256,
+                &self.signing_key,
+                &receipt,
+                request,
+            )?;
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
         }
@@ -1285,98 +1356,13 @@ impl SourceAcquirer {
         request: &AcquisitionRequest,
         now: i64,
     ) -> Result<String, SourceError> {
-        let expected_binding = RepositoryBinding {
-            provider_identity: request.provider_identity.clone(),
-            repository_identity: request.repository_identity.clone(),
-            repository_url: request.repository_url.clone(),
-        };
-        let repository_admitted = match request.trust_class {
-            TrustClass::Trusted => expected_binding == self.config.primary_repository,
-            TrustClass::UntrustedFork => {
-                self.config.allow_untrusted_forks
-                    && self
-                        .config
-                        .allowed_fork_repositories
-                        .contains(&expected_binding)
-            }
-        };
-        if request.acquisition_id.is_nil()
-            || request.organization_id.is_nil()
-            || request.project_id.is_nil()
-            || request.pipeline_id.is_nil()
-            || request.build_id.is_nil()
-            || request.attempt_id.is_nil()
-            || request.checkout_name.trim().is_empty()
-            || request.source_identity.trim().is_empty()
-            || request.audit_lineage.trim().is_empty()
-            || request.acquirer_id != self.config.acquirer_id
-            || request.expected_implementation_sha256 != self.implementation_sha256
-            || request.expected_git_sha256 != self.config.git_executable_sha256
-            || request.expected_git_remote_https_sha256
-                != self.config.git_remote_https_executable_sha256
-            || request.expected_config_sha256 != self.config_sha256
-            || request.protocol_version != PROTOCOL_VERSION
-            || request.schema_version != self.config.schema_version
-            || request.expected_generation != self.config.generation
-            || request
-                .rollback_from_generation
-                .is_some_and(|generation| generation >= self.config.generation)
-            || request.requested_at_unix_ms > now
-            || request.expires_at_unix_ms <= request.requested_at_unix_ms
-            || request.depth == 0
-            || request.depth > self.config.max_depth
-            || request.submodules.len() > self.config.max_submodules
-            || !repository_admitted
-            || !valid_ref(&request.authenticated_ref)
-            || !self.ref_allowed(&request.authenticated_ref)
-            || !is_object_id(&request.exact_commit)
-        {
-            return Err(SourceError::BindingMismatch);
-        }
-        if request.expires_at_unix_ms <= now {
-            return Err(SourceError::ExpiredRequest);
-        }
-        if self.config.grant_expires_unix_ms <= now {
-            return Err(SourceError::ExpiredGrant);
-        }
-        if [
-            &request.checkout_name,
-            &request.source_identity,
-            &request.audit_lineage,
-            &request.repository_identity,
-            &request.repository_url,
-            &request.authenticated_ref,
-        ]
-        .iter()
-        .any(|value| !valid_binding_text(value))
-        {
-            return Err(SourceError::BindingMismatch);
-        }
-        validate_sparse_roots(
-            &request.sparse_roots,
-            &self.config.allowed_sparse_roots,
-            self.config.max_path_bytes,
+        receipt_auth::validate_request(
+            &self.config,
+            &self.config_sha256,
+            &self.implementation_sha256,
+            request,
+            now,
         )
-        .map_err(|_| SourceError::BindingMismatch)?;
-        let mut submodule_paths = BTreeSet::new();
-        for submodule in &request.submodules {
-            validate_repository_url(
-                &submodule.repository_url,
-                self.config.test_allow_file_repositories,
-                self.config.test_allow_http_loopback,
-            )
-            .map_err(|_| SourceError::SubmoduleMismatch)?;
-            validate_relative_path(&submodule.path, self.config.max_path_bytes)
-                .map_err(|_| SourceError::SubmoduleMismatch)?;
-            if !submodule_paths.insert(submodule.path.clone())
-                || !is_object_id(&submodule.exact_commit)
-                || !valid_ref(&submodule.authenticated_ref)
-                || !self.ref_allowed(&submodule.authenticated_ref)
-            {
-                return Err(SourceError::SubmoduleMismatch);
-            }
-        }
-        canonical_digest(request)
     }
 
     fn ref_allowed(&self, reference: &str) -> bool {
@@ -1391,18 +1377,10 @@ impl SourceAcquirer {
         request: &AcquisitionRequest,
         now: i64,
     ) -> Result<i64, SourceError> {
-        let lifetime = self
-            .config
-            .command_timeout_ms
-            .checked_mul(
-                u64::try_from(request.submodules.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1)
-                    .saturating_mul(8),
-            )
-            .and_then(|value| value.checked_add(MAX_LOCAL_PUBLICATION_MS))
-            .and_then(|value| i64::try_from(value).ok())
-            .ok_or(SourceError::InvalidConfig)?;
+        let lifetime = receipt_auth::publication_lifetime_ms(
+            self.config.command_timeout_ms,
+            request.submodules.len(),
+        )?;
         let deadline = now
             .checked_add(lifetime)
             .ok_or(SourceError::InvalidConfig)?
@@ -2089,6 +2067,7 @@ impl SourceAcquirer {
     // and remembering "the host cannot do this" because one probe hit EMFILE or
     // timed out under load would refuse every later acquisition until someone
     // restarted the service.
+    #[cfg(unix)]
     async fn kernel_transport_namespace_usable(
         &self,
         deadline_unix_ms: Option<i64>,
@@ -2115,6 +2094,7 @@ impl SourceAcquirer {
         Ok(self.probe_within(probe_timeout).await)
     }
 
+    #[cfg(unix)]
     async fn probe_within(&self, probe_timeout: Duration) -> bool {
         // Nothing is remembered between acquisitions, in either direction.
         //
@@ -2158,11 +2138,13 @@ impl SourceAcquirer {
         false
     }
 
+    #[cfg(unix)]
     async fn probe_kernel_transport_namespace(&self, probe_timeout: Duration) -> bool {
         #[cfg(not(target_os = "linux"))]
         {
             // No kernel transport namespace exists to admit the launcher, and
             // that is a settled property of the platform, not a bad moment.
+            let _ = probe_timeout;
             false
         }
         #[cfg(target_os = "linux")]
@@ -2415,27 +2397,13 @@ impl SourceAcquirer {
     }
 
     pub async fn verify_receipt(&self, receipt: &AcquisitionReceipt) -> Result<(), SourceError> {
-        if receipt.protocol_version != PROTOCOL_VERSION
-            || receipt.schema_version != self.config.schema_version
-            || receipt.acquirer_id != self.config.acquirer_id
-            || receipt.acquirer_implementation_sha256 != self.implementation_sha256
-            || receipt.git_implementation_sha256 != self.config.git_executable_sha256
-            || receipt.git_remote_https_implementation_sha256
-                != self.config.git_remote_https_executable_sha256
-            || receipt.runtime_closure_sha256 != self.config.runtime_closure_sha256
-            || receipt.git_version != self.config.git_version
-            || receipt.acquirer_config_sha256 != self.config_sha256
-            || receipt.deployment_identity != self.config.deployment_identity
-            || receipt.operator_identity != self.config.operator_identity
-            || receipt.generation != self.config.generation
-            || receipt.signing_key_id != self.config.receipt_signing_key_id
-            || receipt.secret_marker_set_sha256 != self.config.secret_marker_set_sha256
-            || receipt.output_relative_path != format!("{}/tree", receipt.acquisition_id)
-            || receipt.transport_bytes > self.config.max_transport_bytes
-        {
-            return Err(SourceError::InvalidStoredReceipt);
-        }
-        self.verify_receipt_signature(receipt)?;
+        receipt_auth::authenticate_authority(
+            &self.config,
+            &self.config_sha256,
+            &self.implementation_sha256,
+            &self.signing_key,
+            receipt,
+        )?;
         let manifest_path = acquisition_path(&self.config.output_root, receipt.acquisition_id)
             .join("manifest.json");
         let manifest = read_bounded_regular_file(&manifest_path, MAX_GIT_METADATA_BYTES).await?;
@@ -2455,20 +2423,6 @@ impl SourceAcquirer {
         }
         self.verify_materialized_tree(receipt, &entries).await?;
         Ok(())
-    }
-
-    fn verify_receipt_signature(&self, receipt: &AcquisitionReceipt) -> Result<(), SourceError> {
-        let signature = URL_SAFE_NO_PAD
-            .decode(receipt.signature.as_bytes())
-            .map_err(|_| SourceError::InvalidStoredReceipt)?;
-        let mut unsigned = receipt.clone();
-        unsigned.signature.clear();
-        let bytes = serde_json::to_vec(&unsigned).map_err(|_| SourceError::InvalidStoredReceipt)?;
-        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
-            .map_err(|_| SourceError::InvalidConfig)?;
-        mac.update(&bytes);
-        mac.verify_slice(&signature)
-            .map_err(|_| SourceError::InvalidStoredReceipt)
     }
 
     async fn verify_materialized_tree(
@@ -2621,7 +2575,32 @@ impl SourceAcquirer {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn validate_config(
+    config: &SourceConfig,
+    implementation_sha256: &str,
+    credential: &[u8],
+    signing_key: &[u8],
+    markers: &[Vec<u8>],
+) -> Result<(), SourceError> {
+    validate_config_snapshot(
+        config,
+        implementation_sha256,
+        credential,
+        signing_key,
+        markers,
+    )?;
+    if config
+        .runtime_closure
+        .iter()
+        .any(|binding| std::fs::canonicalize(&binding.path).ok().as_ref() != Some(&binding.path))
+    {
+        return Err(SourceError::InvalidConfig);
+    }
+    Ok(())
+}
+
+fn validate_config_snapshot(
     config: &SourceConfig,
     implementation_sha256: &str,
     credential: &[u8],
@@ -2686,11 +2665,10 @@ fn validate_config(
         || !config.transport_root.is_absolute()
         || config.allowed_ref_prefixes.is_empty()
         || config.runtime_closure.is_empty()
-        || config.runtime_closure.iter().any(|binding| {
-            !binding.path.is_absolute()
-                || !is_sha256_hex(&binding.sha256)
-                || std::fs::canonicalize(&binding.path).ok().as_ref() != Some(&binding.path)
-        })
+        || config
+            .runtime_closure
+            .iter()
+            .any(|binding| !binding.path.is_absolute() || !is_sha256_hex(&binding.sha256))
         || config
             .runtime_closure
             .windows(2)
@@ -3341,6 +3319,7 @@ async fn read_opened_executable(file: tokio::fs::File) -> Result<Vec<u8>, Source
     Ok(bytes)
 }
 
+#[cfg(target_os = "linux")]
 async fn snapshot_running_executable(expected_sha256: &str) -> Result<VerifiedFile, SourceError> {
     let bytes = read_running_image().await?;
     if sha256_hex(&bytes) != expected_sha256 {
@@ -3370,14 +3349,16 @@ pub async fn inspect_runtime_closure(
     Ok(bindings)
 }
 
+#[cfg(target_os = "linux")]
 async fn open_runtime_closure(
     bindings: &[RuntimeBinding],
     interpreter_paths: &BTreeSet<PathBuf>,
     preload_path: &Path,
+    custody: Option<&runtime_custody::RuntimeCustody>,
 ) -> Result<Vec<VerifiedRuntimeFile>, SourceError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (bindings, interpreter_paths, preload_path);
+        let _ = (bindings, interpreter_paths, preload_path, custody);
         Err(SourceError::InvalidConfig)
     }
     #[cfg(target_os = "linux")]
@@ -3386,15 +3367,18 @@ async fn open_runtime_closure(
 
         let mut verified = Vec::with_capacity(bindings.len());
         for binding in bindings {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-                .open(&binding.path)
-                .map_err(|_| SourceError::InvalidConfig)?;
+            let file = match custody {
+                Some(custody) => custody.file(binding)?,
+                None => std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                    .open(&binding.path)
+                    .map_err(|_| SourceError::InvalidConfig)?,
+            };
             let metadata = file.metadata().map_err(|_| SourceError::InvalidConfig)?;
             if !metadata.is_file()
                 || metadata.len() > MAX_EXECUTABLE_BYTES
-                || metadata.uid() != 0
+                || (custody.is_none() && metadata.uid() != 0)
                 || metadata.permissions().mode() & 0o022 != 0
             {
                 return Err(SourceError::InvalidConfig);
@@ -3586,6 +3570,7 @@ async fn trace_runtime_closure(
     Ok(closure)
 }
 
+#[cfg(target_os = "linux")]
 async fn snapshot_verified_file(
     path: &Path,
     expected_sha256: &str,
@@ -3623,6 +3608,7 @@ async fn snapshot_verified_file(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn sealed_verified_file(
     bytes: &[u8],
     snapshot_name: &str,
@@ -3674,6 +3660,7 @@ async fn sealed_verified_file(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn inherited_sealed_verified_file(
     bytes: &[u8],
     snapshot_name: &str,
@@ -3732,6 +3719,7 @@ async fn verify_inherited_sealed_file(file: &VerifiedFile) -> Result<(), SourceE
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn snapshot_with_bound_interpreter(
     source: &VerifiedFile,
     expected_source_sha256: &str,
@@ -3746,11 +3734,13 @@ async fn snapshot_with_bound_interpreter(
     inherited_sealed_verified_file(&bytes, snapshot_name, 0o500).await
 }
 
+#[cfg(target_os = "linux")]
 async fn verified_elf_interpreter(source: &VerifiedFile) -> Result<PathBuf, SourceError> {
     let bytes = verified_file_bytes(source).await?;
     elf_interpreter(&bytes)
 }
 
+#[cfg(target_os = "linux")]
 async fn verified_file_bytes(source: &VerifiedFile) -> Result<Vec<u8>, SourceError> {
     let mut file = tokio::fs::File::from_std(
         source
@@ -3769,6 +3759,7 @@ async fn verified_file_bytes(source: &VerifiedFile) -> Result<Vec<u8>, SourceErr
     .map_err(|_| SourceError::InvalidConfig)
 }
 
+#[cfg(target_os = "linux")]
 async fn bound_runtime_interpreter(
     executable: &VerifiedFile,
     runtime: &[VerifiedRuntimeFile],
@@ -3787,6 +3778,7 @@ async fn bound_runtime_interpreter(
     )))
 }
 
+#[cfg(target_os = "linux")]
 fn elf_interpreter(bytes: &[u8]) -> Result<PathBuf, SourceError> {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt as _;
@@ -3809,6 +3801,7 @@ fn elf_interpreter(bytes: &[u8]) -> Result<PathBuf, SourceError> {
     Ok(path)
 }
 
+#[cfg(target_os = "linux")]
 fn bind_elf_interpreter(mut bytes: Vec<u8>, interpreter: &Path) -> Result<Vec<u8>, SourceError> {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -3828,6 +3821,7 @@ fn bind_elf_interpreter(mut bytes: Vec<u8>, interpreter: &Path) -> Result<Vec<u8
     Ok(bytes)
 }
 
+#[cfg(target_os = "linux")]
 fn bind_loader_system_preload(
     mut bytes: Vec<u8>,
     preload_path: &Path,
@@ -3858,6 +3852,7 @@ fn bind_loader_system_preload(
     Ok(bytes)
 }
 
+#[cfg(target_os = "linux")]
 fn elf_interpreter_range(bytes: &[u8]) -> Result<(usize, usize), SourceError> {
     if bytes.get(..4) != Some(b"\x7fELF") {
         return Err(SourceError::InvalidConfig);
@@ -3927,6 +3922,7 @@ fn elf_interpreter_range(bytes: &[u8]) -> Result<(usize, usize), SourceError> {
     Ok((offset, length))
 }
 
+#[cfg(target_os = "linux")]
 fn elf_u16(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u16, SourceError> {
     let value: [u8; 2] = bytes
         .get(offset..offset + 2)
@@ -3940,6 +3936,7 @@ fn elf_u16(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u16, Sour
     })
 }
 
+#[cfg(target_os = "linux")]
 fn elf_u32(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u32, SourceError> {
     let value: [u8; 4] = bytes
         .get(offset..offset + 4)
@@ -3953,6 +3950,7 @@ fn elf_u32(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u32, Sour
     })
 }
 
+#[cfg(target_os = "linux")]
 fn elf_u64(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u64, SourceError> {
     let value: [u8; 8] = bytes
         .get(offset..offset + 8)
@@ -3966,6 +3964,7 @@ fn elf_u64(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u64, Sour
     })
 }
 
+#[cfg(target_os = "linux")]
 fn create_runtime_directory(
     output_root: &Path,
     runtime: &[VerifiedRuntimeFile],
@@ -4019,6 +4018,7 @@ fn create_runtime_directory(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn create_git_exec_directory(
     output_root: &Path,
     git: &Path,
@@ -4198,7 +4198,7 @@ async fn lock_output_root_until(
             // with that acquisition id would fail as AmbiguousClaim. Drop it
             // and refuse instead; the lock is released with the binding.
             if now_unix_ms()? >= deadline_unix_ms {
-                drop(lock);
+                // Returning drops the local lock on supported platforms.
                 return Err(SourceError::ExpiredRequest);
             }
             return Ok(lock);
@@ -4259,6 +4259,7 @@ async fn open_coordination_lock_file(root: &Path) -> Result<std::fs::File, Sourc
     .map_err(|_| SourceError::StateUnavailable)?
 }
 
+#[cfg(target_os = "linux")]
 async fn ensure_private_output_root(root: &Path) -> Result<(), SourceError> {
     #[cfg(unix)]
     {
@@ -4341,6 +4342,8 @@ async fn create_relative_directories(root: &Path, relative: &Path) -> Result<(),
 }
 
 async fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), SourceError> {
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -4989,7 +4992,8 @@ mod tests {
                         sha256: digest.clone()
                     }],
                     &BTreeSet::new(),
-                    Path::new("/unused-preload")
+                    Path::new("/unused-preload"),
+                    None
                 )
                 .await
                 .is_err()
@@ -5180,5 +5184,53 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".expired-")
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn ordinary_runtime_custody_preserves_namespace_root_owner_requirement() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime-file");
+        let bytes = b"correctly hashed non-interpreter runtime bytes";
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o400);
+        assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+        let binding = RuntimeBinding {
+            path,
+            sha256: content_sha256(bytes),
+        };
+        // No constructor, runtime trace, interpreter rewriting or transport can
+        // mask this check. The correct digest and mode leave only ownership as
+        // the rejected condition on the ordinary non-root CI/service account.
+        let result = open_runtime_closure(
+            std::slice::from_ref(&binding),
+            &BTreeSet::new(),
+            Path::new("/unused-preload"),
+            None,
+        )
+        .await;
+        if metadata.uid() == 0 {
+            // Native ordinary ownership is namespace-relative. A root test
+            // process exercises its existing positive behavior, not a skipped
+            // negative case; the named non-root host suite owes the refusal.
+            let runtime = result.expect("ordinary namespace-root runtime remains admitted");
+            assert_eq!(runtime.len(), 1);
+            assert_eq!(runtime[0].binding, binding);
+            assert_eq!(
+                runtime[0].file.metadata().unwrap().len(),
+                bytes.len() as u64
+            );
+            eprintln!("ordinary runtime owner regression: namespace-root positive executed");
+        } else {
+            assert!(matches!(result, Err(SourceError::InvalidConfig)));
+            eprintln!(
+                "ordinary runtime owner regression: correct-hash caller-owned regular file refused"
+            );
+        }
     }
 }
