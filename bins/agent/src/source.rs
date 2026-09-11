@@ -21,11 +21,11 @@ const MAX_REQUEST_BYTES: usize = 65_536;
 /// One NDJSON receipt line back; the private-IO executor caps output here.
 #[cfg(target_os = "linux")]
 const MAX_RESPONSE_BYTES: u64 = 262_144;
-/// Directory entries the publication walk will visit before refusing: the
-/// receipt bounds files, and this bounds a tree whose directory count the
-/// receipt does not carry.
+/// Directory entries a publication or discard walk may visit beyond the
+/// binding's admitted file count: git tracks no empty directory, so a tree
+/// holds at most as many directories as files, and this is the slack on top.
 #[cfg(target_os = "linux")]
-const MAX_PUBLICATION_ENTRIES: usize = 262_144;
+const PUBLICATION_WALK_SLACK: usize = 4_096;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -165,7 +165,7 @@ pub(crate) use linux::{PreparedSource, prepare};
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        MAX_PUBLICATION_ENTRIES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, SourceBinding, denied, hex,
+        MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PUBLICATION_WALK_SLACK, SourceBinding, denied, hex,
     };
     use crate::private_helper::{read_private, seal_executable};
     use crate::{AgentConfig, AgentError};
@@ -589,6 +589,36 @@ mod linux {
             Ok(receipt)
         }
 
+        /// Entries a walk over the acquired tree may visit: the binding's
+        /// admitted file count, doubled for directories, plus slack.
+        fn walk_budget(&self) -> usize {
+            self.config
+                .max_files
+                .saturating_mul(2)
+                .saturating_add(PUBLICATION_WALK_SLACK)
+        }
+
+        /// Removes whatever tree this step's acquisition left under the
+        /// output root when the step did not end in a publication: a
+        /// rejected or truncated answer, a timeout, a cancellation. The
+        /// acquisition id is deterministic, so the directory is known even
+        /// when the answer never arrived. Absent is fine; the receipt and
+        /// manifest, if any, stay.
+        pub fn discard(&self) -> Result<(), String> {
+            let acquisition_dir = self
+                .config
+                .output_root
+                .join(self.acquisition.acquisition_id.to_string());
+            let acquisition = match open_directory(&acquisition_dir) {
+                Ok(fd) => fd,
+                Err(nix::errno::Errno::ENOENT) => return Ok(()),
+                Err(error) => return Err(format!("checkout_discard_failed:open:{error}")),
+            };
+            require_owned(&acquisition)?;
+            discard_acquired_tree(&acquisition, self.walk_budget())
+                .map_err(|error| format!("checkout_discard_failed:{error}"))
+        }
+
         /// The outcome the last `transform` reported, for the step reason.
         pub fn last_outcome(&self) -> Option<&'static str> {
             self.last_outcome.lock().ok().and_then(|last| *last)
@@ -625,7 +655,7 @@ mod linux {
             // under the output root: every such build would otherwise keep a
             // whole checkout on the source volume. The receipt and manifest
             // the acquirer retained beside it stay.
-            publish_tree(&acquisition, workspace, destination)?;
+            publish_tree(&acquisition, workspace, destination, self.walk_budget())?;
             Ok(PublishedCheckout {
                 destination: destination.to_owned(),
                 resolved_commit: receipt
@@ -645,11 +675,12 @@ mod linux {
         acquisition: &OwnedFd,
         workspace: &Path,
         destination: &str,
+        walk_budget: usize,
     ) -> Result<(), String> {
-        match move_verified_tree(acquisition, workspace, destination) {
+        match move_verified_tree(acquisition, workspace, destination, walk_budget) {
             Ok(()) => Ok(()),
             Err(error) => {
-                if let Err(discard) = discard_acquired_tree(acquisition) {
+                if let Err(discard) = discard_acquired_tree(acquisition, walk_budget) {
                     return Err(format!("{error};tree_not_discarded:{discard}"));
                 }
                 Err(error)
@@ -661,6 +692,7 @@ mod linux {
         acquisition: &OwnedFd,
         workspace: &Path,
         destination: &str,
+        walk_budget: usize,
     ) -> Result<(), String> {
         use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
         use nix::sys::stat::{Mode, fchmod, fstatat};
@@ -735,7 +767,7 @@ mod linux {
             Mode::empty(),
         )
         .map_err(|error| format!("checkout_publication_failed:open:{error}"))?;
-        let mut budget = MAX_PUBLICATION_ENTRIES;
+        let mut budget = walk_budget;
         make_owner_writable(published, &mut budget)
             .map_err(|error| format!("checkout_publication_failed:writable:{error}"))?;
         for directory in [&workspace_fd, acquisition] {
@@ -752,7 +784,7 @@ mod linux {
     /// Removes `tree` under `acquisition` if it is still there, by
     /// descriptor and never following a link, within the publication walk
     /// budget. Absent already means nothing to do.
-    fn discard_acquired_tree(acquisition: &OwnedFd) -> Result<(), String> {
+    fn discard_acquired_tree(acquisition: &OwnedFd, walk_budget: usize) -> Result<(), String> {
         use nix::fcntl::{OFlag, openat};
         use nix::sys::stat::{Mode, fchmod, fstatat};
         match fstatat(
@@ -780,7 +812,7 @@ mod linux {
             Mode::empty(),
         )
         .map_err(|error| error.to_string())?;
-        let mut budget = MAX_PUBLICATION_ENTRIES;
+        let mut budget = walk_budget;
         remove_directory_contents(tree, &mut budget)?;
         nix::unistd::unlinkat(acquisition, "tree", nix::unistd::UnlinkatFlags::RemoveDir)
             .map_err(|error| error.to_string())?;
@@ -973,7 +1005,7 @@ mod linux {
             destination: &str,
         ) -> Result<(), String> {
             let acquisition_fd = open_directory(acquisition).map_err(|e| e.to_string())?;
-            publish_tree(&acquisition_fd, workspace, destination)
+            publish_tree(&acquisition_fd, workspace, destination, 1_024)
         }
 
         #[test]

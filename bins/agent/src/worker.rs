@@ -2065,7 +2065,17 @@ async fn run_assignment(
                     }
                     // A later step could not start. The earlier steps ran and
                     // their evidence is journaled below, so this is a failed
-                    // step inside a real attempt, not a processless one.
+                    // step inside a real attempt, not a processless one. A
+                    // helper that never spawned still discards anything a
+                    // partial start may have left.
+                    if let Some(helper) = helper
+                        && let Err(reason) = tokio::task::block_in_place(|| helper.discard())
+                    {
+                        eprintln!(
+                            "attempt {}/{} step {ordinal}: helper leftovers not discarded: {reason}",
+                            organization, attempt
+                        );
+                    }
                     step_records.push(spawn_record);
                     break;
                 }
@@ -2124,16 +2134,17 @@ async fn run_assignment(
                 Termination::Exited => WorkOutcome::Failed,
             };
             let mut step_reason = None;
-            if let Some(helper) = helper
-                && step_terminal == WorkOutcome::Succeeded
-            {
+            if let Some(helper) = helper {
                 // A helper's exit status says nothing on its own: its answer
                 // must have been authenticated, and a checkout must then land
                 // in the workspace, before the step counts as succeeded.
-                if outcome.private_response_accepted != Some(true) {
+                if step_terminal == WorkOutcome::Succeeded
+                    && outcome.private_response_accepted != Some(true)
+                {
                     step_terminal = WorkOutcome::Failed;
                     step_reason = Some(helper.failure_reason());
-                } else {
+                }
+                if step_terminal == WorkOutcome::Succeeded {
                     let workspace_path = config.workspace_root.join(&assignment.workspace);
                     match tokio::task::block_in_place(|| helper.complete(&workspace_path)) {
                         Ok(_) => {}
@@ -2143,6 +2154,16 @@ async fn run_assignment(
                                 "checkout_publication_rejected:{reason}"
                             )));
                         }
+                    }
+                } else {
+                    // Timed out, cancelled, output-limited, rejected: whatever
+                    // the helper materialized before its answer was accepted
+                    // must not stay behind on the source volume.
+                    if let Err(reason) = tokio::task::block_in_place(|| helper.discard()) {
+                        eprintln!(
+                            "attempt {}/{} step {ordinal}: helper leftovers not discarded: {reason}",
+                            organization, attempt
+                        );
                     }
                 }
             }

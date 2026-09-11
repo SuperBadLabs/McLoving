@@ -103,8 +103,13 @@ output root on a different filesystem from the workspace root is
 `checkout_publication_cross_device`, so the deployment must colocate them.
 Whatever refuses or fails the move also discards the acquired tree under the
 output root, by descriptor and without following links, keeping the receipt
-and manifest the acquirer retained beside it, so a refused checkout leaves no
-tree on the source volume.
+and manifest the acquirer retained beside it; and a checkout step that ends
+any other way than in a completed publication (a rejected or truncated
+answer, a timeout, a cancellation, a spawn failure) discards whatever its
+acquisition, whose id is deterministic, left there. Both walks are budgeted
+from the binding's admitted file count rather than a fixed figure, so a
+repository the acquirer admits is one publication can finish. A refused or
+interrupted checkout therefore leaves no tree on the source volume.
 The acquirer leaves its tree read-only; publication then gives every
 directory and regular file below the destination its owner's write bit,
 walking by descriptor and skipping links, so build steps can work in the

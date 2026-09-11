@@ -212,6 +212,16 @@ impl PreparedHelper {
             },
         }
     }
+    /// Cleanup a helper owes when its step did not end in a completed
+    /// publication: a checkout removes the tree its acquisition may have left
+    /// under the output root. Cache and input helpers leave nothing behind.
+    pub fn discard(&self) -> Result<(), String> {
+        match self {
+            Self::Cache(_) | Self::Input(_) => Ok(()),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.discard(),
+        }
+    }
     /// Work a helper still owes once its process has exited and its answer
     /// was accepted: a checkout publishes its verified tree into the
     /// workspace. Cache and input helpers owe nothing.
