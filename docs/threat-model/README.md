@@ -1034,9 +1034,12 @@ a planted link refusing the set with nothing uploaded. Residual: the
 in-flight ledger is per controller process, so replicas of an HA deployment
 each admit streams against the committed figure alone until registration,
 where the quota is authoritative; the walk's aggregate matching work is
-bounded per pattern-and-path pair but not across the walk, and a
-zero-length file is not probed for growth before its header-only stream
-closes (`AGENT-012`). Closure requires the
+bounded per pattern-and-path pair but not across the walk, a zero-length
+file is not probed for growth before its header-only stream closes, the
+collector holds every collected file open at once so a set near the object
+bound needs a descriptor limit above the default 1 024, and the controller
+finalizes a staging writer (its fsync) on a runtime worker thread
+(`AGENT-012`). Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
 
