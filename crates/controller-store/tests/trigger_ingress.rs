@@ -2526,11 +2526,17 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
     // A webhook delivery acknowledged but not admitted is ledger state too:
     // it travels with the handoff so its id stays decided at the destination,
     // and the ledger refuses to admit that id on any path afterwards.
+    let paused_generation = store
+        .pipeline_trigger(organization_id, project_id, pipeline_id, trigger_id)
+        .await
+        .unwrap()
+        .expect("paused trigger is current")
+        .generation;
     store
         .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
             organization_id,
             trigger_id,
-            expected_trigger_generation: 3,
+            expected_trigger_generation: paused_generation,
             delivery_id: "hook-ignored-1",
             event: "ping",
             body_sha256: [7; 32],
@@ -2574,7 +2580,7 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
                 organization_id,
                 trigger_id,
-                expected_trigger_generation: 3,
+                expected_trigger_generation: paused_generation,
                 delivery_id: &admitted_event_id,
                 event: "ping",
                 body_sha256: [7; 32],
@@ -2590,7 +2596,7 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
                 organization_id,
                 trigger_id,
-                expected_trigger_generation: 2,
+                expected_trigger_generation: paused_generation - 1,
                 delivery_id: "hook-stale-generation",
                 event: "ping",
                 body_sha256: [7; 32],

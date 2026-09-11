@@ -3904,7 +3904,7 @@ async fn admit_trigger_event(
     // still replays inside the lock.
     let redelivery = match timing {
         DeliveryTiming::Declared => false,
-        DeliveryTiming::Receipt => state
+        DeliveryTiming::Receipt { .. } => state
             .store
             .trigger_delivery(
                 trigger.organization_id,
@@ -4232,10 +4232,12 @@ fn canonical_trigger_payload(
         // A receipt-timed delivery is canonicalized as what the event source
         // sent: the generation and the clock are the ledger's, recorded in
         // their own columns, and must not enter the digest a redelivery is
-        // matched against.
-        DeliveryTiming::Receipt => json!({
+        // matched against; the raw body's digest must, so a different signed
+        // body whose mapped fields coincide is a conflict, not a replay.
+        DeliveryTiming::Receipt { body_sha256 } => json!({
             "event_kind": request.event_kind.clone(),
             "payload": request.payload.clone(),
+            "body_sha256": hex(&body_sha256),
         }),
     })
 }

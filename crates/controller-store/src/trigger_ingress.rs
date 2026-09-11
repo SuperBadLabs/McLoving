@@ -275,8 +275,10 @@ pub enum DeliveryTiming {
     /// canonical payload, platform, trust pool), never by the trigger
     /// generation or the parameters current at the time of the redelivery,
     /// so later configuration changes do not turn an exact redelivery into a
-    /// conflict.
-    Receipt,
+    /// conflict. The digest of the raw delivery body is part of what the
+    /// caller canonicalizes, so a different signed body under one delivery
+    /// id is a conflict even when its mapped fields coincide.
+    Receipt { body_sha256: [u8; 32] },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1411,7 +1413,7 @@ impl Store {
         // place a legitimate delivery outside the skew window.
         let event_time_unix_ms = match timing {
             DeliveryTiming::Declared => input.event_time_unix_ms,
-            DeliveryTiming::Receipt => database_accepted_at_unix_ms,
+            DeliveryTiming::Receipt { .. } => database_accepted_at_unix_ms,
         };
         if event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
             || event_time_unix_ms
@@ -3347,7 +3349,7 @@ fn delivery_matches_timed(
         // generation the trigger has moved to, the parameters the pipeline
         // now declares and the clock reading are not part of what the event
         // source re-sent.
-        DeliveryTiming::Receipt => {
+        DeliveryTiming::Receipt { .. } => {
             delivery.organization_id == input.organization_id
                 && delivery.project_id == input.project_id
                 && delivery.pipeline_id == input.pipeline_id

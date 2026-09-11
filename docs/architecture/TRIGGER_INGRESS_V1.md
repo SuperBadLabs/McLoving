@@ -261,7 +261,9 @@ the event time from the database clock inside its serialized acceptance, so
 one delivery id gets one time however many controllers receive it and no
 controller clock can push a legitimate delivery outside the skew window; and
 a redelivery is matched on the authenticated delivery alone (ids, kind,
-caller, canonical `{event_kind, payload}`, platform, trust pool), never on
+caller, canonical `{event_kind, payload, body_sha256}` so a different
+signed body whose mapped fields coincide is a conflict, platform, trust
+pool), never on
 the trigger generation or the parameters current at redelivery, so a trigger
 revision or a pipeline parameter change after acceptance does not turn an
 exact redelivery into a conflict. For the same reason a delivery id the

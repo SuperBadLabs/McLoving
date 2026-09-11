@@ -443,6 +443,21 @@ stages:
         json_body(conflict).await["code"],
         "trigger_ingress_conflict"
     );
+    // A different signed body whose mapped fields coincide (only a discarded
+    // field differs) is still a different delivery under that id.
+    let mut same_mapping = push_delivery("refs/heads/main", COMMIT);
+    same_mapping["sender"] = json!({"login": "someone-else"});
+    let same_mapping = serde_json::to_vec(&same_mapping).unwrap();
+    let discarded_field_conflict = post(
+        app.clone(),
+        &hook_route,
+        delivery_id,
+        "push",
+        same_mapping.clone(),
+        sign(&secret, &same_mapping),
+    )
+    .await;
+    assert_eq!(discarded_field_conflict.status(), StatusCode::CONFLICT);
 
     // Authenticated but not admitted: filtered branch, tag push, ping. Each is
     // acknowledged with 202 so GitHub reports success, and each leaves an

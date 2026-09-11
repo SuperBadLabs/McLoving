@@ -259,7 +259,7 @@ pub(super) async fn receive_github_delivery(
         &trigger,
         &request,
         caller_identity,
-        DeliveryTiming::Receipt,
+        DeliveryTiming::Receipt { body_sha256 },
     )
     .await
     {
@@ -455,7 +455,13 @@ fn map_delivery(event: &str, payload: &Value) -> Result<MappedDelivery, String> 
                 if advertised.is_some_and(|size| size > commits.len() as u64) {
                     overflow = true;
                 }
-                for commit in commits {
+                // The bound is on work as well as on the result: once the
+                // set would exceed it the walk stops, so a push near the
+                // transport limit costs at most the bound in retained paths.
+                'commits: for commit in commits {
+                    if overflow {
+                        break;
+                    }
                     for field in ["added", "modified", "removed"] {
                         for path in commit
                             .get(field)
@@ -471,10 +477,11 @@ fn map_delivery(event: &str, payload: &Value) -> Result<MappedDelivery, String> 
                             {
                                 continue;
                             }
-                            paths.insert(path.to_owned());
-                            if paths.len() > MAX_CHANGED_PATHS {
+                            if paths.len() >= MAX_CHANGED_PATHS && !paths.contains(path) {
                                 overflow = true;
+                                break 'commits;
                             }
+                            paths.insert(path.to_owned());
                         }
                     }
                 }
@@ -748,6 +755,17 @@ mod tests {
         });
         let mapped = map_delivery("push", &push).unwrap();
         assert!(mapped.payload.get("paths").is_none());
+        let exact: Vec<Value> = (0..MAX_CHANGED_PATHS)
+            .map(|index| json!({"added": [format!("file-{index}")], "modified": [], "removed": []}))
+            .collect();
+        let mut bounded = push.clone();
+        bounded["commits"] = Value::Array(exact);
+        let mapped = map_delivery("push", &bounded).unwrap();
+        assert_eq!(
+            mapped.payload["paths"].as_array().map(Vec::len),
+            Some(MAX_CHANGED_PATHS),
+            "exactly the bound is retained; repeats of retained paths do not overflow"
+        );
     }
 
     #[tokio::test]
