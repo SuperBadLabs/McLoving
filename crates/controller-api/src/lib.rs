@@ -1217,17 +1217,11 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
-                "get": api_operation(
-                    "readGithubWebhook", "triggers", "Read the GitHub hook path and its derived secret for an SCM webhook trigger", "200",
-                    Vec::new(), None
-                )
+                "get": github_webhook_operation()
             },
             "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
-                "post": unauthenticated_api_operation(
-                    "receiveGithubDelivery", "triggers", "Receive a signed GitHub push or pull-request delivery for an SCM webhook trigger", "201",
-                    Vec::new(), None
-                )
+                "post": github_delivery_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger, delivery],
@@ -1498,6 +1492,31 @@ fn openapi_document() -> Value {
                     "additionalProperties": false
                 },
                 "TriggerEventResponse": trigger_event_response_schema(),
+                "GithubDelivery": {
+                    "type": "object",
+                    "description": "A GitHub webhook payload as GitHub sends it (push or pull_request); the receiver reads repository.full_name, ref/after/deleted/size/commits or action/pull_request.head and drops everything else",
+                    "additionalProperties": true
+                },
+                "GithubWebhookResponse": {
+                    "type": "object",
+                    "required": ["provider", "path", "source_generation", "secret"],
+                    "properties": {
+                        "provider": {"type": "string", "enum": ["github"]},
+                        "path": {"type": "string"},
+                        "source_generation": {"type": "string"},
+                        "secret": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "additionalProperties": false
+                },
+                "WebhookAcknowledgement": {
+                    "type": "object",
+                    "required": ["status", "reason"],
+                    "properties": {
+                        "status": {"type": "string", "enum": ["ignored", "filtered"]},
+                        "reason": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                },
                 "TriggerDelivery": trigger_delivery_schema(),
                 "AdmissionResponse": admission_response_schema(),
                 "ScmTriggerConfiguration": scm_trigger_configuration_schema(),
@@ -2373,6 +2392,57 @@ fn trigger_event_operation(operation_id: &str, summary: &str, body_schema: &str)
         response("Delivery is durably leased or waiting for its bounded retry");
     operation["responses"]["422"] =
         response("Delivery is durably dead-lettered and carries its terminal state");
+    operation
+}
+
+fn github_webhook_operation() -> Value {
+    let mut operation = api_operation(
+        "readGithubWebhook",
+        "triggers",
+        "Read the GitHub hook path and its derived secret for an SCM webhook trigger",
+        "200",
+        Vec::new(),
+        None,
+    );
+    operation["responses"]["200"] = json!({
+        "description": "The public hook path and the secret GitHub must sign deliveries with",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GithubWebhookResponse"}}}
+    });
+    operation
+}
+
+/// The public GitHub receiver: no bearer, the delivery authenticated by its
+/// signature header; four distinct success shapes because GitHub keeps a
+/// hook healthy on any 2xx and the receiver must acknowledge deliveries it
+/// does not admit.
+fn github_delivery_operation() -> Value {
+    let mut operation = unauthenticated_api_operation(
+        "receiveGithubDelivery",
+        "triggers",
+        "Receive a signed GitHub push or pull-request delivery for an SCM webhook trigger",
+        "201",
+        vec![
+            header_parameter("X-GitHub-Delivery", true),
+            header_parameter("X-GitHub-Event", true),
+            header_parameter("X-Hub-Signature-256", true),
+        ],
+        Some("GithubDelivery"),
+    );
+    let admission = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TriggerEventResponse"}}}
+        })
+    };
+    operation["responses"]["200"] =
+        admission("Exact redelivery of an admitted delivery id: the same build, nothing minted");
+    operation["responses"]["201"] = admission("New delivery admitted or durably captured");
+    operation["responses"]["202"] = json!({
+        "description": "Authenticated but not admitted (ignored event or action, tag push, deletion, ping, or a filter miss), acknowledged so GitHub keeps delivering; recorded as a trigger.delivery_unadmitted audit event",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WebhookAcknowledgement"}}}
+    });
+    operation["responses"]["422"] =
+        admission("Delivery is durably dead-lettered and carries its terminal state");
     operation
 }
 

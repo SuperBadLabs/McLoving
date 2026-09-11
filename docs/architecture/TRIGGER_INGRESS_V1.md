@@ -233,7 +233,10 @@ The receiver takes no bearer. It requires `X-GitHub-Delivery`,
 be an enabled or paused `scm_webhook` trigger whose configuration names
 provider `github`), and verifies the signature over the raw body in constant
 time before it interprets anything; a forged or unsigned delivery is refused
-with 401 and leaves no receipt. The body is bounded at 2 MiB. A `push` to a
+with 401 and leaves no receipt. The body is bounded at GitHub's own 25 MiB
+payload maximum, so no delivery GitHub can send is refused unread; the
+OpenAPI operation `receiveGithubDelivery` declares the three headers, the
+`GithubDelivery` body and the 200/201/202/422 answers. A `push` to a
 branch maps to the SCM payload `repository_identity` (the repository's
 `full_name`, which the trigger's `repository_identity` must equal),
 `revision` (`after`), `branch` (the ref without `refs/heads/`) and `paths`

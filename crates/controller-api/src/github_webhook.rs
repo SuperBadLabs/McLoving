@@ -24,10 +24,13 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Largest delivery body accepted; GitHub sends at most 25 MiB, and the
-/// fields this receiver reads sit in the first few kilobytes, but a push with
-/// many commits lists every changed path.
-pub(super) const MAX_DELIVERY_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Largest delivery body accepted: GitHub's own documented payload maximum,
+/// so no delivery GitHub can send is refused unread. The signature is
+/// verified over the whole body before anything is parsed, which costs one
+/// HMAC pass per byte and nothing else for an unauthenticated sender; a body
+/// above the bound is not a GitHub delivery and is refused at the framework
+/// layer with 413.
+pub(super) const MAX_DELIVERY_BODY_BYTES: usize = 25 * 1024 * 1024;
 /// Shortest webhook key file accepted, in bytes.
 pub(super) const MIN_WEBHOOK_KEY_BYTES: usize = 32;
 const SIGNATURE_HEADER: &str = "x-hub-signature-256";
