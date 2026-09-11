@@ -1895,7 +1895,7 @@ async fn run_assignment(
             DurableResult {
                 workspace_transfer: workspace_transfer.as_ref(),
                 outcome: terminal,
-                exit_code: outcome.exit_code,
+                exit_code: last_record.exit_code,
                 termination: if last_record.termination == "spawn_failed" {
                     "spawn_failed"
                 } else {

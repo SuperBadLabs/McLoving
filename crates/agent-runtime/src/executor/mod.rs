@@ -144,6 +144,8 @@ pub enum ExecutionError {
     ContainmentUnverified { process_id: u32, reason: String },
     #[error("execution mode {0:?} is unsupported on this platform")]
     UnsupportedMode(ExecutionMode),
+    #[error("multi-step execution (step {0}) is unsupported on this platform")]
+    MultiStepUnsupported(u32),
     #[error("cmd.exe program or argument contains unsupported shell metacharacters")]
     UnsafeWindowsShellArgument,
     #[error("Windows Job Object operation failed: {0}")]
