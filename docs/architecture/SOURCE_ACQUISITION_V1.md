@@ -71,19 +71,22 @@ it does not make ordinary operator paths symlink-following. Ordinary bounded
 file and runtime snapshot readers use nofollow/nonblocking opens and validate
 the opened object, so a substituted FIFO cannot hang acquisition setup.
 
-The externally selected `mcloving-source-acquirer` profile and exact transport
-filesystem remain prerequisites. The standalone fixture runs the real sealed
+The initial sealed-caller fixture requires the externally selected
+`mcloving-source-acquirer` profile and exact transport filesystem. It runs the real sealed
 helper against authenticated HTTP Git and exercises its internal self-snapshot,
 askpass and runtime-bound transport. Native request, receipt, claim, replay and
-retained-tree semantics are unchanged.
+retained-tree semantics were unchanged by that initial sealed-caller slice;
+the subsequent pure-authentication section describes additional replay checks.
 
 This is a prerequisite for later EXEC-005 work, not source product integration.
 There is no `source_intent`, agent capability, controller catalog, downstream
-checkout or new receipt-verifier API. Source-native commands create nested
+checkout. The subsequent pure-authentication API and standalone containment
+prerequisites do not add those product surfaces. Source-native commands create nested
 process groups; the agent's current outer-group emptiness check does not prove
-termination of that entire descendant tree. Production source-only profile
-selection, nested-process cancellation, held-directory retained-tree custody
-and bounded retention ownership remain separate integration obligations. This
+termination of that entire descendant tree. The standalone fixed source-only launch and descendant-lifetime protocol is
+specified in [SOURCE_CONTAINMENT_V1.md](SOURCE_CONTAINMENT_V1.md). Agent adoption
+of that protocol, held-directory retained-tree custody and bounded retention
+ownership remain separate integration obligations. This
 source-inspected mismatch is not an observed process escape. EXEC-005 remains
 ACTIVE and no frozen Mario/JCOMP-003 or production authority is expanded.
 
@@ -380,3 +383,85 @@ An inventory test separately pins the accepted Mario manifests and proves that
 their current denominator contains zero admitted live SCM configurations or
 credential grants. Historical corpus provenance is reported separately and
 cannot satisfy that production denominator.
+
+## Pure receipt authentication prerequisite
+
+`receipt_auth::ReceiptVerifier` authenticates a stored receipt against the
+original complete `AcquisitionRequest` using explicit immutable configuration,
+implementation digest, signing-key and marker snapshots. Construction performs
+native configuration shape, authority-digest, key, marker, repository and quota
+checks without opening a runtime path, reading a credential file, contacting a
+provider or constructing `SourceAcquirer`. The supplied marker set must contain
+the credential marker committed by the configuration, as in native admission;
+the verifier does not retain marker bytes. Its key-bearing type has no `Debug`
+implementation. Native construction separately preserves runtime-path
+canonicalization and all existing filesystem/credential checks.
+
+The stored-frame API bounds receipt bytes at the native 64 MiB metadata ceiling
+and refuses malformed, duplicate, unknown or trailing JSON fields/frames. Typed
+configuration, original request and typed receipt inputs are size-controlled
+caller authority; callers handling untrusted stored bytes must use the frame
+API. HMAC-SHA-256 verification uses constant-time MAC comparison. Authentication
+checks the canonical complete request digest and separately compares every
+repeated request/configuration/grant identity, exact primary and submodule
+repository/ref/commit bindings, complete sorted unique repository graph,
+acquisition-derived output identity, digest shapes and native count/byte limits.
+A correctly signed receipt for another context therefore fails independently
+of signature corruption. Resolved tree and content identities remain claims
+signed by the native issuer; authentication alone cannot prove their bytes.
+
+Authentication validates acquisition time and publication deadline against the
+original request and grant window, with the native checked lifetime formula
+(`command_timeout_ms * (submodules + 1) * 8 + 120000`) bounding the remaining
+publication interval after acquisition. Admission start is absent from the
+receipt, so this is a conservative upper bound, not exact deadline reconstruction.
+A backwards wall-clock jump during native acquisition can make an otherwise
+signed historical receipt fail this consistency check. It intentionally permits
+consistent authentic historical
+evidence after those windows expire; it grants no new acquisition authority.
+Native replay still performs its existing present-time request/grant admission,
+then full original-request authentication before retained-tree verification.
+The existing `SourceAcquirer::verify_receipt(receipt)` method remains an
+authority/HMAC plus pathname-tree check: without an original request argument it
+does not claim the pure API's full caller-context comparison.
+No fresh timestamp, acquisition identifier or expiry is generated for replay.
+
+This prerequisite does not earn held-directory retained-tree custody. Native
+retained-tree verification still uses pathname-based directory traversal; last
+component no-follow reads do not anchor renamed intermediate directories.
+A future product verifier must hold and recheck the private root identity,
+walk relative to held directory descriptors, preserve publication/retention
+exclusion and bound complete inventory work. Finite retained-state accounting,
+crash reconciliation and submitted-job source dispatch also remain unimplemented.
+Read-only modes protect the cooperative producer contract; they do not isolate
+a fully compromised actor with the same host UID.
+
+
+## Closed source launch prerequisite
+
+[SOURCE_CONTAINMENT_V1.md](SOURCE_CONTAINMENT_V1.md) specifies the separate
+standalone source-only profile transition, private PID-namespace init and
+whole-descendant lifetime protocol. Native commands retain their own process
+groups and transport deadlines. A caller pins the exact namespace init at the
+last private launch gate, joins its pidfd on cancellation and accepts no native
+stdout before the required containment proof. Outer process death alone is
+insufficient evidence that descendants have finished terminating.
+
+The caller-only user namespace translates host-root runtime libraries to an
+unmapped UID. The native root-ownership rule therefore cannot simply be tested
+inside the child or replaced by accepting an overflow UID. The fixed outer
+supervisor checks root ownership, canonical config/runtime bindings and bounded
+same-opened runtime bytes before namespace creation. The child imports held
+runtime descriptors only through typed live-supervisor custody verification;
+ordinary `SourceAcquirer::new` preserves its root-ownership check and does not
+consult an environment flag to waive it. The complete lineage, anchored proc
+reads, resource bounds and cleared-loader bootstrap requirements are in that
+contract. Runtime-file custody is distinct from retained acquisition-directory
+custody, which this change does not implement.
+
+This standalone path does not advertise source capability or create an agent,
+controller, source-intent or workload-checkout surface. Durable product launch,
+complete adverse product lifetime/replay evidence, held retained-root identity,
+finite retention reservations and reconciliation remain prerequisites to that
+integration. The source profile remains an unconfined user-namespace-admission
+domain; it is not a general filesystem/network sandbox or SEC-005 closure.

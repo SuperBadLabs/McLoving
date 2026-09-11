@@ -3,11 +3,15 @@ use mcloving_source_acquirer::{AcquisitionReceipt, ManifestEntry};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
 
+#[path = "../source_lifetime_fixture/mod.rs"]
+mod source_lifetime_fixture;
+
 #[derive(Default)]
 struct ReadCounts {
     reads: AtomicUsize,
     writes: AtomicUsize,
     upload_posts: AtomicUsize,
+    descendant_heartbeats: AtomicUsize,
     release: AtomicBool,
 }
 #[derive(Clone)]
@@ -22,6 +26,26 @@ async fn read_only_http(
     headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
+    if uri.path() == "/fixture-descendant-heartbeat" {
+        if method == Method::GET
+            && headers.get("authorization").and_then(|v| v.to_str().ok())
+                == Some(state.backend.expected_authorization.as_str())
+        {
+            state
+                .counts
+                .descendant_heartbeats
+                .fetch_add(1, Ordering::SeqCst);
+            return Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .unwrap();
+        }
+        state.counts.writes.fetch_add(1, Ordering::SeqCst);
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::empty())
+            .unwrap();
+    }
     let read = (method == Method::GET
         && uri.path() == "/private.git/info/refs"
         && uri.query() == Some("service=git-upload-pack"))
@@ -51,7 +75,11 @@ async fn read_only_http(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree() {
-    let temporary = tempfile::tempdir().expect("standalone tempdir");
+    run_sealed_native_source(None).await;
+}
+
+async fn run_sealed_native_source(scenario: Option<source_lifetime_fixture::Scenario>) {
+    let temporary = source_lifetime_fixture::RetainFailedFixture::new();
     let repository = RepositoryFixture::new(temporary.path(), "private");
     repository.write("source.txt", b"credentialed source\n");
     let commit = repository.commit("private source");
@@ -93,6 +121,13 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
 
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_mcloving-source-acquirer"));
     let git = git_executable();
+    let deliberate_descendant =
+        scenario.is_some_and(source_lifetime_fixture::uses_deliberate_descendant);
+    let git = if deliberate_descendant {
+        source_lifetime_fixture::wrap_git(&git, temporary.path(), address.port())
+    } else {
+        git
+    };
     let git_remote_https = git_remote_https_executable(&git);
     let bound_git_remote_https = temporary.path().join("bound-git-remote-https");
     std::fs::copy(&git_remote_https, &bound_git_remote_https).unwrap();
@@ -298,29 +333,81 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
             assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
         }
     }
-    let mut command = native_command(
-        &format!("/proc/self/fd/{fd}"),
-        &config_path,
-        &credential_path,
-        &signing_key_path,
-        &marker_path,
-    );
+    let mut command = if matches!(
+        scenario,
+        Some(source_lifetime_fixture::Scenario::ParentDeath)
+    ) {
+        source_lifetime_fixture::parent_command(
+            &config_path,
+            &credential_path,
+            &signing_key_path,
+            &marker_path,
+        )
+    } else if scenario.is_some() {
+        source_lifetime_fixture::command(
+            &sealed,
+            &config_path,
+            &credential_path,
+            &signing_key_path,
+            &marker_path,
+        )
+    } else {
+        native_command(
+            &format!("/proc/self/fd/{fd}"),
+            &config_path,
+            &credential_path,
+            &signing_key_path,
+            &marker_path,
+        )
+    };
     command.env(
         "MCLOVING_SOURCE_ACQUIRER_EXPECTED_CONFIG_SHA256",
         config.canonical_digest().unwrap(),
     );
-    let expected_profile = std::fs::read_to_string("/proc/self/attr/current").unwrap();
+    let expected_profile = if scenario.is_some() {
+        "mcloving-source-acquirer (unconfined)\n".to_owned()
+    } else {
+        std::fs::read_to_string("/proc/self/attr/current").unwrap()
+    };
     let named_source_profile =
         expected_profile.split_whitespace().next() == Some("mcloving-source-acquirer");
-    let namespace_denied = host_denies_sealed_launcher_userns();
+    let namespace_denied = scenario.is_none() && host_denies_sealed_launcher_userns();
     assert!(
         !named_source_profile || !namespace_denied,
         "named source-profile gate owes the full sealed acquisition: {}",
         userns_policy_diagnostics()
     );
     let started_ms = now_ms();
-    let mut child = command.spawn().unwrap();
-    let pid = child.id().unwrap();
+    let (mut child, containment) = if scenario.is_some() {
+        let mut launch = source_lifetime_fixture::Launch::spawn(command, &sealed);
+        if matches!(
+            scenario,
+            Some(source_lifetime_fixture::Scenario::ParentDeath)
+        ) {
+            launch.identify_proxy().await;
+        }
+        if !source_lifetime_fixture::host_requires_positive() {
+            launch.expect_unavailable().await;
+            assert_eq!(counts.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
+            assert!(
+                !config
+                    .output_root
+                    .join(request.acquisition_id.to_string())
+                    .exists()
+            );
+            server.abort();
+            return;
+        }
+        launch.admit().await;
+        // Keep the phase gate and exact parent/init pidfds alive until cleanup.
+        (launch.child.take().unwrap(), Some(launch))
+    } else {
+        (command.spawn().unwrap(), None)
+    };
+    let pid = containment
+        .as_ref()
+        .map_or_else(|| child.id().unwrap(), |launch| launch.outer.pid as u32);
     let mut stdin = child.stdin.take().unwrap();
     stdin
         .write_all(&serde_json::to_vec(&request).unwrap())
@@ -377,10 +464,16 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
     }
     tokio::time::timeout(Duration::from_secs(60), async {
         while counts.reads.load(Ordering::SeqCst) == 0 {
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "sealed native helper exited before authenticated provider read"
-            );
+            if let Some(status) = child.try_wait().unwrap() {
+                use tokio::io::AsyncReadExt as _;
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                child.stdout.take().unwrap().read_to_end(&mut stdout).await.unwrap();
+                child.stderr.take().unwrap().read_to_end(&mut stderr).await.unwrap();
+                assert_private_absent(&stdout);
+                assert_private_absent(&stderr);
+                panic!("sealed native helper exited before authenticated provider read: {status}, stdout={}, stderr={}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -406,16 +499,128 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
             .to_string_lossy()
             .contains("memfd:")
     );
+    if deliberate_descendant {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while counts.descendant_heartbeats.load(Ordering::SeqCst) == 0 {
+                assert!(child.try_wait().unwrap().is_none());
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("deliberate descendant must actually emit fixture heartbeat");
+    }
+    let observed = containment
+        .as_ref()
+        .map(|_| source_lifetime_fixture::descendants(pid as i32));
+    if let Some(
+        action @ (source_lifetime_fixture::Scenario::Terminate
+        | source_lifetime_fixture::Scenario::Kill
+        | source_lifetime_fixture::Scenario::ParentDeath),
+    ) = scenario
+    {
+        let launch = containment.as_ref().unwrap();
+        match action {
+            source_lifetime_fixture::Scenario::Terminate => {
+                launch.outer.signal(rustix::process::Signal::TERM)
+            }
+            source_lifetime_fixture::Scenario::Kill => {
+                launch.outer.signal(rustix::process::Signal::KILL)
+            }
+            source_lifetime_fixture::Scenario::ParentDeath => launch.kill_parent(),
+            source_lifetime_fixture::Scenario::Complete
+            | source_lifetime_fixture::Scenario::CompleteWithDescendant => unreachable!(),
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        source_lifetime_fixture::prove_exited(std::slice::from_ref(launch.init.as_ref().unwrap()))
+            .await;
+        source_lifetime_fixture::prove_exited(observed.as_ref().unwrap()).await;
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "outer cancellation must not return a receipt"
+        );
+        assert_private_absent(&output.stderr);
+        source_lifetime_fixture::assert_observed_descendants(
+            observed.as_ref().unwrap(),
+            deliberate_descendant,
+        );
+        let before = counts.reads.load(Ordering::SeqCst);
+        let heartbeat_before = counts.descendant_heartbeats.load(Ordering::SeqCst);
+        counts.release.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            counts.reads.load(Ordering::SeqCst),
+            before,
+            "no authenticated provider activity after cleanup"
+        );
+        assert_eq!(counts.writes.load(Ordering::SeqCst), 0);
+        assert!(heartbeat_before > 0);
+        assert_eq!(
+            counts.descendant_heartbeats.load(Ordering::SeqCst),
+            heartbeat_before,
+            "no deliberately detached descendant activity after namespace cleanup"
+        );
+        eprintln!(
+            "synthetic descendant heartbeat stopped: {heartbeat_before} observed heartbeats before stable post-cleanup interval"
+        );
+        let claim = config
+            .output_root
+            .join(format!("{}.claim.json", request.acquisition_id));
+        let claim_bytes = std::fs::read(&claim)
+            .expect("crashed acquisition retains its original ambiguity claim");
+        let claim_digest = content_sha256(&claim_bytes);
+        source_lifetime_fixture::retire_owned_fixture_transport(
+            &config.transport_root,
+            request.acquisition_id,
+            launch.init.as_ref().unwrap(),
+        );
+        assert_eq!(
+            std::fs::read(&claim).unwrap(),
+            claim_bytes,
+            "transport fixture teardown preserves acquisition ambiguity"
+        );
+        eprintln!(
+            "synthetic crash claim retained through transport retirement: acquisition={}, claim_sha256={claim_digest}",
+            request.acquisition_id
+        );
+        eprintln!(
+            "source containment {action:?}: {} pinned native descendants exited; {before} authenticated reads then stable provider count",
+            observed.as_ref().unwrap().len()
+        );
+        server.abort();
+        return;
+    }
     counts.release.store(true, Ordering::SeqCst);
     let output = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
         .await
         .unwrap()
         .unwrap();
+    if let Some(identities) = &observed {
+        source_lifetime_fixture::prove_exited(std::slice::from_ref(
+            containment.as_ref().unwrap().init.as_ref().unwrap(),
+        ))
+        .await;
+        source_lifetime_fixture::prove_exited(identities).await;
+        source_lifetime_fixture::assert_observed_descendants(identities, deliberate_descendant);
+    }
     assert!(
         output.status.success(),
         "native helper failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    if deliberate_descendant {
+        let heartbeat_count = counts.descendant_heartbeats.load(Ordering::SeqCst);
+        assert!(heartbeat_count > 0);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            counts.descendant_heartbeats.load(Ordering::SeqCst),
+            heartbeat_count,
+            "normal completion also tears down detached descendants"
+        );
+    }
     let completed_ms = now_ms();
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["ok"], true, "native source response: {envelope}");
@@ -424,6 +629,20 @@ async fn sealed_native_source_joins_authenticated_read_receipt_and_retained_tree
     let stored: AcquisitionReceipt =
         serde_json::from_slice(&std::fs::read(acquisition.join("receipt.json")).unwrap()).unwrap();
     assert_eq!(stored, receipt);
+    let pure_verifier = mcloving_source_acquirer::receipt_auth::ReceiptVerifier::new(
+        config.clone(),
+        implementation_sha256.clone(),
+        SIGNING_KEY.to_vec(),
+        vec![CREDENTIAL.to_vec()],
+    )
+    .unwrap();
+    pure_verifier.authenticate(&receipt, &request).unwrap();
+    pure_verifier
+        .authenticate_frame(
+            &std::fs::read(acquisition.join("receipt.json")).unwrap(),
+            &request,
+        )
+        .unwrap();
     use hmac::{Hmac, Mac as _};
     let mut unsigned = receipt.clone();
     unsigned.signature.clear();

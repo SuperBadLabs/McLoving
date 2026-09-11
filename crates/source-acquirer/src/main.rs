@@ -34,9 +34,15 @@ const CREDENTIAL_MONOTONIC_DEADLINE_ENV: &str =
     "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS";
 const TRANSPORT_LAUNCHER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER";
 const TRANSPORT_INIT_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_INIT";
+#[cfg(target_os = "linux")]
 const TRANSPORT_EXECUTABLE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE";
+#[cfg(target_os = "linux")]
 const TRANSPORT_READY_FD_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_READY_FD";
+#[cfg(target_os = "linux")]
 const TRANSPORT_GATE_FD_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_GATE_FD";
+
+#[cfg(target_os = "linux")]
+mod containment;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -53,11 +59,32 @@ enum Output {
 }
 
 fn main() {
+    #[allow(unused_mut)]
+    let mut runtime_custody = None;
+    // Containment setup is deliberately single-threaded and precedes Tokio.
+    // These closed modes only execute this same sealed source image.
+    if let Some(mode) = std::env::var_os("MCLOVING_SOURCE_CONTAINMENT") {
+        #[cfg(target_os = "linux")]
+        match mode.to_str() {
+            Some("outer") => std::process::exit(containment::outer().unwrap_or(1)),
+            Some("init") => std::process::exit(containment::init().unwrap_or(1)),
+            Some("worker") => match containment::verify_worker() {
+                Ok(custody) => runtime_custody = Some(custody),
+                Err(()) => std::process::exit(1),
+            },
+            _ => std::process::exit(1),
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = mode;
+            std::process::exit(1);
+        }
+    }
     if std::env::var(TRANSPORT_LAUNCHER_MODE_ENV).as_deref() == Ok("1") {
         #[cfg(target_os = "linux")]
         let result = run_transport_launcher();
         #[cfg(not(target_os = "linux"))]
-        let result = Err(());
+        let result: Result<(), ()> = Err(());
         if result.is_err() {
             std::process::exit(1);
         }
@@ -67,7 +94,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         let result = run_transport_init();
         #[cfg(not(target_os = "linux"))]
-        let result = Err(());
+        let result: Result<(), ()> = Err(());
         if result.is_err() {
             std::process::exit(1);
         }
@@ -77,19 +104,23 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|_| std::process::exit(1));
-    let result = runtime.block_on(async_main());
+    let result = runtime.block_on(async_main(runtime_custody));
     if result.is_err() {
         std::process::exit(1);
     }
 }
 
-async fn async_main() -> Result<(), ()> {
-    if std::env::var(RESOLVER_MODE_ENV).as_deref() == Ok("1") {
+async fn async_main(
+    runtime_custody: Option<mcloving_source_acquirer::runtime_custody::RuntimeCustody>,
+) -> Result<(), ()> {
+    if runtime_custody.is_some() {
+        run(runtime_custody).await
+    } else if std::env::var(RESOLVER_MODE_ENV).as_deref() == Ok("1") {
         run_resolver().await
     } else if std::env::var("MCLOVING_SOURCE_ACQUIRER_ASKPASS").as_deref() == Ok("1") {
         run_askpass().await
     } else {
-        run().await
+        run(None).await
     }
 }
 
@@ -352,7 +383,9 @@ fn unix_time_ms() -> Result<i64, ()> {
     i64::try_from(now.as_millis()).map_err(|_| ())
 }
 
-async fn run() -> Result<(), ()> {
+async fn run(
+    runtime_custody: Option<mcloving_source_acquirer::runtime_custody::RuntimeCustody>,
+) -> Result<(), ()> {
     let config_path = required_path("MCLOVING_SOURCE_ACQUIRER_CONFIG")?;
     let credential_path = required_path("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE")?;
     let signing_key_path = required_path("MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE")?;
@@ -385,13 +418,14 @@ async fn run() -> Result<(), ()> {
         .map(<[u8]>::to_vec)
         .collect::<Vec<_>>();
     let implementation_sha256 = running_implementation_sha256().await.map_err(|_| ())?;
-    let acquirer = SourceAcquirer::new(
+    let acquirer = SourceAcquirer::new_with_runtime_custody(
         config,
         implementation_sha256,
         credential_path,
         &credential,
         signing_key,
         secret_markers,
+        runtime_custody,
     )
     .await
     .map_err(|_| ())?;

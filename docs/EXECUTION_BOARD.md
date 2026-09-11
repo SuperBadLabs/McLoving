@@ -74,10 +74,15 @@ are `docs/architecture/CACHE_PRODUCT_PATH_V1.md` and
 
 The standalone source-helper custody prerequisite supports a pinned acquisition
 configuration and execution from a sealed caller image while preserving the
-native source boundary. It adds no submitted-job source path. Source-only
-profile selection, nested-process cancellation, retained-tree verification
-and bounded retention ownership remain prerequisites to that integration;
-see `docs/architecture/SOURCE_ACQUISITION_V1.md`.
+native source boundary. Pure receipt authentication additionally binds the complete
+original request and explicit authority snapshots without opening native/provider
+state; stored-frame parsing is bounded and strict. It adds no submitted-job source
+path. A closed standalone source profile/PID-namespace launch protocol and
+pre-namespace runtime-file custody are specified in
+`docs/architecture/SOURCE_CONTAINMENT_V1.md`; they do not constitute agent
+product adoption. Durable agent launch/cancellation/recovery, held-directory
+retained-tree verification and bounded retention ownership remain integration
+prerequisites; see `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 After M1, the production-readiness track is `EXEC-005` -> `SECRET-002` ->
 `SEC-005` -> `CASE-001`, followed by the existing release, deployment,
