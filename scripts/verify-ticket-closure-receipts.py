@@ -365,7 +365,9 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # of the product-parity re-orientation. They sit in a NEW ticket table and
 # the topology gains a new lane table, so EXPECTED_TABLES moves with them
 # (10 -> 11 tickets, 5 -> 6 lanes). No closure exemption or debt change.
-MINIMUM_TICKET_ROWS = 137
+# 137 -> 138 on 2026-09-11 with `AGENT-008`, filed from PAR-010 review: it
+# joins the product-hardening table, so EXPECTED_TABLES does not move.
+MINIMUM_TICKET_ROWS = 138
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
