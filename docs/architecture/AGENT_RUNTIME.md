@@ -403,6 +403,43 @@ discharge a parked reconciliation).
   attempt cancelling for the next session rather than completing and
   reclaiming the spool, and a lease definitively lost meanwhile retires the
   attempt with the chunks already accepted exactly once.
+- Declared artifacts (PAR-014). A stage may declare up to sixteen named
+  artifacts, each up to thirty-two workspace-relative path patterns
+  (`/`-separated segments; `**` alone matches any depth, `*` and `?` match
+  within a segment; never absolute, never `.` or `..`). After the steps of an
+  attempt that was not cancelled, and before its terminal is made durable,
+  the agent collects the matching regular files by a descriptor-relative
+  walk from the workspace: every directory is opened `O_DIRECTORY|O_NOFOLLOW`
+  and re-identified against the entry it was reached by, every matching
+  file is opened `O_NOFOLLOW` and re-identified the same way, the agent's
+  own `spool/` is never visited, a directory is entered only when some
+  pattern can match below it, and the walk is bounded (depth 32, 65 536
+  entries, 1 024 files, 256 MiB). A link that a declaration would collect
+  or descend into refuses the whole set by name (`artifact_refused:link:
+  <path>`), as does a matching entry that is not a regular file, a name
+  that would exceed the store's 512-byte object name, or a bound; a refusal
+  fails an attempt whose steps succeeded and is its recorded reason, and
+  nothing of a refused set is uploaded. Each collected file is one object
+  named `<artifact name>/<workspace path>`, streamed over the session's
+  mTLS channel as an `UploadArtifact` client stream (a header carrying the
+  work authority, name, length and SHA-256, then one-MiB data frames) under
+  the attempt's live lease, with an RPC budget that grows one second per
+  MiB; the controller stages it into the same object store the public
+  upload routes use, with the declared length reserved against the store
+  quota before the first byte, registers it through the same
+  `register_artifact` predicate (lease owner, fence, restore epoch, build
+  and node) under the per-attempt artifact lock, refuses the registration
+  when the attempt's artifacts would pass 256 MiB, and commits it into the
+  immutable digest namespace. The stream is accepted only for a session
+  that negotiated `artifact-upload-v1`; the agent advertises the
+  `artifact-upload-v1` capability on Unix, the controller keeps it for
+  scheduling only when the feature was negotiated, and a node whose stage
+  declares artifacts requires it, so an older agent or a session with an
+  older peer is never offered such a node. A crash between the steps and
+  the terminal leaves the objects already committed registered under the
+  attempt and reports the attempt interrupted as before; recovery does not
+  resume uploads. A Windows agent advertises no collector and a stage that
+  declares artifacts is not routed to it.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
   workspace through the same no-follow cleanup, delete controller-owned log

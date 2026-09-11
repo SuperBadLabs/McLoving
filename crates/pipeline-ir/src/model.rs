@@ -11,7 +11,8 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6, IR_V1_7};
+use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6, IR_V1_7, IR_V1_8};
+use mcloving_domain::artifacts::ArtifactSpec;
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -127,6 +128,9 @@ pub struct Stage {
     /// `None` runs the steps directly on the agent host.
     pub image: Option<String>,
     pub steps: Vec<Step>,
+    /// Declared artifacts collected from the workspace after the steps
+    /// (PAR-014); empty for a stage that declares none.
+    pub artifacts: Vec<ArtifactSpec>,
     pub source_span: SourceSpan,
 }
 
@@ -333,7 +337,9 @@ pub fn compile_strict_yaml_with_parameters(
             .iter()
             .any(|step| matches!(step, Step::CacheIntent(_)))
     });
-    let schema = if stages.iter().any(|stage| {
+    let schema = if stages.iter().any(|stage| !stage.artifacts.is_empty()) {
+        IR_V1_8
+    } else if stages.iter().any(|stage| {
         stage
             .steps
             .iter()
@@ -615,6 +621,7 @@ fn compile_stages(
             let name = stage.required_string("name")?;
             let image = stage.optional_string("image")?;
             let steps_node = stage.required("steps")?;
+            let artifacts_node = stage.take("artifacts");
             stage.finish()?;
             if let Some(image) = &image
                 && !mcloving_domain::container::is_digest_pinned_image(image)
@@ -625,16 +632,72 @@ fn compile_stages(
                 ));
             }
             let steps = compile_steps(steps_node, &path, parameters, expressions)?;
+            let artifacts = compile_artifacts(artifacts_node, &path)?;
             Ok(Stage {
                 id,
                 name,
                 image,
                 steps,
+                artifacts,
                 source_span: node_span,
             })
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.with_span_if_missing(span))
+}
+
+/// Declared artifacts (PAR-014): a sequence of `{name, paths}` mappings, the
+/// paths literal workspace-relative patterns; bounds and the pattern dialect
+/// are the domain's, checked here so a refusal names its field.
+fn compile_artifacts(
+    node: Option<SpannedValue>,
+    stage_path: &str,
+) -> Result<Vec<ArtifactSpec>, CompileError> {
+    let Some(node) = node else {
+        return Ok(Vec::new());
+    };
+    let span = node.span;
+    let path = format!("{stage_path}.artifacts");
+    let YamlValue::Sequence(nodes) = node.value else {
+        return Err(CompileError::schema(&path, "expected a sequence").with_span(span));
+    };
+    let mut specs = Vec::with_capacity(nodes.len());
+    for (index, node) in nodes.into_iter().enumerate() {
+        let entry_path = format!("{path}[{index}]");
+        let entry_span = node.span;
+        let mut entry = MappingView::new(node, &entry_path)?;
+        let name = entry.required_string("name")?;
+        let paths_node = entry.required("paths")?;
+        entry.finish()?;
+        let paths_span = paths_node.span;
+        let YamlValue::Sequence(patterns) = paths_node.value else {
+            return Err(CompileError::schema(
+                format!("{entry_path}.paths"),
+                "expected a sequence of path patterns",
+            )
+            .with_span(paths_span));
+        };
+        let mut paths = Vec::with_capacity(patterns.len());
+        for (pattern_index, pattern) in patterns.into_iter().enumerate() {
+            let pattern_span = pattern.span;
+            let YamlValue::String(pattern) = pattern.value else {
+                return Err(CompileError::schema(
+                    format!("{entry_path}.paths[{pattern_index}]"),
+                    "expected a string path pattern",
+                )
+                .with_span(pattern_span));
+            };
+            paths.push(pattern);
+        }
+        let spec = ArtifactSpec { name, paths };
+        spec.validate().map_err(|error| {
+            CompileError::schema(&entry_path, error.to_string()).with_span(entry_span)
+        })?;
+        specs.push(spec);
+    }
+    mcloving_domain::artifacts::validate_declarations(&specs)
+        .map_err(|error| CompileError::schema(&path, error.to_string()).with_span(span))?;
+    Ok(specs)
 }
 
 fn compile_steps(
@@ -996,11 +1059,11 @@ fn compile_resolved_string(
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
     if !matches!(
         pipeline.schema,
-        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5 | IR_V1_6 | IR_V1_7
+        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5 | IR_V1_6 | IR_V1_7 | IR_V1_8
     ) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 through v1.7 are accepted",
+            "only Pipeline IR v1.0 through v1.8 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -1086,6 +1149,17 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 "$.stages",
                 format!("total step count exceeds {MAX_STEPS}"),
             ));
+        }
+        if !stage.artifacts.is_empty() {
+            if pipeline.schema.minor < IR_V1_8.minor {
+                return Err(IrValidationError::new(
+                    format!("{path}.artifacts"),
+                    "declared artifacts require Pipeline IR v1.8",
+                ));
+            }
+            mcloving_domain::artifacts::validate_declarations(&stage.artifacts).map_err(
+                |error| IrValidationError::new(format!("{path}.artifacts"), error.to_string()),
+            )?;
         }
         if let Some(image) = &stage.image {
             if pipeline.schema.minor < IR_V1_6.minor {

@@ -1965,3 +1965,245 @@ stages:
     stop(&mut agent).await;
     stop(&mut harness.controller).await;
 }
+
+/// One process step writes files; the stage declares two of them by pattern
+/// and one file that no pattern names (PAR-014).
+const ARTIFACT_PIPELINE: &str = r#"
+version: 1
+name: artifacts
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "mkdir -p out target/debug && printf 'hello' > out/a.txt && printf 'log-line' > target/debug/x.log && printf 'not collected' > out/skip.bin"]
+          timeout_seconds: 10
+    artifacts:
+      - name: outputs
+        paths: ["out/*.txt", "target/**/*.log"]
+"#;
+
+/// The step plants a link to a host file where a declaration would collect
+/// it: the whole set is refused by the link's name and nothing is uploaded.
+const PLANTED_LINK_PIPELINE: &str = r#"
+version: 1
+name: planted-link
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "mkdir -p out && printf 'fine' > out/a.txt && ln -s /etc/hostname out/planted.txt"]
+          timeout_seconds: 10
+    artifacts:
+      - name: outputs
+        paths: ["out/*"]
+"#;
+
+#[tokio::test]
+async fn declared_artifacts_are_uploaded_and_downloadable() {
+    let Some(mut harness) = multi_step_harness("artifact-agent", "artifacts").await else {
+        return;
+    };
+    let mut agent = agent_command(
+        "artifact-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent");
+
+    let pipeline_id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "artifacts-e2e".to_owned(),
+                source: ARTIFACT_PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("a stage with declared artifacts validates and saves");
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            "artifacts-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+    // The node routes on the upload capability, so an agent from a release
+    // without the collector is never offered this work.
+    let required: Vec<String> = sqlx::query_scalar(
+        "SELECT required_capabilities FROM nodes WHERE organization_id = $1 AND build_id = $2",
+    )
+    .bind(harness.organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read the node's required capabilities");
+    assert!(
+        required
+            .iter()
+            .any(|capability| capability == "artifact-upload-v1"),
+        "{required:?}"
+    );
+
+    let status = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    assert_eq!(status.status, "succeeded", "{:?}", status.terminal_summary);
+    let mut artifacts = harness
+        .client
+        .artifacts(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .expect("list the build's artifacts");
+    artifacts.sort_by(|a, b| a.name.cmp(&b.name));
+    let listed = artifacts
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.name.as_str(),
+                artifact.bytes,
+                artifact.status.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        vec![
+            ("outputs/out/a.txt", 5, "available"),
+            ("outputs/target/debug/x.log", 8, "available"),
+        ],
+        "each matching regular file is one object under the declared name; the undeclared file is not"
+    );
+    assert!(
+        artifacts
+            .iter()
+            .all(|artifact| artifact.attempt_id == status.attempt_id),
+        "the attempt that ran the step owns its artifacts"
+    );
+    let bytes = harness
+        .client
+        .download_artifact(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+            status.attempt_id,
+            "outputs/out/a.txt",
+        )
+        .await
+        .expect("download the collected file");
+    assert_eq!(bytes, b"hello");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        artifacts[0].sha256,
+        "the listing's digest is the digest of the bytes the step wrote"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}
+
+#[tokio::test]
+async fn a_planted_link_refuses_the_artifact_set_by_name() {
+    let Some(mut harness) = multi_step_harness("planted-link-agent", "planted-link").await else {
+        return;
+    };
+    let mut agent = agent_command(
+        "planted-link-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent");
+
+    let pipeline_id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "planted-link-e2e".to_owned(),
+                source: PLANTED_LINK_PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("the pipeline validates and saves");
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            "planted-link-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+    let status = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    assert_eq!(status.status, "failed", "{:?}", status.terminal_summary);
+    let summary = status
+        .terminal_summary
+        .expect("terminal summary is published");
+    assert_eq!(
+        summary["reason"], "artifact_refused:link:out/planted.txt",
+        "the refusal names the link, not the file beside it: {summary}"
+    );
+    let artifacts = harness
+        .client
+        .artifacts(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .expect("list the build's artifacts");
+    assert!(
+        artifacts.is_empty(),
+        "nothing of a refused set is uploaded: {artifacts:?}"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}

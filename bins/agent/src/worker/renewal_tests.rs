@@ -110,6 +110,12 @@ impl wire::agent_control_server::AgentControl for StallingRenewals {
     ) -> Result<tonic::Response<wire::WorkReceipt>, tonic::Status> {
         Err(tonic::Status::unimplemented("renewal-only test peer"))
     }
+    async fn upload_artifact(
+        &self,
+        _: tonic::Request<tonic::Streaming<wire::ArtifactUploadFrame>>,
+    ) -> Result<tonic::Response<wire::WorkReceipt>, tonic::Status> {
+        Err(tonic::Status::unimplemented("renewal-only test peer"))
+    }
 }
 
 async fn run_peer(

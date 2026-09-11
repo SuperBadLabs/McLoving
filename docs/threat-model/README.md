@@ -962,6 +962,52 @@ until reserved chunks are kept in agent custody (`AGENT-011`); the byte
 quota's per-append sum over prior chunks is cost, not exposure
 (`CTRL-005`).
 
+## PAR-014 artifact upload review, ticket ACTIVE
+
+A stage declares the files it publishes and the agent uploads them after its
+steps over its own channel. Boundaries touched: TM-003 (agent runtime: the
+upload stream rides the existing session-bound, fenced work authority with
+the same lease, fence, restore-epoch and session checks as log publication,
+is accepted only for a session that negotiated `artifact-upload-v1`, and
+the scheduling capability is kept only for such a session, so an older
+agent or peer is never offered a stage that declares artifacts and never
+strands its files); TM-013 (credential and host exposure: the collector
+walks the workspace descriptor-relative from a root opened once, opens
+every directory and file `O_NOFOLLOW` and re-identifies each against the
+entry it was reached by, never visits the agent's own spool, enters a
+directory only when a pattern can match below it, and refuses the whole
+set by name when a link stands where a declaration would collect or
+descend, so a step that plants a link to a service-account file gets a
+named refusal and no upload; a Windows agent has no collector and is not
+routed such work); TM-006 (durable evidence: the controller stages each
+object into the same content-addressed store the public upload routes use,
+with the declared length reserved against the store quota before the first
+byte and a short or mismatching upload discarded, registers it through the
+same fenced `register_artifact` predicate under the per-attempt artifact
+lock, and commits it into the immutable digest namespace, so an artifact is
+either registered with its digest and length or absent); TM-018 (capacity:
+sixteen declarations of thirty-two patterns per stage, a walk bounded at
+depth 32 and 65 536 entries, at most 1 024 files and 256 MiB per attempt
+counted by the agent before the first upload and enforced by the store at
+every registration, one-MiB frames, and an RPC budget of one second per MiB
+bounded at fifteen minutes under a lease the agent keeps renewing);
+TM-052 (API: no new public route; the existing authorized artifact listing
+and download routes serve the objects). Residual: an attempt's own steps
+choose the bytes, as before; a crash between the steps and the durable
+terminal leaves the objects already committed registered under the
+interrupted attempt and recovery does not resume the rest, so a partial
+set is visible with the attempt reported interrupted; artifacts of a
+failed step are collected like a succeeded step's, since a failing build's
+logs are what a reader wants. Tests cover the pattern dialect and
+declaration bounds, the canonical encoding and version gate, the execution
+envelope and required capabilities, the collector's refusals by name (a
+link the declarations would collect or enter, a non-regular entry, an
+object name past the bound), and two shipped-binary gates: a step's files
+listed under the declared name and downloaded with a matching digest, and
+a planted link refusing the set with nothing uploaded. Closure requires the
+reviewed merge, exact-main Foundation and native Windows runs, and a
+receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
+
 ## PAR-001 GitHub webhook receiver review (earned closure)
 
 A public route lets GitHub feed an SCM webhook trigger directly. Boundaries

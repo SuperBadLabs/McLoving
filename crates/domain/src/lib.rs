@@ -1,5 +1,6 @@
 //! Shared domain vocabulary. Runtime behavior begins in later tickets.
 
+pub mod artifacts;
 pub mod cache_intent;
 pub mod input_intent;
 pub mod source_intent;

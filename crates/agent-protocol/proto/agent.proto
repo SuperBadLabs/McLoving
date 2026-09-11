@@ -14,6 +14,28 @@ service AgentControl {
   rpc RenewWorkLease(WorkLeaseRenewal) returns (WorkLeaseReceipt);
   rpc PublishLog(WorkLogChunk) returns (WorkReceipt);
   rpc CompleteWork(WorkCompletion) returns (WorkReceipt);
+  // One declared artifact file (PAR-014): a header frame naming the object,
+  // its length and digest under the attempt's work authority, then data
+  // frames in order. Only sent when artifact-upload-v1 was negotiated. The
+  // receipt's `accepted` is false when the attempt's fenced authority no
+  // longer admits the registration.
+  rpc UploadArtifact(stream ArtifactUploadFrame) returns (WorkReceipt);
+}
+
+message ArtifactUploadFrame {
+  oneof frame {
+    ArtifactUploadHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message ArtifactUploadHeader {
+  WorkAuthority authority = 1;
+  // `<artifact name>/<workspace-relative path>`, at most 512 bytes.
+  string name = 2;
+  string media_type = 3;
+  uint64 bytes = 4;
+  bytes sha256 = 5;
 }
 
 message ProtocolOffer {

@@ -101,7 +101,12 @@ The staging request body is arbitrary binary bytes under
 `application/octet-stream`; it is never JSON encoded.
 The shipped controller requires `MCLOVING_ARTIFACT_AGENT_TOKEN` and binds that
 independent secret to the configured embedded agent ID; public API credentials
-alone can never impersonate the leased artifact publisher.
+alone can never impersonate the leased artifact publisher. A remote agent
+publishes the artifacts a stage declares (PAR-014) over its own mTLS
+agent-control channel, not through these routes: the controller stages,
+registers and commits each object exactly as the commit route does, under the
+attempt's fenced work authority, and the listing and download routes serve
+them like any other artifact.
 
 Cancellation is a durable request. Queued work becomes terminal immediately;
 owned work becomes `cancelling` until the fenced agent proves process-tree

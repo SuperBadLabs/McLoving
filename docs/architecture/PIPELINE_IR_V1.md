@@ -80,6 +80,32 @@ An independent byte validator checks the magic, bounds, UTF-8, opcodes,
 environment ordering, optional markers, and complete input consumption. It
 does not invoke the YAML parser or schema compiler.
 
+## Pipeline IR v1.8 declared artifacts
+
+IR v1.8 lets a stage declare the files it publishes (PAR-014):
+
+```yaml
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          program: cargo
+          args: [test, --locked]
+    artifacts:
+      - name: target-logs
+        paths: ["target/**/*.log"]
+```
+
+A declaration names at most sixteen artifacts per stage, each with one to
+thirty-two literal workspace-relative patterns: `/`-separated segments, `**`
+alone matching any number of segments, `*` and `?` matching within a
+segment, never absolute and never naming `.` or `..`. Names are one to 128
+ASCII letters, digits, dots, underscores or hyphens, unique within the stage.
+The canonical bytes carry the declarations after the stage's steps; a
+pipeline that declares none keeps its earlier schema and byte encoding.
+Declarations are accepted only on stages of process and checkout steps.
+
 ## Compatibility rule
 
 A reader accepts a produced IR when major versions match and the reader minor

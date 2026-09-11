@@ -8,13 +8,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
+use mcloving_agent_protocol::wire::artifact_upload_frame::Frame as ArtifactFrame;
 use mcloving_agent_protocol::wire::{
-    AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationOutcome,
-    CancellationReceipt, CredentialBinding, CredentialEnvelope, CredentialRequest,
-    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
-    RotateCertificateRequest, RotateCertificateResponse, WorkAssignment, WorkAuthority,
-    WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer, WorkOutcome,
-    WorkPoll, WorkReceipt,
+    ArtifactUploadFrame, AttemptAuthority, CancellationCompletion, CancellationDisposition,
+    CancellationOutcome, CancellationReceipt, CredentialBinding, CredentialEnvelope,
+    CredentialRequest, OpenSessionRequest, OpenSessionResponse, ReconciliationDirective,
+    ReconciliationReport, RotateCertificateRequest, RotateCertificateResponse, WorkAssignment,
+    WorkAuthority, WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer,
+    WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
     ACCEPT_LEASE_STATE_FEATURE, ATTEMPT_CREDENTIALS_FEATURE, CURRENT_SESSION_EPOCH_METADATA,
@@ -306,7 +307,7 @@ async fn main() -> Result<()> {
         )
         .await
         .context("configure artifact-agent authentication")?
-        .with_object_store(object_store)
+        .with_object_store(object_store.clone())
         .with_staged_upload_ttl(staged_upload_ttl);
     let trigger_retry_state = state.clone();
     let trigger_retry_organization = worker.organization_id;
@@ -318,7 +319,12 @@ async fn main() -> Result<()> {
         .await
         .context("serve public API")
     };
-    let agent_server = run_agent_control_server(store.clone(), agent_control, work_wakeups.clone());
+    let agent_server = run_agent_control_server(
+        store.clone(),
+        object_store,
+        agent_control,
+        work_wakeups.clone(),
+    );
     let notification_loop = forward_work_ready_notifications(
         store.pool().clone(),
         work_ready_listener,
@@ -706,6 +712,9 @@ fn stale_session_status(churn: &SessionEpochChurn, agent_id: &str) -> Status {
 #[derive(Clone)]
 struct ControllerAgentService {
     store: Store,
+    /// Where an agent's declared artifacts land (PAR-014): the same store
+    /// the public upload routes stage into and commit from.
+    object_store: FilesystemObjectStore,
     identities: Arc<AgentIdentityBindings>,
     session_churn: Arc<SessionEpochChurn>,
     work_wakeups: broadcast::Sender<Uuid>,
@@ -803,6 +812,7 @@ impl AgentControl for ControllerAgentService {
             mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned(),
             mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
             mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE.to_owned(),
+            mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -1132,6 +1142,26 @@ impl AgentControl for ControllerAgentService {
                 capability != mcloving_domain::multi_step::MULTI_STEP_CAPABILITY
             });
         }
+        // The same rule for declared artifacts (PAR-014): a node that requires
+        // the upload capability must never reach a session whose peer cannot
+        // accept the upload stream.
+        if capabilities
+            .iter()
+            .any(|capability| capability == mcloving_domain::artifacts::ARTIFACT_UPLOAD_CAPABILITY)
+            && !self
+                .store
+                .agent_session_supports(
+                    &request.agent_id,
+                    request.session_epoch,
+                    mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE,
+                )
+                .await
+                .map_err(internal_store_error)?
+        {
+            capabilities.retain(|capability| {
+                capability != mcloving_domain::artifacts::ARTIFACT_UPLOAD_CAPABILITY
+            });
+        }
         // Subscribe before the first claim query. PostgreSQL notifications are
         // hints and may be coalesced, but this ordering prevents the ordinary
         // check-then-sleep race within one healthy controller process.
@@ -1447,6 +1477,187 @@ impl AgentControl for ControllerAgentService {
             // Not a terminal publication, so there is no published outcome.
             published_outcome: WorkOutcome::Unspecified as i32,
             // Only AcceptWork receipts carry lease state.
+            cancellation_requested: false,
+        }))
+    }
+
+    async fn upload_artifact(
+        &self,
+        request: Request<tonic::Streaming<ArtifactUploadFrame>>,
+    ) -> Result<Response<WorkReceipt>, Status> {
+        use mcloving_domain::artifacts::{
+            ARTIFACT_UPLOAD_FEATURE, MAX_ARTIFACT_FRAME_BYTES, MAX_ARTIFACT_OBJECT_NAME_BYTES,
+            MAX_ATTEMPT_ARTIFACT_BYTES,
+        };
+        let identity = self.identities.authenticate(&request)?.clone();
+        let mut frames = request.into_inner();
+        let header = match frames.message().await?.and_then(|frame| frame.frame) {
+            Some(ArtifactFrame::Header(header)) => header,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "artifact upload must begin with a header frame",
+                ));
+            }
+        };
+        let authority = header
+            .authority
+            .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
+        let context =
+            authorize_work_authority(&self.store, &self.session_churn, &identity, &authority)
+                .await?;
+        if !self
+            .store
+            .agent_session_supports(
+                &authority.agent_id,
+                authority.session_epoch,
+                ARTIFACT_UPLOAD_FEATURE,
+            )
+            .await
+            .map_err(internal_store_error)?
+        {
+            return Err(Status::failed_precondition(
+                "artifact upload was not negotiated for this session",
+            ));
+        }
+        if header.name.is_empty()
+            || header.name.len() > MAX_ARTIFACT_OBJECT_NAME_BYTES
+            || header.name.chars().any(char::is_control)
+            || header.media_type.is_empty()
+            || header.media_type.len() > 255
+            || header.media_type.trim() != header.media_type
+            || header.media_type.chars().any(char::is_control)
+            || header.sha256.len() != 32
+        {
+            return Err(Status::invalid_argument(
+                "artifact name, media type, or digest is out of bounds",
+            ));
+        }
+        if header.bytes > MAX_ATTEMPT_ARTIFACT_BYTES {
+            return Err(Status::resource_exhausted(
+                "artifact exceeds the per-attempt artifact quota",
+            ));
+        }
+        let Some((build_id, node_id)) = self
+            .store
+            .attempt_scope(context.organization_id, context.attempt_id, context.fence)
+            .await
+            .map_err(internal_store_error)?
+        else {
+            return Err(Status::failed_precondition("attempt is not known"));
+        };
+        let used = self
+            .store
+            .attempt_artifact_bytes(context.organization_id, context.attempt_id, context.fence)
+            .await
+            .map_err(internal_store_error)?;
+        let declared = i64::try_from(header.bytes)
+            .map_err(|_| Status::invalid_argument("artifact byte count is out of range"))?;
+        if used.saturating_add(declared)
+            > i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX)
+        {
+            return Err(Status::resource_exhausted(
+                "artifact exceeds the per-attempt artifact quota",
+            ));
+        }
+        let mut writer = self
+            .object_store
+            .begin_artifact(&context.organization_id.to_string(), header.bytes)
+            .map_err(object_store_status)?;
+        while let Some(frame) = frames.message().await? {
+            match frame.frame {
+                Some(ArtifactFrame::Data(data)) => {
+                    if data.len() > MAX_ARTIFACT_FRAME_BYTES {
+                        return Err(Status::invalid_argument(
+                            "artifact data frame exceeds the frame bound",
+                        ));
+                    }
+                    writer.write(&data).map_err(object_store_status)?;
+                }
+                _ => {
+                    return Err(Status::invalid_argument(
+                        "artifact upload carries one header frame followed by data frames",
+                    ));
+                }
+            }
+        }
+        let staged = writer.finish().map_err(object_store_status)?;
+        let reference = staged.object_ref().clone();
+        if reference.sha256.as_slice() != header.sha256.as_slice()
+            || reference.bytes != header.bytes
+        {
+            return Err(Status::invalid_argument(
+                "artifact bytes do not match the declared digest",
+            ));
+        }
+        let pending = staged.persist().map_err(object_store_status)?;
+        let pending = self
+            .object_store
+            .claim_pending(&pending)
+            .map_err(object_store_status)?;
+        self.object_store
+            .verify_pending(&pending)
+            .map_err(object_store_status)?;
+        let registered = self
+            .store
+            .register_artifact(
+                context.organization_id,
+                build_id,
+                node_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+                &header.name,
+                reference.sha256,
+                declared,
+                &header.media_type,
+                mcloving_domain::artifacts::ARTIFACT_RETENTION_SECONDS,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        if !registered {
+            self.object_store
+                .abort_pending(&pending)
+                .map_err(object_store_status)?;
+            return Ok(Response::new(WorkReceipt {
+                session_epoch: authority.session_epoch,
+                accepted: false,
+                published_outcome: WorkOutcome::Unspecified as i32,
+                cancellation_requested: false,
+            }));
+        }
+        let committed = self
+            .object_store
+            .commit_pending(pending)
+            .map_err(object_store_status)?;
+        if committed != reference {
+            return Err(Status::internal(
+                "committed artifact does not match the staged reference",
+            ));
+        }
+        // The same two-phase registration the public commit route makes:
+        // pending until the bytes are in the immutable namespace, available
+        // once they are, matched against the reserved metadata.
+        let available = self
+            .store
+            .mark_artifact_available(
+                context.organization_id,
+                build_id,
+                node_id,
+                context.attempt_id,
+                context.fence,
+                &header.name,
+                reference.sha256,
+                declared,
+                &header.media_type,
+                mcloving_domain::artifacts::ARTIFACT_RETENTION_SECONDS,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(WorkReceipt {
+            session_epoch: authority.session_epoch,
+            accepted: available,
+            published_outcome: WorkOutcome::Unspecified as i32,
             cancellation_requested: false,
         }))
     }
@@ -1966,6 +2177,21 @@ fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status 
     Status::internal(format!("controller store failed: {error}"))
 }
 
+fn object_store_status(error: mcloving_object_store::ObjectStoreError) -> Status {
+    use mcloving_object_store::ObjectStoreError;
+    match error {
+        ObjectStoreError::ObjectQuotaExceeded
+        | ObjectStoreError::TotalQuotaExceeded
+        | ObjectStoreError::StagedObjectQuotaExceeded => {
+            Status::resource_exhausted(format!("artifact refused: {error}"))
+        }
+        ObjectStoreError::CorruptStagedObject => {
+            Status::invalid_argument(format!("artifact refused: {error}"))
+        }
+        other => Status::internal(format!("artifact store failed: {other}")),
+    }
+}
+
 fn credential_store_error(error: StoreError) -> Status {
     match error {
         StoreError::InvalidSecurityOperation(_) | StoreError::InvalidAgentSession => {
@@ -2085,6 +2311,7 @@ async fn forward_work_ready_notifications(
 
 async fn run_agent_control_server(
     store: Store,
+    object_store: FilesystemObjectStore,
     environment: Option<AgentControlEnvironment>,
     work_wakeups: broadcast::Sender<Uuid>,
 ) -> Result<()> {
@@ -2099,6 +2326,7 @@ async fn run_agent_control_server(
     let drop_start_response_once = environment.drop_start_response_once;
     let service = ControllerAgentService {
         store,
+        object_store,
         identities: Arc::new(environment.identities),
         session_churn: Arc::new(SessionEpochChurn::default()),
         work_wakeups,

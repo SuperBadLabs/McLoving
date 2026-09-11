@@ -30,6 +30,7 @@ use mcloving_agent_runtime::{
     ProcessIdentity, SpoolEntry,
 };
 use mcloving_domain::ConnectorIntentSpec;
+use mcloving_domain::artifacts::ArtifactSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
 use mcloving_domain::input_intent::{InputIntentSpec, InputWorkContext, input_assignment_digest};
 use mcloving_domain::source_intent::CheckoutStepSpec;
@@ -70,6 +71,9 @@ struct ExecutionSpec {
     /// Version-5 only: the digest-pinned image every step runs in (PAR-011).
     #[serde(default)]
     image: Option<String>,
+    /// Version-5 only: the artifacts collected after the steps (PAR-014).
+    #[serde(default)]
+    artifacts: Vec<ArtifactSpec>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +202,9 @@ struct ValidatedAssignment {
     multi_step: bool,
     /// Digest-pinned image every step runs in under podman (PAR-011).
     image: Option<String>,
+    /// Declared artifacts collected from the workspace after the steps
+    /// (PAR-014); empty for a stage that declares none.
+    artifacts: Vec<ArtifactSpec>,
 }
 
 /// One step's durable outcome inside a multi-step attempt, written into the
@@ -987,12 +994,14 @@ fn validate_assignment_with_features(
                     steps: vec![process],
                     multi_step: false,
                     image: None,
+                    artifacts: Vec::new(),
                 }))
             }
             SpecClassification::Steps {
                 steps,
                 image,
                 checkouts,
+                artifacts,
             } => {
                 if !checkouts.is_empty()
                     && (!cfg!(target_os = "linux") || config.source_bindings.is_none())
@@ -1046,6 +1055,7 @@ fn validate_assignment_with_features(
                     steps,
                     multi_step: true,
                     image,
+                    artifacts,
                 }))
             }
             SpecClassification::Cache(intent) => {
@@ -1082,6 +1092,7 @@ fn validate_assignment_with_features(
                         steps: vec![process],
                         multi_step: false,
                         image: None,
+                        artifacts: Vec::new(),
                     }))
                 }
             }
@@ -1119,6 +1130,7 @@ fn validate_assignment_with_features(
                         steps: vec![process],
                         multi_step: false,
                         image: None,
+                        artifacts: Vec::new(),
                     }))
                 }
             }
@@ -1148,6 +1160,7 @@ enum SpecClassification {
         steps: Vec<ProcessSpec>,
         image: Option<String>,
         checkouts: Vec<(usize, CheckoutStepSpec)>,
+        artifacts: Vec<ArtifactSpec>,
     },
     ForAnotherRuntime(&'static str),
     Unsupported(String),
@@ -1269,10 +1282,11 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
         .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(5))
     {
         return match supported_multi_step_spec(execution_spec_json) {
-            Ok((steps, image, checkouts)) => SpecClassification::Steps {
+            Ok((steps, image, checkouts, artifacts)) => SpecClassification::Steps {
                 steps,
                 image,
                 checkouts,
+                artifacts,
             },
             Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
         };
@@ -1289,6 +1303,7 @@ type MultiStepSpec = (
     Vec<ProcessSpec>,
     Option<String>,
     Vec<(usize, CheckoutStepSpec)>,
+    Vec<ArtifactSpec>,
 );
 
 /// Classifies the version-5 envelope (PAR-010): one to sixteen bounded
@@ -1303,6 +1318,8 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<MultiStepSpec
         steps: Vec<serde_json::Value>,
         #[serde(default)]
         image: Option<String>,
+        #[serde(default)]
+        artifacts: Vec<ArtifactSpec>,
     }
     let envelope: Envelope = serde_json::from_slice(execution_spec_json).map_err(|error| {
         format!("execution spec does not deserialize as a version-5 multi-step spec: {error}")
@@ -1363,10 +1380,13 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<MultiStepSpec
         })?;
         steps.push(process);
     }
+    mcloving_domain::artifacts::validate_declarations(&envelope.artifacts)
+        .map_err(|error| format!("execution spec artifacts: {error}"))?;
     let spec = ExecutionSpec {
         version: 5,
         steps,
         image: envelope.image,
+        artifacts: envelope.artifacts,
     };
     for (index, process) in spec.steps.iter().enumerate() {
         if process.kind != "process" && process.kind != "checkout" {
@@ -1410,7 +1430,7 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<MultiStepSpec
     {
         return Err("stage image is not a digest-pinned reference".to_owned());
     }
-    Ok((spec.steps, spec.image, checkouts))
+    Ok((spec.steps, spec.image, checkouts, spec.artifacts))
 }
 
 /// The refusal reason is written twice into the durable result and sent as the
@@ -2487,6 +2507,32 @@ async fn run_assignment(
             "aborted" => WorkOutcome::Aborted,
             _ => WorkOutcome::Failed,
         };
+        // Declared artifacts (PAR-014): collected and uploaded after the
+        // steps, under the attempt's live lease, before the terminal is made
+        // durable, so the terminal can carry a refusal. A cancelled attempt
+        // collects nothing; a refusal or an unsupported peer fails a step
+        // outcome that would otherwise have succeeded and is named as the
+        // reason.
+        let artifact_failure =
+            if assignment.artifacts.is_empty() || terminal == WorkOutcome::Aborted {
+                None
+            } else {
+                collect_and_upload_artifacts(
+                    config,
+                    client,
+                    &assignment,
+                    &features,
+                    AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
+                )
+                .await?
+            };
+        if artifact_failure.is_some() && terminal == WorkOutcome::Succeeded {
+            terminal = WorkOutcome::Failed;
+        }
         let helper_failure = (outcome.private_response_accepted == Some(false)).then(|| {
             prepared_helper
                 .as_ref()
@@ -2544,6 +2590,7 @@ async fn run_assignment(
                 reason: lease_loss
                     .as_deref()
                     .or(workspace_failure.as_deref())
+                    .or(artifact_failure.as_deref())
                     .or(helper_failure)
                     .or(step_failure.as_deref()),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
@@ -3157,6 +3204,153 @@ async fn poll_rpc<T>(
         .map_err(|_| AgentError::PollTimeout)?
         .map(tonic::Response::into_inner)
         .map_err(AgentError::from)
+}
+
+/// Collects the declared artifacts under the workspace and uploads each
+/// over the session's channel. `Ok(Some(reason))` is a named refusal that
+/// fails the attempt; an upload the controller does not accept or a lost
+/// authority propagates like any other authority RPC failure.
+#[cfg(unix)]
+async fn collect_and_upload_artifacts(
+    config: &AgentConfig,
+    client: &mut AgentControlClient<Channel>,
+    assignment: &ValidatedAssignment,
+    features: &SessionFeatures,
+    control: AuthorityRpcControl<'_>,
+) -> Result<Option<String>, AgentError> {
+    if !features.artifact_upload {
+        return Ok(Some("artifact_upload_unsupported".to_owned()));
+    }
+    let workspace = config.workspace_root.join(&assignment.workspace);
+    let files = match tokio::task::block_in_place(|| {
+        crate::artifacts::collect(&workspace, &assignment.artifacts)
+    }) {
+        Ok(files) => files,
+        Err(crate::artifacts::CollectionError::Refused(refusal)) => {
+            return Ok(Some(bounded_refusal_detail(refusal.to_string())));
+        }
+        Err(crate::artifacts::CollectionError::Io(error)) => return Err(error.into()),
+    };
+    for file in files {
+        upload_artifact(client, &assignment.authority, control, file).await?;
+    }
+    Ok(None)
+}
+
+#[cfg(not(unix))]
+async fn collect_and_upload_artifacts(
+    _config: &AgentConfig,
+    _client: &mut AgentControlClient<Channel>,
+    _assignment: &ValidatedAssignment,
+    _features: &SessionFeatures,
+    _control: AuthorityRpcControl<'_>,
+) -> Result<Option<String>, AgentError> {
+    Ok(Some("artifact_upload_unsupported".to_owned()))
+}
+
+/// Streams one collected file: a header with its name, length and digest
+/// (read once for the digest, then again for the frames), then data frames
+/// in order. The RPC budget grows with the length so a large file on a slow
+/// link is not cut short by the lease-sized default; the lease is renewed
+/// meanwhile and its loss still cancels the upload.
+#[cfg(unix)]
+async fn upload_artifact(
+    client: &mut AgentControlClient<Channel>,
+    authority: &WorkAuthority,
+    control: AuthorityRpcControl<'_>,
+    mut file: crate::artifacts::CollectedFile,
+) -> Result<(), AgentError> {
+    use mcloving_agent_protocol::wire::artifact_upload_frame::Frame;
+    use mcloving_agent_protocol::wire::{ArtifactUploadFrame, ArtifactUploadHeader};
+    use mcloving_domain::artifacts::{ARTIFACT_MEDIA_TYPE, MAX_ARTIFACT_FRAME_BYTES};
+    use std::io::{Read as _, Seek as _};
+
+    let digest: [u8; 32] = tokio::task::block_in_place(|| -> Result<[u8; 32], std::io::Error> {
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let read = file.file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            total += read as u64;
+        }
+        if total != file.bytes {
+            return Err(std::io::Error::other(format!(
+                "artifact {} changed length while being read",
+                file.relative_path
+            )));
+        }
+        file.file.seek(std::io::SeekFrom::Start(0))?;
+        Ok(digest.finalize().into())
+    })?;
+    let (frames, receiver) = tokio::sync::mpsc::channel::<ArtifactUploadFrame>(4);
+    let header = ArtifactUploadFrame {
+        frame: Some(Frame::Header(ArtifactUploadHeader {
+            authority: Some(authority.clone()),
+            name: file.name.clone(),
+            media_type: ARTIFACT_MEDIA_TYPE.to_owned(),
+            bytes: file.bytes,
+            sha256: digest.to_vec(),
+        })),
+    };
+    let bytes = file.bytes;
+    let mut source = file.file;
+    let reader = tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        if frames.blocking_send(header).is_err() {
+            return Ok(());
+        }
+        let mut remaining = bytes;
+        let mut buffer = vec![0_u8; MAX_ARTIFACT_FRAME_BYTES];
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(MAX_ARTIFACT_FRAME_BYTES as u64))
+                .unwrap_or(MAX_ARTIFACT_FRAME_BYTES);
+            let read = source.read(&mut buffer[..want])?;
+            if read == 0 {
+                // Shorter than identified: the server refuses the short
+                // upload and the RPC fails; nothing partial is registered.
+                return Ok(());
+            }
+            remaining -= read as u64;
+            let frame = ArtifactUploadFrame {
+                frame: Some(Frame::Data(buffer[..read].to_vec())),
+            };
+            if frames.blocking_send(frame).is_err() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    });
+    let budget = artifact_upload_budget(control.lease_window, bytes);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+    let receipt = tokio::select! {
+        biased;
+        () = control.authority_lost.cancelled() => Err(AgentError::StaleAuthority),
+        () = control.stop.cancelled() => Err(AgentError::Stopped),
+        result = tokio::time::timeout(budget, client.upload_artifact(stream)) => {
+            result
+                .map_err(|_| AgentError::AuthorityRpcTimeout)?
+                .map(tonic::Response::into_inner)
+                .map_err(AgentError::from)
+        },
+    };
+    reader.abort();
+    let receipt = receipt?;
+    if !receipt.accepted {
+        return Err(AgentError::StaleAuthority);
+    }
+    Ok(())
+}
+
+/// The lease-sized authority budget plus one second per MiB, bounded at
+/// fifteen minutes.
+#[cfg(unix)]
+fn artifact_upload_budget(lease_window: Duration, bytes: u64) -> Duration {
+    lease_rpc_budget(lease_window)
+        .saturating_add(Duration::from_secs(bytes.div_ceil(1_048_576)))
+        .min(Duration::from_secs(15 * 60))
 }
 
 async fn authority_rpc<T>(

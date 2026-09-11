@@ -5205,6 +5205,47 @@ impl Store {
     }
 
     /// Reserves one immutable artifact identity before object publication.
+    /// The build and node an attempt belongs to, for a registration made
+    /// under the attempt's own work authority rather than a build route.
+    pub async fn attempt_scope(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<Option<(Uuid, Uuid)>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let scope = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT n.build_id, n.id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(scope)
+    }
+
+    /// Bytes of every artifact registered under an attempt and fence, the
+    /// figure the per-attempt artifact quota is enforced against.
+    pub async fn attempt_artifact_bytes(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let used = artifact_bytes_used(&mut tx, organization_id, attempt_id, fence).await?;
+        tx.commit().await?;
+        Ok(used)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn register_artifact(
         &self,
@@ -5304,6 +5345,17 @@ impl Store {
             .await?;
             tx.commit().await?;
             return Ok(true);
+        }
+        // The per-attempt artifact quota (PAR-014), under the same lock every
+        // registration for this attempt takes, so concurrent uploads cannot
+        // each fit and together exceed it.
+        let used = artifact_bytes_used(&mut tx, organization_id, attempt_id, fence).await?;
+        if used.saturating_add(bytes)
+            > i64::try_from(mcloving_domain::artifacts::MAX_ATTEMPT_ARTIFACT_BYTES)
+                .unwrap_or(i64::MAX)
+        {
+            tx.rollback().await?;
+            return Ok(false);
         }
         let inserted = match sqlx::query_scalar::<_, String>(
             "INSERT INTO attempt_objects (
@@ -7359,6 +7411,27 @@ pub(crate) async fn acquire_restore_fence_shared(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn artifact_bytes_used(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    fence: i64,
+) -> Result<i64, StoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(bytes), 0)::bigint
+         FROM attempt_objects
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND kind = 'artifact'",
+    )
+    .bind(organization_id)
+    .bind(attempt_id)
+    .bind(fence)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 async fn acquire_object_deletion_fence(
