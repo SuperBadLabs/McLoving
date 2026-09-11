@@ -373,6 +373,56 @@ stages:
         .unwrap();
     assert_eq!(builds, 1, "a redelivery mints no second build");
 
+    // The trigger is revised after acceptance (generation 1 -> 2, same
+    // source generation so the secret holds). GitHub redelivers the same
+    // delivery: still an exact replay, because a receipt-timed delivery is
+    // matched on what GitHub sent, not on the generation it was admitted at.
+    let revised = app
+        .clone()
+        .oneshot(
+            Request::put(&trigger_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .header(IDEMPOTENCY_HEADER, "scm-webhook-revise")
+                .body(Body::from(
+                    json!({
+                        "kind": "scm_webhook",
+                        "state": "enabled",
+                        "implementation_sha256": sha256_hex(b"scm-webhook-v1"),
+                        "configuration_sha256": sha256_hex(&serde_json::to_vec(&configuration).unwrap()),
+                        "filter_sha256": sha256_hex(&serde_json::to_vec(&filter).unwrap()),
+                        "event_source_identity": "scm:github:webhook:cljest",
+                        "source_generation": "hook-generation-1",
+                        "configuration": configuration,
+                        "deduplication_window_seconds": 7200,
+                        "max_delivery_attempts": 3,
+                        "delivery_ttl_seconds": 7200,
+                        "reason": "widened window after review",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revised.status(), StatusCode::OK);
+    assert_eq!(json_body(revised).await["generation"], 2);
+    let replayed_after_revision = post(
+        app.clone(),
+        &hook_route,
+        delivery_id,
+        "push",
+        body.clone(),
+        sign(&secret, &body),
+    )
+    .await;
+    assert_eq!(replayed_after_revision.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(replayed_after_revision).await["admission"]["build_id"],
+        build_id
+    );
+
     // The same delivery id with a different signed body is a conflict.
     let altered = serde_json::to_vec(&push_delivery(
         "refs/heads/main",

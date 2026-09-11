@@ -37,11 +37,11 @@ use axum::{Json, Router};
 use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, CancellationDecision,
     ComponentCursor, ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite,
-    CredentialGrantView, DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind,
-    DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent,
-    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
-    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite,
-    ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
+    CredentialGrantView, DagDependency, DagNodeKind, DeliveryTiming, DependencyCondition,
+    DiscoveredRefKind, DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite,
+    DiscoveryParent, DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState,
+    DiscoveryParentWrite, DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource,
+    DiscoveryScanWrite, ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
     NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy,
     PipelineOperationalStateRecord, PipelineOperationalStateTransition,
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
@@ -3764,53 +3764,67 @@ async fn submit_trigger_event(
         .await
         .map_err(trigger_error)?
         .ok_or_else(resource_not_found)?;
-    admit_trigger_event(&state, &trigger, &request, &principal.subject).await
+    admit_trigger_event(
+        &state,
+        &trigger,
+        &request,
+        &principal.subject,
+        DeliveryTiming::Declared,
+    )
+    .await
 }
 
 /// Admits one typed trigger event on behalf of `caller_identity`: filter
 /// check, pre-capture parameter validation, canonical capture into the durable
 /// delivery ledger (created or exactly replayed), then processing. The bearer
-/// route passes its authenticated principal; a public event source (PAR-001)
-/// passes the trigger's own event-source identity once it has authenticated
-/// the delivery by other means, so the ledger and its replay rules are the
-/// same for both.
+/// route passes its authenticated principal and declares the event time; a
+/// public event source (PAR-001) passes the trigger's own event-source
+/// identity once it has authenticated the delivery by other means, and is
+/// receipt-timed: the ledger assigns the event time from its own clock inside
+/// the serialized acceptance and replays the delivery id on the
+/// authenticated delivery alone (see [`DeliveryTiming`]), so the ledger and
+/// its uniqueness rules are the same for both.
 async fn admit_trigger_event(
     state: &ApiState,
     trigger: &PipelineTrigger,
     request: &TriggerEventRequest,
     caller_identity: &str,
+    timing: DeliveryTiming,
 ) -> Result<Response, ApiError> {
     validate_trigger_event_filter(trigger, request)?;
     // Reject parameter shapes before durable capture. The processing path
     // repeats this validation for crash/restart and legacy-corruption safety.
     parameter_values(request.parameters.clone())?;
     let accepted_at_unix_ms = unix_time_ms();
-    let canonical_payload = canonical_trigger_payload(request)?;
+    let canonical_payload = canonical_trigger_payload(request, timing)?;
     let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
     let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
     let parameters = Value::Object(request.parameters.clone().into_iter().collect());
     let schedule_slot = trigger_schedule_slot(trigger, request)?;
     let delivery = state
         .store
-        .accept_trigger_delivery(&NewTriggerDelivery {
-            organization_id: trigger.organization_id,
-            project_id: trigger.project_id,
-            pipeline_id: trigger.pipeline_id,
-            trigger_id: trigger.trigger_id,
-            expected_trigger_generation: request.trigger_generation,
-            delivery_id: request.delivery_id.clone(),
-            event_id: request.event_id.clone(),
-            event_kind: request.event_kind.clone(),
-            caller_identity: caller_identity.to_owned(),
-            payload_sha256,
-            canonical_payload,
-            parameters,
-            requested_platform: request.platform.clone(),
-            requested_trust_pool: request.trust_pool.clone(),
-            event_time_unix_ms: request.event_time_unix_ms,
-            accepted_at_unix_ms,
-            schedule_slot,
-        })
+        .accept_trigger_delivery_timed(
+            &NewTriggerDelivery {
+                organization_id: trigger.organization_id,
+                project_id: trigger.project_id,
+                pipeline_id: trigger.pipeline_id,
+                trigger_id: trigger.trigger_id,
+                expected_trigger_generation: request.trigger_generation,
+                delivery_id: request.delivery_id.clone(),
+                event_id: request.event_id.clone(),
+                event_kind: request.event_kind.clone(),
+                caller_identity: caller_identity.to_owned(),
+                payload_sha256,
+                canonical_payload,
+                parameters,
+                requested_platform: request.platform.clone(),
+                requested_trust_pool: request.trust_pool.clone(),
+                event_time_unix_ms: request.event_time_unix_ms,
+                accepted_at_unix_ms,
+                schedule_slot,
+            },
+            timing,
+        )
         .await
         .map_err(trigger_error)?;
     // An unsupported platform is not refused before capture. The store has to
@@ -4071,7 +4085,10 @@ fn parameter_values_from_delivery(
     parameter_values(parameters)
 }
 
-fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, ApiError> {
+fn canonical_trigger_payload(
+    request: &TriggerEventRequest,
+    timing: DeliveryTiming,
+) -> Result<Value, ApiError> {
     if !request.payload.is_object() {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -4079,12 +4096,22 @@ fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, Api
             "trigger payload must be an object",
         ));
     }
-    Ok(json!({
-        "trigger_generation": request.trigger_generation,
-        "event_kind": request.event_kind.clone(),
-        "event_time_unix_ms": request.event_time_unix_ms,
-        "payload": request.payload.clone(),
-    }))
+    Ok(match timing {
+        DeliveryTiming::Declared => json!({
+            "trigger_generation": request.trigger_generation,
+            "event_kind": request.event_kind.clone(),
+            "event_time_unix_ms": request.event_time_unix_ms,
+            "payload": request.payload.clone(),
+        }),
+        // A receipt-timed delivery is canonicalized as what the event source
+        // sent: the generation and the clock are the ledger's, recorded in
+        // their own columns, and must not enter the digest a redelivery is
+        // matched against.
+        DeliveryTiming::Receipt => json!({
+            "event_kind": request.event_kind.clone(),
+            "payload": request.payload.clone(),
+        }),
+    })
 }
 
 fn validate_trigger_event_filter(

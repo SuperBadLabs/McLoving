@@ -491,7 +491,7 @@ deployment_contract_path_variables() {
         "secret follow MCLOVING_AGENT_SERVER_KEY_PATH file" \
         "secret follow MCLOVING_AGENT_IDENTITY_BINDINGS_PATH file" \
         "secret nofollow MCLOVING_EFFECT_RUNTIME_PLAN file" \
-        "secret follow MCLOVING_WEBHOOK_KEY_FILE file" \
+        "secret nofollow MCLOVING_WEBHOOK_KEY_FILE file" \
         "trust follow MCLOVING_AGENT_SERVER_CERT_PATH file" \
         "trust follow MCLOVING_AGENT_CLIENT_CA_PATH file" \
         "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG file" \

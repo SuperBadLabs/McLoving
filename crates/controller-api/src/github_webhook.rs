@@ -5,7 +5,7 @@
 //! trigger's own event-source identity as the caller.
 use super::{
     ApiError, ApiState, DEFAULT_PLATFORM, DEFAULT_TRUST_POOL, Principal, TriggerEventRequest,
-    admit_trigger_event, internal, resource_not_found, trigger_error, unix_time_ms,
+    admit_trigger_event, internal, resource_not_found, trigger_error,
 };
 use axum::Json;
 use axum::body::Bytes;
@@ -13,6 +13,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac as _};
+use mcloving_controller_store::DeliveryTiming;
 use mcloving_controller_store::{NewAuditEvent, PipelineTrigger, TriggerKind};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -184,31 +185,33 @@ pub(super) async fn receive_github_delivery(
         }
     };
     let parameters = webhook_parameters(&state, &trigger, &mapped).await?;
-    // The event time is the delivery's receipt time, which is deterministic
-    // per delivery id only through the ledger: a redelivery reads the time
-    // the first acceptance recorded, so it replays exactly rather than
-    // conflicting on a clock reading GitHub never sent.
-    let event_time_unix_ms = match state
-        .store
-        .trigger_delivery(trigger.organization_id, trigger.trigger_id, &delivery_id)
-        .await
-        .map_err(trigger_error)?
-    {
-        Some(recorded) => recorded.event_time_unix_ms,
-        None => mapped.event_time_unix_ms,
-    };
+    // The event is the delivery, not the commit: GitHub sends a hook when the
+    // push happens, and a commit's own timestamp may be arbitrarily old. The
+    // receipt time is the ledger's to assign (`DeliveryTiming::Receipt`):
+    // the database clock inside the serialized acceptance, once per delivery
+    // id, so neither this controller's clock nor a second controller
+    // receiving the same first delivery can make it conflict with itself.
+    // The value here is a placeholder the ledger ignores.
     let request = TriggerEventRequest {
         trigger_generation: trigger.generation,
         delivery_id: delivery_id.clone(),
         event_id: delivery_id.clone(),
         event_kind: mapped.event_kind.to_owned(),
-        event_time_unix_ms,
+        event_time_unix_ms: 0,
         payload: mapped.payload,
         parameters,
         platform: DEFAULT_PLATFORM.to_owned(),
         trust_pool: DEFAULT_TRUST_POOL.to_owned(),
     };
-    match admit_trigger_event(&state, &trigger, &request, &trigger.event_source_identity).await {
+    match admit_trigger_event(
+        &state,
+        &trigger,
+        &request,
+        &trigger.event_source_identity,
+        DeliveryTiming::Receipt,
+    )
+    .await
+    {
         Ok(response) => Ok(response),
         Err(error) if error.code == "trigger_filtered" => {
             let reason = error.message.clone();
@@ -296,7 +299,6 @@ fn verify_signature(secret: &[u8], body: &[u8], header: &str) -> Result<(), ApiE
 #[derive(Debug)]
 struct MappedDelivery {
     event_kind: &'static str,
-    event_time_unix_ms: i64,
     payload: Value,
     revision: String,
     branch: String,
@@ -333,14 +335,18 @@ fn map_delivery(event: &str, payload: &Value) -> Result<MappedDelivery, String> 
             if revision == ZERO_SHA1 {
                 return Err("push deleted the branch".to_owned());
             }
-            // The event is the delivery, not the commit: GitHub sends a hook
-            // when the push happens, and a commit's own timestamp may be
-            // arbitrarily old (an old commit pushed today), which the
-            // ledger's skew window would refuse.
-            let event_time_unix_ms = unix_time_ms();
             let mut paths = BTreeSet::new();
             let mut overflow = false;
             if let Some(commits) = payload.get("commits").and_then(Value::as_array) {
+                // GitHub lists at most a bounded number of commits in the
+                // payload and advertises the push's true size beside them; a
+                // list shorter than the advertised size omits commits whose
+                // paths cannot be known, so the change set is treated as
+                // unbounded exactly like an oversized one.
+                let advertised = payload.get("size").and_then(Value::as_u64);
+                if advertised.is_some_and(|size| size > commits.len() as u64) {
+                    overflow = true;
+                }
                 for commit in commits {
                     for field in ["added", "modified", "removed"] {
                         for path in commit
@@ -379,7 +385,6 @@ fn map_delivery(event: &str, payload: &Value) -> Result<MappedDelivery, String> 
             }
             Ok(MappedDelivery {
                 event_kind: "push",
-                event_time_unix_ms,
                 payload: mapped,
                 revision,
                 branch,
@@ -400,10 +405,8 @@ fn map_delivery(event: &str, payload: &Value) -> Result<MappedDelivery, String> 
                 payload.pointer("/pull_request/head/ref"),
                 "pull_request.head.ref",
             )?;
-            let event_time_unix_ms = unix_time_ms();
             Ok(MappedDelivery {
                 event_kind: "pull_request",
-                event_time_unix_ms,
                 payload: json!({
                     "repository_identity": repository,
                     "revision": revision,
@@ -630,5 +633,24 @@ mod tests {
         });
         let mapped = map_delivery("push", &push).unwrap();
         assert!(mapped.payload.get("paths").is_none());
+    }
+
+    #[test]
+    fn a_truncated_commit_list_is_admitted_pathless() {
+        let mut push = json!({
+            "ref": "refs/heads/main",
+            "after": "507956c8dfab2d04959825c277a5205b2aac01d0",
+            "repository": {"full_name": "SuperBadLabs/cljest"},
+            "size": 21,
+            "commits": [{"added": ["src/lib.rs"], "modified": [], "removed": []}]
+        });
+        let mapped = map_delivery("push", &push).unwrap();
+        assert!(
+            mapped.payload.get("paths").is_none(),
+            "a payload listing fewer commits than the push size omits paths"
+        );
+        push["size"] = json!(1);
+        let mapped = map_delivery("push", &push).unwrap();
+        assert_eq!(mapped.payload["paths"], json!(["src/lib.rs"]));
     }
 }

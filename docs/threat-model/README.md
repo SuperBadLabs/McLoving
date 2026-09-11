@@ -890,22 +890,30 @@ A public route lets GitHub feed an SCM webhook trigger directly. Boundaries
 touched: TM-039 (trigger ingress: the receiver admits through the same
 durable delivery ledger, replay and conflict rules as the bearer route, with
 the trigger's own event-source identity as the caller, so nothing about
-uniqueness, redrive or dead-lettering is bypassed; a redelivery reuses the
-recorded event time so it replays rather than conflicts); TM-002/TM-011
+uniqueness, redrive or dead-lettering is bypassed; the delivery is
+receipt-timed, the event time being the database clock read inside the
+serialized acceptance so one delivery id gets one time across controllers
+and no controller clock can reject a legitimate delivery, and a redelivery is
+matched on the authenticated delivery alone rather than on the trigger
+generation or parameters current at redelivery, so it replays rather than
+conflicts after a configuration change); TM-002/TM-011
 (authentication: no bearer, the raw body's `X-Hub-Signature-256` is verified
 in constant time under a per-trigger secret derived by HMAC from the
 controller's webhook key file and the trigger's identity and
 `source_generation`, never stored, rotated by event-source rotation, and
 verified before any byte of the body is interpreted, so a forged delivery
-leaves no receipt; the key file is secret-class in the deployment contract
-and refused unless owner-private); TM-052 (routing: the receiver answers
+leaves no receipt; the key file is secret-class and nofollow in the
+deployment contract, opened without following symlinks, and refused unless
+owner-private); TM-052 (routing: the receiver answers
 only enabled-or-paused `scm_webhook` triggers whose configuration names
 provider `github`, and a controller without a key answers not-found so the
 route cannot be probed for triggers); TM-039 again for the mapping: the
 delivery is reduced to the closed SCM payload (repository `full_name`,
 `after`, branch, bounded paths) and every other field is dropped, an
-oversized change set is admitted pathless so a path filter cannot be
-bypassed by volume, and unadmitted deliveries are acknowledged with 202 and
+oversized or truncated change set (more paths than the bound, or fewer
+commits listed than the push advertises) is admitted pathless so a path
+filter cannot be bypassed by volume or by omission, and unadmitted
+deliveries are acknowledged with 202 and
 recorded as audit events so GitHub keeps delivering. Residual: the operator
 reads the secret over the authenticated API and pastes it into GitHub, so
 the secret's confidentiality in transit and at GitHub is the operator's and

@@ -222,7 +222,9 @@ owner-private file of at least 32 bytes, secret-class in the deployment
 contract); each trigger's hook secret is `HMAC-SHA256(key, organization ||
 project || pipeline || trigger || source_generation)` under a domain
 separator, derived on demand and never stored, so rotating the trigger's
-event source rotates the secret and nothing retains it. An operator reads the
+event source rotates the secret and nothing retains it. The key file is
+opened without following symlinks and the deployment guard refuses a
+symlinked path ahead of the binary. An operator reads the
 path and secret from `GET .../triggers/{trigger}/webhook` and pastes them
 into GitHub; a controller without a key answers not-found on both routes.
 
@@ -236,17 +238,25 @@ branch maps to the SCM payload `repository_identity` (the repository's
 `full_name`, which the trigger's `repository_identity` must equal),
 `revision` (`after`), `branch` (the ref without `refs/heads/`) and `paths`
 (the union of the commits' added, modified and removed paths, omitted when it
-exceeds the 128-path payload bound, so a path filter cannot match an
-unbounded change); a `pull_request` `opened`, `synchronize` or `reopened`
-maps the head sha and head ref the same way. The delivery id is both the
-delivery and the event identity; the event time is the receipt time, and a
-redelivery of a recorded delivery id reuses the recorded time so it replays
-exactly. When the saved pipeline declares public string parameters named
-`revision` or `branch`, the delivery supplies them, which is how a checkout
-step takes its commit from a push.
+exceeds the 128-path payload bound or when the payload lists fewer commits
+than the push's advertised `size`, so a path filter can match neither an
+unbounded nor a partially known change); a `pull_request` `opened`,
+`synchronize` or `reopened` maps the head sha and head ref the same way. The
+delivery id is both the delivery and the event identity. When the saved
+pipeline declares public string parameters named `revision` or `branch`, the
+delivery supplies them, which is how a checkout step takes its commit from a
+push.
 
 Admission then runs the same path as the bearer route with the trigger's own
-`event_source_identity` as the caller: created deliveries answer 201 with the
+`event_source_identity` as the caller, but receipt-timed: the ledger assigns
+the event time from the database clock inside its serialized acceptance, so
+one delivery id gets one time however many controllers receive it and no
+controller clock can push a legitimate delivery outside the skew window; and
+a redelivery is matched on the authenticated delivery alone (ids, kind,
+caller, canonical `{event_kind, payload}`, platform, trust pool), never on
+the trigger generation or the parameters current at redelivery, so a trigger
+revision or a pipeline parameter change after acceptance does not turn an
+exact redelivery into a conflict. Created deliveries answer 201 with the
 build admission, exact redeliveries answer 200 with the same build and mint
 nothing, and a reused delivery id with a different authenticated body is a
 409 `trigger_ingress_conflict`. Deliveries that authenticate but are not

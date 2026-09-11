@@ -223,6 +223,25 @@ pub enum TriggerDeliveryAdmission {
     Replayed(TriggerDelivery),
 }
 
+/// How a delivery's event time is settled and what an exact replay of its
+/// delivery id has to match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryTiming {
+    /// The caller declares the event time and the trigger generation it
+    /// observed; a replay must repeat both, along with the parameters.
+    Declared,
+    /// The event is the delivery's receipt (a public event source such as a
+    /// GitHub hook, PAR-001): the event time is the database clock read
+    /// inside the serialized acceptance transaction, so two controllers
+    /// receiving one first delivery cannot disagree on it, and a redelivery is
+    /// matched by the authenticated delivery alone (ids, kind, caller,
+    /// canonical payload, platform, trust pool), never by the trigger
+    /// generation or the parameters current at the time of the redelivery,
+    /// so later configuration changes do not turn an exact redelivery into a
+    /// conflict.
+    Receipt,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TriggerDeliveryFailure {
     RetryScheduled(TriggerDelivery),
@@ -636,34 +655,6 @@ impl Store {
         row.map(trigger_from_row).transpose()
     }
 
-    /// One accepted delivery of a trigger by its delivery id, if any. A public
-    /// event source that re-sends a delivery (PAR-001) reads the recorded
-    /// event time here so its replay matches the ledger exactly.
-    pub async fn trigger_delivery(
-        &self,
-        organization_id: Uuid,
-        trigger_id: Uuid,
-        delivery_id: &str,
-    ) -> Result<Option<TriggerDelivery>, StoreError> {
-        if delivery_id.is_empty() || delivery_id.len() > MAX_TEXT_BYTES {
-            return Err(StoreError::InvalidTriggerIngress(
-                "delivery id is out of bounds".to_owned(),
-            ));
-        }
-        let mut tx = self.tenant_transaction(organization_id).await?;
-        let row = sqlx::query(
-            "SELECT * FROM trigger_deliveries
-             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-        )
-        .bind(organization_id)
-        .bind(trigger_id)
-        .bind(delivery_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        row.map(delivery_from_row).transpose()
-    }
-
     pub async fn pipeline_trigger_generation(
         &self,
         organization_id: Uuid,
@@ -915,6 +906,20 @@ impl Store {
         &self,
         input: &NewTriggerDelivery,
     ) -> Result<TriggerDeliveryAdmission, StoreError> {
+        self.accept_trigger_delivery_timed(input, DeliveryTiming::Declared)
+            .await
+    }
+
+    /// [`Self::accept_trigger_delivery`] with an explicit [`DeliveryTiming`].
+    /// Under [`DeliveryTiming::Receipt`] the input's `event_time_unix_ms` is
+    /// ignored: the recorded event time is the acceptance transaction's
+    /// database clock, and the replay comparison skips the trigger
+    /// generation, the parameters and the event time.
+    pub async fn accept_trigger_delivery_timed(
+        &self,
+        input: &NewTriggerDelivery,
+        timing: DeliveryTiming,
+    ) -> Result<TriggerDeliveryAdmission, StoreError> {
         validate_delivery(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
@@ -938,7 +943,7 @@ impl Store {
         }
         if let Some(existing) = existing.into_iter().next() {
             let delivery = delivery_from_row(existing)?;
-            if !delivery_matches(&delivery, input) {
+            if !delivery_matches_timed(&delivery, input, timing) {
                 tx.rollback().await?;
                 return Err(StoreError::TriggerIngressConflict(
                     "delivery or event ID was reused for different trigger input".to_owned(),
@@ -996,7 +1001,7 @@ impl Store {
         }
         if let Some(existing) = serialized_existing.into_iter().next() {
             let delivery = delivery_from_row(existing)?;
-            if !delivery_matches(&delivery, input) {
+            if !delivery_matches_timed(&delivery, input, timing) {
                 tx.rollback().await?;
                 return Err(StoreError::TriggerIngressConflict(
                     "delivery or event ID was reused for different trigger input".to_owned(),
@@ -1104,8 +1109,16 @@ impl Store {
         // including the organization-wide audit head, is already held.
         let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let database_accepted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
-        if input.event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
-            || input.event_time_unix_ms
+        // A receipt-timed delivery takes the database clock, read under the
+        // trigger lock, so the time is assigned exactly once per delivery id
+        // however many controllers receive it, and no controller clock can
+        // place a legitimate delivery outside the skew window.
+        let event_time_unix_ms = match timing {
+            DeliveryTiming::Declared => input.event_time_unix_ms,
+            DeliveryTiming::Receipt => database_accepted_at_unix_ms,
+        };
+        if event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+            || event_time_unix_ms
                 < database_accepted_at_unix_ms.saturating_sub(window_seconds * 1000)
         {
             tx.rollback().await?;
@@ -1137,7 +1150,7 @@ impl Store {
                 "event_id": input.event_id,
                 "event_kind": input.event_kind,
                 "payload_sha256": hex::encode(input.payload_sha256),
-                "event_time_unix_ms": input.event_time_unix_ms,
+                "event_time_unix_ms": event_time_unix_ms,
                 "accepted_at_unix_ms": database_accepted_at_unix_ms,
                 "expires_at_unix_ms": expires_at,
                 "schedule_slot": input.schedule_slot.as_ref(),
@@ -1171,7 +1184,7 @@ impl Store {
         .bind(&input.parameters)
         .bind(&input.requested_platform)
         .bind(&input.requested_trust_pool)
-        .bind(input.event_time_unix_ms)
+        .bind(event_time_unix_ms)
         .bind(database_accepted_at_unix_ms)
         .bind(expires_at)
         .bind(audit.sequence)
@@ -3008,6 +3021,35 @@ fn trigger_matches_write(trigger: &PipelineTrigger, input: &PipelineTriggerWrite
         && trigger.actor_subject == input.actor_subject
         && trigger.reason == input.reason
         && trigger.idempotency_key == input.idempotency_key
+}
+
+fn delivery_matches_timed(
+    delivery: &TriggerDelivery,
+    input: &NewTriggerDelivery,
+    timing: DeliveryTiming,
+) -> bool {
+    match timing {
+        DeliveryTiming::Declared => delivery_matches(delivery, input),
+        // The receipt-timed replay is the authenticated delivery itself: the
+        // generation the trigger has moved to, the parameters the pipeline
+        // now declares and the clock reading are not part of what the event
+        // source re-sent.
+        DeliveryTiming::Receipt => {
+            delivery.organization_id == input.organization_id
+                && delivery.project_id == input.project_id
+                && delivery.pipeline_id == input.pipeline_id
+                && delivery.trigger_id == input.trigger_id
+                && delivery.delivery_id == input.delivery_id
+                && delivery.event_id == input.event_id
+                && delivery.event_kind == input.event_kind
+                && delivery.caller_identity == input.caller_identity
+                && delivery.payload_sha256 == input.payload_sha256
+                && delivery.canonical_payload == input.canonical_payload
+                && delivery.requested_platform == input.requested_platform
+                && delivery.requested_trust_pool == input.requested_trust_pool
+                && input.schedule_slot.is_none()
+        }
+    }
 }
 
 fn delivery_matches(delivery: &TriggerDelivery, input: &NewTriggerDelivery) -> bool {

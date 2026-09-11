@@ -90,8 +90,8 @@ pub use test_results::{
     TestCaseObservation, TestOutcome, TestReportSource, TestResultError, parse_junit,
 };
 pub use trigger_ingress::{
-    NewTriggerDelivery, PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite,
-    TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
+    DeliveryTiming, NewTriggerDelivery, PipelineTrigger, PipelineTriggerState,
+    PipelineTriggerWrite, TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
     TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
     TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
     TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
