@@ -38,6 +38,26 @@ pub const MAX_ARTIFACT_WALK_ENTRIES: usize = 65_536;
 pub const ARTIFACT_MEDIA_TYPE: &str = "application/octet-stream";
 /// Retention the agent requests for a collected artifact.
 pub const ARTIFACT_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+/// Seconds the controller allows an upload stream per MiB declared, and the
+/// agent adds to its lease-sized RPC budget per MiB sent.
+pub const ARTIFACT_UPLOAD_SECONDS_PER_MIB: u64 = 1;
+/// Seconds the controller allows an upload stream before its first MiB.
+pub const ARTIFACT_UPLOAD_BASE_SECONDS: u64 = 30;
+/// Longest any one upload may take, on either side.
+pub const MAX_ARTIFACT_UPLOAD_SECONDS: u64 = 15 * 60;
+
+/// The receive or send budget for an upload of `bytes`: the base plus one
+/// second per MiB, bounded.
+#[must_use]
+pub fn artifact_upload_seconds(bytes: u64) -> u64 {
+    ARTIFACT_UPLOAD_BASE_SECONDS
+        .saturating_add(
+            bytes
+                .div_ceil(1_048_576)
+                .saturating_mul(ARTIFACT_UPLOAD_SECONDS_PER_MIB),
+        )
+        .min(MAX_ARTIFACT_UPLOAD_SECONDS)
+}
 
 /// One declared artifact: a name and the workspace-relative patterns whose
 /// matching regular files it collects.

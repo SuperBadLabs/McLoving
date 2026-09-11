@@ -1563,21 +1563,41 @@ impl AgentControl for ControllerAgentService {
             .object_store
             .begin_artifact(&context.organization_id.to_string(), header.bytes)
             .map_err(object_store_status)?;
-        while let Some(frame) = frames.message().await? {
-            match frame.frame {
-                Some(ArtifactFrame::Data(data)) => {
-                    if data.len() > MAX_ARTIFACT_FRAME_BYTES {
+        // The whole receive phase is bounded by the declared length: a peer
+        // that sends a header and then stalls cannot hold the reserved
+        // staging bytes or this task past the deadline; the writer's drop
+        // releases the reservation.
+        let deadline = std::time::Duration::from_secs(
+            mcloving_domain::artifacts::artifact_upload_seconds(header.bytes),
+        );
+        let received = tokio::time::timeout(deadline, async {
+            while let Some(frame) = frames.message().await? {
+                match frame.frame {
+                    Some(ArtifactFrame::Data(data)) => {
+                        if data.len() > MAX_ARTIFACT_FRAME_BYTES {
+                            return Err(Status::invalid_argument(
+                                "artifact data frame exceeds the frame bound",
+                            ));
+                        }
+                        writer.write(&data).map_err(object_store_status)?;
+                    }
+                    _ => {
                         return Err(Status::invalid_argument(
-                            "artifact data frame exceeds the frame bound",
+                            "artifact upload carries one header frame followed by data frames",
                         ));
                     }
-                    writer.write(&data).map_err(object_store_status)?;
                 }
-                _ => {
-                    return Err(Status::invalid_argument(
-                        "artifact upload carries one header frame followed by data frames",
-                    ));
-                }
+            }
+            Ok::<(), Status>(())
+        })
+        .await;
+        match received {
+            Ok(result) => result?,
+            Err(_) => {
+                drop(writer);
+                return Err(Status::deadline_exceeded(
+                    "artifact upload did not complete within its declared-length budget",
+                ));
             }
         }
         let staged = writer.finish().map_err(object_store_status)?;

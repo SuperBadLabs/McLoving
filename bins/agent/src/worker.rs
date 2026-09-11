@@ -2513,23 +2513,26 @@ async fn run_assignment(
         // collects nothing; a refusal or an unsupported peer fails a step
         // outcome that would otherwise have succeeded and is named as the
         // reason.
-        let artifact_failure =
-            if assignment.artifacts.is_empty() || terminal == WorkOutcome::Aborted {
-                None
-            } else {
-                collect_and_upload_artifacts(
-                    config,
-                    client,
-                    &assignment,
-                    &features,
-                    AuthorityRpcControl {
-                        authority_lost: &authority_lost,
-                        stop: &stop,
-                        lease_window,
-                    },
-                )
-                .await?
-            };
+        let artifact_failure = if assignment.artifacts.is_empty()
+            || terminal == WorkOutcome::Aborted
+            || execution_cancellation.is_cancelled()
+        {
+            None
+        } else {
+            collect_and_upload_artifacts(
+                config,
+                client,
+                &assignment,
+                &features,
+                AuthorityRpcControl {
+                    authority_lost: &authority_lost,
+                    stop: &stop,
+                    lease_window,
+                },
+                &execution_cancellation,
+            )
+            .await?
+        };
         if artifact_failure.is_some() && terminal == WorkOutcome::Succeeded {
             terminal = WorkOutcome::Failed;
         }
@@ -3217,6 +3220,7 @@ async fn collect_and_upload_artifacts(
     assignment: &ValidatedAssignment,
     features: &SessionFeatures,
     control: AuthorityRpcControl<'_>,
+    cancellation: &CancellationToken,
 ) -> Result<Option<String>, AgentError> {
     if !features.artifact_upload {
         return Ok(Some("artifact_upload_unsupported".to_owned()));
@@ -3235,7 +3239,13 @@ async fn collect_and_upload_artifacts(
         Err(crate::artifacts::CollectionError::Io(error)) => return Err(error.into()),
     };
     for file in files {
-        upload_artifact(client, &assignment.authority, control, file).await?;
+        // A cancellation that lands after the last step returned stops the
+        // collection where it is: a cancelled attempt collects nothing more.
+        if cancellation.is_cancelled()
+            || !upload_artifact(client, &assignment.authority, control, cancellation, file).await?
+        {
+            return Ok(Some("artifact_collection_cancelled".to_owned()));
+        }
     }
     Ok(None)
 }
@@ -3247,22 +3257,27 @@ async fn collect_and_upload_artifacts(
     _assignment: &ValidatedAssignment,
     _features: &SessionFeatures,
     _control: AuthorityRpcControl<'_>,
+    _cancellation: &CancellationToken,
 ) -> Result<Option<String>, AgentError> {
     Ok(Some("artifact_upload_unsupported".to_owned()))
 }
 
 /// Streams one collected file: a header with its name, length and digest
 /// (read once for the digest, then again for the frames), then data frames
-/// in order. The RPC budget grows with the length so a large file on a slow
-/// link is not cut short by the lease-sized default; the lease is renewed
-/// meanwhile and its loss still cancels the upload.
+/// in order. Both reads are bounded by the length identified at open, so a
+/// writer the step left behind cannot keep the agent reading. The RPC
+/// budget grows with the length so a large file on a slow link is not cut
+/// short by the lease-sized default; the lease is renewed meanwhile and its
+/// loss, a stop, or the attempt's cancellation still ends the upload.
+/// `Ok(false)` is a cancellation observed before the receipt.
 #[cfg(unix)]
 async fn upload_artifact(
     client: &mut AgentControlClient<Channel>,
     authority: &WorkAuthority,
     control: AuthorityRpcControl<'_>,
+    cancellation: &CancellationToken,
     mut file: crate::artifacts::CollectedFile,
-) -> Result<(), AgentError> {
+) -> Result<bool, AgentError> {
     use mcloving_agent_protocol::wire::artifact_upload_frame::Frame;
     use mcloving_agent_protocol::wire::{ArtifactUploadFrame, ArtifactUploadHeader};
     use mcloving_domain::artifacts::{ARTIFACT_MEDIA_TYPE, MAX_ARTIFACT_FRAME_BYTES};
@@ -3274,16 +3289,21 @@ async fn upload_artifact(
         file.file.seek(std::io::SeekFrom::Start(0))?;
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; 64 * 1024];
-        let mut total = 0_u64;
-        loop {
-            let read = file.file.read(&mut buffer)?;
+        let mut remaining = file.bytes;
+        // At most the identified length, then one probe byte: a file still
+        // growing under a writer the step left behind is a changed length,
+        // never an unbounded read.
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+            let read = file.file.read(&mut buffer[..want])?;
             if read == 0 {
                 break;
             }
             digest.update(&buffer[..read]);
-            total += read as u64;
+            remaining -= read as u64;
         }
-        if total != file.bytes {
+        let mut probe = [0_u8; 1];
+        if remaining != 0 || file.file.read(&mut probe)? != 0 {
             return Err(std::io::Error::other(format!(
                 "artifact {} changed length while being read",
                 file.relative_path
@@ -3335,28 +3355,39 @@ async fn upload_artifact(
         biased;
         () = control.authority_lost.cancelled() => Err(AgentError::StaleAuthority),
         () = control.stop.cancelled() => Err(AgentError::Stopped),
+        () = cancellation.cancelled() => Ok(None),
         result = tokio::time::timeout(budget, client.upload_artifact(stream)) => {
             result
                 .map_err(|_| AgentError::AuthorityRpcTimeout)?
                 .map(tonic::Response::into_inner)
+                .map(Some)
                 .map_err(AgentError::from)
         },
     };
     reader.abort();
-    let receipt = receipt?;
+    let Some(receipt) = receipt? else {
+        return Ok(false);
+    };
     if !receipt.accepted {
         return Err(AgentError::StaleAuthority);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The lease-sized authority budget plus one second per MiB, bounded at
 /// fifteen minutes.
 #[cfg(unix)]
 fn artifact_upload_budget(lease_window: Duration, bytes: u64) -> Duration {
+    use mcloving_domain::artifacts::{
+        ARTIFACT_UPLOAD_SECONDS_PER_MIB, MAX_ARTIFACT_UPLOAD_SECONDS,
+    };
     lease_rpc_budget(lease_window)
-        .saturating_add(Duration::from_secs(bytes.div_ceil(1_048_576)))
-        .min(Duration::from_secs(15 * 60))
+        .saturating_add(Duration::from_secs(
+            bytes
+                .div_ceil(1_048_576)
+                .saturating_mul(ARTIFACT_UPLOAD_SECONDS_PER_MIB),
+        ))
+        .min(Duration::from_secs(MAX_ARTIFACT_UPLOAD_SECONDS))
 }
 
 async fn authority_rpc<T>(

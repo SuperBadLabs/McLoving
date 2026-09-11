@@ -430,13 +430,19 @@ discharge a parked reconciliation).
   or a bound; a refusal fails an attempt whose steps succeeded and is its
   recorded reason, and nothing of a refused set is uploaded. Each collected
   file is one object per declaration that matches it (declarations may
-  overlap), named `<artifact name>/<workspace path>`, streamed over the session's
+  overlap), named `<artifact name>/<workspace path>`, read at most to the
+  length identified at open (a file still growing under a writer the step
+  left behind is a changed length, never an unbounded read), streamed over the session's
   mTLS channel as an `UploadArtifact` client stream (a header carrying the
   work authority, name, length and SHA-256, then one-MiB data frames) under
   the attempt's live lease, with an RPC budget that grows one second per
-  MiB; the controller stages it into the same object store the public
+  MiB and ended by a lost lease, a stop, or the attempt's cancellation (a
+  cancellation that lands after the last step collects nothing more); the controller stages it into the same object store the public
   upload routes use, with the declared length reserved against the store
-  quota before the first byte, registers it through the same
+  quota before the first byte and bounds the whole receive phase by the
+  declared length (thirty seconds plus one second per MiB, at most fifteen
+  minutes; a stalled stream releases its reservation), registers it through
+  the same
   `register_artifact` predicate (lease owner, fence, restore epoch, build
   and node) fenced by the agent's current session epoch inside the same
   transaction, under an attempt-scoped artifact lock shared by every name

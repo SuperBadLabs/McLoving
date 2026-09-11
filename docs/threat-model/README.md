@@ -993,7 +993,8 @@ gets a named refusal and no upload; a Windows agent has no collector and is not
 routed such work); TM-006 (durable evidence: the controller stages each
 object into the same content-addressed store the public upload routes use,
 with the declared length reserved against the store quota before the first
-byte and a short or mismatching upload discarded, registers it through the
+byte, the receive phase bounded by that length so a stalled stream releases
+the reservation, and a short or mismatching upload discarded, registers it through the
 same fenced `register_artifact` predicate under an attempt-scoped
 artifact lock shared by every name (so concurrent uploads cannot each fit
 the quota and together exceed it) and then the per-name lock, and commits
@@ -1005,8 +1006,11 @@ their product rather than a combinatorial search, a walk bounded at depth
 32 and 65 536 entries, at most 1 024 objects and 256 MiB per attempt
 counted by the agent before the first upload and both enforced by the store
 at every registration under the attempt-scoped lock, so a custom peer
-cannot register unbounded rows under one lease, one-MiB frames, and an RPC budget of one second per MiB
-bounded at fifteen minutes under a lease the agent keeps renewing);
+cannot register unbounded rows under one lease, the agent's reads bounded by the length identified at open so a writer the
+step left behind cannot keep it reading, one-MiB frames, an RPC budget of
+one second per MiB bounded at fifteen minutes under a lease the agent keeps
+renewing, and the attempt's cancellation ending collection and any upload
+in flight);
 TM-052 (API: no new public route; the existing authorized artifact listing
 and download routes serve the objects). Residual: an attempt's own steps
 choose the bytes, as before; a crash between the steps and the durable
