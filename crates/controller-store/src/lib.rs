@@ -5273,10 +5273,11 @@ impl Store {
     }
 
     /// The status (`pending` or `available`) under which exactly this
-    /// artifact (name, digest and length) is already registered for the
+    /// artifact (name, digest, length and media type) is already registered for the
     /// attempt and fence, if it is: a retry of an upload whose receipt was
     /// lost. An available object needs no bytes at all; a pending one is
     /// already counted in the attempt's byte figure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn artifact_registration_status(
         &self,
         organization_id: Uuid,
@@ -5285,6 +5286,7 @@ impl Store {
         name: &str,
         digest: [u8; 32],
         bytes: i64,
+        media_type: &str,
     ) -> Result<Option<String>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let registered = sqlx::query_scalar::<_, String>(
@@ -5297,6 +5299,7 @@ impl Store {
                AND name = $4
                AND object_digest = $5
                AND bytes = $6
+               AND media_type = $7
                AND status IN ('pending', 'available')",
         )
         .bind(organization_id)
@@ -5305,6 +5308,7 @@ impl Store {
         .bind(name)
         .bind(digest.as_slice())
         .bind(bytes)
+        .bind(media_type)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;

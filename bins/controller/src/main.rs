@@ -1580,6 +1580,7 @@ impl AgentControl for ControllerAgentService {
                 &header.name,
                 digest,
                 declared,
+                &header.media_type,
             )
             .await
             .map_err(internal_store_error)?;
