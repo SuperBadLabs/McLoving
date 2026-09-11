@@ -170,6 +170,15 @@ fn control(name: &str, write: bool) -> Result<File, ()> {
     Ok(file)
 }
 
+fn distinct_control_pipes(ready: &File, gate: &File) -> Result<(), ()> {
+    let ready = ready.metadata().map_err(|_| ())?;
+    let gate = gate.metadata().map_err(|_| ())?;
+    if (ready.dev(), ready.ino()) == (gate.dev(), gate.ino()) {
+        return Err(());
+    }
+    Ok(())
+}
+
 fn phase(ready: &mut File, gate: &mut File, value: u8) -> Result<(), ()> {
     ready.write_all(&[value]).map_err(|_| ())?;
     let mut ack = [0];
@@ -233,6 +242,7 @@ pub(super) fn outer() -> Result<i32, ()> {
     let image = image()?;
     let mut ready = control(READY, true)?;
     let mut gate = control(GATE, false)?;
+    distinct_control_pipes(&ready, &gate)?;
     close_other_fds(&[
         parent,
         image.as_raw_fd(),
@@ -355,11 +365,12 @@ pub(super) fn init() -> Result<i32, ()> {
     // starts unless a live outer parent releases the gate after this setup.
     set_pdeathsig(Signal::SIGKILL).map_err(|_| ())?;
     let _timer = arm_deadline()?;
+    let mut ready = control(READY, true)?;
+    let mut gate = control(GATE, false)?;
+    distinct_control_pipes(&ready, &gate)?;
     profile()?;
     let custody = RuntimeCustody::receive().map_err(|_| ())?;
     let image = image()?;
-    let mut ready = control(READY, true)?;
-    let mut gate = control(GATE, false)?;
     let mut allowed = custody.inherited_descriptors();
     allowed.extend([image.as_raw_fd(), ready.as_raw_fd(), gate.as_raw_fd()]);
     close_other_fds(&allowed)?;

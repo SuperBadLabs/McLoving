@@ -333,6 +333,62 @@ async fn run_sealed_native_source(scenario: Option<source_lifetime_fixture::Scen
             assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
         }
     }
+    if matches!(
+        scenario,
+        Some(source_lifetime_fixture::Scenario::SamePipeControls)
+    ) {
+        let mut probe = native_command(
+            "python3",
+            &config_path,
+            &credential_path,
+            &signing_key_path,
+            &marker_path,
+        );
+        probe
+            .arg("-I")
+            .arg("-c")
+            .arg(include_str!(
+                "../source_lifetime_fixture/same_pipe_control.py"
+            ))
+            .arg(fd.to_string())
+            .arg(&credential_path)
+            .arg(&signing_key_path)
+            .arg(&marker_path)
+            .env(
+                "MCLOVING_SOURCE_ACQUIRER_EXPECTED_CONFIG_SHA256",
+                config.canonical_digest().unwrap(),
+            );
+        let result = tokio::time::timeout(Duration::from_secs(15), probe.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "same-pipe observer: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        eprintln!("distinct control FDs same-pipe actual observation: {observed}");
+        assert!(observed["positive_control_event_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(counts.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(authorized_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(unauthorized_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            observed["private_access_event_bytes"], 0,
+            "no caller acknowledgements authorize private file opens"
+        );
+        assert_ne!(observed["status"], 0);
+        assert_eq!(observed["stdout_base64"], "");
+        assert_eq!(observed["stderr_base64"], "");
+        assert_eq!(
+            observed["remaining_phase_bytes"], 0,
+            "same-pipe identity must refuse before P"
+        );
+        assert!(!config.output_root.exists());
+        server.abort();
+        return;
+    }
     let mut command = if matches!(
         scenario,
         Some(source_lifetime_fixture::Scenario::ParentDeath)
@@ -528,6 +584,7 @@ async fn run_sealed_native_source(scenario: Option<source_lifetime_fixture::Scen
             }
             source_lifetime_fixture::Scenario::ParentDeath => launch.kill_parent(),
             source_lifetime_fixture::Scenario::Complete
+            | source_lifetime_fixture::Scenario::SamePipeControls
             | source_lifetime_fixture::Scenario::CompleteWithDescendant => unreachable!(),
         }
         let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())

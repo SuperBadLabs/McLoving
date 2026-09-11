@@ -12,6 +12,7 @@ const CLEANUP_LIMIT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Scenario {
     Complete,
+    SamePipeControls,
     CompleteWithDescendant,
     Terminate,
     Kill,
@@ -870,7 +871,7 @@ async fn fixed_source_root_custody_refuses_static_proc_identity_map_overlays() {
 }
 
 pub(super) fn uses_deliberate_descendant(scenario: Scenario) -> bool {
-    !matches!(scenario, Scenario::Complete)
+    !matches!(scenario, Scenario::Complete | Scenario::SamePipeControls)
 }
 
 pub(super) fn wrap_git(actual_git: &Path, root: &Path, port: u16) -> PathBuf {
@@ -1027,4 +1028,9 @@ async fn fixed_source_private_entries_reject_forged_parent_before_capsule_author
     eprintln!(
         "forged private entries: 8 actual init/worker namespace launches refused before parent lineage could authorize substituted/unsealed/aliased/config-mismatched capsule; downstream capsule parser coverage is not claimed"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fixed_source_distinct_control_fds_on_same_pipe_refuse_before_private_authority() {
+    super::run_sealed_native_source(Some(Scenario::SamePipeControls)).await;
 }

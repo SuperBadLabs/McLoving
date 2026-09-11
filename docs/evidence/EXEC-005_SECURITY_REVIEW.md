@@ -407,7 +407,7 @@ Neither supervisor reads credential/key/marker files. The selected profile is
 unconfined, not a restrictive workload sandbox.
 
 After guarded profile/parent checks and the deliberate separate-session
-heartbeat fixture were added, the final pre-freeze targeted matrix passed eleven
+heartbeat fixture were added, an earlier pre-freeze targeted matrix passed eleven
 tests with zero failures or ignored tests. Each of the three authenticated
 cancellation routes joined the exact init pidfd and observed seven pinned native
 descendants exit, including the deliberately detached process; its observed
@@ -427,6 +427,28 @@ that failed attempt and its weaker cleanup evidence remain separately retained.
 Later successful pidfd joins do not retroactively establish teardown authority
 for the failed attempt. Fixture-only offline transport retirement after proven
 init exit preserves synthetic claims and does not implement product reclamation.
+
+PR 144 review then identified a missed admission topology: distinct readiness and
+gate descriptor numbers could refer to opposite ends of one pipe, allowing the
+supervisor to consume its own phase bytes as caller acknowledgements. The actual
+old-source regression used valid pinned configuration and private authority,
+asserted different descriptor numbers but equal held device/inode identity, and
+sent no acknowledgements or request. A calibrated inotify watch observed private
+credential/key/marker access (160 event bytes after a 32-byte positive control),
+and the old source exited successfully. No provider request or acquisition was
+claimed by that EOF-driven reproduction.
+
+Both supervisors now compare the held FIFO device/inode identities, with the
+outer check before profile/P/config and the init check before profile/custody/R.
+The same regression then refused before P with zero watched private-authority
+access, no output and a still-working positive watch control. The corrected
+complete targeted matrix passed twelve tests with zero failures or ignored tests,
+including the distinct-pipe authenticated positives and all eleven earlier
+tests. The watch observes private authority files, not configuration; the
+earlier configuration boundary is established by the code placement. Prior
+candidate validation remains evidence for its observed cases and omitted this
+alias case; corrected frozen-candidate full-suite and protected-main results
+must be recorded separately. No broader source integration gate is earned.
 Held acquisition-directory custody, finite retained-state reservations and crash
 reconciliation, controller/agent wiring and actual submitted-job replay remain
 open. EXEC-005 remains ACTIVE and no production/canary/cutover or frozen JCOMP

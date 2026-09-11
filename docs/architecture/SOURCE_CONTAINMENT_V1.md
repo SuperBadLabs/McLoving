@@ -91,7 +91,10 @@ The caller invokes only the sealed source image with no arguments. Environment
 
 `DEADLINE_MONOTONIC_NS` is an absolute monotonic deadline no more than fifteen
 minutes away. The source configuration's canonical expected digest is mandatory.
-The image, parent, ready, and gate descriptors must be distinct. Stdout/stderr
+The image, parent, ready, and gate descriptors must be distinct. Both supervisors
+also require the held ready and gate pipes to have different device/inode identities
+before profile or runtime-custody work: different descriptor numbers for the
+same pipe cannot acknowledge the supervisor's own readiness bytes. Stdout/stderr
 remain native private response channels; the control stream is separate.
 
 The outer emits `P` after exact profile selection and waits for byte `P`. It
