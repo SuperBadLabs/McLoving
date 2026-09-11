@@ -1865,20 +1865,23 @@ async fn run_assignment(
                 // Durable before the spawn: a crash anywhere after this point
                 // names this step as interrupted, because the journal cannot
                 // tell an exited process from one that was cut off.
+                let container_context = step_container
+                    .as_deref()
+                    .zip(container_runtime.as_ref())
+                    .map(|(name, (runtime, _))| (name, crate::container::runtime_context(runtime)));
+                let acquisition_directory = helper.and_then(PreparedHelper::acquisition_directory);
                 journal.record_step_start(
                     &organization,
                     &attempt,
                     fence,
                     session_epoch,
-                    ordinal,
-                    step_container
-                        .as_deref()
-                        .zip(container_runtime.as_ref())
-                        .map(|(name, (runtime, _))| {
-                            (name, crate::container::runtime_context(runtime))
-                        })
-                        .as_ref()
-                        .map(|(name, context)| (*name, context.as_str())),
+                    mcloving_agent_runtime::StepStart {
+                        ordinal,
+                        container: container_context
+                            .as_ref()
+                            .map(|(name, context)| (*name, context.as_str())),
+                        acquisition_directory: acquisition_directory.as_deref(),
+                    },
                 )?;
             }
             // A helper's own frame bound never outranks what the attempt has
@@ -5206,6 +5209,7 @@ mod tests {
             current_step: None,
             container_name: None,
             container_context: None,
+            acquisition_directory: None,
             logs: Vec::new(),
             result: Some(result),
         };

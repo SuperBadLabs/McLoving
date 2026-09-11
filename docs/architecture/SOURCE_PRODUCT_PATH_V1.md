@@ -106,10 +106,14 @@ output root, by descriptor and without following links, keeping the receipt
 and manifest the acquirer retained beside it; and a checkout step that ends
 any other way than in a completed publication (a rejected or truncated
 answer, a timeout, a cancellation, a spawn failure) discards whatever its
-acquisition, whose id is deterministic, left there. Restart recovery of an
-attempt that crashed inside or just past a checkout derives the same ids for
-its steps up to the journaled one and discards their trees under every
-configured binding's output root. Both walks are budgeted from the binding's
+acquisition, whose id is deterministic, left there. The acquisition
+directory is journaled (`attempts.acquisition_directory`, schema 5) before the
+step spawns, so restart recovery of an attempt that crashed inside or just
+past a checkout discards the tree at the journaled location, whatever
+bindings the restarted agent loads; an attempt whose tree could not be
+discarded parks reconciliation-required, exactly like one whose container
+could not be proven gone, and every session retries until the directory
+holds no tree. Both walks are budgeted from the binding's
 admitted file count and path length (every admitted file plus every ancestor
 directory its longest path can have) rather than a fixed figure, so a
 repository the acquirer admits is one publication can finish. A refused or

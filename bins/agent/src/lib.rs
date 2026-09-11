@@ -826,9 +826,6 @@ async fn send_reconciliation(
                         cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
                             .await?
                     };
-                // A checkout the crashed session acquired but never published
-                // is reclaimed by its derived acquisition id (PAR-012).
-                source::discard_recovered_acquisitions(config, attempt);
                 let cancellation_outcome = match outcome {
                     RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
                     RecoveredCancellation::AlreadyExited => {
@@ -880,6 +877,9 @@ async fn send_reconciliation(
                 // the workspace mounted: the row stays parked, and its reap
                 // is retried on every session, until absence is proven in
                 // the launching runtime context (PAR-011).
+                // The same holds for a checkout the crashed session acquired
+                // but never published (PAR-012): the row stays parked until
+                // the journaled acquisition directory holds no tree.
                 let phase = if phase == AttemptPhase::Aborted
                     && !container::recovered_container_gone(config, attempt)
                 {
@@ -890,6 +890,18 @@ async fn send_reconciliation(
                         attempt.attempt_id,
                         attempt.fence_token,
                         attempt.container_name.as_deref().unwrap_or("?")
+                    );
+                    AttemptPhase::ReconciliationRequired
+                } else if phase == AttemptPhase::Aborted
+                    && !source::recovered_acquisition_gone(config, attempt)
+                {
+                    eprintln!(
+                        "recovered attempt {}/{} fence {}: kept reconciliation-required past \
+                         its controller receipt because acquisition {} is not reclaimed",
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                        attempt.acquisition_directory.as_deref().unwrap_or("?")
                     );
                     AttemptPhase::ReconciliationRequired
                 } else {
@@ -976,6 +988,20 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
                 attempt.container_name.as_deref().unwrap_or("?")
             );
         }
+        // Likewise a parked attempt's journaled acquisition: a discard that
+        // failed once is retried every session until the tree is gone.
+        if attempt.phase == AttemptPhase::ReconciliationRequired
+            && attempt.acquisition_directory.is_some()
+            && !source::recovered_acquisition_gone(config, attempt)
+        {
+            eprintln!(
+                "parked attempt {}/{} fence {}: acquisition {} still not reclaimed",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.acquisition_directory.as_deref().unwrap_or("?")
+            );
+        }
         if !matches!(
             attempt.phase,
             AttemptPhase::Accepted | AttemptPhase::Running
@@ -985,8 +1011,29 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         let mut outcome =
             cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
         // A checkout the crashed session acquired but never published is
-        // reclaimed by its derived acquisition id (PAR-012).
-        source::discard_recovered_acquisitions(config, attempt);
+        // reclaimed from the journaled acquisition directory (PAR-012); an
+        // attempt whose tree could not be discarded parks, like one whose
+        // container could not be proven gone, and every session retries.
+        let acquisition_gone = source::recovered_acquisition_gone(config, attempt);
+        if outcome != RecoveredCancellation::ReconciliationRequired && !acquisition_gone {
+            journal.transition(
+                &attempt.organization_id,
+                &attempt.attempt_id,
+                attempt.fence_token,
+                attempt.session_epoch,
+                AttemptPhase::ReconciliationRequired,
+                attempt.process_id,
+            )?;
+            eprintln!(
+                "recovered attempt {}/{} fence {}: acquisition {} could not be reclaimed; \
+                 parked reconciliation-required",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.acquisition_directory.as_deref().unwrap_or("?")
+            );
+            outcome = RecoveredCancellation::ReconciliationRequired;
+        }
         // The terminated group was only the podman client of a container
         // stage; the container it started outlives that client (PAR-011).
         // Reap it by its derived name and require proof it is gone, or park
@@ -1982,6 +2029,7 @@ mod tests {
             current_step: None,
             container_name: None,
             container_context: None,
+            acquisition_directory: None,
             logs: Vec::new(),
             result: None,
         };
@@ -2184,6 +2232,7 @@ mod tests {
                 current_step: None,
                 container_name: None,
                 container_context: None,
+                acquisition_directory: None,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2228,6 +2277,7 @@ mod tests {
             current_step: None,
             container_name: None,
             container_context: None,
+            acquisition_directory: None,
             logs: Vec::new(),
             result: None,
         };

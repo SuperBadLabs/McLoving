@@ -159,14 +159,15 @@ pub(crate) fn scheduling_capabilities(config: &AgentConfig) -> Result<Vec<String
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{PreparedSource, discard_recovered_acquisitions, prepare};
+pub(crate) use linux::{PreparedSource, prepare, recovered_acquisition_gone};
 
-/// Recovery reclaims nothing where checkouts never run.
+/// Where checkouts never run, a recovered attempt never journaled one.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn discard_recovered_acquisitions(
+pub(crate) fn recovered_acquisition_gone(
     _config: &AgentConfig,
-    _attempt: &mcloving_agent_runtime::ReconciliationAttempt,
-) {
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> bool {
+    attempt.acquisition_directory.is_none()
 }
 
 #[cfg(target_os = "linux")]
@@ -595,11 +596,18 @@ mod linux {
         /// acquisition id is deterministic, so the directory is known even
         /// when the answer never arrived. Absent is fine; the receipt and
         /// manifest, if any, stay.
-        pub fn discard(&self) -> Result<(), String> {
-            let acquisition_dir = self
-                .config
+        /// The directory this step's acquisition lands in, journaled before
+        /// the spawn.
+        pub fn acquisition_directory(&self) -> String {
+            self.config
                 .output_root
-                .join(self.acquisition.acquisition_id.to_string());
+                .join(self.acquisition.acquisition_id.to_string())
+                .display()
+                .to_string()
+        }
+
+        pub fn discard(&self) -> Result<(), String> {
+            let acquisition_dir = PathBuf::from(self.acquisition_directory());
             let acquisition = match open_directory(&acquisition_dir) {
                 Ok(fd) => fd,
                 Err(nix::errno::Errno::ENOENT) => return Ok(()),
@@ -897,65 +905,75 @@ mod linux {
         Uuid::from_bytes(bytes)
     }
 
-    /// Restart recovery of an attempt that may have been inside, or just
-    /// past, a checkout step: for every configured source binding, discard
-    /// the trees of the acquisitions this attempt's steps up to the journaled
-    /// one could have made. A crash between the acquirer's answer and the
-    /// publication is otherwise a tree kept on the source volume forever.
-    /// Absent directories are fine; failures are reported, never fatal.
-    pub(crate) fn discard_recovered_acquisitions(
+    /// Whether a recovered attempt's source acquisition is proven gone:
+    /// trivially so when its current step journaled none; otherwise only
+    /// when the journaled directory is absent or its tree was discarded now.
+    /// The location comes from the journal, written before the step's spawn,
+    /// so a binding removed or re-rooted after the crash changes nothing; a
+    /// failure leaves the attempt parked for the next session to retry.
+    pub(crate) fn recovered_acquisition_gone(
         config: &AgentConfig,
         attempt: &mcloving_agent_runtime::ReconciliationAttempt,
-    ) {
-        let Some(bindings) = &config.source_bindings else {
-            return;
+    ) -> bool {
+        let Some(directory) = &attempt.acquisition_directory else {
+            return true;
         };
-        let last_step = attempt.current_step.unwrap_or(0);
-        for binding in &bindings.mappings {
-            let source_config: SourceConfig =
-                match read_private(&binding.config_path, 262_144, false)
-                    .map_err(|_| ())
-                    .and_then(|bytes| parse_json_no_duplicates(&bytes).map_err(|_| ()))
-                {
-                    Ok(config) => config,
-                    Err(()) => {
-                        eprintln!(
-                            "recovered attempt {}/{}: source binding {} configuration unreadable; \
-                         its acquisitions are not reclaimed",
-                            attempt.organization_id, attempt.attempt_id, binding.mapping_id
-                        );
-                        continue;
-                    }
-                };
-            for ordinal in 0..=last_step {
-                let id = acquisition_id_for(&attempt.attempt_id, attempt.fence_token, ordinal);
-                let directory = source_config.output_root.join(id.to_string());
-                let acquisition = match open_directory(&directory) {
-                    Ok(fd) => fd,
-                    Err(nix::errno::Errno::ENOENT) => continue,
-                    Err(error) => {
-                        eprintln!(
-                            "recovered attempt {}/{} step {ordinal}: acquisition {id} not opened: {error}",
-                            attempt.organization_id, attempt.attempt_id
-                        );
-                        continue;
-                    }
-                };
-                if let Err(reason) = require_owned(&acquisition)
-                    .and_then(|()| discard_acquired_tree(&acquisition, walk_budget(&source_config)))
-                {
-                    eprintln!(
-                        "recovered attempt {}/{} step {ordinal}: acquisition {id} tree not discarded: {reason}",
-                        attempt.organization_id, attempt.attempt_id
-                    );
-                } else {
-                    eprintln!(
-                        "recovered attempt {}/{} step {ordinal}: acquisition {id} tree discarded",
-                        attempt.organization_id, attempt.attempt_id
-                    );
-                }
+        let path = Path::new(directory);
+        if !path.is_absolute() {
+            eprintln!(
+                "recovered attempt {}/{} fence {}: journaled acquisition directory {directory:?} is not absolute",
+                attempt.organization_id, attempt.attempt_id, attempt.fence_token
+            );
+            return false;
+        }
+        let acquisition = match open_directory(path) {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::ENOENT) => return true,
+            Err(error) => {
+                eprintln!(
+                    "recovered attempt {}/{} fence {}: acquisition {directory} not opened: {error}",
+                    attempt.organization_id, attempt.attempt_id, attempt.fence_token
+                );
+                return false;
+            }
+        };
+        match require_owned(&acquisition)
+            .and_then(|()| discard_acquired_tree(&acquisition, recovery_walk_budget(config)))
+        {
+            Ok(()) => true,
+            Err(reason) => {
+                eprintln!(
+                    "recovered attempt {}/{} fence {}: acquisition {directory} tree not discarded: {reason}",
+                    attempt.organization_id, attempt.attempt_id, attempt.fence_token
+                );
+                false
             }
         }
+    }
+
+    /// The widest walk any configured binding admits, for reclaiming a
+    /// journaled acquisition whose binding may since have changed; a floor
+    /// covers an agent whose bindings are gone or unreadable.
+    fn recovery_walk_budget(config: &AgentConfig) -> usize {
+        const FLOOR: usize = 16_777_216;
+        config
+            .source_bindings
+            .as_ref()
+            .map(|bindings| {
+                bindings
+                    .mappings
+                    .iter()
+                    .filter_map(|binding| {
+                        read_private(&binding.config_path, 262_144, false)
+                            .ok()
+                            .and_then(|bytes| parse_json_no_duplicates::<SourceConfig>(&bytes).ok())
+                            .map(|config| walk_budget(&config))
+                    })
+                    .max()
+                    .unwrap_or(FLOOR)
+                    .max(FLOOR)
+            })
+            .unwrap_or(FLOOR)
     }
 
     fn open_directory(path: &Path) -> Result<OwnedFd, nix::errno::Errno> {

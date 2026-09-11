@@ -212,6 +212,16 @@ impl PreparedHelper {
             },
         }
     }
+    /// Where this helper's step will leave what it acquires, journaled
+    /// before the spawn so recovery can reclaim it: a checkout's acquisition
+    /// directory. Cache and input helpers leave nothing.
+    pub fn acquisition_directory(&self) -> Option<String> {
+        match self {
+            Self::Cache(_) | Self::Input(_) => None,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => Some(v.acquisition_directory()),
+        }
+    }
     /// Cleanup a helper owes when its step did not end in a completed
     /// publication: a checkout removes the tree its acquisition may have left
     /// under the output root. Cache and input helpers leave nothing behind.

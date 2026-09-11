@@ -294,7 +294,7 @@ discharge a parked reconciliation).
   proof, and the moment the group is empty, on every arm, the executor
   removes the named container and accepts only a `container exists` exit
   status of 1 as proof it is gone; anything else is unverified containment.
-  The container name is journaled (`attempts.container_name`, schema 4)
+  The container name is journaled (`attempts.container_name`, schema 4, 5 with PAR-012)
   before the spawn, so restart recovery reaps exactly the container the
   recovered step launched, only when it launched one, and parks the attempt
   reconciliation-required if the proof fails; an unproven reap during
