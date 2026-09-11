@@ -913,7 +913,10 @@ delivery is reduced to the closed SCM payload (repository `full_name`,
 `after`, branch, bounded paths) and every other field is dropped, an
 oversized or truncated change set (more paths than the bound, or fewer
 commits listed than the push advertises) is admitted pathless so a path
-filter cannot be bypassed by volume or by omission, and unadmitted
+filter cannot be bypassed by volume or by omission, a delivery id's first
+authenticated decision is durable (a repeated unadmitted delivery answers its
+recorded acknowledgement without a second audit record, an admitted id
+re-sent under an inadmissible event is a conflict), and unadmitted
 deliveries are acknowledged with 202 and
 recorded as audit events so GitHub keeps delivering. Residual: the operator
 reads the secret over the authenticated API and pastes it into GitHub, so

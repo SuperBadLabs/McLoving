@@ -499,6 +499,48 @@ stages:
     .unwrap();
     assert_eq!(unadmitted, 3, "every unadmitted delivery is recorded");
 
+    // GitHub redelivers the ping: the recorded acknowledgement, no second
+    // audit record. The admitted push re-sent under an inadmissible event
+    // header (the signature covers only the body) is a reuse of its id.
+    let ping_again = post(
+        app.clone(),
+        &hook_route,
+        "ping-1",
+        "ping",
+        ping.clone(),
+        sign(&secret, &ping),
+    )
+    .await;
+    assert_eq!(ping_again.status(), StatusCode::ACCEPTED);
+    let ping_again = json_body(ping_again).await;
+    assert_eq!(ping_again["status"], "ignored");
+    assert_eq!(ping_again["delivery_id"], "ping-1");
+    let unadmitted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE organization_id = $1 AND action = 'trigger.delivery_unadmitted'",
+    )
+    .bind(organization_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        unadmitted, 3,
+        "a repeated unadmitted delivery appends nothing"
+    );
+    let reused_as_ping = post(
+        app.clone(),
+        &hook_route,
+        delivery_id,
+        "ping",
+        body.clone(),
+        sign(&secret, &body),
+    )
+    .await;
+    assert_eq!(reused_as_ping.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(reused_as_ping).await["code"],
+        "trigger_ingress_conflict"
+    );
+
     // A pull request synchronize on the filtered branch set: head ref must
     // pass the branch filter like a push.
     let pull = serde_json::to_vec(&json!({

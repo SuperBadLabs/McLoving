@@ -1510,10 +1510,11 @@ fn openapi_document() -> Value {
                 },
                 "WebhookAcknowledgement": {
                     "type": "object",
-                    "required": ["status", "reason"],
+                    "required": ["status", "reason", "delivery_id"],
                     "properties": {
                         "status": {"type": "string", "enum": ["ignored", "filtered"]},
-                        "reason": {"type": "string"}
+                        "reason": {"type": "string"},
+                        "delivery_id": {"type": "string"}
                     },
                     "additionalProperties": false
                 },

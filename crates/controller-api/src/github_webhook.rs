@@ -173,9 +173,46 @@ pub(super) async fn receive_github_delivery(
             "the delivery body is not a JSON object",
         ));
     }
+    // A delivery id's first authenticated decision is durable. A repeat of a
+    // delivery that was acknowledged but not admitted answers the recorded
+    // acknowledgement again and appends nothing, so GitHub redeliveries of a
+    // ping or a filtered push cannot grow the audit chain and an id decided
+    // once never enters the ledger later under another event.
+    if let Some(recorded) = state
+        .store
+        .unadmitted_delivery_acknowledgement(
+            trigger.organization_id,
+            trigger.trigger_id,
+            &delivery_id,
+        )
+        .await
+        .map_err(trigger_error)?
+    {
+        return Ok(acknowledgement(
+            &delivery_id,
+            recorded["status"].as_str().unwrap_or("ignored"),
+            recorded["reason"].as_str().unwrap_or_default(),
+        ));
+    }
     let mapped = match map_delivery(&event, &payload) {
         Ok(mapped) => mapped,
         Err(reason) => {
+            // The signature covers the body, not the event header: an
+            // admitted delivery id re-sent under an inadmissible event is a
+            // reuse of that id, reported as the ledger would report it.
+            if state
+                .store
+                .trigger_delivery(trigger.organization_id, trigger.trigger_id, &delivery_id)
+                .await
+                .map_err(trigger_error)?
+                .is_some()
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "trigger_ingress_conflict",
+                    "delivery ID was reused for an event that is not admissible",
+                ));
+            }
             return acknowledge_unadmitted(
                 &state,
                 &trigger,
@@ -492,7 +529,11 @@ async fn acknowledge_unadmitted(
         })
         .await
         .map_err(super::product_error)?;
-    Ok((
+    Ok(acknowledgement(delivery_id, status, reason))
+}
+
+fn acknowledgement(delivery_id: &str, status: &str, reason: &str) -> Response {
+    (
         StatusCode::ACCEPTED,
         Json(json!({
             "status": status,
@@ -500,7 +541,7 @@ async fn acknowledge_unadmitted(
             "delivery_id": delivery_id,
         })),
     )
-        .into_response())
+        .into_response()
 }
 
 #[cfg(test)]

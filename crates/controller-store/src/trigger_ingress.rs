@@ -687,6 +687,41 @@ impl Store {
         row.map(delivery_from_row).transpose()
     }
 
+    /// The recorded acknowledgement of a delivery the receiver authenticated
+    /// but did not admit (`trigger.delivery_unadmitted`), if any. A delivery
+    /// id's first authenticated decision is durable: a repeat of an
+    /// unadmitted delivery answers the recorded acknowledgement again without
+    /// a second audit record, and never later enters the ledger.
+    pub async fn unadmitted_delivery_acknowledgement(
+        &self,
+        organization_id: Uuid,
+        trigger_id: Uuid,
+        delivery_id: &str,
+    ) -> Result<Option<Value>, StoreError> {
+        if delivery_id.is_empty() || delivery_id.len() > MAX_TEXT_BYTES {
+            return Err(StoreError::InvalidTriggerIngress(
+                "delivery id is out of bounds".to_owned(),
+            ));
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let payload = sqlx::query_scalar::<_, Value>(
+            "SELECT payload FROM audit_events
+             WHERE organization_id = $1
+               AND action = 'trigger.delivery_unadmitted'
+               AND subject = $2
+               AND payload->>'delivery_id' = $3
+             ORDER BY sequence
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(trigger_id.to_string())
+        .bind(delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(payload)
+    }
+
     pub async fn pipeline_trigger_generation(
         &self,
         organization_id: Uuid,

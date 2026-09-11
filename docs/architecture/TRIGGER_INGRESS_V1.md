@@ -269,9 +269,16 @@ nothing, and a reused delivery id with a different authenticated body is a
 409 `trigger_ingress_conflict`. Deliveries that authenticate but are not
 admitted, a tag push, a branch deletion, a `ping`, an unsupported event or
 action, or an event the trigger's filter refuses, answer 202 with
-`{"status": "ignored" | "filtered", "reason"}` so GitHub reports the hook
-healthy, and each is recorded as a `trigger.delivery_unadmitted` audit event
-under the event-source identity rather than as a delivery row.
+`{"status": "ignored" | "filtered", "reason", "delivery_id"}` so GitHub
+reports the hook healthy, and each is recorded as a
+`trigger.delivery_unadmitted` audit event under the event-source identity
+rather than as a delivery row. A delivery id's first authenticated decision
+is durable: a repeat of an unadmitted delivery answers the recorded
+acknowledgement again without a second audit record and never enters the
+ledger later under another event, and an admitted delivery id re-sent under
+an inadmissible event (the signature covers the body, not the event header)
+is a 409 `trigger_ingress_conflict`. To run an event that was filtered under
+a narrower filter, push again or use the bearer route.
 
 Trigger configuration is a `kind`-discriminated union with separate closed SCM,
 schedule, upstream, and remote API variants and their exact required fields.
