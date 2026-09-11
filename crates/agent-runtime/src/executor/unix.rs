@@ -393,6 +393,12 @@ where
                     request.termination_grace,
                 )
                 .await?;
+                // The monitor failed, not the workload: the container may
+                // still be running with the workspace mounted, so it is
+                // reaped here exactly as on every other teardown arm.
+                if let Some(container) = &request.container {
+                    reap_container(&container.runtime, &container.name).await?;
+                }
                 return Err(error.into());
             }
             let status = terminate_and_prove_group_empty(

@@ -902,6 +902,25 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
     let report = Journal::open(&config.journal_path)?.reconcile()?;
     let mut journal = Journal::open(&config.journal_path)?;
     for attempt in &report.attempts {
+        // A parked container attempt keeps its journaled container name, and
+        // a reap that failed once may succeed now. Retry the absence proof on
+        // every session so a surviving container never outlives the parked
+        // row unnoticed; the row itself stays parked until the controller
+        // discharges it.
+        if attempt.phase == AttemptPhase::ReconciliationRequired
+            && let Some(name) = &attempt.container_name
+        {
+            let gone = config
+                .podman_path
+                .as_deref()
+                .is_some_and(|runtime| container::reap_recovered_container(runtime, name));
+            if !gone {
+                eprintln!(
+                    "parked attempt {}/{} fence {}: container {} still cannot be proven gone",
+                    attempt.organization_id, attempt.attempt_id, attempt.fence_token, name
+                );
+            }
+        }
         if !matches!(
             attempt.phase,
             AttemptPhase::Accepted | AttemptPhase::Running
