@@ -159,7 +159,7 @@ pub(crate) fn scheduling_capabilities(config: &AgentConfig) -> Result<Vec<String
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{PreparedSource, prepare, recovered_acquisition_gone};
+pub(crate) use linux::{PreparedSource, PublishFailure, prepare, recovered_acquisition_gone};
 
 /// Where checkouts never run, a recovered attempt never journaled one.
 #[cfg(not(target_os = "linux"))]
@@ -635,26 +635,44 @@ mod linux {
         /// Then the tree, which the acquirer left read-only, is made writable
         /// for its owner so build steps can work in it, walking by descriptor
         /// and never following a link.
-        pub fn publish(&self, workspace: &Path) -> Result<PublishedCheckout, String> {
+        ///
+        /// `interrupted` is consulted before the move and at every entry of
+        /// the walk after it: the step's deadline and its cancellation apply
+        /// to publication exactly as they applied to the helper's process,
+        /// so a large tree cannot keep being mutated past either.
+        pub fn publish(
+            &self,
+            workspace: &Path,
+            interrupted: &dyn Fn() -> bool,
+        ) -> Result<PublishedCheckout, PublishFailure> {
             let receipt = self
                 .verified
                 .lock()
                 .ok()
                 .and_then(|mut slot| slot.take())
-                .ok_or_else(|| "checkout_unverified".to_owned())?;
+                .ok_or_else(|| PublishFailure::Refused("checkout_unverified".to_owned()))?;
             let destination = self.acquisition.checkout_name.as_str();
             let acquisition_dir = self
                 .config
                 .output_root
                 .join(receipt.acquisition_id.to_string());
-            let acquisition = open_directory(&acquisition_dir)
-                .map_err(|error| format!("checkout_publication_failed:acquisition:{error}"))?;
-            require_owned(&acquisition)?;
+            let acquisition = open_directory(&acquisition_dir).map_err(|error| {
+                PublishFailure::Unreclaimed(format!(
+                    "checkout_publication_failed:acquisition:{error}"
+                ))
+            })?;
+            require_owned(&acquisition).map_err(PublishFailure::Unreclaimed)?;
             // A refused publication must not leave the materialized tree
             // under the output root: every such build would otherwise keep a
             // whole checkout on the source volume. The receipt and manifest
             // the acquirer retained beside it stay.
-            publish_tree(&acquisition, workspace, destination, self.walk_budget())?;
+            publish_tree(
+                &acquisition,
+                workspace,
+                destination,
+                self.walk_budget(),
+                interrupted,
+            )?;
             Ok(PublishedCheckout {
                 destination: destination.to_owned(),
                 resolved_commit: receipt
@@ -667,6 +685,16 @@ mod linux {
         }
     }
 
+    /// How a publication did not happen: refused with the tree discarded,
+    /// which is a failed step; or with the tree possibly still under the
+    /// output root, which parks the attempt until a later session reclaims
+    /// it from the journaled acquisition directory.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum PublishFailure {
+        Refused(String),
+        Unreclaimed(String),
+    }
+
     /// Moves `tree` under `acquisition` into `<workspace>/<destination>`, and
     /// on any refusal or failure that leaves the tree behind discards it,
     /// keeping whatever else the acquirer retained beside it.
@@ -675,15 +703,22 @@ mod linux {
         workspace: &Path,
         destination: &str,
         walk_budget: usize,
-    ) -> Result<(), String> {
-        match move_verified_tree(acquisition, workspace, destination, walk_budget) {
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<(), PublishFailure> {
+        match move_verified_tree(
+            acquisition,
+            workspace,
+            destination,
+            walk_budget,
+            interrupted,
+        ) {
             Ok(()) => Ok(()),
-            Err(error) => {
-                if let Err(discard) = discard_acquired_tree(acquisition, walk_budget) {
-                    return Err(format!("{error};tree_not_discarded:{discard}"));
-                }
-                Err(error)
-            }
+            Err(error) => match discard_acquired_tree(acquisition, walk_budget) {
+                Ok(()) => Err(PublishFailure::Refused(error)),
+                Err(discard) => Err(PublishFailure::Unreclaimed(format!(
+                    "{error};tree_not_discarded:{discard}"
+                ))),
+            },
         }
     }
 
@@ -692,7 +727,11 @@ mod linux {
         workspace: &Path,
         destination: &str,
         walk_budget: usize,
+        interrupted: &dyn Fn() -> bool,
     ) -> Result<(), String> {
+        if interrupted() {
+            return Err("checkout_publication_interrupted".to_owned());
+        }
         use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
         use nix::sys::stat::{Mode, fchmod, fstatat};
         // The acquirer left its directory 0o500; renaming an entry out of it
@@ -767,7 +806,7 @@ mod linux {
         )
         .map_err(|error| format!("checkout_publication_failed:open:{error}"))?;
         let mut budget = walk_budget;
-        make_owner_writable(published, &mut budget)
+        make_owner_writable(published, &mut budget, interrupted)
             .map_err(|error| format!("checkout_publication_failed:writable:{error}"))?;
         for directory in [&workspace_fd, acquisition] {
             File::from(
@@ -1000,7 +1039,11 @@ mod linux {
     /// Adds the owner's write bit to every directory and regular file below
     /// `directory`, by descriptor, never following a link, within `budget`
     /// entries. Symlinks and special files are left untouched.
-    fn make_owner_writable(directory: OwnedFd, budget: &mut usize) -> Result<(), String> {
+    fn make_owner_writable(
+        directory: OwnedFd,
+        budget: &mut usize,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
         use nix::dir::{Dir, Type};
         use nix::fcntl::{OFlag, openat};
         use nix::sys::stat::{Mode, fchmod, fstat, fstatat};
@@ -1018,6 +1061,9 @@ mod linux {
             let name = entry.file_name();
             if name == c"." || name == c".." {
                 continue;
+            }
+            if interrupted() {
+                return Err("checkout_publication_interrupted".to_owned());
             }
             *budget = budget
                 .checked_sub(1)
@@ -1047,7 +1093,7 @@ mod linux {
                         Mode::empty(),
                     )
                     .map_err(|error| error.to_string())?;
-                    make_owner_writable(child, budget)?;
+                    make_owner_writable(child, budget, interrupted)?;
                 }
                 Type::File => {
                     let child = openat(
@@ -1105,7 +1151,31 @@ mod linux {
             destination: &str,
         ) -> Result<(), String> {
             let acquisition_fd = open_directory(acquisition).map_err(|e| e.to_string())?;
-            publish_tree(&acquisition_fd, workspace, destination, 1_024)
+            publish_tree(&acquisition_fd, workspace, destination, 1_024, &|| false).map_err(
+                |failure| match failure {
+                    PublishFailure::Refused(reason) | PublishFailure::Unreclaimed(reason) => reason,
+                },
+            )
+        }
+
+        /// A deadline or cancellation that arrives before the move refuses
+        /// the publication and discards the tree; nothing lands in the
+        /// workspace.
+        #[test]
+        fn an_interrupted_publication_is_refused_and_the_tree_discarded() {
+            let root = tempfile::tempdir().unwrap();
+            let acquisition = read_only_tree(root.path());
+            let workspace = root.path().join("ws");
+            std::fs::create_dir(&workspace).unwrap();
+            let acquisition_fd = open_directory(&acquisition).unwrap();
+            let failure =
+                publish_tree(&acquisition_fd, &workspace, "source", 1_024, &|| true).unwrap_err();
+            assert_eq!(
+                failure,
+                PublishFailure::Refused("checkout_publication_interrupted".to_owned())
+            );
+            assert!(!workspace.join("source").exists());
+            assert!(!acquisition.join("tree").exists());
         }
 
         /// A tree the acquirer left for a step whose agent crashed before

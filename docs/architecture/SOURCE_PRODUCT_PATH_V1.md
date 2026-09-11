@@ -121,9 +121,17 @@ interrupted checkout therefore leaves no tree on the source volume.
 The acquirer leaves its tree read-only; publication then gives every
 directory and regular file below the destination its owner's write bit,
 walking by descriptor and skipping links, so build steps can work in the
-checkout. A checkout step whose exit was clean but whose answer was not
-accepted, or whose publication was refused, is the failed step that stops the
-stage, with the reason in its step record and the terminal summary.
+checkout. The step's deadline and cancellation apply to publication as they
+applied to the helper's process: the move is not started and the walk is
+not continued past either, and an interrupted publication is refused with
+the tree discarded. A checkout step whose exit was clean but whose answer
+was not accepted, or whose publication was refused, is the failed step that
+stops the stage, with the reason in its step record and the terminal
+summary. A live discard that fails, or a refused publication whose tree
+could not be discarded, parks the attempt reconciliation-required at once,
+the same way an unverifiable container does, so the journaled acquisition
+directory is retried by later sessions rather than forgotten by a terminal
+row.
 
 ## Gate
 

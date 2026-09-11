@@ -235,19 +235,50 @@ impl PreparedHelper {
     /// Work a helper still owes once its process has exited and its answer
     /// was accepted: a checkout publishes its verified tree into the
     /// workspace. Cache and input helpers owe nothing.
-    pub fn complete(&self, workspace: &Path) -> Result<Option<String>, String> {
+    ///
+    /// `interrupted` is the step's deadline and cancellation, honoured
+    /// throughout the work. A `Refused` failure is a failed step with the
+    /// helper's leftovers already discarded; `Unreclaimed` means leftovers
+    /// may remain and the attempt must park until they are.
+    pub fn complete(
+        &self,
+        workspace: &Path,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<Option<String>, HelperFailure> {
         match self {
             Self::Cache(_) | Self::Input(_) => {
-                let _ = workspace;
+                let _ = (workspace, interrupted);
                 Ok(None)
             }
             #[cfg(target_os = "linux")]
-            Self::Source(v) => v.publish(workspace).map(|published| {
-                Some(format!(
-                    "checkout {} at {} ({} files)",
-                    published.destination, published.resolved_commit, published.materialized_files
-                ))
-            }),
+            Self::Source(v) => v
+                .publish(workspace, interrupted)
+                .map(|published| {
+                    Some(format!(
+                        "checkout {} at {} ({} files)",
+                        published.destination,
+                        published.resolved_commit,
+                        published.materialized_files
+                    ))
+                })
+                .map_err(|failure| match failure {
+                    crate::source::PublishFailure::Refused(reason) => {
+                        HelperFailure::Refused(reason)
+                    }
+                    crate::source::PublishFailure::Unreclaimed(reason) => {
+                        HelperFailure::Unreclaimed(reason)
+                    }
+                }),
         }
     }
+}
+
+/// Why a helper's completion did not happen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HelperFailure {
+    /// The step failed and nothing of the helper's remains to reclaim.
+    Refused(String),
+    /// Something of the helper's may remain on disk; the attempt parks
+    /// reconciliation-required so a later session reclaims it.
+    Unreclaimed(String),
 }

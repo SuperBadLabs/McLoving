@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::private_helper::PreparedHelper;
+use crate::private_helper::{HelperFailure, PreparedHelper};
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
@@ -1966,6 +1966,14 @@ async fn run_assignment(
             if let Some(helper) = helper {
                 helper.begin()?;
             }
+            // The step's deadline covers the helper's work after its process
+            // too: a publication cannot run on past the timeout or a
+            // cancellation that ended the process.
+            let step_deadline = tokio::time::Instant::now() + request.timeout;
+            let interrupted = || {
+                tokio::time::Instant::now() >= step_deadline
+                    || execution_cancellation.is_cancelled()
+            };
             let execution = execute_prepared(
                 &request,
                 execution_cancellation.clone(),
@@ -2074,9 +2082,14 @@ async fn run_assignment(
                     if let Some(helper) = helper
                         && let Err(reason) = tokio::task::block_in_place(|| helper.discard())
                     {
-                        eprintln!(
-                            "attempt {}/{} step {ordinal}: helper leftovers not discarded: {reason}",
-                            organization, attempt
+                        return park_unreclaimed_helper(
+                            &mut journal,
+                            &organization,
+                            &attempt,
+                            fence,
+                            session_epoch,
+                            ordinal,
+                            reason,
                         );
                     }
                     step_records.push(spawn_record);
@@ -2149,23 +2162,47 @@ async fn run_assignment(
                 }
                 if step_terminal == WorkOutcome::Succeeded {
                     let workspace_path = config.workspace_root.join(&assignment.workspace);
-                    match tokio::task::block_in_place(|| helper.complete(&workspace_path)) {
+                    match tokio::task::block_in_place(|| {
+                        helper.complete(&workspace_path, &interrupted)
+                    }) {
                         Ok(_) => {}
-                        Err(reason) => {
-                            step_terminal = WorkOutcome::Failed;
+                        Err(HelperFailure::Refused(reason)) => {
+                            step_terminal = if execution_cancellation.is_cancelled() {
+                                WorkOutcome::Aborted
+                            } else {
+                                WorkOutcome::Failed
+                            };
                             step_reason = Some(bounded_refusal_detail(format!(
                                 "checkout_publication_rejected:{reason}"
                             )));
+                        }
+                        Err(HelperFailure::Unreclaimed(reason)) => {
+                            return park_unreclaimed_helper(
+                                &mut journal,
+                                &organization,
+                                &attempt,
+                                fence,
+                                session_epoch,
+                                ordinal,
+                                reason,
+                            );
                         }
                     }
                 } else {
                     // Timed out, cancelled, output-limited, rejected: whatever
                     // the helper materialized before its answer was accepted
-                    // must not stay behind on the source volume.
+                    // must not stay behind on the source volume. A discard
+                    // that fails parks the attempt: the journaled acquisition
+                    // directory lets every later session retry it.
                     if let Err(reason) = tokio::task::block_in_place(|| helper.discard()) {
-                        eprintln!(
-                            "attempt {}/{} step {ordinal}: helper leftovers not discarded: {reason}",
-                            organization, attempt
+                        return park_unreclaimed_helper(
+                            &mut journal,
+                            &organization,
+                            &attempt,
+                            fence,
+                            session_epoch,
+                            ordinal,
+                            reason,
                         );
                     }
                 }
@@ -5656,6 +5693,36 @@ mod tests {
 
 #[cfg(test)]
 mod renewal_tests;
+
+/// A helper's leftovers could not be reclaimed now. The step's process group
+/// is already empty, and the acquisition directory is journaled, so the
+/// attempt parks reconciliation-required exactly like an unverifiable
+/// container: a later session retries the reclaim before the row can go
+/// terminal, and the controller reconciles the fenced authority.
+#[allow(clippy::too_many_arguments)]
+fn park_unreclaimed_helper(
+    journal: &mut Journal,
+    organization: &str,
+    attempt: &str,
+    fence: u64,
+    session_epoch: u64,
+    ordinal: u32,
+    reason: String,
+) -> Result<(), AgentError> {
+    journal.transition(
+        organization,
+        attempt,
+        fence,
+        session_epoch,
+        AttemptPhase::ReconciliationRequired,
+        None,
+    )?;
+    Err(AgentError::ExecutionReconciliationRequired {
+        organization: organization.to_owned(),
+        attempt: attempt.to_owned(),
+        cause: format!("step {ordinal} helper leftovers not reclaimed: {reason}"),
+    })
+}
 
 /// Prepares every checkout step of the assignment into a sealed acquirer
 /// invocation (PAR-012). Validation admitted checkouts only with source
