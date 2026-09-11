@@ -1,0 +1,48 @@
+Baseline: unmutated client must pass every assertion
+  baseline clean: 18 assertions
+
+[1/21] dashboard-rows-never-appended -> expects desktop_dashboard_lists_builds red
+    caught, also red: ['focus_survives_repeated_live_updates']
+[2/21] validate-button-unwired -> expects desktop_pipeline_validate_accepts_valid_source red
+    caught, also red: ['strict_yaml_refusal_surfaced_to_user']
+[3/21] plan-button-unwired -> expects desktop_pipeline_plan_renders_stages red
+    caught
+[4/21] save-pipeline-unwired -> expects desktop_pipeline_save_and_submit red
+    caught
+[5/21] refusal-not-styled-or-shown -> expects strict_yaml_refusal_surfaced_to_user red
+    caught
+[6/21] build-summary-never-rendered -> expects desktop_build_view_renders_all_panels red
+    caught
+[7/21] audit-output-never-rendered -> expects desktop_audit_view_renders_events red
+    caught
+[8/21] explain-output-never-rendered -> expects desktop_explain_view_renders_reason red
+    caught
+[9/21] navigation-landmark-unlabelled -> expects landmarks_present_in_rendered_dom red
+    caught
+[10/21] control-loses-its-label -> expects every_control_has_accessible_name red
+    caught
+[11/21] focus-ring-removed -> expects keyboard_focus_is_visible_through_journeys red
+    caught
+[12/21] focus-not-preserved-across-refresh -> expects focus_survives_repeated_live_updates red
+    caught, also red: ['focus_survives_build_view_live_refresh']
+[13/21] live-region-not-announced -> expects live_status_region_announces_changes red
+    caught, also red: ['landmarks_present_in_rendered_dom']
+[14/21] table-scroller-removed -> expects viewport_390_has_no_horizontal_overflow red
+    caught
+[15/21] script-error-thrown-on-load -> expects console_has_no_script_errors red
+    caught
+[16/21] favicon-declaration-removed -> expects console_has_no_unexpected_resource_failures red
+    caught
+[17/21] artifact-rows-never-rendered -> expects desktop_build_view_renders_all_panels red
+    caught, also red: ['artifact_download_delivers_content', 'focus_survives_build_view_live_refresh']
+[18/21] artifact-focus-not-preserved-across-live-refresh -> expects focus_survives_build_view_live_refresh red
+    caught
+[19/21] artifact-focus-key-ignores-fence -> expects focus_survives_build_view_live_refresh red
+    caught
+[20/21] artifact-download-unwired -> expects artifact_download_delivers_content red
+    caught
+[21/21] artifact-download-requests-the-wrong-artifact -> expects artifact_download_delivers_content red
+    caught, also red: ['console_has_no_unexpected_resource_failures']
+
+21 of 21 mutations caught
+Mutation evidence written to /tmp/claude-1000/mutfinal
