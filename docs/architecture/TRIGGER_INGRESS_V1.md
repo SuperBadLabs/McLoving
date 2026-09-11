@@ -207,8 +207,101 @@ and effect authority remains governed by its own tickets and fences.
 The generated OpenAPI contract exposes:
 
 - `GET/PUT .../pipelines/{pipeline}/triggers/{trigger}`;
-- `POST .../triggers/{trigger}/events`; and
-- `POST .../triggers/{trigger}/deliveries/{delivery}/redrive`.
+- `POST .../triggers/{trigger}/events`;
+- `POST .../triggers/{trigger}/deliveries/{delivery}/redrive`;
+- `GET .../triggers/{trigger}/webhook`, the GitHub hook path and its derived
+  secret (project configuration authority); and
+- `POST /api/v1/webhooks/github/{organization}/{project}/{pipeline}/{trigger}`,
+  the public GitHub receiver described below.
+
+## GitHub webhook receiver (PAR-001)
+
+A GitHub-provider SCM webhook trigger may be fed directly by GitHub. The
+controller holds one webhook key (`MCLOVING_WEBHOOK_KEY_FILE`, an
+owner-private file of at least 32 bytes, secret-class in the deployment
+contract); each trigger's hook secret is `HMAC-SHA256(key, organization ||
+project || pipeline || trigger || source_generation)` under a domain
+separator, derived on demand and never stored, so rotating the trigger's
+event source rotates the secret and nothing retains it. The key file is
+opened without following symlinks and the deployment guard refuses a
+symlinked path ahead of the binary. An operator reads the
+path and secret from `GET .../triggers/{trigger}/webhook` and pastes them
+into GitHub; a controller without a key answers not-found on both routes.
+
+The receiver takes no bearer. It requires `X-GitHub-Delivery`,
+`X-GitHub-Event` and `X-Hub-Signature-256`, resolves the trigger (which must
+be an enabled or paused `scm_webhook` trigger whose configuration names
+provider `github`), and verifies the signature over the raw body in constant
+time before it interprets anything; a forged or unsigned delivery is refused
+with 401 and leaves no receipt. The body is bounded at GitHub's own 25 MiB
+payload maximum, so no delivery GitHub can send is refused unread, and the
+route holds at most eight deliveries in flight, the permit taken before any
+body is buffered and released at a 30-second deadline, so an
+unauthenticated sender can pin at most eight bodies in memory and none of
+them for longer than the deadline; a saturated route answers 503
+`webhook_busy` with `Retry-After` and reads nothing, a delivery that
+outlives the deadline answers 408 `webhook_timeout`, and either refused
+delivery is redeliverable. The OpenAPI
+operation `receiveGithubDelivery` declares the three headers, the
+`GithubDelivery` body and the 200/201/202/422 answers, plus the 408 and
+503 backpressure answers with their `Retry-After` header. The secret-bearing
+`GET .../webhook` answer is marked `Cache-Control: no-store`. A `push` to a
+branch maps to the SCM payload `repository_identity` (the repository's
+`full_name`, which the trigger's `repository_identity` must equal),
+`revision` (`after`), `branch` (the ref without `refs/heads/`) and `paths`
+(the union of the commits' added, modified and removed paths, omitted when it
+exceeds the 128-path payload bound or when the payload lists fewer commits
+than the push's advertised `size`, so a path filter can match neither an
+unbounded nor a partially known change); a `pull_request` `opened`,
+`synchronize` or `reopened` maps the head sha and head ref the same way. The
+delivery id is both the delivery and the event identity. When the saved
+pipeline declares public string parameters named `revision` or `branch`, the
+delivery supplies them, which is how a checkout step takes its commit from a
+push.
+
+Admission then runs the same path as the bearer route with the trigger's own
+`event_source_identity` as the caller, but receipt-timed: the ledger assigns
+the event time from the database clock inside its serialized acceptance, so
+one delivery id gets one time however many controllers receive it and no
+controller clock can push a legitimate delivery outside the skew window; and
+a redelivery is matched on the authenticated delivery alone (ids, kind,
+caller, canonical `{event_kind, payload, body_sha256}` so a different
+signed body whose mapped fields coincide is a conflict, platform, trust
+pool), never on
+the trigger generation or the parameters current at redelivery, so a trigger
+revision or a pipeline parameter change after acceptance does not turn an
+exact redelivery into a conflict. For the same reason a delivery id the
+ledger already holds is replayed before the trigger's current pause state
+and filter are applied: those describe new input, and a paused trigger or a
+narrowed branch filter must not turn an accepted delivery's redelivery into
+a refusal or a `filtered` acknowledgement. Created deliveries answer 201 with the
+build admission, exact redeliveries answer 200 with the same build and mint
+nothing, and a reused delivery id with a different authenticated body is a
+409 `trigger_ingress_conflict`. Deliveries that authenticate but are not
+admitted, a tag push, a branch deletion, a `ping`, an unsupported event or
+action, or an event the trigger's filter refuses, answer 202 with
+`{"status": "ignored" | "filtered", "reason", "delivery_id"}` so GitHub
+reports the hook healthy, and each is recorded as a
+`trigger.delivery_unadmitted` audit event under the event-source identity
+and as a `webhook_receipts` row (event header, body digest, status, reason)
+rather than as a delivery row. A delivery id's first authenticated decision
+is durable: admitted ids live in `trigger_deliveries`, unadmitted ids in
+`webhook_receipts`, both written under the trigger lock with each write
+refusing an id the other holds across both the delivery and the event
+identifier namespaces (acceptance and redrive check receipts on every path
+and timing, the bearer route included), so two concurrent first deliveries
+cannot be decided twice; a receipt carries the trigger generation whose filter and
+state decided it and is refused under the lock if the trigger was revised
+meanwhile, so a stale decision never bars an id from admission under the new
+filter; a repeat of an unadmitted delivery with the same event header
+and body answers the recorded acknowledgement again without a second audit
+record, and a repeat with a different header or body, or an admitted id
+re-sent under an inadmissible event (the signature covers the body, not the
+event header), is a 409 `trigger_ingress_conflict`. An admitted delivery
+replays under the caller identity it was recorded with, so rotating the
+trigger's event-source identity does not turn its redelivery into a
+conflict. To run an event that was filtered under a narrower filter, push
+again or use the bearer route.
 
 Trigger configuration is a `kind`-discriminated union with separate closed SCM,
 schedule, upstream, and remote API variants and their exact required fields.
@@ -222,10 +315,13 @@ dead-letter reason, and optional build admission for every normal outcome.
 The database ledger is the transferable source of truth: append-only trigger
 versions, unique event/delivery deduplication records, pending/retry/dead-letter
 sets, admitted build bindings, claim fences, redrive lineage, and
-generation-specific schedule watermarks. The quiesced transfer snapshot also
-binds every trigger version's actor, reason, idempotency key, audit sequence and
-event hash; every accepted delivery's audit sequence and event hash; and the
-handoff export audit event into one domain-separated state digest. Verification
+generation-specific schedule watermarks, and the webhook receipts of
+deliveries authenticated but not admitted (schema 2), so a delivery id
+decided at the source stays decided at the destination. The quiesced transfer
+snapshot also binds every trigger version's actor, reason, idempotency key,
+audit sequence and event hash; every accepted delivery's audit sequence and
+event hash; every webhook receipt's audit sequence; and the handoff export
+audit event into one domain-separated state digest. Verification
 recomputes a separate exact-ledger digest and requires it in the hash-verified
 handoff audit event. Its caller must also supply that event hash from an
 independently retained audit export or chain head; the snapshot cannot establish

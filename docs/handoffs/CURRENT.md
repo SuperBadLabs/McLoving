@@ -15,17 +15,14 @@ ticket, in this order:
 `PAR-000` -> `PAR-010` -> `PAR-011` -> `PAR-012` -> `PAR-001` -> `PAR-013` ->
 `PAR-014` -> `PAR-004` -> `PAR-005` -> `PAR-003` -> `PAR-002` -> `PAR-015`
 
-`PAR-000` closed on PR #143 (`aeb6dd85`, Foundation `34560483683`, Windows `34560483674`) and `PAR-010` on PR #145 (`cca42de5`, Foundation `34571458905`, Windows `34571458894`); `PAR-011` closed on PR #146 (`0eb949ba`, Foundation `34584499133`, Windows `34584499144`); `PAR-012` is `ACTIVE` in slot 1. `AGENT-008` was filed from PAR-010 review and `AGENT-009` from PAR-011 review as parallel lanes. `EXEC-005` stays
-`ACTIVE` but rescoped: its cache and input slices are merged, its source slice
-is delivered by `PAR-012`, and its dependency-resolver and provisioner slices
-are dropped. The `JCOMP-001` through `JCOMP-003` milestone is complete and its
+`PAR-000` closed on PR #143 (`aeb6dd85`, Foundation `34560483683`, Windows `34560483674`) and `PAR-010` on PR #145 (`cca42de5`, Foundation `34571458905`, Windows `34571458894`); `PAR-011` closed on PR #146 (`0eb949ba`, Foundation `34584499133`, Windows `34584499144`); `PAR-012` closed on PR #147 (`e22a94ed`, Foundation `34598819224`, Windows `34598819193`) and closed `EXEC-005` with it; `PAR-001` is `ACTIVE` in slot 1. `AGENT-008` was filed from PAR-010 review, `AGENT-009` from PAR-011 review and `AGENT-010` from PAR-012 review as parallel lanes. The `JCOMP-001` through `JCOMP-003` milestone is complete and its
 receipts stand as bounded evidence.
 
 **Progress metric: distance.** Count the unclosed tickets from the head of the
 chain to `PAR-005`. It was 9 on 2026-09-10, 8 after `PAR-000` closed, 7
-after `PAR-010` closed on 2026-09-11, and 6 after `PAR-011` closed the same
-day (`PAR-012`, `PAR-001`, `PAR-013`, `PAR-014`, `PAR-004`, `PAR-005`); the
-2026-09-30 milestone is met nineteen days early. Report it here every
+after `PAR-010` closed on 2026-09-11, 6 after `PAR-011` closed the same day,
+and 5 after `PAR-012` closed on 2026-09-11 (`PAR-001`, `PAR-013`, `PAR-014`,
+`PAR-004`, `PAR-005`); the 2026-09-30 milestone is met nineteen days early. Report it here every
 two weeks; it must fall. A ticket added to the chain is reported as a
 regression in this file, not filed silently.
 

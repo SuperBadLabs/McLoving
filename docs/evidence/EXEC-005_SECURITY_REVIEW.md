@@ -451,5 +451,32 @@ alias case; corrected frozen-candidate full-suite and protected-main results
 must be recorded separately. No broader source integration gate is earned.
 Held acquisition-directory custody, finite retained-state reservations and crash
 reconciliation, controller/agent wiring and actual submitted-job replay remain
-open. EXEC-005 remains ACTIVE and no production/canary/cutover or frozen JCOMP
-claim is expanded.
+open at the time of that review; the source slice then closed as the checkout
+step of `PAR-012` (PR #147), recorded below. No production/canary/cutover or
+frozen JCOMP claim is expanded by the closure.
+
+## Closure — source slice delivered by PAR-012 (2026-09-11)
+
+`EXEC-005` closed with `PAR-012` on PR #147, squash commit
+`e22a94ed49b259f52e6c16c2e3bf65891eb9a3b3`, exact-main Foundation `34598819224` and Windows Agent
+`34598819193`. Of the five helper product paths this ticket set out to wire:
+
+- cache (PRs #139 and #141) and input (PR #140) merged with their own
+  submitted-job gates, recorded above;
+- source is the `checkout` step: a submitted pipeline checks a repository
+  out at an exact commit through the API, controller, remote mTLS agent and
+  the shipped sealed source acquirer, and the next step builds in the tree.
+  Its gate is `bins/agent/tests/source_work.rs` and its receipt
+  `docs/evidence/PAR-012_SECURITY_REVIEW.md`, which also records the
+  held-directory custody, crash reconciliation and submitted-job replay this
+  review left open;
+- dependency resolution and dynamic provisioning were dropped on 2026-09-10
+  (`PAR-000`, ADR 0016): their helpers require a McLoving-private attestation
+  that no public registry or cloud provides, so no product path and no gate is
+  claimed for them.
+
+The residuals named above stand: same-UID hostile workload containment is
+`SEC-005`, startup catalogs do not promise hot revocation, cached bytes are
+not restored to a workspace, captured input values do not reach a workspace,
+and the source publication hardening items are `AGENT-010`. No production,
+canary or cutover authority follows from this closure.

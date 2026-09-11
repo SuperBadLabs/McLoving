@@ -132,6 +132,7 @@ async fn main() -> Result<()> {
     let cache_mapping_catalog = cache_mapping_catalog_from_environment()?;
     let input_mapping_catalog = input_mapping_catalog_from_environment()?;
     let source_mapping_catalog = source_mapping_catalog_from_environment()?;
+    let webhook_key = webhook_key_from_environment()?;
     validate_effect_mapping_configuration(
         worker.config.effect_plan.as_ref().map(|plan| {
             (
@@ -226,6 +227,11 @@ async fn main() -> Result<()> {
         state = state
             .with_source_mapping_catalog(catalog)
             .context("configure source mapping admission catalog")?;
+    }
+    if let Some(key) = webhook_key {
+        state = state
+            .with_webhook_key(key)
+            .context("configure the controller webhook key")?;
     }
     if let Some(oidc) = &oidc {
         state = state
@@ -2651,6 +2657,49 @@ fn load_input_mapping_catalog(
     _expected: &str,
 ) -> Result<InputMappingCatalog> {
     bail!("input catalog is supported only on Linux controllers")
+}
+
+/// `MCLOVING_WEBHOOK_KEY_FILE` (PAR-001): an owner-private regular file of
+/// at least 32 bytes; per-trigger GitHub hook secrets are derived from it and
+/// never stored. Absent means the public webhook route answers not-found.
+fn webhook_key_from_environment() -> Result<Option<Vec<u8>>> {
+    let path = match std::env::var("MCLOVING_WEBHOOK_KEY_FILE") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_WEBHOOK_KEY_FILE must not be empty"),
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error).context("read webhook key path"),
+    };
+    if !path.is_absolute() {
+        bail!("MCLOVING_WEBHOOK_KEY_FILE must be absolute");
+    }
+    use std::io::Read as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&path).context("open webhook key file")?;
+    let metadata = file.metadata().context("inspect webhook key file")?;
+    if !metadata.is_file() || metadata.len() < 32 || metadata.len() > 4096 {
+        bail!("webhook key file must be a regular file of 32 to 4096 bytes");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o077 != 0 {
+            bail!("webhook key file must not be readable by group or other users");
+        }
+    }
+    let mut key = Vec::new();
+    file.take(4097)
+        .read_to_end(&mut key)
+        .context("read webhook key file")?;
+    if key.len() < 32 || key.len() > 4096 {
+        bail!("webhook key file changed size while being read");
+    }
+    Ok(Some(key))
 }
 
 fn source_mapping_catalog_from_environment() -> Result<Option<SourceMappingCatalog>> {

@@ -988,11 +988,26 @@ fn digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// Whether any regular file under `root` holds `needle`. The walk races the
+/// agent's own reclaim of the tree it inspects, so an entry that vanishes
+/// between listing and inspection counts as absent rather than as a panic.
 fn directory_contains(root: &Path, needle: &[u8]) -> bool {
-    let entries = std::fs::read_dir(root).expect("read test directory");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => panic!("read test directory {}: {error}", root.display()),
+    };
     for entry in entries {
-        let path = entry.expect("read test entry").path();
-        let metadata = std::fs::symlink_metadata(&path).expect("inspect output-boundary entry");
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("read test entry under {}: {error}", root.display()),
+        };
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("inspect output-boundary entry {}: {error}", path.display()),
+        };
         if metadata.file_type().is_symlink() {
             continue;
         }
@@ -1000,12 +1015,15 @@ fn directory_contains(root: &Path, needle: &[u8]) -> bool {
             if directory_contains(&path, needle) {
                 return true;
             }
-        } else if std::fs::read(&path)
-            .expect("read complete output boundary file")
-            .windows(needle.len())
-            .any(|window| window == needle)
-        {
-            return true;
+        } else {
+            let content = match std::fs::read(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("read output boundary file {}: {error}", path.display()),
+            };
+            if content.windows(needle.len()).any(|window| window == needle) {
+                return true;
+            }
         }
     }
     false

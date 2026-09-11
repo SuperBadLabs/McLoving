@@ -90,12 +90,13 @@ pub use test_results::{
     TestCaseObservation, TestOutcome, TestReportSource, TestResultError, parse_junit,
 };
 pub use trigger_ingress::{
-    NewTriggerDelivery, PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite,
-    TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
-    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
-    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
-    TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
-    TriggerScheduleWatermark, TriggerTransferSnapshot, compute_trigger_transfer_snapshot_digest,
+    DeliveryTiming, NewTriggerDelivery, NewWebhookReceipt, PipelineTrigger, PipelineTriggerState,
+    PipelineTriggerWrite, TRIGGER_TRANSFER_SCHEMA_VERSION, TriggerDelivery,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, TriggerScheduleWatermark, TriggerTransferSnapshot,
+    WebhookReceipt, WebhookReceiptOutcome, compute_trigger_transfer_snapshot_digest,
     compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
 };
 
@@ -196,6 +197,7 @@ pub const ACTIVE_LEASE_NOTIFICATIONS_V35: &str =
 
 pub const BUILD_WORKSPACE_V36: &str = include_str!("../migrations/0036_build_workspace.sql");
 pub const STEP_ORDINAL_V37: &str = include_str!("../migrations/0037_step_ordinal.sql");
+pub const WEBHOOK_RECEIPTS_V38: &str = include_str!("../migrations/0038_webhook_receipts.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -860,6 +862,7 @@ impl Store {
                    ('trigger_schedule_watermarks', 'SELECT'),
                    ('trigger_schedule_watermarks', 'INSERT'),
                    ('trigger_schedule_watermarks', 'UPDATE'),
+                   ('webhook_receipts', 'SELECT'), ('webhook_receipts', 'INSERT'),
                    ('discovery_parent_definitions', 'SELECT'),
                    ('discovery_parent_definitions', 'INSERT'),
                    ('discovery_parent_definitions', 'UPDATE'),
@@ -1189,7 +1192,7 @@ impl Store {
                    ('pipeline_operational_state_history'),
                    ('pipeline_trigger_definitions'),
                    ('pipeline_trigger_versions'), ('trigger_deliveries'),
-                   ('trigger_schedule_watermarks'),
+                   ('trigger_schedule_watermarks'), ('webhook_receipts'),
                    ('discovery_parent_definitions'),
                    ('discovery_parent_versions'), ('discovery_scans'),
                    ('discovery_scan_results'), ('discovery_child_identities'),
@@ -1236,7 +1239,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 60
+             SELECT COUNT(*) = 61
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1265,7 +1268,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 60
+                    AND (SELECT COUNT(*) FROM policies) = 61
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1383,6 +1386,7 @@ impl Store {
         apply_migration(&mut tx, 35, ACTIVE_LEASE_NOTIFICATIONS_V35).await?;
         apply_migration(&mut tx, 36, BUILD_WORKSPACE_V36).await?;
         apply_migration(&mut tx, 37, STEP_ORDINAL_V37).await?;
+        apply_migration(&mut tx, 38, WEBHOOK_RECEIPTS_V38).await?;
         tx.commit().await?;
         Ok(())
     }

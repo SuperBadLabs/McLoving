@@ -2,15 +2,16 @@
 mod diff003;
 
 use mcloving_controller_store::{
-    DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, PipelineOperationalState,
-    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
-    PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, Store,
-    StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TriggerDeliveryAdmission,
-    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission,
-    TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
-    TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
-    TriggerScheduleSlot, compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
-    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
+    DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, NewWebhookReceipt,
+    PipelineOperationalState, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePutOutcome, PipelineTriggerState,
+    PipelineTriggerWrite, PipelineWrite, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, compute_audit_event_hash,
+    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
+    verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -2522,6 +2523,29 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         .put_pipeline_trigger(&pause_for_handoff)
         .await
         .unwrap();
+    // A webhook delivery acknowledged but not admitted is ledger state too:
+    // it travels with the handoff so its id stays decided at the destination,
+    // and the ledger refuses to admit that id on any path afterwards.
+    let paused_generation = store
+        .pipeline_trigger(organization_id, project_id, pipeline_id, trigger_id)
+        .await
+        .unwrap()
+        .expect("paused trigger is current")
+        .generation;
+    store
+        .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
+            organization_id,
+            trigger_id,
+            expected_trigger_generation: paused_generation,
+            delivery_id: "hook-ignored-1",
+            event: "ping",
+            body_sha256: [7; 32],
+            status: "ignored",
+            reason: "ping is not a build trigger",
+            caller_identity: "remote:caller:rotated",
+        })
+        .await
+        .expect("record an unadmitted webhook receipt");
     let handoff = store
         .export_quiesced_trigger_state(
             organization_id,
@@ -2532,6 +2556,75 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         )
         .await
         .expect("export complete paused trigger ledger");
+    assert_eq!(handoff.webhook_receipts.len(), 1);
+    assert_eq!(handoff.webhook_receipts[0].delivery_id, "hook-ignored-1");
+    assert_eq!(
+        handoff.handoff_audit_event.payload["webhook_receipt_count"],
+        json!(1)
+    );
+    let mut receipt_admitted = handoff.clone();
+    receipt_admitted.webhook_receipts[0].delivery_id =
+        receipt_admitted.deliveries[0].delivery_id.clone();
+    receipt_admitted.state_sha256 =
+        compute_trigger_transfer_snapshot_digest(&receipt_admitted).unwrap();
+    assert!(matches!(
+        verify_trigger_transfer_snapshot(&receipt_admitted, handoff.audit_event_hash),
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    // A receipt may collide with neither an admitted delivery id nor an
+    // admitted event id, and a decision taken against a superseded
+    // generation is refused rather than recorded.
+    let admitted_event_id = handoff.deliveries[0].event_id.clone();
+    assert!(matches!(
+        store
+            .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
+                organization_id,
+                trigger_id,
+                expected_trigger_generation: paused_generation,
+                delivery_id: &admitted_event_id,
+                event: "ping",
+                body_sha256: [7; 32],
+                status: "ignored",
+                reason: "collides with an admitted event id",
+                caller_identity: "remote:caller:rotated",
+            })
+            .await,
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    assert!(matches!(
+        store
+            .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
+                organization_id,
+                trigger_id,
+                expected_trigger_generation: paused_generation - 1,
+                delivery_id: "hook-stale-generation",
+                event: "ping",
+                body_sha256: [7; 32],
+                status: "ignored",
+                reason: "decided against a superseded generation",
+                caller_identity: "remote:caller:rotated",
+            })
+            .await,
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    // A redrive may not mint its new identifiers onto an acknowledged id.
+    assert!(matches!(
+        store
+            .redrive_trigger_delivery(&TriggerDeliveryRedrive {
+                organization_id,
+                project_id,
+                pipeline_id,
+                trigger_id,
+                dead_letter_delivery_id: "dead-1".to_owned(),
+                new_delivery_id: "hook-ignored-1".to_owned(),
+                new_event_id: "redrive-event-onto-receipt".to_owned(),
+                actor_subject: "recovery@example.test".to_owned(),
+                accepted_at_unix_ms: handoff_now,
+            })
+            .await,
+        Err(StoreError::TriggerIngressConflict(message))
+            if message.contains("acknowledged as unadmitted")
+    ));
     let trusted_handoff_audit_hash = handoff.audit_event_hash;
     verify_trigger_transfer_snapshot(&handoff, trusted_handoff_audit_hash)
         .expect("verify handoff snapshot against independently retained audit hash");

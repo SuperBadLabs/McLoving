@@ -387,7 +387,7 @@ CLOSED_TICKETS = frozenset({
     "DIFF-002",
     "DIFF-003",
     "DISC-001", "E2E-001", "E2E-002", "E2E-003", "EXEC-001", "EXEC-002",
-    "EXEC-003", "EXEC-004", "EXT-001", "EXT-002", "FOUND-001",
+    "EXEC-003", "EXEC-004", "EXEC-005", "EXT-001", "EXT-002", "FOUND-001",
     # HYG-002 closes itself: the attribution field above and the five parser
     # fixes are its acceptance, and its own row went DONE in the same change.
     "FOUND-002", "HYG-001", "HYG-002", "IDP-001", "INPUT-001", "INV-001",
@@ -396,7 +396,7 @@ CLOSED_TICKETS = frozenset({
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
     "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
     "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",
-    "PAR-000", "PAR-010", "PAR-011", "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001", "UI-002",
+    "PAR-000", "PAR-010", "PAR-011", "PAR-012", "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001", "UI-002",
     "UX-001", "UX-002", "WIN-001", "WIN-002", "WIN-003", "WIN-004"
 })
 

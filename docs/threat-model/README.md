@@ -604,6 +604,8 @@ had never claimed one.
 | PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
 | PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
 | PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
+| PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
+| EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -617,7 +619,7 @@ chain, or deployment boundaries.
 
 PR #135 follow-up review identified an earlier malformed interpolation prefix hidden by a later lexical exclusion. The bounded Clojure precheck now follows the existing independent Rust proof before entering dynamic syntax; unknown nested expressions are not guessed. Original `2326a63` receipts remain historical, and fresh exact-source evidence plus protected verification are required for the follow-up. The V2 contract and runtime authority are unchanged; no closure attribution is added.
 
-## EXEC-005 review — bounded cache product integration, ticket ACTIVE
+## EXEC-005 review — bounded cache product integration (earned closure)
 
 The cache slice reviews TM-036 and TM-012 across submitted intent, operator
 mapping, controller context, sealed process and authenticated response. Closed
@@ -661,11 +663,16 @@ cache producer and shared HMAC verifier. Same-UID hostile workload containment
 remains SEC-005, startup catalogs do not promise hot revocation, and cached bytes
 are not restored to a downstream workspace. At the cache review, four other
 helper product paths remained refused; the input successor review follows.
-All five end-to-end gates and normal protected-main verification
-are still required before EXEC-005 can close. This is a partial implementation
-boundary review, not ticket closure or production qualification.
+This section reviewed the cache slice as a partial implementation boundary.
+`EXEC-005` closed with `PAR-012` on PR #147: the cache and input slices
+merged with their own gates, the source slice is the checkout step reviewed
+in the `PAR-012` section, and the dependency-resolver and provisioner slices
+were dropped on 2026-09-10 because their helpers require a McLoving-private
+attestation no public registry or cloud provides. Three of the five helper
+gates exist; the two dropped helpers earn none. No production, canary or
+cutover authority follows from the closure.
 
-## EXEC-005 input capture integration review, ticket ACTIVE
+## EXEC-005 input capture integration review (earned closure)
 
 The bounded input contract is `docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
 TM-008/TM-026 are reviewed for closed literal input intents, canonical IR 1.5
@@ -877,7 +884,62 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
-## PAR-012 checkout step execution review, ticket ACTIVE
+## PAR-001 GitHub webhook receiver review, ticket ACTIVE
+
+A public route lets GitHub feed an SCM webhook trigger directly. Boundaries
+touched: TM-039 (trigger ingress: the receiver admits through the same
+durable delivery ledger, replay and conflict rules as the bearer route, with
+the trigger's own event-source identity as the caller, so nothing about
+uniqueness, redrive or dead-lettering is bypassed; the delivery is
+receipt-timed, the event time being the database clock read inside the
+serialized acceptance so one delivery id gets one time across controllers
+and no controller clock can reject a legitimate delivery, and a redelivery is
+matched on the authenticated delivery alone rather than on the trigger
+generation or parameters current at redelivery, and ahead of the trigger's
+current pause state and filter, so it replays rather than conflicts, refuses
+or acknowledges as filtered after a configuration change); TM-002/TM-011
+(authentication: no bearer, the raw body's `X-Hub-Signature-256` is verified
+in constant time under a per-trigger secret derived by HMAC from the
+controller's webhook key file and the trigger's identity and
+`source_generation`, never stored, rotated by event-source rotation, and
+verified before any byte of the body is interpreted, so a forged delivery
+leaves no receipt; deliveries in flight are bounded to eight, the permit
+taken before the body is buffered and released at a 30-second deadline, so
+an unauthenticated sender pins at most eight bodies of the 25 MiB bound in
+memory and none past the deadline, a saturated route answers 503 without
+reading and a stalled body 408; the key file is secret-class and nofollow in
+the deployment contract, opened without following symlinks, and refused
+unless owner-private; the secret-bearing read answer is `no-store`); TM-052 (routing: the receiver answers
+only enabled-or-paused `scm_webhook` triggers whose configuration names
+provider `github`, and a controller without a key answers not-found so the
+route cannot be probed for triggers); TM-039 again for the mapping: the
+delivery is reduced to the closed SCM payload (repository `full_name`,
+`after`, branch, bounded paths) and every other field is dropped, an
+oversized or truncated change set (more paths than the bound, or fewer
+commits listed than the push advertises) is admitted pathless so a path
+filter cannot be bypassed by volume or by omission, a delivery id's first
+authenticated decision is durable (admitted ids in `trigger_deliveries`,
+unadmitted ids in the indexed `webhook_receipts` with their event header and
+body digest, both written under the trigger lock and each refusing the
+other's ids; a repeat with the same authenticated input answers its recorded
+acknowledgement without a second audit record, a repeat with different input
+or an admitted id re-sent under an inadmissible event is a conflict; an
+admitted delivery replays under its recorded caller identity across
+event-source rotation), and unadmitted deliveries are acknowledged with 202 and
+recorded as audit events so GitHub keeps delivering. Residual: the operator
+reads the secret over the authenticated API and pastes it into GitHub, so
+the secret's confidentiality in transit and at GitHub is the operator's and
+GitHub's; the receiver trusts GitHub's delivery id as the idempotency key,
+which is what GitHub's own redelivery contract guarantees; `revision` and
+`branch` reach a pipeline only as parameters it declares, never implicitly.
+Tests cover admission, exact redelivery with one build, reused-id conflict,
+forged signature without receipt, missing headers, the unkeyed controller,
+filtered and ignored acknowledgements with their audit records, and the
+pull-request mapping. Closure requires the reviewed merge, exact-main
+Foundation and native Windows runs, and a receipt in
+`docs/evidence/PAR-001_SECURITY_REVIEW.md`.
+
+## PAR-012 checkout step execution review (earned closure)
 
 A `checkout` step puts the sealed source acquirer on the product path: a
 submitted pipeline names a deployment source binding, a ref, an exact commit
@@ -911,7 +973,17 @@ commit reaches the pipeline as a literal or a typed parameter until `PAR-001`
 supplies it from a delivery. Shipped-binary tests cover an ineligible agent
 leaving the checkout queued, the branch head landing with a following step
 building in it, a planted symlink destination refused by name, and five API
-refusals. Closure requires the reviewed merge, exact-main Foundation and
-native Windows runs, and a receipt in
-`docs/evidence/PAR-012_SECURITY_REVIEW.md`.
+refusals. Closed on PR #147 (`e22a94ed`), exact-main Foundation
+`34598819224` and Windows Agent `34598819193`; receipt
+`docs/evidence/PAR-012_SECURITY_REVIEW.md`. The review added, before the
+merge, pre-publication verification of the retained tree with the acquirer's
+own routine, a sealed launcher, journaled acquisition directories reclaimed
+by recovery, and deadline-bounded publication. Residual, filed as
+`AGENT-010`: verification opens the acquisition by pathname while the move
+uses a held descriptor, the manifest bound is the acquirer's tool-output
+bound rather than the admitted limits, the final syncs and the recovery walk
+bound are not deadline- or journal-bound, and the zero-budget checkout record
+does not carry its termination through finalization. The published tree is
+owner-writable by design, and plain process steps remain uncontained
+(`SEC-005`).
 

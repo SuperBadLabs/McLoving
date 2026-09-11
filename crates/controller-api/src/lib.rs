@@ -5,6 +5,8 @@ mod cache_intent;
 mod input_intent;
 use input_intent::validate_input_mappings;
 pub use input_intent::{INPUT_MAPPING_CATALOG_V1, InputMappingCatalog, InputMappingRecord};
+mod github_webhook;
+pub use github_webhook::GithubWebhookResponse;
 mod oidc;
 mod source_intent;
 use cache_intent::validate_cache_mappings;
@@ -35,11 +37,11 @@ use axum::{Json, Router};
 use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, CancellationDecision,
     ComponentCursor, ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite,
-    CredentialGrantView, DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind,
-    DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent,
-    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
-    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite,
-    ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
+    CredentialGrantView, DagDependency, DagNodeKind, DeliveryTiming, DependencyCondition,
+    DiscoveredRefKind, DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite,
+    DiscoveryParent, DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState,
+    DiscoveryParentWrite, DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource,
+    DiscoveryScanWrite, ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
     NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy,
     PipelineOperationalStateRecord, PipelineOperationalStateTransition,
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
@@ -91,6 +93,19 @@ pub struct ApiState {
     cache_mapping_catalog: CacheMappingCatalog,
     input_mapping_catalog: InputMappingCatalog,
     source_mapping_catalog: SourceMappingCatalog,
+    /// Controller webhook key (PAR-001): per-trigger GitHub hook secrets are
+    /// derived from it and never stored. Absent means no public webhook route
+    /// answers.
+    webhook_key: Option<Vec<u8>>,
+    /// Permits for deliveries in flight on the public webhook route, taken
+    /// before a body is buffered: the route is unauthenticated until the
+    /// signature over the whole body is checked, so its memory is bounded by
+    /// permits times the body limit rather than by whoever connects.
+    webhook_deliveries: Arc<tokio::sync::Semaphore>,
+    /// How long one public webhook delivery may hold its permit, from the
+    /// first body byte to the response: a sender that withholds or trickles
+    /// a body cannot pin a permit past this.
+    webhook_delivery_deadline: Duration,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -196,6 +211,11 @@ impl ApiState {
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
+            webhook_key: None,
+            webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
+                github_webhook::MAX_CONCURRENT_DELIVERIES,
+            )),
+            webhook_delivery_deadline: github_webhook::DELIVERY_DEADLINE,
         })
     }
 
@@ -218,6 +238,11 @@ impl ApiState {
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
+            webhook_key: None,
+            webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
+                github_webhook::MAX_CONCURRENT_DELIVERIES,
+            )),
+            webhook_delivery_deadline: github_webhook::DELIVERY_DEADLINE,
         }
     }
 
@@ -375,6 +400,41 @@ impl ApiState {
         Ok(self)
     }
 
+    /// Installs the controller webhook key GitHub hook secrets derive from.
+    pub fn with_webhook_key(mut self, key: Vec<u8>) -> Result<Self, ApiError> {
+        if key.len() < github_webhook::MIN_WEBHOOK_KEY_BYTES {
+            return Err(ApiError::configuration(
+                "webhook key must hold at least 32 bytes",
+            ));
+        }
+        self.webhook_key = Some(key);
+        Ok(self)
+    }
+
+    /// Bounds how many public webhook deliveries may be in flight at once
+    /// (default [`github_webhook::MAX_CONCURRENT_DELIVERIES`]).
+    pub fn with_webhook_delivery_limit(mut self, limit: usize) -> Result<Self, ApiError> {
+        if limit == 0 {
+            return Err(ApiError::configuration(
+                "webhook delivery limit must admit at least one delivery",
+            ));
+        }
+        self.webhook_deliveries = Arc::new(tokio::sync::Semaphore::new(limit));
+        Ok(self)
+    }
+
+    /// Bounds how long one public webhook delivery may hold its permit
+    /// (default [`github_webhook::DELIVERY_DEADLINE`]).
+    pub fn with_webhook_delivery_deadline(mut self, deadline: Duration) -> Result<Self, ApiError> {
+        if deadline.is_zero() {
+            return Err(ApiError::configuration(
+                "webhook delivery deadline must be positive",
+            ));
+        }
+        self.webhook_delivery_deadline = deadline;
+        Ok(self)
+    }
+
     pub fn with_source_mapping_catalog(
         mut self,
         catalog: SourceMappingCatalog,
@@ -430,12 +490,28 @@ impl ApiState {
 }
 
 pub fn router(state: ApiState) -> Router {
+    let state = Arc::new(state);
     let artifact_upload = Router::new()
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads",
             post(stage_artifact),
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
+    // A public route: no bearer, the body signature under the trigger's
+    // derived secret is the only authentication (PAR-001). Deliveries in
+    // flight are bounded before any body is buffered.
+    let github_webhook = Router::new()
+        .route(
+            "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}",
+            post(github_webhook::receive_github_delivery),
+        )
+        .route_layer(DefaultBodyLimit::max(
+            github_webhook::MAX_DELIVERY_BODY_BYTES,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            github_webhook::bound_deliveries,
+        ));
     let discovery_scan = Router::new()
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
@@ -504,6 +580,10 @@ pub fn router(state: ApiState) -> Router {
             post(submit_trigger_event),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook",
+            get(github_webhook::read_github_webhook),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
             post(redrive_trigger_event),
         )
@@ -512,6 +592,7 @@ pub fn router(state: ApiState) -> Router {
             get(get_discovery_parent).put(put_discovery_parent),
         )
         .merge(discovery_scan)
+        .merge(github_webhook)
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
             get(list_discovery_children),
@@ -585,7 +666,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/organizations/{organization_id}/performance",
             get(performance),
         )
-        .with_state(Arc::new(state))
+        .with_state(state)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1181,6 +1262,14 @@ fn openapi_document() -> Value {
                     "submitTriggerEvent", "Authenticate, durably capture, and process a typed trigger event", "TriggerEventRequest"
                 )
             },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "get": github_webhook_operation()
+            },
+            "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "post": github_delivery_operation()
+            },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger, delivery],
                 "post": trigger_event_operation(
@@ -1450,6 +1539,32 @@ fn openapi_document() -> Value {
                     "additionalProperties": false
                 },
                 "TriggerEventResponse": trigger_event_response_schema(),
+                "GithubDelivery": {
+                    "type": "object",
+                    "description": "A GitHub webhook payload as GitHub sends it (push or pull_request); the receiver reads repository.full_name, ref/after/deleted/size/commits or action/pull_request.head and drops everything else",
+                    "additionalProperties": true
+                },
+                "GithubWebhookResponse": {
+                    "type": "object",
+                    "required": ["provider", "path", "source_generation", "secret"],
+                    "properties": {
+                        "provider": {"type": "string", "enum": ["github"]},
+                        "path": {"type": "string"},
+                        "source_generation": {"type": "string"},
+                        "secret": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "additionalProperties": false
+                },
+                "WebhookAcknowledgement": {
+                    "type": "object",
+                    "required": ["status", "reason", "delivery_id"],
+                    "properties": {
+                        "status": {"type": "string", "enum": ["ignored", "filtered"]},
+                        "reason": {"type": "string"},
+                        "delivery_id": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                },
                 "TriggerDelivery": trigger_delivery_schema(),
                 "AdmissionResponse": admission_response_schema(),
                 "ScmTriggerConfiguration": scm_trigger_configuration_schema(),
@@ -2325,6 +2440,76 @@ fn trigger_event_operation(operation_id: &str, summary: &str, body_schema: &str)
         response("Delivery is durably leased or waiting for its bounded retry");
     operation["responses"]["422"] =
         response("Delivery is durably dead-lettered and carries its terminal state");
+    operation
+}
+
+fn github_webhook_operation() -> Value {
+    let mut operation = api_operation(
+        "readGithubWebhook",
+        "triggers",
+        "Read the GitHub hook path and its derived secret for an SCM webhook trigger",
+        "200",
+        Vec::new(),
+        None,
+    );
+    operation["responses"]["200"] = json!({
+        "description": "The public hook path and the secret GitHub must sign deliveries with",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GithubWebhookResponse"}}}
+    });
+    operation
+}
+
+/// The public GitHub receiver: no bearer, the delivery authenticated by its
+/// signature header; four distinct success shapes because GitHub keeps a
+/// hook healthy on any 2xx and the receiver must acknowledge deliveries it
+/// does not admit.
+fn github_delivery_operation() -> Value {
+    let mut operation = unauthenticated_api_operation(
+        "receiveGithubDelivery",
+        "triggers",
+        "Receive a signed GitHub push or pull-request delivery for an SCM webhook trigger",
+        "201",
+        vec![
+            header_parameter("X-GitHub-Delivery", true),
+            header_parameter("X-GitHub-Event", true),
+            header_parameter("X-Hub-Signature-256", true),
+        ],
+        Some("GithubDelivery"),
+    );
+    let admission = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TriggerEventResponse"}}}
+        })
+    };
+    operation["responses"]["200"] =
+        admission("Exact redelivery of an admitted delivery id: the same build, nothing minted");
+    operation["responses"]["201"] = admission("New delivery admitted or durably captured");
+    operation["responses"]["202"] = json!({
+        "description": "Either an admitted delivery that is durably leased or waiting for its bounded retry (TriggerEventResponse), or a delivery authenticated but not admitted (ignored event or action, tag push, deletion, ping, or a filter miss) acknowledged so GitHub keeps delivering and recorded as a webhook receipt (WebhookAcknowledgement)",
+        "content": {"application/json": {"schema": {"oneOf": [
+            {"$ref": "#/components/schemas/TriggerEventResponse"},
+            {"$ref": "#/components/schemas/WebhookAcknowledgement"}
+        ]}}}
+    });
+    operation["responses"]["422"] =
+        admission("Delivery is durably dead-lettered and carries its terminal state");
+    let error = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+        })
+    };
+    operation["responses"]["408"] = error(
+        "webhook_timeout: the body was not received within the delivery deadline; the permit is released and the delivery is redeliverable",
+    );
+    let mut busy = error(
+        "webhook_busy: too many deliveries in flight; the body is not read and the delivery is redeliverable",
+    );
+    busy["headers"] = json!({
+        "Retry-After": {"description": "Seconds to wait before redelivering", "schema": {"type": "string"}}
+    });
+    operation["responses"]["503"] = busy;
     operation
 }
 
@@ -3716,37 +3901,90 @@ async fn submit_trigger_event(
         .await
         .map_err(trigger_error)?
         .ok_or_else(resource_not_found)?;
-    validate_trigger_event_filter(&trigger, &request)?;
+    admit_trigger_event(
+        &state,
+        &trigger,
+        &request,
+        &principal.subject,
+        DeliveryTiming::Declared,
+    )
+    .await
+}
+
+/// Admits one typed trigger event on behalf of `caller_identity`: filter
+/// check, pre-capture parameter validation, canonical capture into the durable
+/// delivery ledger (created or exactly replayed), then processing. The bearer
+/// route passes its authenticated principal and declares the event time; a
+/// public event source (PAR-001) passes the trigger's own event-source
+/// identity once it has authenticated the delivery by other means, and is
+/// receipt-timed: the ledger assigns the event time from its own clock inside
+/// the serialized acceptance and replays the delivery id on the
+/// authenticated delivery alone (see [`DeliveryTiming`]), so the ledger and
+/// its uniqueness rules are the same for both.
+async fn admit_trigger_event(
+    state: &ApiState,
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+    caller_identity: &str,
+    timing: DeliveryTiming,
+) -> Result<Response, ApiError> {
+    // The trigger's pause state and filter describe new input. A receipt-timed
+    // delivery id the ledger already holds is a redelivery of an accepted
+    // event, which must replay however the trigger has been revised or paused
+    // since, so the current-generation gate is skipped for it and the
+    // serialized acceptance decides replay or conflict under the trigger
+    // lock. The lookup is advisory: a miss that races a concurrent first
+    // acceptance takes the gate against the same current configuration and
+    // still replays inside the lock.
+    let redelivery = match timing {
+        DeliveryTiming::Declared => false,
+        DeliveryTiming::Receipt { .. } => state
+            .store
+            .trigger_delivery(
+                trigger.organization_id,
+                trigger.trigger_id,
+                &request.delivery_id,
+            )
+            .await
+            .map_err(trigger_error)?
+            .is_some(),
+    };
+    if !redelivery {
+        validate_trigger_event_filter(trigger, request)?;
+    }
     // Reject parameter shapes before durable capture. The processing path
     // repeats this validation for crash/restart and legacy-corruption safety.
     parameter_values(request.parameters.clone())?;
     let accepted_at_unix_ms = unix_time_ms();
-    let canonical_payload = canonical_trigger_payload(&request)?;
+    let canonical_payload = canonical_trigger_payload(request, timing)?;
     let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
     let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
     let parameters = Value::Object(request.parameters.clone().into_iter().collect());
-    let schedule_slot = trigger_schedule_slot(&trigger, &request)?;
+    let schedule_slot = trigger_schedule_slot(trigger, request)?;
     let delivery = state
         .store
-        .accept_trigger_delivery(&NewTriggerDelivery {
-            organization_id,
-            project_id,
-            pipeline_id,
-            trigger_id,
-            expected_trigger_generation: request.trigger_generation,
-            delivery_id: request.delivery_id.clone(),
-            event_id: request.event_id.clone(),
-            event_kind: request.event_kind.clone(),
-            caller_identity: principal.subject.clone(),
-            payload_sha256,
-            canonical_payload,
-            parameters,
-            requested_platform: request.platform.clone(),
-            requested_trust_pool: request.trust_pool.clone(),
-            event_time_unix_ms: request.event_time_unix_ms,
-            accepted_at_unix_ms,
-            schedule_slot,
-        })
+        .accept_trigger_delivery_timed(
+            &NewTriggerDelivery {
+                organization_id: trigger.organization_id,
+                project_id: trigger.project_id,
+                pipeline_id: trigger.pipeline_id,
+                trigger_id: trigger.trigger_id,
+                expected_trigger_generation: request.trigger_generation,
+                delivery_id: request.delivery_id.clone(),
+                event_id: request.event_id.clone(),
+                event_kind: request.event_kind.clone(),
+                caller_identity: caller_identity.to_owned(),
+                payload_sha256,
+                canonical_payload,
+                parameters,
+                requested_platform: request.platform.clone(),
+                requested_trust_pool: request.trust_pool.clone(),
+                event_time_unix_ms: request.event_time_unix_ms,
+                accepted_at_unix_ms,
+                schedule_slot,
+            },
+            timing,
+        )
         .await
         .map_err(trigger_error)?;
     // An unsupported platform is not refused before capture. The store has to
@@ -3760,7 +3998,7 @@ async fn submit_trigger_event(
         TriggerDeliveryAdmission::Created(delivery)
         | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
     };
-    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+    process_trigger_delivery(state, delivery, accepted_at_unix_ms).await
 }
 
 async fn redrive_trigger_event(
@@ -4007,7 +4245,10 @@ fn parameter_values_from_delivery(
     parameter_values(parameters)
 }
 
-fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, ApiError> {
+fn canonical_trigger_payload(
+    request: &TriggerEventRequest,
+    timing: DeliveryTiming,
+) -> Result<Value, ApiError> {
     if !request.payload.is_object() {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -4015,12 +4256,24 @@ fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, Api
             "trigger payload must be an object",
         ));
     }
-    Ok(json!({
-        "trigger_generation": request.trigger_generation,
-        "event_kind": request.event_kind.clone(),
-        "event_time_unix_ms": request.event_time_unix_ms,
-        "payload": request.payload.clone(),
-    }))
+    Ok(match timing {
+        DeliveryTiming::Declared => json!({
+            "trigger_generation": request.trigger_generation,
+            "event_kind": request.event_kind.clone(),
+            "event_time_unix_ms": request.event_time_unix_ms,
+            "payload": request.payload.clone(),
+        }),
+        // A receipt-timed delivery is canonicalized as what the event source
+        // sent: the generation and the clock are the ledger's, recorded in
+        // their own columns, and must not enter the digest a redelivery is
+        // matched against; the raw body's digest must, so a different signed
+        // body whose mapped fields coincide is a conflict, not a replay.
+        DeliveryTiming::Receipt { body_sha256 } => json!({
+            "event_kind": request.event_kind.clone(),
+            "payload": request.payload.clone(),
+            "body_sha256": hex(&body_sha256),
+        }),
+    })
 }
 
 fn validate_trigger_event_filter(
@@ -7707,6 +7960,14 @@ mod tests {
                 "get",
             ),
             ("/api/v1/organizations/{organization_id}/performance", "get"),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook",
+                "get",
+            ),
+            (
+                "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}",
+                "post",
+            ),
         ];
         let mut operation_ids = BTreeSet::new();
         for (path, method) in expected {

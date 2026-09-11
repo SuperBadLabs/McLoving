@@ -488,7 +488,7 @@ pub(crate) async fn logout(
     Ok((no_store_headers(), Json(LogoutResponse { revoked })))
 }
 
-fn no_store_headers() -> HeaderMap {
+pub(crate) fn no_store_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));

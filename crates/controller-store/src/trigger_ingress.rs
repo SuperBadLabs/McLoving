@@ -223,6 +223,64 @@ pub enum TriggerDeliveryAdmission {
     Replayed(TriggerDelivery),
 }
 
+/// A webhook delivery that was authenticated but not admitted, recorded so
+/// its delivery id's decision is durable (PAR-001).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WebhookReceipt {
+    pub organization_id: Uuid,
+    pub trigger_id: Uuid,
+    pub delivery_id: String,
+    pub event: String,
+    pub body_sha256: [u8; 32],
+    pub status: String,
+    pub reason: String,
+    pub caller_identity: String,
+    pub recorded_at_unix_ms: i64,
+    pub audit_sequence: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWebhookReceipt<'a> {
+    pub organization_id: Uuid,
+    pub trigger_id: Uuid,
+    /// The trigger generation whose filter and state produced this decision;
+    /// the receipt is refused under the lock if the trigger has moved on.
+    pub expected_trigger_generation: i64,
+    pub delivery_id: &'a str,
+    pub event: &'a str,
+    pub body_sha256: [u8; 32],
+    pub status: &'a str,
+    pub reason: &'a str,
+    pub caller_identity: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub enum WebhookReceiptOutcome {
+    Recorded(WebhookReceipt),
+    Replayed(WebhookReceipt),
+}
+
+/// How a delivery's event time is settled and what an exact replay of its
+/// delivery id has to match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryTiming {
+    /// The caller declares the event time and the trigger generation it
+    /// observed; a replay must repeat both, along with the parameters.
+    Declared,
+    /// The event is the delivery's receipt (a public event source such as a
+    /// GitHub hook, PAR-001): the event time is the database clock read
+    /// inside the serialized acceptance transaction, so two controllers
+    /// receiving one first delivery cannot disagree on it, and a redelivery is
+    /// matched by the authenticated delivery alone (ids, kind, caller,
+    /// canonical payload, platform, trust pool), never by the trigger
+    /// generation or the parameters current at the time of the redelivery,
+    /// so later configuration changes do not turn an exact redelivery into a
+    /// conflict. The digest of the raw delivery body is part of what the
+    /// caller canonicalizes, so a different signed body under one delivery
+    /// id is a conflict even when its mapped fields coincide.
+    Receipt { body_sha256: [u8; 32] },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TriggerDeliveryFailure {
     RetryScheduled(TriggerDelivery),
@@ -319,17 +377,24 @@ pub struct TriggerTransferSnapshot {
     pub versions: Vec<PipelineTrigger>,
     pub deliveries: Vec<TriggerDelivery>,
     pub schedule_watermarks: Vec<TriggerScheduleWatermark>,
+    /// Webhook deliveries authenticated but not admitted (schema 2): part of
+    /// the ledger, so a delivery id decided at the source stays decided at
+    /// the destination.
+    pub webhook_receipts: Vec<WebhookReceipt>,
     pub handoff_audit_event: crate::AuditEvent,
     pub audit_sequence: i64,
     pub audit_event_hash: [u8; 32],
     pub state_sha256: [u8; 32],
 }
 
+/// The trigger transfer snapshot format this build exports and verifies.
+pub const TRIGGER_TRANSFER_SCHEMA_VERSION: u16 = 2;
+
 pub fn verify_trigger_transfer_snapshot(
     snapshot: &TriggerTransferSnapshot,
     trusted_handoff_audit_event_hash: [u8; 32],
 ) -> Result<(), StoreError> {
-    if snapshot.schema_version != 1
+    if snapshot.schema_version != TRIGGER_TRANSFER_SCHEMA_VERSION
         || snapshot.current_generation <= 0
         || snapshot.audit_sequence <= 0
         || snapshot.audit_event_hash == [0; 32]
@@ -407,6 +472,26 @@ pub fn verify_trigger_transfer_snapshot(
             ));
         }
     }
+    let mut receipt_ids = std::collections::BTreeSet::new();
+    for receipt in &snapshot.webhook_receipts {
+        if receipt.organization_id != snapshot.organization_id
+            || receipt.trigger_id != snapshot.trigger_id
+            || !matches!(receipt.status.as_str(), "ignored" | "filtered")
+            || receipt.reason.is_empty()
+            || receipt.event.is_empty()
+            || receipt.caller_identity.is_empty()
+            || receipt.recorded_at_unix_ms < 0
+            || receipt.audit_sequence <= 0
+            || deliveries_by_id.contains_key(receipt.delivery_id.as_str())
+            || event_ids.contains(receipt.delivery_id.as_str())
+            || !receipt_ids.insert(receipt.delivery_id.as_str())
+        {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger transfer webhook receipts are duplicated, admitted, or substituted"
+                    .to_owned(),
+            ));
+        }
+    }
     let mut watermark_generations = std::collections::BTreeSet::new();
     for watermark in &snapshot.schedule_watermarks {
         if watermark.organization_id != snapshot.organization_id
@@ -478,6 +563,7 @@ pub fn verify_trigger_transfer_snapshot(
         "version_count": snapshot.versions.len(),
         "delivery_count": snapshot.deliveries.len(),
         "schedule_watermark_count": snapshot.schedule_watermarks.len(),
+        "webhook_receipt_count": snapshot.webhook_receipts.len(),
         "ledger_sha256": hex::encode(ledger_sha256),
     });
     if snapshot.handoff_audit_event.category != "trigger"
@@ -517,6 +603,7 @@ pub fn compute_trigger_transfer_snapshot_digest(
         versions: &'a [PipelineTrigger],
         deliveries: &'a [TriggerDelivery],
         schedule_watermarks: &'a [TriggerScheduleWatermark],
+        webhook_receipts: &'a [WebhookReceipt],
         handoff_audit_event: &'a crate::AuditEvent,
         audit_sequence: i64,
         audit_event_hash: [u8; 32],
@@ -531,13 +618,14 @@ pub fn compute_trigger_transfer_snapshot_digest(
         versions: &snapshot.versions,
         deliveries: &snapshot.deliveries,
         schedule_watermarks: &snapshot.schedule_watermarks,
+        webhook_receipts: &snapshot.webhook_receipts,
         handoff_audit_event: &snapshot.handoff_audit_event,
         audit_sequence: snapshot.audit_sequence,
         audit_event_hash: snapshot.audit_event_hash,
     })
     .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mcloving-trigger-transfer-v1\0");
+    hasher.update(b"mcloving-trigger-transfer-v2\0");
     hasher.update(canonical);
     Ok(hasher.finalize().into())
 }
@@ -553,6 +641,7 @@ fn trigger_transfer_ledger_digest(
     versions: &[PipelineTrigger],
     deliveries: &[TriggerDelivery],
     schedule_watermarks: &[TriggerScheduleWatermark],
+    webhook_receipts: &[WebhookReceipt],
 ) -> Result<[u8; 32], StoreError> {
     #[derive(Serialize)]
     struct LedgerDigestInput<'a> {
@@ -565,6 +654,7 @@ fn trigger_transfer_ledger_digest(
         versions: &'a [PipelineTrigger],
         deliveries: &'a [TriggerDelivery],
         schedule_watermarks: &'a [TriggerScheduleWatermark],
+        webhook_receipts: &'a [WebhookReceipt],
     }
     let canonical = serde_json::to_vec(&LedgerDigestInput {
         schema_version,
@@ -576,10 +666,11 @@ fn trigger_transfer_ledger_digest(
         versions,
         deliveries,
         schedule_watermarks,
+        webhook_receipts,
     })
     .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mcloving-trigger-transfer-ledger-v1\0");
+    hasher.update(b"mcloving-trigger-transfer-ledger-v2\0");
     hasher.update(canonical);
     Ok(hasher.finalize().into())
 }
@@ -597,6 +688,7 @@ pub fn compute_trigger_transfer_snapshot_ledger_digest(
         &snapshot.versions,
         &snapshot.deliveries,
         &snapshot.schedule_watermarks,
+        &snapshot.webhook_receipts,
     )
 }
 
@@ -634,6 +726,209 @@ impl Store {
         .await?;
         tx.commit().await?;
         row.map(trigger_from_row).transpose()
+    }
+
+    /// One accepted delivery of a trigger by its delivery id, if any. A
+    /// receipt-timed event source (PAR-001) asks this before applying the
+    /// trigger's current filter and pause state to a delivery: those describe
+    /// new input, and a delivery id the ledger already holds is a redelivery
+    /// that must replay whatever the trigger has since been changed to. The
+    /// answer is advisory only; the serialized acceptance decides replay or
+    /// conflict under the trigger lock.
+    pub async fn trigger_delivery(
+        &self,
+        organization_id: Uuid,
+        trigger_id: Uuid,
+        delivery_id: &str,
+    ) -> Result<Option<TriggerDelivery>, StoreError> {
+        if delivery_id.is_empty() || delivery_id.len() > MAX_TEXT_BYTES {
+            return Err(StoreError::InvalidTriggerIngress(
+                "delivery id is out of bounds".to_owned(),
+            ));
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query(
+            "SELECT * FROM trigger_deliveries
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.map(delivery_from_row).transpose()
+    }
+
+    /// The receipt of a webhook delivery that was authenticated but not
+    /// admitted, if any. Advisory: the serialized writes decide.
+    pub async fn webhook_receipt(
+        &self,
+        organization_id: Uuid,
+        trigger_id: Uuid,
+        delivery_id: &str,
+    ) -> Result<Option<WebhookReceipt>, StoreError> {
+        validate_text("delivery_id", delivery_id, MAX_TEXT_BYTES)?;
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query(
+            "SELECT * FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.map(webhook_receipt_from_row).transpose()
+    }
+
+    /// Records that a webhook delivery was authenticated but not admitted,
+    /// or replays the receipt already recorded for its delivery id. Runs
+    /// under the trigger lock like acceptance: an id the delivery ledger
+    /// holds is a conflict, a receipt whose event or body digest differs
+    /// from this input is a conflict, and the receipt row's primary key
+    /// makes a concurrent second decision impossible.
+    pub async fn record_unadmitted_webhook_delivery(
+        &self,
+        input: &NewWebhookReceipt<'_>,
+    ) -> Result<WebhookReceiptOutcome, StoreError> {
+        validate_text("delivery_id", input.delivery_id, MAX_TEXT_BYTES)?;
+        validate_text("event", input.event, MAX_TEXT_BYTES)?;
+        validate_text("caller_identity", input.caller_identity, MAX_TEXT_BYTES)?;
+        if !matches!(input.status, "ignored" | "filtered") {
+            return Err(StoreError::InvalidTriggerIngress(
+                "webhook receipt status must be ignored or filtered".to_owned(),
+            ));
+        }
+        if input.reason.is_empty() || input.reason.len() > 1024 {
+            return Err(StoreError::InvalidTriggerIngress(
+                "webhook receipt reason is out of bounds".to_owned(),
+            ));
+        }
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
+        let existing = sqlx::query(
+            "SELECT * FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
+             FOR UPDATE",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(input.delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            let receipt = webhook_receipt_from_row(existing)?;
+            tx.commit().await?;
+            if receipt.event == input.event && receipt.body_sha256 == input.body_sha256 {
+                return Ok(WebhookReceiptOutcome::Replayed(receipt));
+            }
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery ID was reused for different webhook input".to_owned(),
+            ));
+        }
+        // Accepted deliveries treat delivery and event identifiers as one
+        // namespace; a receipt id must collide with neither.
+        let admitted = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM trigger_deliveries
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND (delivery_id = $3 OR event_id = $3)",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(input.delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if admitted.is_some() {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery ID was reused for an event that is not admissible".to_owned(),
+            ));
+        }
+        // The decision was taken against one generation's filter and state;
+        // if the trigger was revised meanwhile the decision is stale, and a
+        // stale receipt would bar the id from admission under the new filter
+        // forever. Refuse it so the sender's redelivery is decided afresh.
+        let current_generation = sqlx::query_scalar::<_, i64>(
+            "SELECT current_generation FROM pipeline_trigger_definitions
+             WHERE organization_id = $1 AND trigger_id = $2",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match current_generation {
+            Some(generation) if generation == input.expected_trigger_generation => {}
+            Some(generation) => {
+                tx.rollback().await?;
+                return Err(StoreError::TriggerIngressConflict(format!(
+                    "trigger generation changed from {} to {generation}",
+                    input.expected_trigger_generation
+                )));
+            }
+            None => {
+                tx.rollback().await?;
+                return Err(StoreError::TriggerIngressConflict(
+                    "delivery does not identify a configured trigger".to_owned(),
+                ));
+            }
+        }
+        let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
+        let recorded_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        let audit = crate::audit::append_audit_record(
+            &mut tx,
+            input.organization_id,
+            "trigger",
+            input.caller_identity,
+            "trigger.delivery_unadmitted",
+            &format!(
+                "trigger:{}:delivery:{}",
+                input.trigger_id, input.delivery_id
+            ),
+            json!({
+                "provider": "github",
+                "trigger_id": input.trigger_id,
+                "delivery_id": input.delivery_id,
+                "event": input.event,
+                "body_sha256": hex::encode(input.body_sha256),
+                "status": input.status,
+                "reason": input.reason,
+                "recorded_at_unix_ms": recorded_at_unix_ms,
+            }),
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO webhook_receipts (
+                 organization_id, trigger_id, delivery_id, event, body_sha256,
+                 status, reason, caller_identity, recorded_at_unix_ms, audit_sequence
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(input.delivery_id)
+        .bind(input.event)
+        .bind(input.body_sha256.as_slice())
+        .bind(input.status)
+        .bind(input.reason)
+        .bind(input.caller_identity)
+        .bind(recorded_at_unix_ms)
+        .bind(audit.sequence)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(WebhookReceiptOutcome::Recorded(WebhookReceipt {
+            organization_id: input.organization_id,
+            trigger_id: input.trigger_id,
+            delivery_id: input.delivery_id.to_owned(),
+            event: input.event.to_owned(),
+            body_sha256: input.body_sha256,
+            status: input.status.to_owned(),
+            reason: input.reason.to_owned(),
+            caller_identity: input.caller_identity.to_owned(),
+            recorded_at_unix_ms,
+            audit_sequence: audit.sequence,
+        }))
     }
 
     pub async fn pipeline_trigger_generation(
@@ -887,6 +1182,20 @@ impl Store {
         &self,
         input: &NewTriggerDelivery,
     ) -> Result<TriggerDeliveryAdmission, StoreError> {
+        self.accept_trigger_delivery_timed(input, DeliveryTiming::Declared)
+            .await
+    }
+
+    /// [`Self::accept_trigger_delivery`] with an explicit [`DeliveryTiming`].
+    /// Under [`DeliveryTiming::Receipt`] the input's `event_time_unix_ms` is
+    /// ignored: the recorded event time is the acceptance transaction's
+    /// database clock, and the replay comparison skips the trigger
+    /// generation, the parameters and the event time.
+    pub async fn accept_trigger_delivery_timed(
+        &self,
+        input: &NewTriggerDelivery,
+        timing: DeliveryTiming,
+    ) -> Result<TriggerDeliveryAdmission, StoreError> {
         validate_delivery(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
@@ -910,7 +1219,7 @@ impl Store {
         }
         if let Some(existing) = existing.into_iter().next() {
             let delivery = delivery_from_row(existing)?;
-            if !delivery_matches(&delivery, input) {
+            if !delivery_matches_timed(&delivery, input, timing) {
                 tx.rollback().await?;
                 return Err(StoreError::TriggerIngressConflict(
                     "delivery or event ID was reused for different trigger input".to_owned(),
@@ -968,7 +1277,7 @@ impl Store {
         }
         if let Some(existing) = serialized_existing.into_iter().next() {
             let delivery = delivery_from_row(existing)?;
-            if !delivery_matches(&delivery, input) {
+            if !delivery_matches_timed(&delivery, input, timing) {
                 tx.rollback().await?;
                 return Err(StoreError::TriggerIngressConflict(
                     "delivery or event ID was reused for different trigger input".to_owned(),
@@ -976,6 +1285,28 @@ impl Store {
             }
             tx.commit().await?;
             return Ok(TriggerDeliveryAdmission::Replayed(delivery));
+        }
+        // A delivery id the webhook receiver already acknowledged as
+        // unadmitted was decided once; it does not enter the ledger later
+        // under any path or timing, the bearer route included. Checked under
+        // the same trigger lock the receipt was written under, so the two
+        // decisions are serialized.
+        let acknowledged = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND delivery_id IN ($3, $4)",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
+        .bind(&input.event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if acknowledged.is_some() {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery ID was already acknowledged as unadmitted".to_owned(),
+            ));
         }
         let generation: i64 = trigger_row.try_get("current_generation")?;
         if generation != input.expected_trigger_generation {
@@ -1076,8 +1407,16 @@ impl Store {
         // including the organization-wide audit head, is already held.
         let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let database_accepted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
-        if input.event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
-            || input.event_time_unix_ms
+        // A receipt-timed delivery takes the database clock, read under the
+        // trigger lock, so the time is assigned exactly once per delivery id
+        // however many controllers receive it, and no controller clock can
+        // place a legitimate delivery outside the skew window.
+        let event_time_unix_ms = match timing {
+            DeliveryTiming::Declared => input.event_time_unix_ms,
+            DeliveryTiming::Receipt { .. } => database_accepted_at_unix_ms,
+        };
+        if event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+            || event_time_unix_ms
                 < database_accepted_at_unix_ms.saturating_sub(window_seconds * 1000)
         {
             tx.rollback().await?;
@@ -1109,7 +1448,7 @@ impl Store {
                 "event_id": input.event_id,
                 "event_kind": input.event_kind,
                 "payload_sha256": hex::encode(input.payload_sha256),
-                "event_time_unix_ms": input.event_time_unix_ms,
+                "event_time_unix_ms": event_time_unix_ms,
                 "accepted_at_unix_ms": database_accepted_at_unix_ms,
                 "expires_at_unix_ms": expires_at,
                 "schedule_slot": input.schedule_slot.as_ref(),
@@ -1143,7 +1482,7 @@ impl Store {
         .bind(&input.parameters)
         .bind(&input.requested_platform)
         .bind(&input.requested_trust_pool)
-        .bind(input.event_time_unix_ms)
+        .bind(event_time_unix_ms)
         .bind(database_accepted_at_unix_ms)
         .bind(expires_at)
         .bind(audit.sequence)
@@ -1858,6 +2197,26 @@ impl Store {
             tx.commit().await?;
             return Ok(TriggerDeliveryAdmission::Replayed(replay));
         }
+        // The redrive's new identifiers are new admissions: an id the webhook
+        // receiver already acknowledged as unadmitted is refused here as it
+        // is in acceptance, under the same trigger lock.
+        let acknowledged = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND delivery_id IN ($3, $4)",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.new_delivery_id)
+        .bind(&input.new_event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if acknowledged.is_some() {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "redrive delivery or event ID was already acknowledged as unadmitted".to_owned(),
+            ));
+        }
         let trigger = sqlx::query(
             "SELECT definition.current_generation, version.state,
                     version.event_source_identity
@@ -2170,8 +2529,22 @@ impl Store {
             .into_iter()
             .map(schedule_watermark_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let receipt_rows = sqlx::query(
+            "SELECT * FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2
+             ORDER BY delivery_id
+             FOR SHARE",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let webhook_receipts = receipt_rows
+            .into_iter()
+            .map(webhook_receipt_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
         let ledger_sha256 = trigger_transfer_ledger_digest(
-            1,
+            TRIGGER_TRANSFER_SCHEMA_VERSION,
             organization_id,
             project_id,
             pipeline_id,
@@ -2180,6 +2553,7 @@ impl Store {
             &versions,
             &deliveries,
             &schedule_watermarks,
+            &webhook_receipts,
         )?;
         let audit = crate::audit::append_audit_record(
             &mut tx,
@@ -2196,12 +2570,13 @@ impl Store {
                 "version_count": versions.len(),
                 "delivery_count": deliveries.len(),
                 "schedule_watermark_count": schedule_watermarks.len(),
+                "webhook_receipt_count": webhook_receipts.len(),
                 "ledger_sha256": hex::encode(ledger_sha256),
             }),
         )
         .await?;
         let mut snapshot = TriggerTransferSnapshot {
-            schema_version: 1,
+            schema_version: TRIGGER_TRANSFER_SCHEMA_VERSION,
             organization_id,
             project_id,
             pipeline_id,
@@ -2210,6 +2585,7 @@ impl Store {
             versions,
             deliveries,
             schedule_watermarks,
+            webhook_receipts,
             handoff_audit_event: audit.clone(),
             audit_sequence: audit.sequence,
             audit_event_hash: audit.event_hash,
@@ -2982,6 +3358,35 @@ fn trigger_matches_write(trigger: &PipelineTrigger, input: &PipelineTriggerWrite
         && trigger.idempotency_key == input.idempotency_key
 }
 
+fn delivery_matches_timed(
+    delivery: &TriggerDelivery,
+    input: &NewTriggerDelivery,
+    timing: DeliveryTiming,
+) -> bool {
+    match timing {
+        DeliveryTiming::Declared => delivery_matches(delivery, input),
+        // The receipt-timed replay is the authenticated delivery itself: the
+        // generation the trigger has moved to, the parameters the pipeline
+        // now declares and the clock reading are not part of what the event
+        // source re-sent.
+        DeliveryTiming::Receipt { .. } => {
+            delivery.organization_id == input.organization_id
+                && delivery.project_id == input.project_id
+                && delivery.pipeline_id == input.pipeline_id
+                && delivery.trigger_id == input.trigger_id
+                && delivery.delivery_id == input.delivery_id
+                && delivery.event_id == input.event_id
+                && delivery.event_kind == input.event_kind
+                && delivery.caller_identity == input.caller_identity
+                && delivery.payload_sha256 == input.payload_sha256
+                && delivery.canonical_payload == input.canonical_payload
+                && delivery.requested_platform == input.requested_platform
+                && delivery.requested_trust_pool == input.requested_trust_pool
+                && input.schedule_slot.is_none()
+        }
+    }
+}
+
 fn delivery_matches(delivery: &TriggerDelivery, input: &NewTriggerDelivery) -> bool {
     delivery.organization_id == input.organization_id
         && delivery.project_id == input.project_id
@@ -3041,6 +3446,24 @@ fn trigger_from_row(row: sqlx::postgres::PgRow) -> Result<PipelineTrigger, Store
         idempotency_key: row.try_get("idempotency_key")?,
         audit_sequence: row.try_get("audit_sequence")?,
         audit_event_hash: digest_from_row(&row, "audit_event_hash")?,
+    })
+}
+
+fn webhook_receipt_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookReceipt, StoreError> {
+    let body_sha256: Vec<u8> = row.try_get("body_sha256")?;
+    Ok(WebhookReceipt {
+        organization_id: row.try_get("organization_id")?,
+        trigger_id: row.try_get("trigger_id")?,
+        delivery_id: row.try_get("delivery_id")?,
+        event: row.try_get("event")?,
+        body_sha256: body_sha256.as_slice().try_into().map_err(|_| {
+            StoreError::InvalidTriggerIngress("stored webhook body digest is malformed".to_owned())
+        })?,
+        status: row.try_get("status")?,
+        reason: row.try_get("reason")?,
+        caller_identity: row.try_get("caller_identity")?,
+        recorded_at_unix_ms: row.try_get("recorded_at_unix_ms")?,
+        audit_sequence: row.try_get("audit_sequence")?,
     })
 }
 
