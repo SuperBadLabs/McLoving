@@ -1087,9 +1087,11 @@ where a credential acts, a named repository must be the mapping's, and a
 kind whose credential the deployment lacks is refused rather than queued
 undeliverable; at delivery the destination host is resolved, every address
 is checked against loopback, private, link-local, shared, benchmarking,
-documentation, multicast, reserved and the IPv6 unique-local, site-local,
-IETF protocol-assignment (Teredo, benchmarking, ORCHID), 6to4, well-known
-and local-use NAT64 and IPv4-mapped forms, the connection is pinned to
+documentation, multicast and reserved ranges, IPv6 allowed only inside
+global unicast less the IETF protocol-assignment, documentation and
+segment-routing blocks with 6to4, well-known NAT64 and IPv4-mapped forms
+decided by the embedded address and local-use NAT64 refused, the connection
+is pinned to
 exactly those addresses with the name kept for TLS and `Host`, redirects are
 not followed and no proxy is used, and the sequence is repeated on every
 attempt so a name that changes its answer between attempts is re-decided;

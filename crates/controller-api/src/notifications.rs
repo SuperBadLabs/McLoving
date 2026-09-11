@@ -323,6 +323,8 @@ fn forbidden_v4(v4: Ipv4Addr) -> Option<&'static str> {
         Some("protocol assignments")
     } else if a == 198 && (18..=19).contains(&b) {
         Some("benchmarking")
+    } else if a == 192 && b == 88 && c == 99 {
+        Some("6to4 relay anycast")
     } else if v4.is_documentation() {
         Some("documentation")
     } else if v4.is_multicast() {
@@ -338,35 +340,46 @@ fn embedded_v4(high: u16, low: u16) -> Ipv4Addr {
     Ipv4Addr::from((u32::from(high) << 16) | u32::from(low))
 }
 
+/// IPv6 is decided by allowlist: only global unicast (`2000::/3`) may be a
+/// destination, less the special-purpose blocks carved out of it, and an
+/// address that embeds an IPv4 address is decided by that address. Every
+/// other prefix (loopback, unspecified, the discard and dummy prefixes,
+/// unique-local, link-local, site-local, multicast, and whatever IANA
+/// reserves next) is refused without being named individually.
 fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
     if let Some(mapped) = v6.to_ipv4_mapped() {
         return forbidden_v4(mapped).or(Some("IPv4-mapped"));
     }
     let segments = v6.segments();
-    if v6.is_unspecified() {
-        Some("unspecified")
-    } else if v6.is_loopback() {
-        Some("loopback")
-    } else if v6.is_multicast() {
-        Some("multicast")
-    } else if segments[0] & 0xfe00 == 0xfc00 {
-        Some("unique local")
-    } else if segments[0] & 0xffc0 == 0xfe80 {
-        Some("link-local")
-    } else if segments[0] & 0xffc0 == 0xfec0 {
-        Some("site-local")
-    } else if segments[0] == 0x2001 && segments[1] == 0x0db8 {
-        Some("documentation")
-    } else if segments[0] == 0x0100 && segments[1..4] == [0, 0, 0] {
-        Some("discard")
-    } else if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1 {
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1 {
         // Local-use NAT64 (RFC 8215): translates to whatever the local
         // translator chooses, so the whole prefix is refused.
-        Some("local-use NAT64")
-    } else if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
+        return Some("local-use NAT64");
+    }
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
         // Well-known NAT64: the embedded IPv4 address decides.
-        forbidden_v4(embedded_v4(segments[6], segments[7])).or(Some("NAT64"))
-    } else if segments[0] == 0x2002 {
+        return forbidden_v4(embedded_v4(segments[6], segments[7])).or(Some("NAT64"));
+    }
+    if segments[0] & 0xe000 != 0x2000 {
+        return Some(if v6.is_unspecified() {
+            "unspecified"
+        } else if v6.is_loopback() {
+            "loopback"
+        } else if v6.is_multicast() {
+            "multicast"
+        } else if segments[0] & 0xfe00 == 0xfc00 {
+            "unique local"
+        } else if segments[0] & 0xffc0 == 0xfe80 {
+            "link-local"
+        } else if segments[0] & 0xffc0 == 0xfec0 {
+            "site-local"
+        } else if segments[0] == 0x0100 && segments[1..3] == [0, 0] {
+            "discard or dummy"
+        } else {
+            "non-global"
+        });
+    }
+    if segments[0] == 0x2002 {
         // 6to4: the embedded IPv4 address decides.
         forbidden_v4(embedded_v4(segments[1], segments[2])).or(Some("6to4"))
     } else if segments[0] == 0x2001 && segments[1] < 0x0200 {
@@ -374,6 +387,12 @@ fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
         // benchmarking (2001:2::/48), AMT, AS112, ORCHID and whatever is
         // assigned next; none is a notification destination.
         Some("IETF protocol assignment")
+    } else if (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
+    {
+        // 2001:db8::/32 and 3fff::/20 (5f00::/16 segment-routing SIDs lie
+        // outside 2000::/3 and are refused above).
+        Some("documentation")
     } else {
         None
     }
@@ -808,6 +827,14 @@ mod tests {
             "2001:1ff:ffff::1",
             "2001:db8::1",
             "100::1",
+            "100:0:0:1::1",
+            "::2",
+            "1::1",
+            "3fff::1",
+            "3fff:fff:ffff::1",
+            "5f00::1",
+            "5f00:ffff::1",
+            "192.88.99.1",
             "fc00::1",
             "fd12::1",
             "fe80::1",
@@ -826,6 +853,8 @@ mod tests {
             "2606:50c0:8000::153",
             "2001:200::1",
             "2001:4860:4860::8888",
+            "3ffe::1",
+            "3fff:1000::1",
         ] {
             let address: IpAddr = allowed.parse().unwrap();
             assert_eq!(

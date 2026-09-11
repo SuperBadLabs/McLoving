@@ -145,9 +145,11 @@ can tell its outcomes apart), `X-McLoving-Attempt` and
 `X-McLoving-Event: build.terminal`. Before either connects, the destination
 host is resolved and every address is checked against the loopback,
 private, link-local, shared, benchmarking, documentation, multicast and
-reserved ranges and their IPv6 counterparts including unique-local,
-site-local, the IETF protocol-assignments block (Teredo, benchmarking,
-ORCHID), 6to4, NAT64 (well-known and local-use) and IPv4-mapped forms; the connection is
+reserved ranges; an IPv6 address is allowed only inside global unicast
+`2000::/3` less the IETF protocol-assignments block (Teredo, benchmarking,
+ORCHID), documentation and segment-routing prefixes, with 6to4, NAT64 and
+IPv4-mapped forms decided by the embedded IPv4 address and local-use NAT64
+refused outright; the connection is
 then pinned to exactly those addresses with the host name kept for TLS and
 `Host`, redirects are not followed, proxies are not used, a request is
 bounded at five seconds to connect and twenty in all, the answer is read to
