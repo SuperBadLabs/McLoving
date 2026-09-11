@@ -1027,6 +1027,22 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                     "a container stage may hold process steps only",
                 ));
             }
+            // The container runtime takes environment from a line-oriented
+            // file, so a multiline value cannot reach a container step; refuse
+            // it here rather than fail the attempt at execution.
+            for (step_index, step) in stage.steps.iter().enumerate() {
+                if let Step::Process(process) = step
+                    && let Some((name, _)) = process
+                        .env
+                        .iter()
+                        .find(|(name, value)| name.contains('=') || value.contains('\n'))
+                {
+                    return Err(IrValidationError::new(
+                        format!("{path}.steps[{step_index}].process.env.{name}"),
+                        "container stage environment values must be single-line and names must not contain '='",
+                    ));
+                }
+            }
         }
         for (step_index, step) in stage.steps.iter().enumerate() {
             match step {

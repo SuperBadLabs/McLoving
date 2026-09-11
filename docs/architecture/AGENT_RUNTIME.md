@@ -285,7 +285,10 @@ discharge a parked reconciliation).
   never through the podman client's own environment (which the agent fixes,
   so a workload cannot redirect the runtime through `CONTAINERS_CONF`,
   `HOME` or `XDG_RUNTIME_DIR`), never through the argument vector, and never
-  through the workspace or any durable path; a tag reference
+  through the workspace or any durable path; the transport is line-oriented,
+  so a multiline environment value is refused at admission for a container
+  stage (and a multiline credential value refuses the step by name); the
+  workspace mount carries the private SELinux relabel option; a tag reference
   is refused at compile, admission and execution. The podman client is the
   process-group leader, so timeout and cancellation keep the group teardown
   proof, and the moment the group is empty, on every arm, the executor

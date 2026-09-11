@@ -253,7 +253,7 @@ where
                 .arg(spool.join("container.cid"))
                 .arg("--userns=keep-id")
                 .arg("--volume")
-                .arg(format!("{}:/workspace", workspace.display()))
+                .arg(format!("{}:/workspace:Z", workspace.display()))
                 .arg("--workdir")
                 .arg("/workspace")
                 .arg("--env-file")
@@ -539,6 +539,7 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -566,6 +567,7 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .output(),
     )
     .await

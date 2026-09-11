@@ -8251,6 +8251,16 @@ stages:
             .expect_err("a tag can move and is refused");
         assert_eq!(error.code, "pipeline_rejected");
         assert!(error.message.contains("digest-pinned"), "{}", error.message);
+
+        // A multiline value cannot cross the runtime's line-oriented env
+        // transport; it is refused at admission, not at execution.
+        let multiline = source.replace(
+            "          args: [-c, \"cat /etc/os-release\"]\n",
+            "          args: [-c, \"cat /etc/os-release\"]\n          env:\n            PEM: \"line one\\nline two\"\n",
+        );
+        let error = compile_source_with_parameters(&multiline, BTreeMap::new())
+            .expect_err("a multiline value in a container stage is refused");
+        assert!(error.message.contains("single-line"), "{}", error.message);
     }
 
     #[test]
