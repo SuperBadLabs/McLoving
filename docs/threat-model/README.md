@@ -604,6 +604,8 @@ had never claimed one.
 | PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
 | PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
 | PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
+| PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
+| EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -617,7 +619,7 @@ chain, or deployment boundaries.
 
 PR #135 follow-up review identified an earlier malformed interpolation prefix hidden by a later lexical exclusion. The bounded Clojure precheck now follows the existing independent Rust proof before entering dynamic syntax; unknown nested expressions are not guessed. Original `2326a63` receipts remain historical, and fresh exact-source evidence plus protected verification are required for the follow-up. The V2 contract and runtime authority are unchanged; no closure attribution is added.
 
-## EXEC-005 review — bounded cache product integration, ticket ACTIVE
+## EXEC-005 review — bounded cache product integration (earned closure)
 
 The cache slice reviews TM-036 and TM-012 across submitted intent, operator
 mapping, controller context, sealed process and authenticated response. Closed
@@ -661,11 +663,16 @@ cache producer and shared HMAC verifier. Same-UID hostile workload containment
 remains SEC-005, startup catalogs do not promise hot revocation, and cached bytes
 are not restored to a downstream workspace. At the cache review, four other
 helper product paths remained refused; the input successor review follows.
-All five end-to-end gates and normal protected-main verification
-are still required before EXEC-005 can close. This is a partial implementation
-boundary review, not ticket closure or production qualification.
+This section reviewed the cache slice as a partial implementation boundary.
+`EXEC-005` closed with `PAR-012` on PR #147: the cache and input slices
+merged with their own gates, the source slice is the checkout step reviewed
+in the `PAR-012` section, and the dependency-resolver and provisioner slices
+were dropped on 2026-09-10 because their helpers require a McLoving-private
+attestation no public registry or cloud provides. Three of the five helper
+gates exist; the two dropped helpers earn none. No production, canary or
+cutover authority follows from the closure.
 
-## EXEC-005 input capture integration review, ticket ACTIVE
+## EXEC-005 input capture integration review (earned closure)
 
 The bounded input contract is `docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
 TM-008/TM-026 are reviewed for closed literal input intents, canonical IR 1.5
@@ -877,7 +884,7 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
-## PAR-012 checkout step execution review, ticket ACTIVE
+## PAR-012 checkout step execution review (earned closure)
 
 A `checkout` step puts the sealed source acquirer on the product path: a
 submitted pipeline names a deployment source binding, a ref, an exact commit
@@ -911,7 +918,17 @@ commit reaches the pipeline as a literal or a typed parameter until `PAR-001`
 supplies it from a delivery. Shipped-binary tests cover an ineligible agent
 leaving the checkout queued, the branch head landing with a following step
 building in it, a planted symlink destination refused by name, and five API
-refusals. Closure requires the reviewed merge, exact-main Foundation and
-native Windows runs, and a receipt in
-`docs/evidence/PAR-012_SECURITY_REVIEW.md`.
+refusals. Closed on PR #147 (`e22a94ed`), exact-main Foundation
+`34598819224` and Windows Agent `34598819193`; receipt
+`docs/evidence/PAR-012_SECURITY_REVIEW.md`. The review added, before the
+merge, pre-publication verification of the retained tree with the acquirer's
+own routine, a sealed launcher, journaled acquisition directories reclaimed
+by recovery, and deadline-bounded publication. Residual, filed as
+`AGENT-010`: verification opens the acquisition by pathname while the move
+uses a held descriptor, the manifest bound is the acquirer's tool-output
+bound rather than the admitted limits, the final syncs and the recovery walk
+bound are not deadline- or journal-bound, and the zero-budget checkout record
+does not carry its termination through finalization. The published tree is
+owner-writable by design, and plain process steps remain uncontained
+(`SEC-005`).
 
