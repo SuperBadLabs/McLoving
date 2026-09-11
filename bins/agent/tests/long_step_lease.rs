@@ -87,6 +87,22 @@ stages:
           timeout_seconds: 60
 "#;
 
+/// A line every 50 ms for five seconds: a crash right after the first
+/// acknowledged chunk leaves lines the tail never streamed, which the
+/// restart must publish (PAR-013).
+const INTERRUPTED_LOG_PIPELINE: &str = r#"
+version: 1
+name: interrupted-log
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "i=1; while [ $i -le 100 ]; do printf 'tick-%s\\n' $i; i=$((i+1)); sleep 0.05; done"]
+          timeout_seconds: 60
+"#;
+
 const BLOCKED_RENEWAL_PIPELINE: &str = r#"
 version: 1
 name: blocked-renewal
@@ -392,6 +408,102 @@ async fn a_restart_replays_reserved_chunks_under_their_journaled_sequences() {
         1,
         "exactly one logical terminal outcome"
     );
+
+    stop(&mut agent).await;
+    stop(&mut controller).await;
+}
+
+#[tokio::test]
+async fn a_crash_mid_step_publishes_the_interrupted_output_on_restart() {
+    let Some(harness) = Harness::from_environment("interrupted-log").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller("10", None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    // The agent dies the moment the controller has acknowledged the first
+    // live chunk, while the step is still running and writing.
+    let mut crashing = harness
+        .agent_command("10")
+        .env("MCLOVING_TEST_CRASH_AFTER_LOG_CHUNKS", "1")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the crashing remote agent");
+    let admission = harness
+        .submit(&client, "interrupted-log-e2e", INTERRUPTED_LOG_PIPELINE)
+        .await;
+    let exit = tokio::time::timeout(Duration::from_secs(60), crashing.wait())
+        .await
+        .expect("the agent crashes after its first acknowledged chunk")
+        .expect("wait for the crashing agent");
+    assert_eq!(exit.code(), Some(89));
+
+    // The restart quiesces the orphaned step, renews the retained lease and
+    // publishes the interrupted step's spool from its reservations before
+    // completing the cancellation.
+    let mut agent = harness
+        .agent_command("10")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("restart the remote agent");
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = client
+                .status(harness.organization_id, harness.project_id, admission)
+                .await
+                .expect("read build status");
+            if matches!(status.status.as_str(), "succeeded" | "failed" | "aborted") {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the interrupted attempt is reported within bound");
+    assert_ne!(status.status, "succeeded", "{status:?}");
+    let logs = client
+        .logs(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("read the interrupted step's logs");
+    let mut sequences: Vec<i64> = logs.iter().map(|item| item.sequence).collect();
+    sequences.sort_unstable();
+    assert_eq!(
+        sequences,
+        (0..sequences.len() as i64).collect::<Vec<_>>(),
+        "every sequence exactly once and none missing: {logs:?}"
+    );
+    assert!(
+        sequences.len() >= 2,
+        "the restart must publish what the tail never streamed, not only the \
+         chunk acknowledged before the crash: {logs:?}"
+    );
+    let mut ordered = logs.clone();
+    ordered.sort_by_key(|item| item.sequence);
+    let text: String = ordered
+        .iter()
+        .map(|item| item.text.clone().unwrap_or_default())
+        .collect();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!lines.is_empty(), "{logs:?}");
+    for (index, line) in lines.iter().enumerate() {
+        assert_eq!(
+            *line,
+            format!("tick-{}", index + 1),
+            "lines intact and in order: {text:?}"
+        );
+    }
+    // A recovered running attempt ends through the cancellation-completion
+    // path rather than a terminal publication; either way it ends once.
+    let mut terminal_class = 0;
+    for kind in [
+        "attempt.terminal",
+        "attempt.recovery_terminated",
+        "attempt.cancellation_completed",
+        "attempt.reconciliation_terminal",
+    ] {
+        terminal_class += harness.count_events(admission, kind).await;
+    }
+    assert_eq!(terminal_class, 1, "exactly one logical terminal outcome");
 
     stop(&mut agent).await;
     stop(&mut controller).await;

@@ -620,8 +620,10 @@ async fn replay_finalization(
         session_epoch: attempt.session_epoch,
         chunk_bound: log_chunk_bound(live_log_stream),
     };
+    let mut journaled = std::collections::BTreeSet::new();
     for entry in &attempt.logs {
         let (stream, step_ordinal) = spool_stream(entry)?;
+        journaled.insert((step_ordinal, stream));
         spools
             .publish(
                 &mut publication,
@@ -632,6 +634,54 @@ async fn replay_finalization(
                 None,
             )
             .await?;
+    }
+    // A step the crashed session was still running has no journaled spool
+    // descriptor: its output sits in the live spool the executor was writing
+    // and, when the tail was streaming, partly in reservations. Under the
+    // renewed lease, publish what the ledger lacks from that spool (the
+    // unreceipted ranges and the unstreamed tail) before the cancellation
+    // completes, so the interrupted step's output is not stranded.
+    let interrupted_ordinal = attempt.current_step.unwrap_or(0);
+    let live_spool = match attempt.current_step {
+        Some(step) => attempt.workspace.join("spool").join(format!("step-{step}")),
+        None => attempt.workspace.join("spool"),
+    };
+    for stream in ["stdout", "stderr"] {
+        if journaled.contains(&(interrupted_ordinal, stream)) {
+            continue;
+        }
+        let relative_path = live_spool.join(format!("{stream}.log"));
+        let path = config.workspace_root.join(&relative_path);
+        let Ok(metadata) = fs::symlink_metadata(&path).await else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() == 0 {
+            continue;
+        }
+        let entry = SpoolEntry {
+            sequence: u64::from(interrupted_ordinal) * 2 + u64::from(stream == "stderr"),
+            relative_path,
+            digest: file_digest(&path).await?,
+            bytes: metadata.len(),
+        };
+        if let Err(error) = spools
+            .publish(
+                &mut publication,
+                stream,
+                interrupted_ordinal,
+                &config.workspace_root,
+                &entry,
+                None,
+            )
+            .await
+        {
+            // Best effort by design: the attempt is being reported as
+            // interrupted either way, and the ledger keeps what it has.
+            eprintln!(
+                "interrupted step {interrupted_ordinal} {stream} of {}/{} not fully published: {error}",
+                attempt.organization_id, attempt.attempt_id
+            );
+        }
     }
     let outcome = persisted_outcome(&result.outcome)?;
     if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)
@@ -3079,6 +3129,21 @@ async fn publish_reserved_chunk(
     )?;
     crash_after_log_chunks_for_test();
     Ok(())
+}
+
+/// The SHA-256 of a whole file, streamed.
+async fn file_digest(path: &Path) -> Result<[u8; 32], AgentError> {
+    let mut file = fs::File::open(path).await?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
 }
 
 /// Reads exactly `bytes` bytes of `file` starting at `offset`.

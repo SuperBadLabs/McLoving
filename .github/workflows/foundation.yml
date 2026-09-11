@@ -540,7 +540,7 @@ jobs:
             1 identity-collision --require-postgres \
             cargo +1.97.1 test --locked -p mcloving-agent --test identity_collision -- --test-threads=1
           bash scripts/run-verified-rust-test.sh \
-            7 long-step-lease --require-postgres \
+            8 long-step-lease --require-postgres \
             cargo +1.97.1 test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1
       - name: Run submitted cache product gate
         env:

@@ -2715,6 +2715,7 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id AND b.organization_id = n.organization_id
              WHERE l.organization_id = $1
+               AND l.build_id = $3
                AND b.project_id = $2
                AND b.id = $3
                AND l.fence = a.fence
@@ -2848,6 +2849,7 @@ impl Store {
                  JOIN builds AS b
                    ON b.id = n.build_id AND b.organization_id = n.organization_id
                  WHERE l.organization_id = $1
+                   AND l.build_id = $3
                    AND b.project_id = $2
                    AND b.id = $3
                    AND l.attempt_id = $4
@@ -2865,6 +2867,7 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id AND b.organization_id = n.organization_id
              WHERE l.organization_id = $1
+               AND l.build_id = $3
                AND b.project_id = $2
                AND b.id = $3
                AND l.fence = a.fence
@@ -2921,6 +2924,7 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id AND b.organization_id = n.organization_id
              WHERE l.organization_id = $1
+               AND l.build_id = $3
                AND b.project_id = $2
                AND b.id = $3
                AND l.fence = a.fence
@@ -3085,20 +3089,14 @@ impl Store {
         let inserted = sqlx::query_scalar::<_, i64>(
             "INSERT INTO attempt_log_chunks (
                  organization_id, attempt_id, fence, sequence,
-                 stream, content, digest, step_ordinal, build_position
+                 stream, content, digest, step_ordinal, build_id, build_position
              )
-             SELECT $1, a.id, $3, $6, $7, $8, $9, $10,
+             SELECT $1, a.id, $3, $6, $7, $8, $9, $10, n.build_id,
                     (
                         SELECT COALESCE(MAX(l2.build_position), 0) + 1
                         FROM attempt_log_chunks AS l2
-                        JOIN attempts AS a2
-                          ON a2.id = l2.attempt_id
-                         AND a2.organization_id = l2.organization_id
-                        JOIN nodes AS n2
-                          ON n2.id = a2.node_id
-                         AND n2.organization_id = a2.organization_id
-                        WHERE n2.organization_id = n.organization_id
-                          AND n2.build_id = n.build_id
+                        WHERE l2.organization_id = n.organization_id
+                          AND l2.build_id = n.build_id
                     )
              FROM attempts AS a
              JOIN nodes AS n

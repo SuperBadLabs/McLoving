@@ -67,7 +67,7 @@ podman run --rm \
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
      bash scripts/run-verified-rust-test.sh 1 identity-collision --require-postgres cargo test --locked -p mcloving-agent --test identity_collision -- --test-threads=1 &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
-     bash scripts/run-verified-rust-test.sh 7 long-step-lease --require-postgres cargo test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1 &&
+     bash scripts/run-verified-rust-test.sh 8 long-step-lease --require-postgres cargo test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1 &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
    MCLOVING_CACHE_BINARY=/work/target/debug/mcloving-cache \
      bash scripts/test-cache-product.sh &&

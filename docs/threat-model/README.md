@@ -918,9 +918,11 @@ paged read, holds a request at most 30 seconds re-reading at 200 ms, reads
 the chunks once more after observing a terminal status so the drained end
 is exact, answers from the ledger only, so a follower observes committed
 chunks and nothing in flight, and names positions within the build's own
-commit order, stored at commit under the per-build log lock and indexed so
-a page after a position is one range read rather than a re-ranking of the
-ledger, rather than the store's table-wide identity, so a tenant cannot
+commit order, stored with the build identity at commit under the per-build
+log lock and unique-indexed on (organization, build, position) so a page
+after a position is one ordered range scan rather than a re-ranking of the
+ledger or a merge across attempts, rather than the store's table-wide
+identity, so a tenant cannot
 measure another's activity from cursor gaps). Capacity under TM-018: at
 most 262 144 chunk rows per attempt for a live-streaming session, each
 bounded by the 64 MiB per-attempt byte quota, the row count itself bounded
@@ -928,9 +930,11 @@ by the tail's one-second flush floor and pacing. Residual: a workload can still 
 own stdout, as before; the live tail opens the spool by path after the
 executor created it, so a workload that swaps the path in that window
 streams other content it could have printed anyway and then fails its
-attempt at the terminal check; a crash while a step runs loses at most the
-chunk reserved but not yet acknowledged, and the interrupted attempt is
-reported as such. Tests cover the journal reservations (uniqueness,
+attempt at the terminal check; a crash while a step runs is followed, on
+restart, by publication of the interrupted step's spool from its
+reservations under the renewed lease before the cancellation completes,
+and the interrupted attempt is reported as such (a lease reclaimed in the
+meantime leaves the accepted chunks exactly once). Tests cover the journal reservations (uniqueness,
 coverage, stale authority, retirement, schema migration), the store follow
 read and both chunk bounds, and two shipped-binary gates: the first line
 visible while the step runs with the paged read agreeing with the follow,

@@ -377,8 +377,13 @@ discharge a parked reconciliation).
   reservation like any other. Recovery replays from the same reservations.
   A session with the feature may number chunks up to 262 144 per attempt;
   the 64 MiB byte quota is unchanged. A crash while a step runs leaves at most a
-  reserved, unsent chunk; the interrupted attempt is reported as before and
-  the chunks already accepted stay exactly once.
+  reserved, unsent chunk; on restart the recovered attempt is quiesced and
+  reported as interrupted as before, and before its cancellation completes
+  the agent, under the renewed lease the controller still retains for it,
+  publishes the interrupted step's live spool from its reservations (the
+  unreceipted ranges and the unstreamed tail), so the output up to the
+  quiesce is in the ledger; if the lease was reclaimed meanwhile, the chunks
+  already accepted stay exactly once.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
   workspace through the same no-follow cleanup, delete controller-owned log
