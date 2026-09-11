@@ -826,6 +826,9 @@ async fn send_reconciliation(
                         cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
                             .await?
                     };
+                // A checkout the crashed session acquired but never published
+                // is reclaimed by its derived acquisition id (PAR-012).
+                source::discard_recovered_acquisitions(config, attempt);
                 let cancellation_outcome = match outcome {
                     RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
                     RecoveredCancellation::AlreadyExited => {
@@ -981,6 +984,9 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         }
         let mut outcome =
             cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
+        // A checkout the crashed session acquired but never published is
+        // reclaimed by its derived acquisition id (PAR-012).
+        source::discard_recovered_acquisitions(config, attempt);
         // The terminated group was only the podman client of a container
         // stage; the container it started outlives that client (PAR-011).
         // Reap it by its derived name and require proof it is gone, or park

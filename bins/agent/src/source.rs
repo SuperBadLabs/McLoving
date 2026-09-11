@@ -21,9 +21,8 @@ const MAX_REQUEST_BYTES: usize = 65_536;
 /// One NDJSON receipt line back; the private-IO executor caps output here.
 #[cfg(target_os = "linux")]
 const MAX_RESPONSE_BYTES: u64 = 262_144;
-/// Directory entries a publication or discard walk may visit beyond the
-/// binding's admitted file count: git tracks no empty directory, so a tree
-/// holds at most as many directories as files, and this is the slack on top.
+/// Directory entries a publication or discard walk may visit beyond what the
+/// binding's admitted file count and path length allow, as slack.
 #[cfg(target_os = "linux")]
 const PUBLICATION_WALK_SLACK: usize = 4_096;
 
@@ -160,7 +159,15 @@ pub(crate) fn scheduling_capabilities(config: &AgentConfig) -> Result<Vec<String
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{PreparedSource, prepare};
+pub(crate) use linux::{PreparedSource, discard_recovered_acquisitions, prepare};
+
+/// Recovery reclaims nothing where checkouts never run.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn discard_recovered_acquisitions(
+    _config: &AgentConfig,
+    _attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) {
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -228,20 +235,7 @@ mod linux {
     /// spawn of the same step meets the acquirer's replay rules rather than
     /// minting a second tree.
     fn acquisition_id(context: &SourceWorkContext, ordinal: u32) -> Uuid {
-        use sha2::{Digest as _, Sha256};
-        let digest = Sha256::digest(
-            format!(
-                "mcloving.source-acquisition/v1:{}:{}:{ordinal}",
-                context.attempt_id, context.fence_token
-            )
-            .as_bytes(),
-        );
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&digest[..16]);
-        // Name-derived (version 8, RFC 9562 custom) with the RFC variant.
-        bytes[6] = (bytes[6] & 0x0f) | 0x80;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        Uuid::from_bytes(bytes)
+        acquisition_id_for(&context.attempt_id, context.fence_token, ordinal)
     }
 
     pub(crate) fn prepare(
@@ -589,13 +583,10 @@ mod linux {
             Ok(receipt)
         }
 
-        /// Entries a walk over the acquired tree may visit: the binding's
-        /// admitted file count, doubled for directories, plus slack.
+        /// Entries a walk over the acquired tree may visit, derived from
+        /// what the binding admits.
         fn walk_budget(&self) -> usize {
-            self.config
-                .max_files
-                .saturating_mul(2)
-                .saturating_add(PUBLICATION_WALK_SLACK)
+            walk_budget(&self.config)
         }
 
         /// Removes whatever tree this step's acquisition left under the
@@ -876,6 +867,97 @@ mod linux {
         Ok(())
     }
 
+    /// Entries a walk over an acquired tree may visit: every admitted file
+    /// plus every ancestor directory it can have. A path of at most
+    /// `max_path_bytes` holds at most `max_path_bytes / 2` components (one
+    /// byte of name and one separator each), so that many directories per
+    /// file bounds even fully disjoint deep paths; slack on top.
+    fn walk_budget(config: &SourceConfig) -> usize {
+        let directories_per_file = config.max_path_bytes / 2;
+        config
+            .max_files
+            .saturating_mul(directories_per_file.saturating_add(1))
+            .saturating_add(PUBLICATION_WALK_SLACK)
+    }
+
+    /// The deterministic acquisition id of step `ordinal` of an attempt:
+    /// derived from the attempt and its fence alone, so recovery can name a
+    /// crashed step's acquisition without the prepared request.
+    pub(crate) fn acquisition_id_for(attempt_id: &str, fence_token: u64, ordinal: u32) -> Uuid {
+        use sha2::{Digest as _, Sha256};
+        let digest = Sha256::digest(
+            format!("mcloving.source-acquisition/v1:{attempt_id}:{fence_token}:{ordinal}")
+                .as_bytes(),
+        );
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        // Name-derived (version 8, RFC 9562 custom) with the RFC variant.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    /// Restart recovery of an attempt that may have been inside, or just
+    /// past, a checkout step: for every configured source binding, discard
+    /// the trees of the acquisitions this attempt's steps up to the journaled
+    /// one could have made. A crash between the acquirer's answer and the
+    /// publication is otherwise a tree kept on the source volume forever.
+    /// Absent directories are fine; failures are reported, never fatal.
+    pub(crate) fn discard_recovered_acquisitions(
+        config: &AgentConfig,
+        attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    ) {
+        let Some(bindings) = &config.source_bindings else {
+            return;
+        };
+        let last_step = attempt.current_step.unwrap_or(0);
+        for binding in &bindings.mappings {
+            let source_config: SourceConfig =
+                match read_private(&binding.config_path, 262_144, false)
+                    .map_err(|_| ())
+                    .and_then(|bytes| parse_json_no_duplicates(&bytes).map_err(|_| ()))
+                {
+                    Ok(config) => config,
+                    Err(()) => {
+                        eprintln!(
+                            "recovered attempt {}/{}: source binding {} configuration unreadable; \
+                         its acquisitions are not reclaimed",
+                            attempt.organization_id, attempt.attempt_id, binding.mapping_id
+                        );
+                        continue;
+                    }
+                };
+            for ordinal in 0..=last_step {
+                let id = acquisition_id_for(&attempt.attempt_id, attempt.fence_token, ordinal);
+                let directory = source_config.output_root.join(id.to_string());
+                let acquisition = match open_directory(&directory) {
+                    Ok(fd) => fd,
+                    Err(nix::errno::Errno::ENOENT) => continue,
+                    Err(error) => {
+                        eprintln!(
+                            "recovered attempt {}/{} step {ordinal}: acquisition {id} not opened: {error}",
+                            attempt.organization_id, attempt.attempt_id
+                        );
+                        continue;
+                    }
+                };
+                if let Err(reason) = require_owned(&acquisition)
+                    .and_then(|()| discard_acquired_tree(&acquisition, walk_budget(&source_config)))
+                {
+                    eprintln!(
+                        "recovered attempt {}/{} step {ordinal}: acquisition {id} tree not discarded: {reason}",
+                        attempt.organization_id, attempt.attempt_id
+                    );
+                } else {
+                    eprintln!(
+                        "recovered attempt {}/{} step {ordinal}: acquisition {id} tree discarded",
+                        attempt.organization_id, attempt.attempt_id
+                    );
+                }
+            }
+        }
+    }
+
     fn open_directory(path: &Path) -> Result<OwnedFd, nix::errno::Errno> {
         use nix::fcntl::{OFlag, open};
         use nix::sys::stat::Mode;
@@ -1006,6 +1088,37 @@ mod linux {
         ) -> Result<(), String> {
             let acquisition_fd = open_directory(acquisition).map_err(|e| e.to_string())?;
             publish_tree(&acquisition_fd, workspace, destination, 1_024)
+        }
+
+        /// A tree the acquirer left for a step whose agent crashed before
+        /// publication is found by the attempt's deterministic acquisition id
+        /// and discarded, with the receipt kept; deep paths stay inside the
+        /// budget the binding's limits imply.
+        #[test]
+        fn a_crashed_step_acquisition_is_discarded_by_derived_id() {
+            let attempt_id = "2b3a5a1e-0000-4000-8000-000000000001";
+            let fence = (7_u64 << 32) | 9;
+            let id = acquisition_id_for(attempt_id, fence, 1);
+            assert_eq!(id, acquisition_id_for(attempt_id, fence, 1));
+            assert_ne!(id, acquisition_id_for(attempt_id, fence, 0));
+            assert_ne!(id, acquisition_id_for(attempt_id, fence + 1, 1));
+            let root = tempfile::tempdir().unwrap();
+            let acquisition = root.path().join(id.to_string());
+            let deep = acquisition.join("tree/a/b/c/d/e/f/g/h");
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(deep.join("file"), b"x").unwrap();
+            std::fs::write(acquisition.join("receipt.json"), b"{}").unwrap();
+            let acquisition_fd = open_directory(&acquisition).unwrap();
+            // Budget as `walk_budget` would derive for one admitted file of
+            // at most 20 bytes of path: 1 + 10 directories, plus slack.
+            let budget = 1_usize
+                .saturating_mul(20 / 2 + 1)
+                .saturating_add(PUBLICATION_WALK_SLACK);
+            discard_acquired_tree(&acquisition_fd, budget).unwrap();
+            assert!(!acquisition.join("tree").exists());
+            assert!(acquisition.join("receipt.json").exists());
+            // Absent already is not an error.
+            discard_acquired_tree(&acquisition_fd, budget).unwrap();
         }
 
         #[test]

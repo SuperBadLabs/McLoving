@@ -106,8 +106,12 @@ output root, by descriptor and without following links, keeping the receipt
 and manifest the acquirer retained beside it; and a checkout step that ends
 any other way than in a completed publication (a rejected or truncated
 answer, a timeout, a cancellation, a spawn failure) discards whatever its
-acquisition, whose id is deterministic, left there. Both walks are budgeted
-from the binding's admitted file count rather than a fixed figure, so a
+acquisition, whose id is deterministic, left there. Restart recovery of an
+attempt that crashed inside or just past a checkout derives the same ids for
+its steps up to the journaled one and discards their trees under every
+configured binding's output root. Both walks are budgeted from the binding's
+admitted file count and path length (every admitted file plus every ancestor
+directory its longest path can have) rather than a fixed figure, so a
 repository the acquirer admits is one publication can finish. A refused or
 interrupted checkout therefore leaves no tree on the source volume.
 The acquirer leaves its tree read-only; publication then gives every
