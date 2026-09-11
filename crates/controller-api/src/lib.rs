@@ -97,6 +97,11 @@ pub struct ApiState {
     /// derived from it and never stored. Absent means no public webhook route
     /// answers.
     webhook_key: Option<Vec<u8>>,
+    /// Permits for deliveries in flight on the public webhook route, taken
+    /// before a body is buffered: the route is unauthenticated until the
+    /// signature over the whole body is checked, so its memory is bounded by
+    /// permits times the body limit rather than by whoever connects.
+    webhook_deliveries: Arc<tokio::sync::Semaphore>,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -203,6 +208,9 @@ impl ApiState {
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
             webhook_key: None,
+            webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
+                github_webhook::MAX_CONCURRENT_DELIVERIES,
+            )),
         })
     }
 
@@ -226,6 +234,9 @@ impl ApiState {
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
             webhook_key: None,
+            webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
+                github_webhook::MAX_CONCURRENT_DELIVERIES,
+            )),
         }
     }
 
@@ -394,6 +405,18 @@ impl ApiState {
         Ok(self)
     }
 
+    /// Bounds how many public webhook deliveries may be in flight at once
+    /// (default [`github_webhook::MAX_CONCURRENT_DELIVERIES`]).
+    pub fn with_webhook_delivery_limit(mut self, limit: usize) -> Result<Self, ApiError> {
+        if limit == 0 {
+            return Err(ApiError::configuration(
+                "webhook delivery limit must admit at least one delivery",
+            ));
+        }
+        self.webhook_deliveries = Arc::new(tokio::sync::Semaphore::new(limit));
+        Ok(self)
+    }
+
     pub fn with_source_mapping_catalog(
         mut self,
         catalog: SourceMappingCatalog,
@@ -449,6 +472,7 @@ impl ApiState {
 }
 
 pub fn router(state: ApiState) -> Router {
+    let state = Arc::new(state);
     let artifact_upload = Router::new()
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads",
@@ -456,7 +480,8 @@ pub fn router(state: ApiState) -> Router {
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
     // A public route: no bearer, the body signature under the trigger's
-    // derived secret is the only authentication (PAR-001).
+    // derived secret is the only authentication (PAR-001). Deliveries in
+    // flight are bounded before any body is buffered.
     let github_webhook = Router::new()
         .route(
             "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}",
@@ -464,6 +489,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .route_layer(DefaultBodyLimit::max(
             github_webhook::MAX_DELIVERY_BODY_BYTES,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            github_webhook::bound_deliveries,
         ));
     let discovery_scan = Router::new()
         .route(
@@ -619,7 +648,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/organizations/{organization_id}/performance",
             get(performance),
         )
-        .with_state(Arc::new(state))
+        .with_state(state)
 }
 
 #[derive(Clone, Debug, Serialize)]

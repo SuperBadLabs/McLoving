@@ -9,8 +9,11 @@ use super::{
 };
 use axum::Json;
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::extract::{Path, State};
+use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac as _};
 use mcloving_controller_store::{
@@ -34,6 +37,12 @@ type HmacSha256 = Hmac<Sha256>;
 /// above the bound is not a GitHub delivery and is refused at the framework
 /// layer with 413.
 pub(super) const MAX_DELIVERY_BODY_BYTES: usize = 25 * 1024 * 1024;
+/// Deliveries the public route holds in flight at once. Taken before the
+/// body is buffered, so an unauthenticated sender can pin at most this many
+/// bodies of [`MAX_DELIVERY_BODY_BYTES`] in memory; the rest are told to
+/// retry. GitHub does not retry on its own, but a refused delivery is
+/// redeliverable and replays exactly once admitted.
+pub(super) const MAX_CONCURRENT_DELIVERIES: usize = 8;
 /// Shortest webhook key file accepted, in bytes.
 pub(super) const MIN_WEBHOOK_KEY_BYTES: usize = 32;
 const SIGNATURE_HEADER: &str = "x-hub-signature-256";
@@ -115,8 +124,10 @@ pub(super) async fn read_github_webhook(
         .ok_or_else(webhooks_not_configured)?;
     let trigger =
         github_trigger(&state, organization_id, project_id, pipeline_id, trigger_id).await?;
+    // The secret is a long-lived credential: never cacheable.
     Ok((
         StatusCode::OK,
+        super::oidc::no_store_headers(),
         Json(GithubWebhookResponse {
             provider: "github".to_owned(),
             path: hook_path(organization_id, project_id, pipeline_id, trigger_id),
@@ -294,6 +305,29 @@ fn replay_receipt(
     } else {
         Err(reused_delivery_id())
     }
+}
+
+/// Route middleware: takes a delivery permit before the request body is
+/// buffered and holds it until the response is produced. A saturated route
+/// answers 503 `webhook_busy` with `Retry-After` and reads nothing.
+pub(super) async fn bound_deliveries(
+    State(state): State<Arc<ApiState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = state.webhook_deliveries.clone().try_acquire_owned() else {
+        let mut response = ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "webhook_busy",
+            "too many deliveries in flight; redeliver shortly",
+        )
+        .into_response();
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
+        return response;
+    };
+    next.run(request).await
 }
 
 fn webhooks_not_configured() -> ApiError {
@@ -713,6 +747,80 @@ mod tests {
         });
         let mapped = map_delivery("push", &push).unwrap();
         assert!(mapped.payload.get("paths").is_none());
+    }
+
+    #[tokio::test]
+    async fn deliveries_in_flight_are_bounded_before_the_body_is_read() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::post;
+        use std::sync::Mutex;
+        use tower::ServiceExt as _;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        let principal = Principal {
+            subject: "service:webhook-test".to_owned(),
+            kind: mcloving_controller_store::authz::PrincipalKind::Service,
+            organization_id: Uuid::new_v4(),
+            project_roles: Default::default(),
+            service_scopes: Default::default(),
+            mapped_projects: Default::default(),
+            action_grants: Default::default(),
+        };
+        let state = Arc::new(
+            ApiState::new(
+                mcloving_controller_store::Store::new(pool),
+                "webhook-test-bearer-token-at-least-32-bytes",
+                principal,
+            )
+            .expect("construct state")
+            .with_webhook_delivery_limit(1)
+            .expect("one permit"),
+        );
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(Mutex::new(Some(entered_tx)));
+        let release = Arc::new(Mutex::new(Some(release_rx)));
+        let app = Router::new()
+            .route(
+                "/hook",
+                post(move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        let entered = entered.lock().unwrap().take();
+                        if let Some(entered) = entered {
+                            entered.send(()).unwrap();
+                        }
+                        let release = release.lock().unwrap().take();
+                        if let Some(release) = release {
+                            release.await.unwrap();
+                        }
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                bound_deliveries,
+            ))
+            .with_state(state);
+        let request = || {
+            axum::http::Request::post("/hook")
+                .body(Body::from("{}"))
+                .unwrap()
+        };
+        let first = tokio::spawn(app.clone().oneshot(request()));
+        entered_rx.await.unwrap();
+        let second = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(second.headers()[RETRY_AFTER], "1");
+        release_tx.send(()).unwrap();
+        assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+        let third = app.oneshot(request()).await.unwrap();
+        assert_eq!(third.status(), StatusCode::OK, "the permit is released");
     }
 
     #[test]

@@ -234,9 +234,14 @@ be an enabled or paused `scm_webhook` trigger whose configuration names
 provider `github`), and verifies the signature over the raw body in constant
 time before it interprets anything; a forged or unsigned delivery is refused
 with 401 and leaves no receipt. The body is bounded at GitHub's own 25 MiB
-payload maximum, so no delivery GitHub can send is refused unread; the
-OpenAPI operation `receiveGithubDelivery` declares the three headers, the
-`GithubDelivery` body and the 200/201/202/422 answers. A `push` to a
+payload maximum, so no delivery GitHub can send is refused unread, and the
+route holds at most eight deliveries in flight, the permit taken before any
+body is buffered, so an unauthenticated sender can pin at most eight bodies
+in memory; a saturated route answers 503 `webhook_busy` with `Retry-After`
+and reads nothing, and the refused delivery is redeliverable. The OpenAPI
+operation `receiveGithubDelivery` declares the three headers, the
+`GithubDelivery` body and the 200/201/202/422 answers. The secret-bearing
+`GET .../webhook` answer is marked `Cache-Control: no-store`. A `push` to a
 branch maps to the SCM payload `repository_identity` (the repository's
 `full_name`, which the trigger's `repository_identity` must equal),
 `revision` (`after`), `branch` (the ref without `refs/heads/`) and `paths`
