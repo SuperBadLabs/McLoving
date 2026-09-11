@@ -56,9 +56,6 @@ const LIVE_TAIL_INTERVAL: Duration = Duration::from_millis(250);
 /// about a second without a chunk per line.
 const LIVE_CHUNK_TARGET_BYTES: u64 = 64 * 1024;
 const LIVE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-/// The tail stretches its flush interval, up to this, so the live sequence
-/// budget lasts the step's whole timeout.
-const LIVE_MAX_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const WORK_POLL_RPC_WINDOW: Duration = Duration::from_secs(25);
@@ -3427,8 +3424,9 @@ impl LiveTail {
     }
 
     /// How long a stream with a small amount of unpublished output waits
-    /// before it is flushed: one second, stretched so that the remaining
-    /// sequence budget (two streams) lasts until the step's deadline.
+    /// before it is flushed: one second, stretched as far as needed so that
+    /// this step's share of the sequence budget (two streams) lasts until the
+    /// step's deadline.
     fn flush_interval(&self, next_sequence: u64) -> Duration {
         let remaining = self.step_ceiling.saturating_sub(next_sequence).max(1);
         let left = self
@@ -3437,7 +3435,10 @@ impl LiveTail {
         let paced = left
             .checked_div(u32::try_from(remaining / 2).unwrap_or(u32::MAX).max(1))
             .unwrap_or(LIVE_FLUSH_INTERVAL);
-        paced.clamp(LIVE_FLUSH_INTERVAL, LIVE_MAX_FLUSH_INTERVAL)
+        // No upper clamp: the interval is whatever the share and the deadline
+        // require, so the budget lasts the whole step rather than running out
+        // before it under a cap.
+        paced.max(LIVE_FLUSH_INTERVAL)
     }
 
     /// Runs the tail as its own task until it is aborted or stops itself:

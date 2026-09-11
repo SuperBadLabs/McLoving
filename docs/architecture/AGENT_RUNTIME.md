@@ -358,7 +358,8 @@ discharge a parked reconciliation).
   the step, the tail stops reserving 128 sequences below the live bound so
   the terminal pass always has room for every stream's remainder, it never
   streams past the step's aggregate output limit, and it paces its flushes
-  (one second, stretched up to a minute) so the sequence budget lasts the
+  (one second, stretched as far as the step's timeout and its share
+  require) so the sequence budget lasts the
   step's whole timeout, that budget shared out across the remaining steps
   of the attempt so an early step cannot spend what later steps need. Each
   chunk also raises the stream's retention floor under one lock the
