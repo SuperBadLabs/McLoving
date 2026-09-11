@@ -41,7 +41,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Bound on one delivery end to end: resolution, connection, request and
 /// the bounded read of the answer.
-const DELIVERY_DEADLINE: Duration = Duration::from_secs(30);
+const DELIVERY_DEADLINE: Duration =
+    Duration::from_secs(mcloving_domain::notifications::DELIVERY_DEADLINE_SECONDS);
 const USER_AGENT: &str = "mcloving-controller-notifications/1";
 const MAX_ERROR_BYTES: usize = 256;
 
@@ -358,8 +359,12 @@ fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
         Some("documentation")
     } else if segments[0] == 0x0100 && segments[1..4] == [0, 0, 0] {
         Some("discard")
+    } else if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1 {
+        // Local-use NAT64 (RFC 8215): translates to whatever the local
+        // translator chooses, so the whole prefix is refused.
+        Some("local-use NAT64")
     } else if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
-        // NAT64: the embedded IPv4 address decides.
+        // Well-known NAT64: the embedded IPv4 address decides.
         forbidden_v4(embedded_v4(segments[6], segments[7])).or(Some("NAT64"))
     } else if segments[0] == 0x2002 {
         // 6to4: the embedded IPv4 address decides.
@@ -760,6 +765,9 @@ mod tests {
             "::ffff:8.8.8.8",
             "64:ff9b::10.0.0.1",
             "64:ff9b::a00:1",
+            "64:ff9b:1::1",
+            "64:ff9b:1:ffff::8.8.8.8",
+            "64:ff9b:1:ffff:ffff:ffff:808:808",
             "2002:a00:1::",
             "2001::1",
             "2001:db8::1",

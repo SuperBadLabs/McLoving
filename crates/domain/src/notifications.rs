@@ -18,6 +18,12 @@ pub const DEFAULT_STATUS_CONTEXT: &str = "mcloving";
 pub const MAX_DELIVERY_ATTEMPTS: i32 = 12;
 /// Longest wait between two attempts, in seconds.
 pub const MAX_DELIVERY_BACKOFF_SECONDS: u64 = 3600;
+/// Bound on one delivery attempt end to end, in seconds.
+pub const DELIVERY_DEADLINE_SECONDS: u64 = 30;
+/// How long a claim keeps its row off every other worker's scan: longer than
+/// the deadline, so an attempt still in flight is never claimed twice.
+pub const CLAIM_LEASE_SECONDS: u64 = 3 * DELIVERY_DEADLINE_SECONDS;
+const _: () = assert!(CLAIM_LEASE_SECONDS > DELIVERY_DEADLINE_SECONDS);
 /// Longest body a notification target may answer with before the answer is
 /// discarded unread.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;

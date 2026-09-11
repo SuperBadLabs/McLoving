@@ -125,8 +125,10 @@ resolved targets are recorded with the build at admission; the transaction
 that makes the build terminal records one delivery per target and appends
 one `dag.build_terminal` event, so a terminal build has its deliveries or is
 not terminal. Every controller on the database runs a delivery worker that
-claims due rows under `FOR UPDATE SKIP LOCKED`, so a row is delivered by one
-worker at a time, retries with exponential backoff (2, 4, 8 ... seconds,
+claims due rows under `FOR UPDATE SKIP LOCKED` and leases each past the
+delivery deadline, so a row is delivered by one worker at a time even after
+the lock is released, retries with exponential backoff scheduled when the
+failed attempt is settled (2, 4, 8 ... seconds,
 capped at an hour) and abandons after twelve attempts, the last error kept in
 the ledger. A commit status is `POST /repos/{owner}/{name}/statuses/{commit}`
 at `api.github.com`, `success`, `failure` or `error` for a succeeded, failed

@@ -12716,7 +12716,21 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .iter()
             .all(|delivery| delivery.attempts == 1 && delivery.build_status == "succeeded")
     );
-    // Nothing is due again until the backoff passes.
+    // A claim leases the row past the delivery deadline, so an attempt still
+    // in flight is never claimed by a second worker after the lock is gone.
+    let leased = sqlx::query_scalar::<_, bool>(
+        "SELECT bool_and(next_attempt_at > clock_timestamp() + make_interval(secs => $3))
+         FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .bind(mcloving_domain::notifications::DELIVERY_DEADLINE_SECONDS as f64)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the leases");
+    assert!(leased, "claims lease past the delivery deadline");
+    // Nothing is due again until the lease passes.
     assert!(
         store
             .claim_due_notifications(organization_id, 10)
