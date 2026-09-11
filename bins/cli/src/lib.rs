@@ -750,14 +750,10 @@ async fn follow_logs(
         };
         for item in &page.items {
             chunks += 1;
-            match &item.text {
-                Some(text) => write!(stdout, "{text}")?,
-                None => writeln!(
-                    stdout,
-                    "[{} step {} binary {}]",
-                    item.stream, item.step_ordinal, item.content_hex
-                )?,
-            }
+            // The exact bytes the step wrote, so a code point the live tail
+            // split across two chunks is reproduced rather than annotated
+            // twice; the terminal decodes the stream as a whole.
+            stdout.write_all(&decode_hex(&item.content_hex)?)?;
         }
         stdout.flush()?;
         let drained = page.items.is_empty();
@@ -771,6 +767,27 @@ async fn follow_logs(
         "chunks": chunks,
         "next_cursor": cursor,
     }))
+}
+
+/// Decodes the API's lowercase hex log content back to the bytes the step
+/// wrote.
+fn decode_hex(hex: &str) -> Result<Vec<u8>> {
+    let digits = hex.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        bail!("log content hex has an odd length");
+    }
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .context("log content hex has a non-hex digit")?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .context("log content hex has a non-hex digit")?;
+            Ok(u8::try_from(high * 16 + low).expect("two hex digits fit a byte"))
+        })
+        .collect()
 }
 
 fn cursor(
@@ -981,6 +998,21 @@ fn scalar(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_follower_writes_the_exact_bytes_across_a_split_code_point() {
+        // `é` split between two live chunks: neither half is valid UTF-8 on
+        // its own, and their concatenation is the character again.
+        let first = super::decode_hex("61c3").unwrap();
+        let second = super::decode_hex("a962").unwrap();
+        assert!(std::str::from_utf8(&first).is_err());
+        assert!(std::str::from_utf8(&second).is_err());
+        let mut joined = first;
+        joined.extend(second);
+        assert_eq!(std::str::from_utf8(&joined).unwrap(), "aéb");
+        assert!(super::decode_hex("abc").is_err());
+        assert!(super::decode_hex("zz").is_err());
+    }
+
     use super::*;
 
     #[test]
