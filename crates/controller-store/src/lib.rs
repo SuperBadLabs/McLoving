@@ -310,9 +310,56 @@ pub struct CommittedLog {
     pub stream: String,
     pub content: Vec<u8>,
     pub digest: [u8; 32],
-    /// Global commit order of the chunk (migration 0016); a follower resumes
-    /// after the last cursor it saw.
+    /// The chunk's position in its build's commit order, counted over every
+    /// chunk ever committed for the build (one-based, dense, stable because
+    /// chunks are append-only and the table-wide identity behind the order
+    /// never leaves the store); a follower resumes after the last position
+    /// it saw. Never the global identity itself, which would let one tenant
+    /// measure another's activity from the gaps.
     pub cursor: i64,
+}
+
+/// Every chunk of one build numbered in commit order, over all fences, so a
+/// position is stable however the attempt is re-fenced; readers then keep
+/// only the current fence's chunks. Binds `$1` organization, `$2` project,
+/// `$3` build.
+const BUILD_LOG_POSITIONS: &str = "WITH positions AS (
+                 SELECT l.attempt_id, l.fence, l.sequence, l.stream,
+                        a.fence AS attempt_fence,
+                        row_number() OVER (ORDER BY l.cursor_id) AS position
+                 FROM attempt_log_chunks AS l
+                 JOIN attempts AS a
+                   ON a.id = l.attempt_id AND a.organization_id = l.organization_id
+                 JOIN nodes AS n
+                   ON n.id = a.node_id AND n.organization_id = a.organization_id
+                 JOIN builds AS b
+                   ON b.id = n.build_id AND b.organization_id = n.organization_id
+                 WHERE l.organization_id = $1
+                   AND b.project_id = $2
+                   AND b.id = $3
+             )";
+
+type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
+
+fn committed_log_from_row(
+    (attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor): LogRow,
+) -> Result<CommittedLog, StoreError> {
+    let digest: [u8; 32] = digest
+        .try_into()
+        .map_err(|_| StoreError::CorruptLogDigest {
+            attempt_id,
+            sequence,
+        })?;
+    Ok(CommittedLog {
+        attempt_id,
+        fence,
+        sequence,
+        step_ordinal,
+        stream,
+        content,
+        digest,
+        cursor,
+    })
 }
 
 /// Fenced log publication from one agent attempt.
@@ -2674,53 +2721,27 @@ impl Store {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<Vec<CommittedLog>, StoreError> {
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let rows = sqlx::query_as::<_, LogRow>(
-            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal,
-                    l.cursor_id
-             FROM attempt_log_chunks AS l
-             JOIN attempts AS a
-               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
-             JOIN nodes AS n
-               ON n.id = a.node_id AND n.organization_id = a.organization_id
-             JOIN builds AS b
-               ON b.id = n.build_id AND b.organization_id = n.organization_id
-             WHERE l.organization_id = $1
-               AND b.project_id = $2
-               AND b.id = $3
-               AND l.fence = a.fence
-             ORDER BY l.cursor_id",
-        )
+        let rows = sqlx::query_as::<_, LogRow>(&format!(
+            "{BUILD_LOG_POSITIONS}
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest,
+                    l.step_ordinal, p.position
+             FROM positions AS p
+             JOIN attempt_log_chunks AS l
+               ON l.organization_id = $1
+              AND l.attempt_id = p.attempt_id
+              AND l.fence = p.fence
+              AND l.sequence = p.sequence
+             WHERE p.fence = p.attempt_fence
+             ORDER BY p.position"
+        ))
         .bind(organization_id)
         .bind(project_id)
         .bind(build_id)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        rows.into_iter()
-            .map(
-                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor)| {
-                    let digest: [u8; 32] =
-                        digest
-                            .try_into()
-                            .map_err(|_| StoreError::CorruptLogDigest {
-                                attempt_id,
-                                sequence,
-                            })?;
-                    Ok(CommittedLog {
-                        attempt_id,
-                        fence,
-                        sequence,
-                        step_ordinal,
-                        stream,
-                        content,
-                        digest,
-                        cursor,
-                    })
-                },
-            )
-            .collect()
+        rows.into_iter().map(committed_log_from_row).collect()
     }
 
     /// Returns the exact immutable checkout evidence committed by one fenced
@@ -2799,11 +2820,6 @@ impl Store {
             .transpose()
     }
 
-    /// Returns one immutable, stable page of current-fence build logs.
-    ///
-    /// The cursor is the exact last `(attempt, fence, sequence, stream)` tuple
-    /// from a prior page. It resolves independently of the attempt's current
-    /// fence, while returned rows remain restricted to current-fence evidence.
     #[allow(clippy::too_many_arguments)]
     pub async fn build_logs_page(
         &self,
@@ -2835,52 +2851,32 @@ impl Store {
                     .to_owned(),
             ));
         }
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let rows = sqlx::query_as::<_, LogRow>(
-            "WITH cursor AS (
-                 SELECT l.cursor_id
-                 FROM attempt_log_chunks AS l
-                 JOIN attempts AS a
-                   ON a.id = l.attempt_id
-                  AND a.organization_id = l.organization_id
-                 JOIN nodes AS n
-                   ON n.id = a.node_id
-                  AND n.organization_id = a.organization_id
-                 JOIN builds AS b
-                   ON b.id = n.build_id
-                  AND b.organization_id = n.organization_id
-                 WHERE l.organization_id = $1
-                   AND b.project_id = $2
-                   AND b.id = $3
-                   AND l.attempt_id = $4
-                   AND l.fence = $5
-                   AND l.sequence = $6
-                   AND l.stream = $7
+        let rows = sqlx::query_as::<_, LogRow>(&format!(
+            "{BUILD_LOG_POSITIONS},
+             cursor AS (
+                 SELECT position FROM positions
+                 WHERE attempt_id = $4 AND fence = $5 AND sequence = $6 AND stream = $7
              )
-             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal,
-                    l.cursor_id
-             FROM attempt_log_chunks AS l
-             JOIN attempts AS a
-               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
-             JOIN nodes AS n
-               ON n.id = a.node_id AND n.organization_id = a.organization_id
-             JOIN builds AS b
-               ON b.id = n.build_id AND b.organization_id = n.organization_id
-             WHERE l.organization_id = $1
-               AND b.project_id = $2
-               AND b.id = $3
-               AND l.fence = a.fence
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest,
+                    l.step_ordinal, p.position
+             FROM positions AS p
+             JOIN attempt_log_chunks AS l
+               ON l.organization_id = $1
+              AND l.attempt_id = p.attempt_id
+              AND l.fence = p.fence
+              AND l.sequence = p.sequence
+             WHERE p.fence = p.attempt_fence
                AND (
                    $4::uuid IS NULL
                    OR (
                        EXISTS (SELECT 1 FROM cursor)
-                       AND l.cursor_id > (SELECT cursor_id FROM cursor)
+                       AND p.position > (SELECT position FROM cursor)
                    )
                )
-             ORDER BY l.cursor_id
-             LIMIT $8",
-        )
+             ORDER BY p.position
+             LIMIT $8"
+        ))
         .bind(organization_id)
         .bind(project_id)
         .bind(build_id)
@@ -2892,34 +2888,12 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        rows.into_iter()
-            .map(
-                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor)| {
-                    let digest: [u8; 32] =
-                        digest
-                            .try_into()
-                            .map_err(|_| StoreError::CorruptLogDigest {
-                                attempt_id,
-                                sequence,
-                            })?;
-                    Ok(CommittedLog {
-                        attempt_id,
-                        fence,
-                        sequence,
-                        step_ordinal,
-                        stream,
-                        content,
-                        digest,
-                        cursor,
-                    })
-                },
-            )
-            .collect()
+        rows.into_iter().map(committed_log_from_row).collect()
     }
 
-    /// The build's committed log chunks after one global cursor, in commit
-    /// order (PAR-013): the follower's read. Only chunks of each attempt's
-    /// current fence are visible, as for the paged read.
+    /// The build's committed log chunks after one build-scoped position, in
+    /// commit order (PAR-013): the follower's read. Only chunks of each
+    /// attempt's current fence are visible, as for the paged read.
     pub async fn build_logs_after_cursor(
         &self,
         organization_id: Uuid,
@@ -2933,26 +2907,22 @@ impl Store {
                 "log follow requires a non-negative cursor and limit between 1 and 1001".to_owned(),
             ));
         }
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let rows = sqlx::query_as::<_, LogRow>(
-            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal,
-                    l.cursor_id
-             FROM attempt_log_chunks AS l
-             JOIN attempts AS a
-               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
-             JOIN nodes AS n
-               ON n.id = a.node_id AND n.organization_id = a.organization_id
-             JOIN builds AS b
-               ON b.id = n.build_id AND b.organization_id = n.organization_id
-             WHERE l.organization_id = $1
-               AND b.project_id = $2
-               AND b.id = $3
-               AND l.fence = a.fence
-               AND l.cursor_id > $4
-             ORDER BY l.cursor_id
-             LIMIT $5",
-        )
+        let rows = sqlx::query_as::<_, LogRow>(&format!(
+            "{BUILD_LOG_POSITIONS}
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest,
+                    l.step_ordinal, p.position
+             FROM positions AS p
+             JOIN attempt_log_chunks AS l
+               ON l.organization_id = $1
+              AND l.attempt_id = p.attempt_id
+              AND l.fence = p.fence
+              AND l.sequence = p.sequence
+             WHERE p.fence = p.attempt_fence
+               AND p.position > $4
+             ORDER BY p.position
+             LIMIT $5"
+        ))
         .bind(organization_id)
         .bind(project_id)
         .bind(build_id)
@@ -2961,29 +2931,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        rows.into_iter()
-            .map(
-                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor)| {
-                    let digest: [u8; 32] =
-                        digest
-                            .try_into()
-                            .map_err(|_| StoreError::CorruptLogDigest {
-                                attempt_id,
-                                sequence,
-                            })?;
-                    Ok(CommittedLog {
-                        attempt_id,
-                        fence,
-                        sequence,
-                        step_ordinal,
-                        stream,
-                        content,
-                        digest,
-                        cursor,
-                    })
-                },
-            )
-            .collect()
+        rows.into_iter().map(committed_log_from_row).collect()
     }
 
     /// Commits a log chunk only for the exact live fenced attempt.

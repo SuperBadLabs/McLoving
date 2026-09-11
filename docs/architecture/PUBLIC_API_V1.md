@@ -117,10 +117,13 @@ cursor. Continuation requires the complete
 saved cursor remains exact across attempt re-fencing. Every item exposes exact
 `content_hex`; `text` is present only when the
 whole chunk is valid UTF-8, so clients can always reproduce the digest without
-lossy replacement. Every item also carries its global `cursor`, and the same
+lossy replacement. Every item also carries its `cursor`, its position in the
+build's commit order (one-based, dense, stable across re-fencing, and
+build-scoped: the store's table-wide identity behind the order is never
+exposed, so no tenant can measure another's activity from gaps), and the same
 route follows a running build (PAR-013): `after_cursor` (zero from the
-start, exclusive with the attempt tuple) returns chunks after that cursor in
-commit order, `wait_ms` (at most 30 000) holds the request, re-reading at a
+start, exclusive with the attempt tuple) returns chunks after that position
+in commit order, `wait_ms` (at most 30 000) holds the request, re-reading at a
 short interval, until a chunk is committed or the build is no longer live
 (the chunks are read once more after a terminal status is observed, so an
 empty page with `live: false` is the drained end of the log), and the page

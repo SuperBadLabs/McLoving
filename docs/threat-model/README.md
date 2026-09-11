@@ -916,8 +916,10 @@ reservations and sends only ranges without a receipt); TM-052 (API: follow
 mode reads through the same authorization, tenant and fence filters as the
 paged read, holds a request at most 30 seconds re-reading at 200 ms, reads
 the chunks once more after observing a terminal status so the drained end
-is exact, and answers from the ledger only, so a follower observes
-committed chunks and nothing in flight). Residual: a workload can still write anything into its
+is exact, answers from the ledger only, so a follower observes committed
+chunks and nothing in flight, and names positions within the build's own
+commit order rather than the store's table-wide identity, so a tenant
+cannot measure another's activity from cursor gaps). Residual: a workload can still write anything into its
 own stdout, as before; the live tail opens the spool by path after the
 executor created it, so a workload that swaps the path in that window
 streams other content it could have printed anyway and then fails its

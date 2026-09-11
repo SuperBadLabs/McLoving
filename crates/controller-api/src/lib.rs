@@ -1100,8 +1100,8 @@ pub struct LogQuery {
     pub after_sequence: Option<i64>,
     pub after_stream: Option<String>,
     pub limit: Option<u32>,
-    /// Follow mode (PAR-013): chunks after this global cursor in commit
-    /// order; zero from the start. Exclusive with the attempt cursor.
+    /// Follow mode (PAR-013): chunks after this build-scoped position in
+    /// commit order; zero from the start. Exclusive with the attempt cursor.
     pub after_cursor: Option<i64>,
     /// Follow mode: how long to wait for chunks when none are committed
     /// after the cursor and the build is still live, at most 30 000.
@@ -1341,7 +1341,7 @@ fn openapi_document() -> Value {
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/logs": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
                 "get": api_operation(
-                    "listBuildLogs", "evidence", "Read fenced log chunks, paged by attempt cursor or followed by global cursor with a bounded wait", "200",
+                    "listBuildLogs", "evidence", "Read fenced log chunks, paged by attempt cursor or followed by build-scoped position with a bounded wait", "200",
                     vec![
                         query_parameter("after_attempt_id", "uuid"),
                         query_parameter("after_fence", "integer"),
@@ -3294,8 +3294,10 @@ pub struct LogResponse {
     pub attempt_id: Uuid,
     pub fence: i64,
     pub sequence: i64,
-    /// Global commit order of the chunk; a follower resumes after the last
-    /// one it saw. Defaulted so an older client still decodes.
+    /// The chunk's position in its build's commit order (one-based, dense,
+    /// stable); a follower resumes after the last one it saw. Build-scoped,
+    /// never the store's global identity. Defaulted so an older client still
+    /// decodes.
     #[serde(default)]
     pub cursor: i64,
     /// Which step of a multi-step stage wrote the chunk; zero for a
@@ -6254,7 +6256,7 @@ fn build_is_live(status: &str) -> bool {
     matches!(status, "queued" | "running")
 }
 
-/// The follower's read (PAR-013): chunks after one global cursor in commit
+/// The follower's read (PAR-013): chunks after one build-scoped position in commit
 /// order. When none are committed yet and the build is still live, the
 /// request waits up to `wait_ms` (bounded) re-reading at a short interval,
 /// so a follower sees output within about one interval of its commit
@@ -7309,7 +7311,7 @@ impl Client {
         }
     }
 
-    /// The follower's read (PAR-013): chunks after one global cursor, waiting
+    /// The follower's read (PAR-013): chunks after one build-scoped position, waiting
     /// up to `wait_ms` for the first when the build is still live.
     pub async fn logs_after_cursor(
         &self,
