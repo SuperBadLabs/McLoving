@@ -1154,6 +1154,7 @@ async fn record_terminal_notifications(
              WHERE b.organization_id = $1 AND b.id = $2
              ON CONFLICT (organization_id, build_id, target_index) DO UPDATE
              SET build_status = EXCLUDED.build_status,
+                 terminal_generation = notification_deliveries.terminal_generation + 1,
                  state = 'pending',
                  attempts = 0,
                  next_attempt_at = clock_timestamp(),

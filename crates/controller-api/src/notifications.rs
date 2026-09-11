@@ -369,8 +369,11 @@ fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
     } else if segments[0] == 0x2002 {
         // 6to4: the embedded IPv4 address decides.
         forbidden_v4(embedded_v4(segments[1], segments[2])).or(Some("6to4"))
-    } else if segments[0] == 0x2001 && segments[1] == 0 {
-        Some("Teredo")
+    } else if segments[0] == 0x2001 && segments[1] < 0x0200 {
+        // 2001::/23, the IETF protocol assignments block: Teredo,
+        // benchmarking (2001:2::/48), AMT, AS112, ORCHID and whatever is
+        // assigned next; none is a notification destination.
+        Some("IETF protocol assignment")
     } else {
         None
     }
@@ -577,6 +580,7 @@ fn webhook_record(state: &ApiState, delivery: &NotificationDelivery) -> Value {
         "status": delivery.build_status,
         "mapping_id": delivery.mapping_id,
         "target_index": delivery.target_index,
+        "terminal_generation": delivery.terminal_generation,
         "attempt": delivery.attempts,
         "build_url": build_url(state, delivery),
     })
@@ -618,7 +622,10 @@ async fn deliver_webhook(state: &ApiState, delivery: &NotificationDelivery) -> R
             (WEBHOOK_SIGNATURE_HEADER, signature),
             (
                 WEBHOOK_DELIVERY_HEADER,
-                format!("{}:{}", delivery.build_id, delivery.target_index),
+                format!(
+                    "{}:{}:{}",
+                    delivery.build_id, delivery.target_index, delivery.terminal_generation
+                ),
             ),
             (WEBHOOK_ATTEMPT_HEADER, delivery.attempts.to_string()),
             (WEBHOOK_EVENT_HEADER, WEBHOOK_EVENT.to_owned()),
@@ -673,6 +680,7 @@ impl ApiState {
                         organization_id,
                         delivery.build_id,
                         delivery.target_index,
+                        delivery.terminal_generation,
                         delivery.attempts,
                         outcome.as_ref().err().map(String::as_str),
                     )
@@ -792,6 +800,12 @@ mod tests {
             "64:ff9b:1:ffff:ffff:ffff:808:808",
             "2002:a00:1::",
             "2001::1",
+            "2001:2::1",
+            "2001:3::1",
+            "2001:4:112::1",
+            "2001:10::1",
+            "2001:20::1",
+            "2001:1ff:ffff::1",
             "2001:db8::1",
             "100::1",
             "fc00::1",
@@ -810,6 +824,7 @@ mod tests {
             "8.8.8.8",
             "140.82.112.3",
             "2606:50c0:8000::153",
+            "2001:200::1",
             "2001:4860:4860::8888",
         ] {
             let address: IpAddr = allowed.parse().unwrap();

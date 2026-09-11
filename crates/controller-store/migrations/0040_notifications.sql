@@ -21,6 +21,10 @@ CREATE TABLE notification_deliveries (
     ),
     target jsonb NOT NULL CHECK (jsonb_typeof(target) = 'object'),
     build_status text NOT NULL CHECK (build_status IN ('succeeded', 'failed', 'aborted')),
+    -- Counts the build's terminal outcomes this row has carried: a retried
+    -- build that becomes terminal again starts a new generation, and a
+    -- settlement or a delivery identity from the old one cannot match it.
+    terminal_generation integer NOT NULL DEFAULT 1 CHECK (terminal_generation >= 1),
     state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'delivered', 'abandoned')),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),

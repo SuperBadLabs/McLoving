@@ -383,7 +383,10 @@ pub struct NotificationDelivery {
     pub mapping_id: String,
     pub target: Value,
     pub build_status: String,
-    /// Attempts made so far, this claim included.
+    /// Which of the build's terminal outcomes this row carries; a retried
+    /// build that becomes terminal again starts the next generation.
+    pub terminal_generation: i32,
+    /// Attempts made so far in this generation, this claim included.
     pub attempts: i32,
 }
 
@@ -3507,6 +3510,7 @@ impl Store {
                 Value,
                 String,
                 i32,
+                i32,
             ),
         >(
             "WITH due AS (
@@ -3529,10 +3533,12 @@ impl Store {
                    AND d.build_id = due.build_id
                    AND d.target_index = due.target_index
                  RETURNING d.organization_id, d.build_id, d.target_index, d.kind,
-                           d.mapping_id, d.target, d.build_status, d.attempts
+                           d.mapping_id, d.target, d.build_status,
+                           d.terminal_generation, d.attempts
              )
              SELECT b.project_id, b.pipeline_id, c.build_id, c.target_index, c.kind,
-                    c.mapping_id, c.target, c.build_status, c.attempts
+                    c.mapping_id, c.target, c.build_status, c.terminal_generation,
+                    c.attempts
              FROM claimed AS c
              JOIN builds AS b
                ON b.organization_id = c.organization_id AND b.id = c.build_id
@@ -3557,6 +3563,7 @@ impl Store {
                     mapping_id,
                     target,
                     build_status,
+                    terminal_generation,
                     attempts,
                 )| {
                     NotificationDelivery {
@@ -3569,6 +3576,7 @@ impl Store {
                         mapping_id,
                         target,
                         build_status,
+                        terminal_generation,
                         attempts,
                     }
                 },
@@ -3578,12 +3586,14 @@ impl Store {
 
     /// Records a claimed delivery's outcome: delivered, or failed with the
     /// error the next attempt will see, abandoned once the attempts are
-    /// spent. A row another claim moved on is left alone.
+    /// spent. A row another claim moved on, or one that carries a later
+    /// terminal generation than the claim, is left alone.
     pub async fn settle_notification(
         &self,
         organization_id: Uuid,
         build_id: Uuid,
         target_index: i32,
+        terminal_generation: i32,
         attempts: i32,
         error: Option<&str>,
     ) -> Result<bool, StoreError> {
@@ -3615,6 +3625,7 @@ impl Store {
                AND build_id = $2
                AND target_index = $3
                AND state = 'pending'
+               AND terminal_generation = $8
                AND attempts = $4
              RETURNING attempts",
         )
@@ -3625,6 +3636,7 @@ impl Store {
         .bind(error.as_deref())
         .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
         .bind(mcloving_domain::notifications::MAX_DELIVERY_BACKOFF_SECONDS as f64)
+        .bind(terminal_generation)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;

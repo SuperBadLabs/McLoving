@@ -452,7 +452,7 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         );
         assert_eq!(
             headers[WEBHOOK_DELIVERY_HEADER].to_str().unwrap(),
-            format!("{build_id}:1")
+            format!("{build_id}:1:1")
         );
         assert_eq!(headers[WEBHOOK_ATTEMPT_HEADER].to_str().unwrap(), "1");
         assert_eq!(
@@ -465,6 +465,7 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         assert_eq!(record["build_id"], build_id.to_string());
         assert_eq!(record["pipeline_id"], pipeline_id.to_string());
         assert_eq!(record["mapping_id"], "hooks.main");
+        assert_eq!(record["terminal_generation"], 1);
         assert_eq!(
             record["build_url"],
             format!(

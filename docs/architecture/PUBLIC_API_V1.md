@@ -135,15 +135,19 @@ at `api.github.com`, `success`, `failure` or `error` for a succeeded, failed
 or aborted build, under the target's context, with a `target_url` that opens
 the build in the controller UI when `MCLOVING_PUBLIC_BASE_URL` is set. A
 webhook is a JSON record (`mcloving.build-notification/v1`: organization,
-project, pipeline, build, status, mapping, target index, attempt, build URL)
+project, pipeline, build, status, mapping, target index, terminal generation,
+attempt, build URL)
 POSTed to the mapping's `https` destination with `X-McLoving-Signature-256:
 sha256=<HMAC-SHA256 of the exact body under the notification key>`,
-`X-McLoving-Delivery: <build>:<index>`, `X-McLoving-Attempt` and
+`X-McLoving-Delivery: <build>:<index>:<terminal generation>` (a retried
+build that becomes terminal again starts a new generation, so a receiver
+can tell its outcomes apart), `X-McLoving-Attempt` and
 `X-McLoving-Event: build.terminal`. Before either connects, the destination
 host is resolved and every address is checked against the loopback,
 private, link-local, shared, benchmarking, documentation, multicast and
 reserved ranges and their IPv6 counterparts including unique-local,
-site-local, Teredo, 6to4, NAT64 and IPv4-mapped forms; the connection is
+site-local, the IETF protocol-assignments block (Teredo, benchmarking,
+ORCHID), 6to4, NAT64 (well-known and local-use) and IPv4-mapped forms; the connection is
 then pinned to exactly those addresses with the host name kept for TLS and
 `Host`, redirects are not followed, proxies are not used, a request is
 bounded at five seconds to connect and twenty in all, the answer is read to

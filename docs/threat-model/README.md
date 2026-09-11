@@ -1088,7 +1088,8 @@ kind whose credential the deployment lacks is refused rather than queued
 undeliverable; at delivery the destination host is resolved, every address
 is checked against loopback, private, link-local, shared, benchmarking,
 documentation, multicast, reserved and the IPv6 unique-local, site-local,
-Teredo, 6to4, NAT64 and IPv4-mapped forms, the connection is pinned to
+IETF protocol-assignment (Teredo, benchmarking, ORCHID), 6to4, well-known
+and local-use NAT64 and IPv4-mapped forms, the connection is pinned to
 exactly those addresses with the name kept for TLS and `Host`, redirects are
 not followed and no proxy is used, and the sequence is repeated on every
 attempt so a name that changes its answer between attempts is re-decided;
@@ -1099,9 +1100,12 @@ event, re-derivation on the retry paths inserts nothing new, rows are
 claimed `FOR UPDATE SKIP LOCKED` under a lease longer than the delivery
 deadline so two controllers hold disjoint rows even after the lock is
 released, the backoff scheduled when a failed attempt is settled so the row
-is off every scan until due, settlement is keyed on the claim's attempt count so an overtaken
-worker's answer is dropped, and attempts are bounded at twelve with the
-backoff capped at an hour); TM-013 (credentials and host exposure: the token
+is off every scan until due, settlement is keyed on the claim's terminal
+generation and attempt count so an overtaken worker's answer, or one from
+before an operator retry made the build terminal again, is dropped, a scan
+abandons a pending row whose attempts are spent rather than claiming it
+again, and attempts are bounded at twelve per generation with the backoff
+capped at an hour); TM-013 (credentials and host exposure: the token
 and signing key are owner-private secret-class files opened without
 following links, never logged, never in a link, and the public base URL is
 the only thing a notification carries about the controller; the UI reads

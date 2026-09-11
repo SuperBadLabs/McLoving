@@ -12711,10 +12711,18 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         .collect();
     claimed.sort_unstable();
     assert_eq!(claimed, vec![0, 1], "{first:?} {second:?}");
+    assert!(first.iter().chain(second.iter()).all(|delivery| {
+        delivery.attempts == 1
+            && delivery.terminal_generation == 1
+            && delivery.build_status == "succeeded"
+    }));
+    // A settlement from an earlier terminal generation never lands on a
+    // later one.
     assert!(
-        first
-            .iter()
-            .all(|delivery| delivery.attempts == 1 && delivery.build_status == "succeeded")
+        !store
+            .settle_notification(organization_id, admission.build_id, 0, 0, 1, None)
+            .await
+            .expect("settle under a stale generation")
     );
     // A claim leases the row past the delivery deadline, so an attempt still
     // in flight is never claimed by a second worker after the lock is gone.
@@ -12741,7 +12749,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     // Settle: one delivered, the other failed and re-queued with its error.
     assert!(
         store
-            .settle_notification(organization_id, admission.build_id, 0, 1, None)
+            .settle_notification(organization_id, admission.build_id, 0, 1, 1, None)
             .await
             .expect("settle delivered")
     );
@@ -12752,6 +12760,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
                 admission.build_id,
                 1,
                 1,
+                1,
                 Some("sink answered 503")
             )
             .await
@@ -12760,7 +12769,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     // A stale settlement (wrong attempt count) changes nothing.
     assert!(
         !store
-            .settle_notification(organization_id, admission.build_id, 1, 7, None)
+            .settle_notification(organization_id, admission.build_id, 1, 1, 7, None)
             .await
             .expect("stale settlement is ignored")
     );
@@ -12797,6 +12806,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .settle_notification(
                 organization_id,
                 admission.build_id,
+                1,
                 1,
                 last[0].attempts,
                 Some("still failing"),
