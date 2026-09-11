@@ -892,7 +892,7 @@ follows it by one global cursor. Boundaries touched: TM-003 (agent runtime:
 live chunks travel the existing fenced, session-bound `PublishLog` path with
 the same lease, fence, restore-epoch and session checks, redaction to a fixed
 point and idempotent append, so a stale or fenced-out agent cannot publish
-and a duplicate is a no-op; the per-attempt chunk bound rises to 8 192 only
+and a duplicate is a no-op; the per-attempt chunk bound rises to 262 144 only
 for a session that negotiated `live-log-stream-v1`, read from the durable
 session record, the live tail stops 128 sequences short of it, paces its
 flushes so the budget lasts the step's timeout with the budget shared
@@ -918,8 +918,13 @@ paged read, holds a request at most 30 seconds re-reading at 200 ms, reads
 the chunks once more after observing a terminal status so the drained end
 is exact, answers from the ledger only, so a follower observes committed
 chunks and nothing in flight, and names positions within the build's own
-commit order rather than the store's table-wide identity, so a tenant
-cannot measure another's activity from cursor gaps). Residual: a workload can still write anything into its
+commit order, stored at commit under the per-build log lock and indexed so
+a page after a position is one range read rather than a re-ranking of the
+ledger, rather than the store's table-wide identity, so a tenant cannot
+measure another's activity from cursor gaps). Capacity under TM-018: at
+most 262 144 chunk rows per attempt for a live-streaming session, each
+bounded by the 64 MiB per-attempt byte quota, the row count itself bounded
+by the tail's one-second flush floor and pacing. Residual: a workload can still write anything into its
 own stdout, as before; the live tail opens the spool by path after the
 executor created it, so a workload that swaps the path in that window
 streams other content it could have printed anyway and then fails its
