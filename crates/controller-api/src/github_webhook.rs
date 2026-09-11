@@ -586,6 +586,7 @@ async fn acknowledge_unadmitted(
             .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
                 organization_id: trigger.organization_id,
                 trigger_id: trigger.trigger_id,
+                expected_trigger_generation: trigger.generation,
                 delivery_id,
                 event,
                 body_sha256,

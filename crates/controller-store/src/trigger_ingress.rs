@@ -243,6 +243,9 @@ pub struct WebhookReceipt {
 pub struct NewWebhookReceipt<'a> {
     pub organization_id: Uuid,
     pub trigger_id: Uuid,
+    /// The trigger generation whose filter and state produced this decision;
+    /// the receipt is refused under the lock if the trigger has moved on.
+    pub expected_trigger_generation: i64,
     pub delivery_id: &'a str,
     pub event: &'a str,
     pub body_sha256: [u8; 32],
@@ -478,6 +481,7 @@ pub fn verify_trigger_transfer_snapshot(
             || receipt.recorded_at_unix_ms < 0
             || receipt.audit_sequence <= 0
             || deliveries_by_id.contains_key(receipt.delivery_id.as_str())
+            || event_ids.contains(receipt.delivery_id.as_str())
             || !receipt_ids.insert(receipt.delivery_id.as_str())
         {
             return Err(StoreError::TriggerIngressConflict(
@@ -822,9 +826,12 @@ impl Store {
                 "delivery ID was reused for different webhook input".to_owned(),
             ));
         }
+        // Accepted deliveries treat delivery and event identifiers as one
+        // namespace; a receipt id must collide with neither.
         let admitted = sqlx::query_scalar::<_, i32>(
             "SELECT 1 FROM trigger_deliveries
-             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND (delivery_id = $3 OR event_id = $3)",
         )
         .bind(input.organization_id)
         .bind(input.trigger_id)
@@ -836,6 +843,34 @@ impl Store {
             return Err(StoreError::TriggerIngressConflict(
                 "delivery ID was reused for an event that is not admissible".to_owned(),
             ));
+        }
+        // The decision was taken against one generation's filter and state;
+        // if the trigger was revised meanwhile the decision is stale, and a
+        // stale receipt would bar the id from admission under the new filter
+        // forever. Refuse it so the sender's redelivery is decided afresh.
+        let current_generation = sqlx::query_scalar::<_, i64>(
+            "SELECT current_generation FROM pipeline_trigger_definitions
+             WHERE organization_id = $1 AND trigger_id = $2",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match current_generation {
+            Some(generation) if generation == input.expected_trigger_generation => {}
+            Some(generation) => {
+                tx.rollback().await?;
+                return Err(StoreError::TriggerIngressConflict(format!(
+                    "trigger generation changed from {} to {generation}",
+                    input.expected_trigger_generation
+                )));
+            }
+            None => {
+                tx.rollback().await?;
+                return Err(StoreError::TriggerIngressConflict(
+                    "delivery does not identify a configured trigger".to_owned(),
+                ));
+            }
         }
         let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let recorded_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
@@ -1256,11 +1291,13 @@ impl Store {
         // decisions are serialized.
         let acknowledged = sqlx::query_scalar::<_, i32>(
             "SELECT 1 FROM webhook_receipts
-             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND delivery_id IN ($3, $4)",
         )
         .bind(input.organization_id)
         .bind(input.trigger_id)
         .bind(&input.delivery_id)
+        .bind(&input.event_id)
         .fetch_optional(&mut *tx)
         .await?;
         if acknowledged.is_some() {

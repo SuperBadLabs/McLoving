@@ -281,9 +281,13 @@ and as a `webhook_receipts` row (event header, body digest, status, reason)
 rather than as a delivery row. A delivery id's first authenticated decision
 is durable: admitted ids live in `trigger_deliveries`, unadmitted ids in
 `webhook_receipts`, both written under the trigger lock with each write
-refusing an id the other holds (acceptance checks receipts on every path and
-timing, the bearer route included), so two concurrent first deliveries
-cannot be decided twice; a repeat of an unadmitted delivery with the same event header
+refusing an id the other holds across both the delivery and the event
+identifier namespaces (acceptance checks receipts on every path and timing,
+the bearer route included), so two concurrent first deliveries cannot be
+decided twice; a receipt carries the trigger generation whose filter and
+state decided it and is refused under the lock if the trigger was revised
+meanwhile, so a stale decision never bars an id from admission under the new
+filter; a repeat of an unadmitted delivery with the same event header
 and body answers the recorded acknowledgement again without a second audit
 record, and a repeat with a different header or body, or an admitted id
 re-sent under an inadmissible event (the signature covers the body, not the

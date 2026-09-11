@@ -2530,6 +2530,7 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
             organization_id,
             trigger_id,
+            expected_trigger_generation: 3,
             delivery_id: "hook-ignored-1",
             event: "ping",
             body_sha256: [7; 32],
@@ -2562,6 +2563,42 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         compute_trigger_transfer_snapshot_digest(&receipt_admitted).unwrap();
     assert!(matches!(
         verify_trigger_transfer_snapshot(&receipt_admitted, handoff.audit_event_hash),
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    // A receipt may collide with neither an admitted delivery id nor an
+    // admitted event id, and a decision taken against a superseded
+    // generation is refused rather than recorded.
+    let admitted_event_id = handoff.deliveries[0].event_id.clone();
+    assert!(matches!(
+        store
+            .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
+                organization_id,
+                trigger_id,
+                expected_trigger_generation: 3,
+                delivery_id: &admitted_event_id,
+                event: "ping",
+                body_sha256: [7; 32],
+                status: "ignored",
+                reason: "collides with an admitted event id",
+                caller_identity: "remote:caller:rotated",
+            })
+            .await,
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    assert!(matches!(
+        store
+            .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
+                organization_id,
+                trigger_id,
+                expected_trigger_generation: 2,
+                delivery_id: "hook-stale-generation",
+                event: "ping",
+                body_sha256: [7; 32],
+                status: "ignored",
+                reason: "decided against a superseded generation",
+                caller_identity: "remote:caller:rotated",
+            })
+            .await,
         Err(StoreError::TriggerIngressConflict(_))
     ));
     let trusted_handoff_audit_hash = handoff.audit_event_hash;
