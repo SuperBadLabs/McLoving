@@ -90,6 +90,10 @@ stages:
 /// A line every 50 ms for five seconds: a crash right after the first
 /// acknowledged chunk leaves lines the tail never streamed, which the
 /// restart must publish (PAR-013).
+/// The workload also revokes the agent's own access to its spool (the step
+/// runs in its workspace, where `spool/` holds the live spool): the crashed
+/// session never reaches the executor's restoration at exit, so recovery
+/// must restore it before the interrupted output can be published.
 const INTERRUPTED_LOG_PIPELINE: &str = r#"
 version: 1
 name: interrupted-log
@@ -99,7 +103,7 @@ stages:
     steps:
       - process:
           program: /bin/sh
-          args: [-c, "i=1; while [ $i -le 100 ]; do printf 'tick-%s\\n' $i; i=$((i+1)); sleep 0.05; done"]
+          args: [-c, "chmod 000 spool/step-* spool 2>/dev/null; i=1; while [ $i -le 100 ]; do printf 'tick-%s\\n' $i; i=$((i+1)); sleep 0.05; done"]
           timeout_seconds: 60
 "#;
 

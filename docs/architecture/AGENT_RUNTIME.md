@@ -383,9 +383,13 @@ discharge a parked reconciliation).
   publishes the interrupted step's spool from its reservations (the
   unreceipted ranges and the unstreamed tail), probing the live step directory first and then the relocated one, since a
   multi-step crash may fall between a finished step's relocation and its
-  journaling, and first applying the executor's aggregate quota cut to the
-  pair with the journaled reservations as floors, since the crashed session
-  never reached that cut and an orphan may have kept writing, so the output up to the quiesce is in the ledger; a failed publication keeps the
+  journaling, restoring the agent's own access to the spool chain first (the workload
+  may have revoked it and the crashed session never reached the
+  executor's restoration at exit; only a confirmed absence is an empty
+  stream, a permission or I/O failure is an error) and then applying the
+  executor's aggregate quota cut to the pair with the journaled
+  reservations as floors, since the crashed session never reached that
+  cut and an orphan may have kept writing, so the output up to the quiesce is in the ledger; a failed publication keeps the
   attempt cancelling for the next session rather than completing and
   reclaiming the spool, and a lease definitively lost meanwhile retires the
   attempt with the chunks already accepted exactly once.

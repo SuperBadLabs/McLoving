@@ -660,8 +660,15 @@ async fn replay_finalization(
         }
         for directory in &candidates {
             let relative_path = directory.join(format!("{stream}.log"));
-            let path = config.workspace_root.join(&relative_path);
-            if let Ok(file) = open_spool_for_cut(&path) {
+            // The workload may have revoked the agent's own access to its
+            // spool before the crash; the executor restores that at exit on
+            // the crash-free path, so recovery restores it here. Only a
+            // confirmed absence moves on to the next candidate: a permission
+            // or I/O failure is an error, never an empty stream.
+            if let Some(file) =
+                open_interrupted_spool(&config.workspace_root, &relative_path).await?
+            {
+                let path = config.workspace_root.join(&relative_path);
                 interrupted.push((stream, relative_path, path, file));
                 break;
             }
@@ -3182,6 +3189,63 @@ async fn publish_reserved_chunk(
     )?;
     crash_after_log_chunks_for_test();
     Ok(())
+}
+
+/// Locates an interrupted step's spool for recovery, restoring the agent's
+/// own access along the way: every directory under the workspace root on the
+/// way to it gets owner traversal back and the file itself owner read and
+/// write, as the executor does at exit on the crash-free path. `Ok(None)` is
+/// a confirmed absence (some component does not exist); a link or a
+/// non-directory in the chain, a non-regular spool, and every other failure
+/// are errors.
+async fn open_interrupted_spool(
+    workspace_root: &Path,
+    relative_path: &Path,
+) -> Result<Option<std::fs::File>, AgentError> {
+    let Some(relative_directory) = relative_path.parent() else {
+        return Err(AgentError::InvalidAssignment(
+            "interrupted spool path has no parent".to_owned(),
+        ));
+    };
+    let mut directory = workspace_root.to_owned();
+    for component in relative_directory.components() {
+        let Component::Normal(component) = component else {
+            return Err(AgentError::InvalidAssignment(
+                "interrupted spool path must be normalized and relative".to_owned(),
+            ));
+        };
+        directory.push(component);
+        let metadata = match fs::symlink_metadata(&directory).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+            return Err(AgentError::InvalidAssignment(
+                "interrupted spool path contains a non-directory, symlink, or reparse point"
+                    .to_owned(),
+            ));
+        }
+        restore_directory_access(&directory, &metadata).await?;
+    }
+    let path = workspace_root.join(relative_path);
+    let metadata = match fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || is_link_or_reparse_point(&metadata) {
+        return Err(AgentError::InvalidAssignment(
+            "interrupted spool is not a regular file".to_owned(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o600);
+        fs::set_permissions(&path, permissions).await?;
+    }
+    Ok(Some(open_spool_for_cut(&path)?))
 }
 
 /// Opens an interrupted step's spool for the recovery cut: a regular file

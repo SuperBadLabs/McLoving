@@ -931,8 +931,10 @@ own stdout, as before; the live tail opens the spool by path after the
 executor created it, so a workload that swaps the path in that window
 streams other content it could have printed anyway and then fails its
 attempt at the terminal check; a crash while a step runs is followed, on
-restart, by the executor's aggregate quota cut applied to the interrupted step's
-spool pair with its reservations as floors and then publication of that
+restart, by restoration of the agent's own access to the interrupted step's spool
+chain (a workload-revoked permission is restored, never read as an absent
+stream), the executor's aggregate quota cut applied to the spool pair
+with its reservations as floors and then publication of that
 spool from its reservations under the renewed lease before the
 cancellation completes (a
 failed publication keeps the attempt cancelling for the next session
