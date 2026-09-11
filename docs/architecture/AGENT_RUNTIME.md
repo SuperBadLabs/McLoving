@@ -441,9 +441,12 @@ discharge a parked reconciliation).
   (thirty seconds plus one second per MiB, at most fifteen minutes, not the
   lease-sized RPC budget) and ended by a lost lease, a stop, or the
   attempt's cancellation (a cancellation that lands after the last step
-  collects nothing more); a file that runs short under the streaming read
-  is the same `changed_length` refusal as one that changes under the digest
-  read, and one rewritten in place between the passes, which the controller
+  collects nothing more and is recorded as `artifact_collection_cancelled`,
+  so a succeeded step outcome the controller lets stand is never reported
+  with its declared artifacts absent); a file that runs short or grows
+  under the streaming read (its last frame is held back until a probe shows
+  no growth, so the server registers nothing) is the same `changed_length`
+  refusal as one that changes under the digest read, and one rewritten in place between the passes, which the controller
   refuses for its digest, is the `changed_content` refusal; the controller stages it into the same object store the public
   upload routes use, with the declared length reserved against the store
   quota before the first byte, charges the declared length against the

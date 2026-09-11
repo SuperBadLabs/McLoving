@@ -2524,26 +2524,30 @@ async fn run_assignment(
         // collects nothing; a refusal or an unsupported peer fails a step
         // outcome that would otherwise have succeeded and is named as the
         // reason.
-        let artifact_failure = if assignment.artifacts.is_empty()
-            || terminal == WorkOutcome::Aborted
-            || execution_cancellation.is_cancelled()
-        {
-            None
-        } else {
-            collect_and_upload_artifacts(
-                config,
-                client,
-                &assignment,
-                &features,
-                AuthorityRpcControl {
-                    authority_lost: &authority_lost,
-                    stop: &stop,
-                    lease_window,
-                },
-                &execution_cancellation,
-            )
-            .await?
-        };
+        let artifact_failure =
+            if assignment.artifacts.is_empty() || terminal == WorkOutcome::Aborted {
+                None
+            } else if execution_cancellation.is_cancelled() {
+                // A cancellation that lands after the last step returned: the
+                // controller lets a succeeded terminal stand, so the attempt
+                // must not be reported succeeded with every declared artifact
+                // absent; the skipped collection is its named failure.
+                Some("artifact_collection_cancelled".to_owned())
+            } else {
+                collect_and_upload_artifacts(
+                    config,
+                    client,
+                    &assignment,
+                    &features,
+                    AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
+                    &execution_cancellation,
+                )
+                .await?
+            };
         if artifact_failure.is_some() && terminal == WorkOutcome::Succeeded {
             terminal = WorkOutcome::Failed;
         }
@@ -3364,6 +3368,15 @@ async fn upload_artifact(
                 return Ok(FrameRead::Short);
             }
             remaining -= read as u64;
+            if remaining == 0 {
+                // Before the last frame goes: a file that grew under the
+                // read is held back so the stream ends short and the server
+                // registers nothing, rather than accepting the old prefix.
+                let mut probe = [0_u8; 1];
+                if source.read(&mut probe)? != 0 {
+                    return Ok(FrameRead::Short);
+                }
+            }
             let frame = ArtifactUploadFrame {
                 frame: Some(Frame::Data(buffer[..read].to_vec())),
             };
@@ -3436,8 +3449,8 @@ enum UploadOutcome {
 }
 
 /// How the streaming read of one artifact ended: every identified byte
-/// sent, the file shorter than identified, or the stream closed by the
-/// RPC's end before the file was done.
+/// sent, the file shorter or longer than identified (its last frame held
+/// back), or the stream closed by the RPC's end before the file was done.
 #[cfg(unix)]
 enum FrameRead {
     Complete,
