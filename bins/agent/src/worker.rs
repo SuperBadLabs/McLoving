@@ -1613,6 +1613,13 @@ async fn run_assignment(
         }
     };
     require_work_receipt(start_receipt, session_epoch)?;
+    // Every step's output is redacted against every credential the attempt
+    // redeemed, not only the ones that step declared: an earlier step may
+    // write its secret into the shared workspace and a later step may print
+    // it, and the durable local spool must never hold it either way. Only the
+    // declared bindings are injected into a step's environment.
+    let attempt_redactions =
+        execution_environment(BTreeMap::new(), credentials.clone())?.redactions;
     let completion_result: Result<(), AgentError> = async {
         // One attempt, several ordered steps (PAR-010). Every step's spool is
         // journaled before the first publication, every step's outcome is
@@ -1711,7 +1718,7 @@ async fn run_assignment(
             let execution = execute_prepared(
                 &request,
                 execution_cancellation.clone(),
-                &execution_environment.redactions,
+                &attempt_redactions,
                 helper,
                 on_spawn,
             )
