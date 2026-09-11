@@ -680,6 +680,18 @@ class Gate:
         """
         self.show_view("build")
         self.settle(0.4)
+
+        # Empty the download directory first. Rerunning with the same
+        # --output-dir -- which this gate's own documentation tells you to do --
+        # would otherwise leave the previous run's build.log sitting there, and
+        # it satisfies the filename, length and payload checks perfectly. The
+        # assertion would then pass with no download having occurred at all,
+        # including under the mutation that removes the click listener.
+        for stale in self.download_dir.iterdir():
+            if stale.is_file():
+                stale.unlink()
+        leftover = [path.name for path in self.download_dir.iterdir()]
+
         # The uniquely named row, deliberately. `report.txt` appears twice
         # differing only by fence, and production's artifact query carries no
         # fence -- `find_artifact` takes the first match -- so a download of that
@@ -724,7 +736,8 @@ class Gate:
         payload = delivered.read_bytes() if delivered is not None else b""
         self.assertion(
             "artifact_download_delivers_content",
-            clicked is not None
+            not leftover
+            and clicked is not None
             and not clicked.get("disabled")
             and not errored
             and '"downloaded": "build.log"' in result
@@ -732,7 +745,8 @@ class Gate:
             and delivered.name == "build.log"
             and len(payload) == 26
             and payload == b"browser fixture build log\n",
-            f"clicked={clicked}, error-styled={errored}, "
+            f"leftover_before_click={leftover}, clicked={clicked}, "
+            f"error-styled={errored}, "
             f"file={delivered.name if delivered else None}, "
             f"delivered_bytes={len(payload)}, result {result[:80]!r}",
         )
