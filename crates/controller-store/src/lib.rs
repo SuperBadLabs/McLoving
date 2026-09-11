@@ -5246,6 +5246,45 @@ impl Store {
         Ok(used)
     }
 
+    /// [`Self::register_artifact`] for an agent's own upload (PAR-014): the
+    /// registration is fenced by the agent's current session epoch inside
+    /// the same transaction, so a session superseded while a long stream was
+    /// in flight cannot register after its replacement.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_artifact_in_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.register_artifact_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            Some(session_epoch),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn register_artifact(
         &self,
@@ -5262,6 +5301,41 @@ impl Store {
         media_type: &str,
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
+        self.register_artifact_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_artifact_with_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
         if name.is_empty()
             || name.len() > 512
             || name.chars().any(char::is_control)
@@ -5276,6 +5350,12 @@ impl Store {
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         acquire_object_deletion_fence(&mut tx, &digest).await?;
         // The attempt-scoped lock first (PAR-014): every registration for the
         // attempt, whatever its name, reads the quota and inserts under it,
@@ -5507,6 +5587,41 @@ impl Store {
     }
 
     /// Marks an exact reserved artifact available only after bytes are published.
+    /// [`Self::mark_artifact_available`] for an agent's own upload
+    /// (PAR-014), fenced by the agent's current session epoch inside the
+    /// same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_artifact_available_in_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.mark_artifact_available_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            Some((agent_id, session_epoch)),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn mark_artifact_available(
         &self,
@@ -5521,10 +5636,47 @@ impl Store {
         media_type: &str,
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
+        self.mark_artifact_available_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_artifact_available_with_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        session: Option<(&str, u64)>,
+    ) -> Result<bool, StoreError> {
         if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some((agent_id, session_epoch)) = session
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         acquire_object_deletion_fence(&mut tx, &digest).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(

@@ -409,15 +409,18 @@ discharge a parked reconciliation).
   within a segment; never absolute, never `.` or `..`). After the steps of an
   attempt that was not cancelled, and before its terminal is made durable,
   the agent collects the matching regular files by a descriptor-relative
-  walk: the agent-owned workspace root is opened by path without following
-  a link, the attempt workspace is reached from it one component at a time
+  walk: the agent-owned workspace root is resolved from the filesystem root
+  one component at a time without following a link in any of them, the
+  attempt workspace is reached from it one component at a time
   `O_DIRECTORY|O_NOFOLLOW` (a link in its place, a step having swapped its
   workspace, is refused by name), every directory below is opened the same
   way and re-identified against the entry it was reached by, every matching
   file is opened `O_NOFOLLOW` and re-identified the same way, the agent's
   own `spool/` is never visited, a directory is entered only when some
   pattern can match below it, an entry whose name is not UTF-8 is refused
-  when a declaration would collect or enter it and skipped otherwise, and
+  when a declaration would collect or enter it and skipped otherwise, a
+  matching path holding a control character is refused by name before any
+  upload, and
   the walk is bounded (depth 32, 65 536 entries, 1 024 objects, 256 MiB).
   Pattern matching is a table over pattern and path segments, so a pattern
   of many `**` segments costs their product. A link that a declaration
@@ -435,8 +438,9 @@ discharge a parked reconciliation).
   upload routes use, with the declared length reserved against the store
   quota before the first byte, registers it through the same
   `register_artifact` predicate (lease owner, fence, restore epoch, build
-  and node) under an attempt-scoped artifact lock shared by every name and
-  then the per-name lock, refuses the registration when the attempt's
+  and node) fenced by the agent's current session epoch inside the same
+  transaction, under an attempt-scoped artifact lock shared by every name
+  and then the per-name lock, refuses the registration when the attempt's
   artifacts would pass 256 MiB, and commits it into the immutable digest
   namespace. The stream is accepted only for a session
   that negotiated `artifact-upload-v1`; the agent advertises the

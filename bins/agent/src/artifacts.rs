@@ -51,7 +51,8 @@ pub enum CollectionRefusal {
     IdentityChanged(String),
     /// A matching file whose object name would exceed the store's bound.
     NameTooLong(String),
-    /// A matching entry whose name is not UTF-8 and so cannot be named.
+    /// A matching entry whose name is not UTF-8, or holds a control
+    /// character, and so cannot name an object.
     UnnameableEntry(String),
     /// More matching files than one attempt may upload.
     TooManyFiles(usize),
@@ -250,6 +251,12 @@ fn walk_directory(
         // overlap on purpose, and the object's identity includes the
         // declaration's name, so each emitted object counts against the
         // file and byte bounds.
+        // The object name must satisfy the controller's rules before a byte
+        // is sent: a name it would refuse is a named refusal here, not an
+        // RPC failure that ends the session.
+        if path.chars().any(char::is_control) {
+            return Err(CollectionRefusal::UnnameableEntry(path).into());
+        }
         for spec in walk.specs.iter().filter(|spec| spec.matches(&path)) {
             let name = format!("{}/{path}", spec.name);
             if name.len() > MAX_ARTIFACT_OBJECT_NAME_BYTES {
@@ -273,18 +280,56 @@ fn walk_directory(
     Ok(())
 }
 
-/// Opens the agent-owned workspace root by its path: a directory reached
-/// without following a link in its final component.
+/// Opens the agent-owned workspace root one component at a time from the
+/// filesystem root, never following a link in any of them: a writable
+/// ancestor swapped for a link cannot redirect the walk. A relative root is
+/// taken from the current directory the same way.
 fn open_directory_by_path(path: &Path) -> Result<OwnedFd, CollectionError> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut directory = open_filesystem_root()?;
+    let mut reached = String::new();
+    for component in absolute.components() {
+        let name = match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(name) => name,
+            std::path::Component::CurDir => continue,
+            _ => {
+                return Err(std::io::Error::other(
+                    "workspace root must be a normalized absolute path",
+                )
+                .into());
+            }
+        };
+        let raw = std::ffi::CString::new(name.as_encoded_bytes())
+            .map_err(|_| std::io::Error::other("workspace root component contains NUL"))?;
+        reached = format!("{reached}/{}", name.to_string_lossy());
+        directory = match openat(
+            &directory,
+            raw.as_c_str(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::ELOOP | nix::errno::Errno::ENOTDIR) => {
+                return Err(CollectionRefusal::Link(format!("<root>{reached}")).into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+    }
+    Ok(directory)
+}
+
+fn open_filesystem_root() -> Result<OwnedFd, CollectionError> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    let directory = std::fs::OpenOptions::new()
+    Ok(std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)?;
-    if !is_directory(&fstat(&directory)?) {
-        return Err(std::io::Error::other("workspace root is not a directory").into());
-    }
-    Ok(directory.into())
+        .open("/")?
+        .into())
 }
 
 fn open_regular(directory: &OwnedFd, name: &CStr) -> Result<OwnedFd, CollectionError> {
@@ -434,6 +479,47 @@ mod tests {
         assert!(matches!(
             error,
             CollectionError::Refused(CollectionRefusal::Link(path)) if path == "<workspace>/org/attempt"
+        ));
+    }
+
+    #[test]
+    fn an_ancestor_of_the_workspace_root_swapped_for_a_link_is_refused() {
+        let directory = workspace();
+        // The configured root is `<tmp>/link/org/attempt/1` where `link` is a
+        // symlink to the real tree: an ancestor, not the final component.
+        let real = directory.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::rename(directory.path().join("org"), real.join("org")).unwrap();
+        std::os::unix::fs::symlink(&real, directory.path().join("link")).unwrap();
+        let error = collect(
+            &directory.path().join("link"),
+            Path::new(WORKSPACE),
+            &[spec("all", &["**/*"])],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CollectionError::Refused(CollectionRefusal::Link(path)) if path.ends_with("/link")
+        ));
+        // The real tree is fine.
+        let files = collect(
+            &real,
+            Path::new(WORKSPACE),
+            &[spec("logs", &["target/*.log"])],
+        )
+        .unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn a_name_the_controller_would_refuse_is_a_named_refusal_here() {
+        let directory = workspace();
+        let root = directory.path().join(WORKSPACE);
+        std::fs::write(root.join("other/bad\nname.xml"), b"x").unwrap();
+        let error = collect_in(&directory, &[spec("reports", &["other/*"])]).unwrap_err();
+        assert!(matches!(
+            error,
+            CollectionError::Refused(CollectionRefusal::UnnameableEntry(path)) if path == "other/bad\nname.xml"
         ));
     }
 

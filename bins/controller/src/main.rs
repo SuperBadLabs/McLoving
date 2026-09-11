@@ -1597,9 +1597,13 @@ impl AgentControl for ControllerAgentService {
         self.object_store
             .verify_pending(&pending)
             .map_err(object_store_status)?;
+        // Fenced by the session epoch inside the registration itself: the
+        // check made before the stream was read can go stale during a long
+        // upload, and a superseded session must not register after its
+        // replacement.
         let registered = self
             .store
-            .register_artifact(
+            .register_artifact_in_session(
                 context.organization_id,
                 build_id,
                 node_id,
@@ -1612,6 +1616,7 @@ impl AgentControl for ControllerAgentService {
                 declared,
                 &header.media_type,
                 mcloving_domain::artifacts::ARTIFACT_RETENTION_SECONDS,
+                authority.session_epoch,
             )
             .await
             .map_err(internal_store_error)?;
@@ -1640,7 +1645,7 @@ impl AgentControl for ControllerAgentService {
         // once they are, matched against the reserved metadata.
         let available = self
             .store
-            .mark_artifact_available(
+            .mark_artifact_available_in_session(
                 context.organization_id,
                 build_id,
                 node_id,
@@ -1651,6 +1656,8 @@ impl AgentControl for ControllerAgentService {
                 declared,
                 &header.media_type,
                 mcloving_domain::artifacts::ARTIFACT_RETENTION_SECONDS,
+                &authority.agent_id,
+                authority.session_epoch,
             )
             .await
             .map_err(internal_store_error)?;

@@ -967,19 +967,26 @@ quota's per-append sum over prior chunks is cost, not exposure
 A stage declares the files it publishes and the agent uploads them after its
 steps over its own channel. Boundaries touched: TM-003 (agent runtime: the
 upload stream rides the existing session-bound, fenced work authority with
-the same lease, fence, restore-epoch and session checks as log publication,
+the same lease, fence and restore-epoch checks as log publication and the
+session epoch re-checked inside the registration and availability
+transactions themselves, so a session superseded during a long stream cannot
+register after its replacement,
 is accepted only for a session that negotiated `artifact-upload-v1`, and
 the scheduling capability is kept only for such a session, so an older
 agent or peer is never offered a stage that declares artifacts and never
 strands its files); TM-013 (credential and host exposure: the collector
-opens the agent-owned workspace root by path without following a link,
-reaches the attempt workspace from it one component at a time `O_NOFOLLOW`
+resolves the agent-owned workspace root from the filesystem root one
+component at a time without following a link in any of them, so a writable
+ancestor swapped for a link cannot redirect the walk, reaches the attempt
+workspace from it one component at a time `O_NOFOLLOW`
 so a step that swaps its workspace for a link is refused by name rather
 than followed, opens every directory and file below `O_NOFOLLOW` and
 re-identifies each against the entry it was reached by, never visits the
 agent's own spool, enters a directory only when a pattern can match below
 it, refuses an entry whose name is not UTF-8 when a declaration would
-collect or enter it rather than naming an object by a lossy spelling, and
+collect or enter it rather than naming an object by a lossy spelling,
+refuses a matching path holding a control character by name before any
+upload rather than letting the controller's refusal end the session, and
 refuses the whole set by name when a link stands where a declaration would
 collect or descend, so a step that plants a link to a service-account file
 gets a named refusal and no upload; a Windows agent has no collector and is not
