@@ -1046,9 +1046,12 @@ between reads, so a cancellation that lands while a large file is hashed on
 a slow filesystem takes effect only after the read, the client's upload
 deadline equals the server's receive budget with no headroom for the commit,
 the streaming reader's join is unbounded on a stalled read, the controller
-writes each frame on a runtime worker, and an upload's in-flight ledger
+writes each frame on a runtime worker, an upload's in-flight ledger
 charge overlaps its registered row until the stream ends, so two uploads
-that exactly fill the quota can see the second refused (`AGENT-012`). Closure requires the
+that exactly fill the quota can see the second refused, and a file larger
+than the controller's per-object limit (64 MiB by default, below the 256 MiB
+attempt quota) is refused by the controller with an answer the agent treats
+as a session error rather than a named refusal (`AGENT-012`). Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
 
