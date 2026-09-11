@@ -84,7 +84,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 36, "route matrix must track the public API");
+    assert_eq!(cases.len(), 37, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -1367,6 +1367,10 @@ fn route_cases(
             format!("{project}/pipelines/{pipeline_id}/triggers/{trigger_id}/events"),
             event,
             json,
+        ),
+        case(
+            Method::GET,
+            format!("{project}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook"),
         ),
         body_case(
             Method::POST,

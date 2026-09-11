@@ -207,8 +207,54 @@ and effect authority remains governed by its own tickets and fences.
 The generated OpenAPI contract exposes:
 
 - `GET/PUT .../pipelines/{pipeline}/triggers/{trigger}`;
-- `POST .../triggers/{trigger}/events`; and
-- `POST .../triggers/{trigger}/deliveries/{delivery}/redrive`.
+- `POST .../triggers/{trigger}/events`;
+- `POST .../triggers/{trigger}/deliveries/{delivery}/redrive`;
+- `GET .../triggers/{trigger}/webhook`, the GitHub hook path and its derived
+  secret (project configuration authority); and
+- `POST /api/v1/webhooks/github/{organization}/{project}/{pipeline}/{trigger}`,
+  the public GitHub receiver described below.
+
+## GitHub webhook receiver (PAR-001)
+
+A GitHub-provider SCM webhook trigger may be fed directly by GitHub. The
+controller holds one webhook key (`MCLOVING_WEBHOOK_KEY_FILE`, an
+owner-private file of at least 32 bytes, secret-class in the deployment
+contract); each trigger's hook secret is `HMAC-SHA256(key, organization ||
+project || pipeline || trigger || source_generation)` under a domain
+separator, derived on demand and never stored, so rotating the trigger's
+event source rotates the secret and nothing retains it. An operator reads the
+path and secret from `GET .../triggers/{trigger}/webhook` and pastes them
+into GitHub; a controller without a key answers not-found on both routes.
+
+The receiver takes no bearer. It requires `X-GitHub-Delivery`,
+`X-GitHub-Event` and `X-Hub-Signature-256`, resolves the trigger (which must
+be an enabled or paused `scm_webhook` trigger whose configuration names
+provider `github`), and verifies the signature over the raw body in constant
+time before it interprets anything; a forged or unsigned delivery is refused
+with 401 and leaves no receipt. The body is bounded at 2 MiB. A `push` to a
+branch maps to the SCM payload `repository_identity` (the repository's
+`full_name`, which the trigger's `repository_identity` must equal),
+`revision` (`after`), `branch` (the ref without `refs/heads/`) and `paths`
+(the union of the commits' added, modified and removed paths, omitted when it
+exceeds the 128-path payload bound, so a path filter cannot match an
+unbounded change); a `pull_request` `opened`, `synchronize` or `reopened`
+maps the head sha and head ref the same way. The delivery id is both the
+delivery and the event identity; the event time is the receipt time, and a
+redelivery of a recorded delivery id reuses the recorded time so it replays
+exactly. When the saved pipeline declares public string parameters named
+`revision` or `branch`, the delivery supplies them, which is how a checkout
+step takes its commit from a push.
+
+Admission then runs the same path as the bearer route with the trigger's own
+`event_source_identity` as the caller: created deliveries answer 201 with the
+build admission, exact redeliveries answer 200 with the same build and mint
+nothing, and a reused delivery id with a different authenticated body is a
+409 `trigger_ingress_conflict`. Deliveries that authenticate but are not
+admitted, a tag push, a branch deletion, a `ping`, an unsupported event or
+action, or an event the trigger's filter refuses, answer 202 with
+`{"status": "ignored" | "filtered", "reason"}` so GitHub reports the hook
+healthy, and each is recorded as a `trigger.delivery_unadmitted` audit event
+under the event-source identity rather than as a delivery row.
 
 Trigger configuration is a `kind`-discriminated union with separate closed SCM,
 schedule, upstream, and remote API variants and their exact required fields.

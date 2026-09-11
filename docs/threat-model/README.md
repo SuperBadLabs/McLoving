@@ -884,6 +884,41 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
+## PAR-001 GitHub webhook receiver review, ticket ACTIVE
+
+A public route lets GitHub feed an SCM webhook trigger directly. Boundaries
+touched: TM-039 (trigger ingress: the receiver admits through the same
+durable delivery ledger, replay and conflict rules as the bearer route, with
+the trigger's own event-source identity as the caller, so nothing about
+uniqueness, redrive or dead-lettering is bypassed; a redelivery reuses the
+recorded event time so it replays rather than conflicts); TM-002/TM-011
+(authentication: no bearer, the raw body's `X-Hub-Signature-256` is verified
+in constant time under a per-trigger secret derived by HMAC from the
+controller's webhook key file and the trigger's identity and
+`source_generation`, never stored, rotated by event-source rotation, and
+verified before any byte of the body is interpreted, so a forged delivery
+leaves no receipt; the key file is secret-class in the deployment contract
+and refused unless owner-private); TM-052 (routing: the receiver answers
+only enabled-or-paused `scm_webhook` triggers whose configuration names
+provider `github`, and a controller without a key answers not-found so the
+route cannot be probed for triggers); TM-039 again for the mapping: the
+delivery is reduced to the closed SCM payload (repository `full_name`,
+`after`, branch, bounded paths) and every other field is dropped, an
+oversized change set is admitted pathless so a path filter cannot be
+bypassed by volume, and unadmitted deliveries are acknowledged with 202 and
+recorded as audit events so GitHub keeps delivering. Residual: the operator
+reads the secret over the authenticated API and pastes it into GitHub, so
+the secret's confidentiality in transit and at GitHub is the operator's and
+GitHub's; the receiver trusts GitHub's delivery id as the idempotency key,
+which is what GitHub's own redelivery contract guarantees; `revision` and
+`branch` reach a pipeline only as parameters it declares, never implicitly.
+Tests cover admission, exact redelivery with one build, reused-id conflict,
+forged signature without receipt, missing headers, the unkeyed controller,
+filtered and ignored acknowledgements with their audit records, and the
+pull-request mapping. Closure requires the reviewed merge, exact-main
+Foundation and native Windows runs, and a receipt in
+`docs/evidence/PAR-001_SECURITY_REVIEW.md`.
+
 ## PAR-012 checkout step execution review (earned closure)
 
 A `checkout` step puts the sealed source acquirer on the product path: a

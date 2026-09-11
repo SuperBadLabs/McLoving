@@ -1477,6 +1477,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "base64",
+ "hmac",
  "http",
  "jsonwebtoken",
  "mcloving-controller-api",

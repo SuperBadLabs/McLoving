@@ -5,6 +5,8 @@ mod cache_intent;
 mod input_intent;
 use input_intent::validate_input_mappings;
 pub use input_intent::{INPUT_MAPPING_CATALOG_V1, InputMappingCatalog, InputMappingRecord};
+mod github_webhook;
+pub use github_webhook::GithubWebhookResponse;
 mod oidc;
 mod source_intent;
 use cache_intent::validate_cache_mappings;
@@ -91,6 +93,10 @@ pub struct ApiState {
     cache_mapping_catalog: CacheMappingCatalog,
     input_mapping_catalog: InputMappingCatalog,
     source_mapping_catalog: SourceMappingCatalog,
+    /// Controller webhook key (PAR-001): per-trigger GitHub hook secrets are
+    /// derived from it and never stored. Absent means no public webhook route
+    /// answers.
+    webhook_key: Option<Vec<u8>>,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -196,6 +202,7 @@ impl ApiState {
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
+            webhook_key: None,
         })
     }
 
@@ -218,6 +225,7 @@ impl ApiState {
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
+            webhook_key: None,
         }
     }
 
@@ -375,6 +383,17 @@ impl ApiState {
         Ok(self)
     }
 
+    /// Installs the controller webhook key GitHub hook secrets derive from.
+    pub fn with_webhook_key(mut self, key: Vec<u8>) -> Result<Self, ApiError> {
+        if key.len() < github_webhook::MIN_WEBHOOK_KEY_BYTES {
+            return Err(ApiError::configuration(
+                "webhook key must hold at least 32 bytes",
+            ));
+        }
+        self.webhook_key = Some(key);
+        Ok(self)
+    }
+
     pub fn with_source_mapping_catalog(
         mut self,
         catalog: SourceMappingCatalog,
@@ -436,6 +455,16 @@ pub fn router(state: ApiState) -> Router {
             post(stage_artifact),
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
+    // A public route: no bearer, the body signature under the trigger's
+    // derived secret is the only authentication (PAR-001).
+    let github_webhook = Router::new()
+        .route(
+            "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}",
+            post(github_webhook::receive_github_delivery),
+        )
+        .route_layer(DefaultBodyLimit::max(
+            github_webhook::MAX_DELIVERY_BODY_BYTES,
+        ));
     let discovery_scan = Router::new()
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
@@ -504,6 +533,10 @@ pub fn router(state: ApiState) -> Router {
             post(submit_trigger_event),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook",
+            get(github_webhook::read_github_webhook),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
             post(redrive_trigger_event),
         )
@@ -512,6 +545,7 @@ pub fn router(state: ApiState) -> Router {
             get(get_discovery_parent).put(put_discovery_parent),
         )
         .merge(discovery_scan)
+        .merge(github_webhook)
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
             get(list_discovery_children),
@@ -1179,6 +1213,20 @@ fn openapi_document() -> Value {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
                 "post": trigger_event_operation(
                     "submitTriggerEvent", "Authenticate, durably capture, and process a typed trigger event", "TriggerEventRequest"
+                )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "get": api_operation(
+                    "readGithubWebhook", "triggers", "Read the GitHub hook path and its derived secret for an SCM webhook trigger", "200",
+                    Vec::new(), None
+                )
+            },
+            "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "post": unauthenticated_api_operation(
+                    "receiveGithubDelivery", "triggers", "Receive a signed GitHub push or pull-request delivery for an SCM webhook trigger", "201",
+                    Vec::new(), None
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
@@ -3716,28 +3764,44 @@ async fn submit_trigger_event(
         .await
         .map_err(trigger_error)?
         .ok_or_else(resource_not_found)?;
-    validate_trigger_event_filter(&trigger, &request)?;
+    admit_trigger_event(&state, &trigger, &request, &principal.subject).await
+}
+
+/// Admits one typed trigger event on behalf of `caller_identity`: filter
+/// check, pre-capture parameter validation, canonical capture into the durable
+/// delivery ledger (created or exactly replayed), then processing. The bearer
+/// route passes its authenticated principal; a public event source (PAR-001)
+/// passes the trigger's own event-source identity once it has authenticated
+/// the delivery by other means, so the ledger and its replay rules are the
+/// same for both.
+async fn admit_trigger_event(
+    state: &ApiState,
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+    caller_identity: &str,
+) -> Result<Response, ApiError> {
+    validate_trigger_event_filter(trigger, request)?;
     // Reject parameter shapes before durable capture. The processing path
     // repeats this validation for crash/restart and legacy-corruption safety.
     parameter_values(request.parameters.clone())?;
     let accepted_at_unix_ms = unix_time_ms();
-    let canonical_payload = canonical_trigger_payload(&request)?;
+    let canonical_payload = canonical_trigger_payload(request)?;
     let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
     let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
     let parameters = Value::Object(request.parameters.clone().into_iter().collect());
-    let schedule_slot = trigger_schedule_slot(&trigger, &request)?;
+    let schedule_slot = trigger_schedule_slot(trigger, request)?;
     let delivery = state
         .store
         .accept_trigger_delivery(&NewTriggerDelivery {
-            organization_id,
-            project_id,
-            pipeline_id,
-            trigger_id,
+            organization_id: trigger.organization_id,
+            project_id: trigger.project_id,
+            pipeline_id: trigger.pipeline_id,
+            trigger_id: trigger.trigger_id,
             expected_trigger_generation: request.trigger_generation,
             delivery_id: request.delivery_id.clone(),
             event_id: request.event_id.clone(),
             event_kind: request.event_kind.clone(),
-            caller_identity: principal.subject.clone(),
+            caller_identity: caller_identity.to_owned(),
             payload_sha256,
             canonical_payload,
             parameters,
@@ -3760,7 +3824,7 @@ async fn submit_trigger_event(
         TriggerDeliveryAdmission::Created(delivery)
         | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
     };
-    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+    process_trigger_delivery(state, delivery, accepted_at_unix_ms).await
 }
 
 async fn redrive_trigger_event(
@@ -7707,6 +7771,14 @@ mod tests {
                 "get",
             ),
             ("/api/v1/organizations/{organization_id}/performance", "get"),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/webhook",
+                "get",
+            ),
+            (
+                "/api/v1/webhooks/github/{organization_id}/{project_id}/{pipeline_id}/{trigger_id}",
+                "post",
+            ),
         ];
         let mut operation_ids = BTreeSet::new();
         for (path, method) in expected {

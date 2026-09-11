@@ -636,6 +636,34 @@ impl Store {
         row.map(trigger_from_row).transpose()
     }
 
+    /// One accepted delivery of a trigger by its delivery id, if any. A public
+    /// event source that re-sends a delivery (PAR-001) reads the recorded
+    /// event time here so its replay matches the ledger exactly.
+    pub async fn trigger_delivery(
+        &self,
+        organization_id: Uuid,
+        trigger_id: Uuid,
+        delivery_id: &str,
+    ) -> Result<Option<TriggerDelivery>, StoreError> {
+        if delivery_id.is_empty() || delivery_id.len() > MAX_TEXT_BYTES {
+            return Err(StoreError::InvalidTriggerIngress(
+                "delivery id is out of bounds".to_owned(),
+            ));
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query(
+            "SELECT * FROM trigger_deliveries
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.map(delivery_from_row).transpose()
+    }
+
     pub async fn pipeline_trigger_generation(
         &self,
         organization_id: Uuid,
