@@ -504,13 +504,19 @@ deployment_contract_path_variables() {
       # Cache bindings are optional owner-private immutable configuration;
       # the guard additionally enforces their exact mode/owner/link contract.
       # The session receipt is an optional durable output the agent writes;
-      # state-class like the journal, absence legal before first use.
+      # state-class like the journal, absence legal before first use. The
+      # podman path (PAR-011) is optional and trust-class: an executable the
+      # agent runs, so it must be readable and unwritable by group/other and
+      # owned by root or the service account, exactly like the CA bundle; a
+      # distribution podman is a root-owned world-readable binary and may be
+      # a symlink, so the resolved target is what the rule inspects.
       printf '%s\n' \
         "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH file" \
         "secret nofollow MCLOVING_AGENT_CACHE_BINDINGS_PATH file" \
         "secret nofollow MCLOVING_AGENT_INPUT_BINDINGS_PATH file" \
         "trust follow MCLOVING_CONTROLLER_CA_PATH file" \
         "trust follow MCLOVING_AGENT_CERTIFICATE_PATH file" \
+        "trust follow MCLOVING_AGENT_PODMAN_PATH file" \
         "state follow MCLOVING_AGENT_WORKSPACE_ROOT directory" \
         "state follow MCLOVING_AGENT_JOURNAL_PATH file" \
         "state follow MCLOVING_AGENT_SESSION_RECEIPT_PATH file"

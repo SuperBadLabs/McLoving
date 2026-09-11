@@ -65,6 +65,11 @@ pub struct ExecutionRequest {
     /// under `spool/step-n/`, so every step's output survives as its own
     /// journaled spool.
     pub step_ordinal: Option<u32>,
+    /// Run the program inside a container instead of directly on the host
+    /// (PAR-011). The attempt workspace is bind-mounted as the working
+    /// directory and nothing else of the host is; teardown proves the
+    /// container is gone as well as the process group.
+    pub container: Option<ContainerSpec>,
     pub workspace_root: PathBuf,
     pub workspace: PathBuf,
     pub mode: ExecutionMode,
@@ -85,10 +90,43 @@ pub enum Termination {
     OutputLimitExceeded,
 }
 
+/// Time the executor may spend proving a container gone after its client
+/// group is empty: forced removal (`rm --force --time 0`, up to
+/// [`CONTAINER_REMOVAL_TIMEOUT`]) followed by the existence query (up to
+/// [`CONTAINER_EXISTENCE_TIMEOUT`]). A container attempt's lease must reserve
+/// this on top of the termination grace, because a pre-expiry cancellation
+/// that cannot finish the reap before the term ends leaves a container
+/// writing into the workspace while the attempt is already reclaimable.
+pub const CONTAINER_TEARDOWN_RESERVE: Duration = Duration::from_secs(20);
+/// Bound on `podman rm --force --time 0 <name>` during teardown.
+pub const CONTAINER_REMOVAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on `podman container exists <name>` during teardown.
+pub const CONTAINER_EXISTENCE_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    CONTAINER_REMOVAL_TIMEOUT.as_secs() + CONTAINER_EXISTENCE_TIMEOUT.as_secs()
+        <= CONTAINER_TEARDOWN_RESERVE.as_secs()
+);
+
+/// One container execution (PAR-011): a pinned runtime binary, a digest-pinned
+/// image, and the agent-chosen container name teardown reaps and proves absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContainerSpec {
+    /// Absolute path of the podman binary the deployment pinned.
+    pub runtime: PathBuf,
+    /// `name@sha256:<64 hex>`; a tag is refused before this point.
+    pub image: String,
+    /// Deterministic per-step container name, so cleanup after a crash can
+    /// find the container without the cidfile.
+    pub name: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Containment {
     UnixProcessGroup,
     WindowsJobObject,
+    /// A Unix process group holding the `podman run` client, plus the named
+    /// container proven absent after the group is empty.
+    PodmanContainer,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,6 +184,10 @@ pub enum ExecutionError {
     UnsupportedMode(ExecutionMode),
     #[error("multi-step execution (step {0}) is unsupported on this platform")]
     MultiStepUnsupported(u32),
+    #[error("container execution is unsupported for this request: {0}")]
+    ContainerUnsupported(&'static str),
+    #[error("container {name} could not be proven gone: {reason}")]
+    ContainerUnverified { name: String, reason: String },
     #[error("cmd.exe program or argument contains unsupported shell metacharacters")]
     UnsafeWindowsShellArgument,
     #[error("Windows Job Object operation failed: {0}")]

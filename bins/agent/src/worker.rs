@@ -58,6 +58,9 @@ const CANCELLATION_COMPLETION_PROTOCOL: &str = "cancellation";
 struct ExecutionSpec {
     version: u16,
     steps: Vec<ProcessSpec>,
+    /// Version-5 only: the digest-pinned image every step runs in (PAR-011).
+    #[serde(default)]
+    image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +181,8 @@ struct ValidatedAssignment {
     /// under per-step spools and step ordinals, and the journal records
     /// each step start before its spawn.
     multi_step: bool,
+    /// Digest-pinned image every step runs in under podman (PAR-011).
+    image: Option<String>,
 }
 
 /// One step's durable outcome inside a multi-step attempt, written into the
@@ -806,9 +811,17 @@ fn validate_assignment_with_features(
                     payload_digest,
                     steps: vec![process],
                     multi_step: false,
+                    image: None,
                 }))
             }
-            SpecClassification::Steps(steps) => {
+            SpecClassification::Steps { steps, image } => {
+                if image.is_some() && (!cfg!(unix) || config.podman_path.is_none()) {
+                    // Routing keeps image work away from agents without a
+                    // runtime; if it arrives anyway, another agent can run it.
+                    return Ok(AssignmentDisposition::ForAnotherRuntime(
+                        "container work requires an agent with a configured podman runtime",
+                    ));
+                }
                 if !features.multi_step {
                     // The capability is advertised at session open, before
                     // negotiation can tell this agent whether the controller
@@ -838,6 +851,7 @@ fn validate_assignment_with_features(
                     payload_digest,
                     steps,
                     multi_step: true,
+                    image,
                 }))
             }
             SpecClassification::Cache(intent) => {
@@ -871,6 +885,7 @@ fn validate_assignment_with_features(
                         payload_digest,
                         steps: vec![process],
                         multi_step: false,
+                        image: None,
                     }))
                 }
             }
@@ -905,6 +920,7 @@ fn validate_assignment_with_features(
                         payload_digest,
                         steps: vec![process],
                         multi_step: false,
+                        image: None,
                     }))
                 }
             }
@@ -928,8 +944,12 @@ enum SpecClassification {
     Input(InputIntentSpec),
     Cache(CacheIntentSpec),
     Process(ProcessSpec),
-    /// The version-5 multi-step envelope: ordered process steps of one stage.
-    Steps(Vec<ProcessSpec>),
+    /// The version-5 multi-step envelope: ordered process steps of one stage,
+    /// optionally all inside one digest-pinned image.
+    Steps {
+        steps: Vec<ProcessSpec>,
+        image: Option<String>,
+    },
     ForAnotherRuntime(&'static str),
     Unsupported(String),
 }
@@ -1050,7 +1070,7 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
         .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(5))
     {
         return match supported_multi_step_spec(execution_spec_json) {
-            Ok(steps) => SpecClassification::Steps(steps),
+            Ok((steps, image)) => SpecClassification::Steps { steps, image },
             Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
         };
     }
@@ -1063,7 +1083,9 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
 /// Classifies the version-5 envelope (PAR-010): one to sixteen bounded
 /// process steps, each held to exactly the per-step rules of the single-step
 /// contract. Every refusal is permanent for this payload.
-fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<Vec<ProcessSpec>, String> {
+fn supported_multi_step_spec(
+    execution_spec_json: &[u8],
+) -> Result<(Vec<ProcessSpec>, Option<String>), String> {
     use mcloving_domain::multi_step::MAX_STEPS_PER_STAGE;
     let spec: ExecutionSpec = serde_json::from_slice(execution_spec_json).map_err(|error| {
         format!("execution spec does not deserialize as a version-5 multi-step spec: {error}")
@@ -1117,7 +1139,12 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<Vec<ProcessSp
             union.len()
         ));
     }
-    Ok(spec.steps)
+    if let Some(image) = &spec.image
+        && !mcloving_domain::container::is_digest_pinned_image(image)
+    {
+        return Err("stage image is not a digest-pinned reference".to_owned());
+    }
+    Ok((spec.steps, spec.image))
 }
 
 /// The refusal reason is written twice into the durable result and sent as the
@@ -1156,6 +1183,11 @@ fn supported_process_spec(execution_spec_json: &[u8]) -> Result<ProcessSpec, Str
             "execution spec version {} is not supported (expected 1)",
             spec.version
         ));
+    }
+    if spec.image.is_some() {
+        // Containment is a version-5 property; a version-1 payload that asks
+        // for it must never run directly on the host instead.
+        return Err("a version-1 execution spec cannot carry an image".to_owned());
     }
     let mut steps = spec.steps;
     if steps.len() != 1 {
@@ -1345,6 +1377,12 @@ async fn run_assignment(
     })?;
 
     let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
+    // Everything a pre-expiry cancellation must finish before the term ends:
+    // the group's termination grace, plus the container reap on a container
+    // attempt (PAR-011), so the controller can never reclaim an attempt whose
+    // container is still writing into the workspace.
+    let termination_reserve =
+        termination_reserve(config.termination_grace, assignment.image.is_some());
     let receipt = lease_window_rpc(
         lease_window,
         client.accept_work(assignment.authority.clone()),
@@ -1361,7 +1399,7 @@ async fn run_assignment(
     // response cannot leave a process starting without termination reserve.
     let lease_started_at = accepted_at;
     let lease = lease_deadline_rpc(
-        lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace),
+        lease_cancellation_deadline(lease_started_at, lease_window, termination_reserve),
         client.renew_work_lease(WorkLeaseRenewal {
             authority: Some(assignment.authority.clone()),
             lease_seconds: config.lease_seconds,
@@ -1373,7 +1411,7 @@ async fn run_assignment(
         return Err(AgentError::StaleAuthority);
     }
     if tokio::time::Instant::now()
-        >= lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace)
+        >= lease_cancellation_deadline(lease_started_at, lease_window, termination_reserve)
     {
         return Err(AgentError::LeaseRenewalTimeout);
     }
@@ -1436,7 +1474,7 @@ async fn run_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
-            termination_grace: config.termination_grace,
+            termination_grace: termination_reserve,
             execution_cancellation: execution_cancellation.clone(),
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -1500,6 +1538,22 @@ async fn run_assignment(
     let mut assignment = assignment;
     let mut steps = std::mem::take(&mut assignment.steps);
     let multi_step = assignment.multi_step;
+    // Validation admitted an image only with a configured runtime.
+    let container_runtime = assignment
+        .image
+        .as_ref()
+        .map(|image| {
+            config
+                .podman_path
+                .clone()
+                .map(|runtime| (runtime, image.clone()))
+                .ok_or_else(|| {
+                    AgentError::InvalidAssignment(
+                        "container stage reached an agent without a runtime".to_owned(),
+                    )
+                })
+        })
+        .transpose()?;
     if let Some(prepared) = &prepared_helper {
         let first = steps
             .first_mut()
@@ -1642,6 +1696,11 @@ async fn run_assignment(
                 .cloned()
                 .collect::<Vec<_>>();
             let execution_environment = execution_environment(process.env, step_credentials)?;
+            // Journaled before the spawn so recovery reaps exactly the
+            // container this step launched, and only when it launched one.
+            let step_container = container_runtime
+                .as_ref()
+                .map(|_| crate::container::container_name(&attempt, ordinal));
             if multi_step {
                 // Durable before the spawn: a crash anywhere after this point
                 // names this step as interrupted, because the journal cannot
@@ -1652,6 +1711,14 @@ async fn run_assignment(
                     fence,
                     session_epoch,
                     ordinal,
+                    step_container
+                        .as_deref()
+                        .zip(container_runtime.as_ref())
+                        .map(|(name, (runtime, _))| {
+                            (name, crate::container::runtime_context(runtime))
+                        })
+                        .as_ref()
+                        .map(|(name, context)| (*name, context.as_str())),
                 )?;
             }
             let request = ExecutionRequest {
@@ -1664,6 +1731,13 @@ async fn run_assignment(
                     None
                 },
                 step_ordinal: multi_step.then_some(ordinal),
+                container: container_runtime.as_ref().zip(step_container.as_ref()).map(
+                    |((runtime, image), name)| mcloving_agent_runtime::executor::ContainerSpec {
+                        runtime: runtime.clone(),
+                        image: image.clone(),
+                        name: name.clone(),
+                    },
+                ),
                 workspace_root: config.workspace_root.clone(),
                 workspace: assignment.workspace.clone(),
                 mode: match process.mode {
@@ -2291,7 +2365,13 @@ fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
 }
 
 fn requires_processless_reconciliation(error: &ExecutionError) -> bool {
-    matches!(error, ExecutionError::ReplacedWorkspaceRoot)
+    // A container that cannot be proven gone may still be running with the
+    // workspace mounted even though its client's process group is empty; that
+    // is reconciliation, never a terminal spawn failure (PAR-011).
+    matches!(
+        error,
+        ExecutionError::ReplacedWorkspaceRoot | ExecutionError::ContainerUnverified { .. }
+    )
 }
 
 async fn renew_lease(
@@ -2497,6 +2577,18 @@ fn accept_consumed_claim_lease(
 ) -> bool {
     claimed_no_later_than + lease_window.saturating_sub(Duration::from_secs(1))
         < accepted_at + renewal_interval
+}
+
+/// The time a pre-expiry cancellation reserves inside the lease: the
+/// termination grace alone for a process attempt, plus the bounded container
+/// reap for a container attempt. The agent configuration refuses a lease that
+/// cannot hold the container reserve when a runtime is configured.
+pub(super) fn termination_reserve(termination_grace: Duration, container: bool) -> Duration {
+    if container {
+        termination_grace + mcloving_agent_runtime::executor::CONTAINER_TEARDOWN_RESERVE
+    } else {
+        termination_grace
+    }
 }
 
 pub(super) fn execution_lease_budget(
@@ -3504,6 +3596,7 @@ mod tests {
         AgentConfig {
             input_bindings: None,
             cache_bindings: None,
+            podman_path: None,
             agent_id: "agent-1".to_owned(),
             trust_pool: "trusted".to_owned(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
@@ -3646,6 +3739,23 @@ mod tests {
         .unwrap();
         runnable(
             validate_assignment_with_features(&config(), 4, assignment(&shared), features).unwrap(),
+        );
+    }
+
+    /// A version-1 payload may not ask for containment: the image is a
+    /// version-5 property, and running such a payload directly on the host
+    /// would silently drop the containment it requested.
+    #[test]
+    fn a_version_one_spec_with_an_image_is_refused() {
+        let spec = serde_json::to_vec(&json!({"version": 1, "steps": [
+            {"kind": "process", "program": "/bin/true"}
+        ], "image": "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"}))
+        .unwrap();
+        let refusal = unsupported(validate_assignment(&config(), 4, assignment(&spec)).unwrap());
+        assert!(
+            refusal.detail.contains("cannot carry an image"),
+            "{}",
+            refusal.detail
         );
     }
 
@@ -4310,6 +4420,34 @@ mod tests {
         );
     }
 
+    /// PAR-011, from review. A container outlives its killed client, and the
+    /// reap that proves it gone is bounded but not free. A container attempt
+    /// therefore reserves the reap on top of the grace, so the pre-expiry
+    /// cancellation still finishes the whole teardown inside the term.
+    #[test]
+    fn container_attempts_reserve_the_reap_inside_the_lease() {
+        use mcloving_agent_runtime::executor::CONTAINER_TEARDOWN_RESERVE;
+        let start = tokio::time::Instant::now();
+        let window = Duration::from_secs(30);
+        let grace = Duration::from_secs(2);
+        assert_eq!(termination_reserve(grace, false), grace);
+        assert_eq!(
+            termination_reserve(grace, true),
+            grace + CONTAINER_TEARDOWN_RESERVE
+        );
+        let deadline = lease_cancellation_deadline(start, window, termination_reserve(grace, true));
+        assert_eq!(deadline, start + Duration::from_secs(7));
+        assert!(
+            deadline + grace + CONTAINER_TEARDOWN_RESERVE <= start + window,
+            "grace and reap both fit before lease expiry"
+        );
+        // The default cadence (5 s) still fits in the default 30 s lease.
+        assert!(
+            Duration::from_secs(5)
+                < execution_lease_budget(window, termination_reserve(grace, true))
+        );
+    }
+
     /// AGENT-007, from review. A lease term must be anchored at the instant its
     /// request LEFT, never at the instant its answer arrived. The controller
     /// stamps `lease_expires_at` while the request is in flight, so a round trip
@@ -4851,6 +4989,8 @@ mod tests {
             process_id: None,
             process_birth_identity: None,
             current_step: None,
+            container_name: None,
+            container_context: None,
             logs: Vec::new(),
             result: Some(result),
         };

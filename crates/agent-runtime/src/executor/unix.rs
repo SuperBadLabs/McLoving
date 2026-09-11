@@ -1,9 +1,10 @@
 //! Unix process-group execution.
 
 use std::fs::File;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use nix::errno::Errno;
@@ -24,8 +25,9 @@ use tokio_util::sync::CancellationToken;
 use crate::SpoolEntry;
 
 use super::{
-    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
-    Termination, create_workspace, sync_boundaries, validate_redactions, write_redacted_output,
+    CONTAINER_EXISTENCE_TIMEOUT, CONTAINER_REMOVAL_TIMEOUT, ContainerSpec, Containment,
+    ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture, Termination,
+    create_workspace, sync_boundaries, validate_redactions, write_redacted_output,
 };
 
 /// Executes one process in a new process group.
@@ -189,16 +191,113 @@ where
     // it. A sibling workload running as the same OS account may rename it.
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
-    let mut command = Command::new(&request.program);
+    // A container step runs the pinned podman client as the process-group
+    // leader; the image's program becomes the container entrypoint and the
+    // attempt workspace its working directory. Nothing else of the host is
+    // mounted. Environment reaches the container only by name, so secret
+    // values never appear in the podman argument vector.
+    // Held only until the podman client has been spawned with its inherited
+    // copy; no other child may inherit it.
+    let mut env_transport: Option<File> = None;
+    let mut command = match &request.container {
+        Some(container) => {
+            if private_io.is_some() || request.workspace_seed.is_some() {
+                return Err(ExecutionError::ContainerUnsupported(
+                    "helper private IO and workspace transfer run on the host only",
+                ));
+            }
+            if !mcloving_domain::container::is_digest_pinned_image(&container.image) {
+                return Err(ExecutionError::ContainerUnsupported(
+                    "image reference is not digest-pinned",
+                ));
+            }
+            // Workload variables travel in a memory-only env file the podman
+            // client reads through an inherited descriptor: they never share
+            // the client's own environment, where names such as
+            // CONTAINERS_CONF, HOME or XDG_RUNTIME_DIR would redirect the
+            // runtime; they never enter the argument vector, where values are
+            // visible; and they never touch the workspace or any durable
+            // path, so a crash retains nothing and the container cannot read
+            // the file back through /workspace.
+            let mut env_lines = Vec::new();
+            for (key, value) in &request.environment {
+                let (key, value) = (key.to_string_lossy(), value.to_string_lossy());
+                if key.contains(['=', '\n', '\0']) || value.contains(['\n', '\0']) {
+                    return Err(ExecutionError::ContainerUnsupported(
+                        "environment entries must not contain newlines, NUL or '=' in names",
+                    ));
+                }
+                env_lines.push(format!("{key}={value}\n"));
+            }
+            let transport = {
+                use std::io::{Seek as _, Write as _};
+                let fd = nix::sys::memfd::memfd_create(
+                    c"mcloving-container-env",
+                    nix::sys::memfd::MFdFlags::empty(),
+                )?;
+                let mut file = File::from(fd);
+                for line in &env_lines {
+                    file.write_all(line.as_bytes())?;
+                }
+                file.seek(std::io::SeekFrom::Start(0))?;
+                file
+            };
+            let env_path = format!("/proc/self/fd/{}", transport.as_raw_fd());
+            env_transport = Some(transport);
+            // The child starts inside the workspace, and podman reads a
+            // volume source that does not begin with `/` or `.` as a named
+            // volume, so a relative workspace root would mount the wrong
+            // storage and drop the cidfile under a duplicated path. Both
+            // paths are made absolute against this process's directory.
+            let mounted_workspace = std::path::absolute(&workspace)?;
+            let cidfile = std::path::absolute(spool.join("container.cid"))?;
+            let mut command = Command::new(&container.runtime);
+            command
+                .arg("run")
+                .arg("--rm")
+                .arg("--name")
+                .arg(&container.name)
+                .arg("--cidfile")
+                .arg(cidfile)
+                .arg("--userns=keep-id")
+                .arg("--volume")
+                .arg(format!("{}:/workspace:Z", mounted_workspace.display()))
+                .arg("--workdir")
+                .arg("/workspace")
+                .arg("--env-file")
+                .arg(&env_path)
+                .arg("--entrypoint")
+                .arg(&request.program)
+                .arg(&container.image)
+                .args(&request.arguments);
+            command
+        }
+        None => {
+            let mut command = Command::new(&request.program);
+            command.args(&request.arguments);
+            command
+        }
+    };
     command
-        .args(&request.arguments)
         .env_clear()
         .env(
             "PATH",
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
-        .env("LANG", "C.UTF-8")
-        .envs(&request.environment)
+        .env("LANG", "C.UTF-8");
+    if request.container.is_some() {
+        // The podman client's control environment is fixed by the agent and
+        // never touched by the workload; rootless podman needs these four.
+        command.envs(std::env::vars_os().filter(|(key, _)| {
+            matches!(
+                key.to_str(),
+                Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+            )
+        }));
+    } else {
+        command.envs(&request.environment);
+    }
+    command
         .current_dir(&workspace)
         .stdin(if private_io.is_some() {
             Stdio::piped()
@@ -215,6 +314,9 @@ where
     }
     let mut child = command.spawn()?;
     drop(command);
+    // The client holds its own descriptor now; closing ours means no later
+    // child of this process can inherit the credential-bearing transport.
+    drop(env_transport.take());
     let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
         (Some(stdout), Some(stderr), Some(limit)) => {
             Some(OutputCapture::start(stdout, stderr, limit, redactions))
@@ -226,13 +328,17 @@ where
     let process_group_id =
         i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
     if let Err(error) = on_spawn(process_id) {
-        terminate_and_prove_group_empty(
+        terminate_group_reaping_on_failure(
             &mut child,
             process_id,
             process_group_id,
             request.termination_grace,
+            request.container.as_ref(),
         )
         .await?;
+        if let Some(container) = &request.container {
+            reap_container(&container.runtime, &container.name).await?;
+        }
         return Err(error);
     }
 
@@ -260,24 +366,36 @@ where
             request.termination_grace,
         ) => match status {
             Ok(status) => (Termination::Exited, status),
-            Err(error) => return Err(error),
+            Err(error) => {
+                // The leader cleanup already forces unverified containment;
+                // still reap the container now so it does not keep the
+                // workspace mounted until a recovery session. The original
+                // error is what the caller must see either way, and recovery
+                // retries the absence proof if this reap did not succeed.
+                if let Some(container) = &request.container {
+                    let _ = reap_container(&container.runtime, &container.name).await;
+                }
+                return Err(error);
+            }
         },
         () = cancellation.cancelled() => {
-            let status = terminate_and_prove_group_empty(
+            let status = terminate_group_reaping_on_failure(
                 &mut child,
                 process_id,
                 process_group_id,
                 request.termination_grace,
+                request.container.as_ref(),
             )
             .await?;
             (Termination::Cancelled, status)
         }
         () = sleep_until(deadline) => {
-            let status = terminate_and_prove_group_empty(
+            let status = terminate_group_reaping_on_failure(
                 &mut child,
                 process_id,
                 process_group_id,
                 request.termination_grace,
+                request.container.as_ref(),
             )
             .await?;
             (Termination::TimedOut, status)
@@ -289,25 +407,40 @@ where
             request.output_limit_bytes,
         ) => {
             if let Err(error) = result {
-                terminate_and_prove_group_empty(
+                terminate_group_reaping_on_failure(
                     &mut child,
                     process_id,
                     process_group_id,
                     request.termination_grace,
+                    request.container.as_ref(),
                 )
                 .await?;
+                // The monitor failed, not the workload: the container may
+                // still be running with the workspace mounted, so it is
+                // reaped here exactly as on every other teardown arm.
+                if let Some(container) = &request.container {
+                    reap_container(&container.runtime, &container.name).await?;
+                }
                 return Err(error.into());
             }
-            let status = terminate_and_prove_group_empty(
+            let status = terminate_group_reaping_on_failure(
                 &mut child,
                 process_id,
                 process_group_id,
                 request.termination_grace,
+                request.container.as_ref(),
             )
             .await?;
             (Termination::OutputLimitExceeded, status)
         }
     };
+    // The group is empty on every arm above, but a container outlives its
+    // killed client. Reap it before any output is inspected or made durable,
+    // so nothing keeps writing into the mounted workspace meanwhile, and
+    // before any later fallible step could skip the proof.
+    if let Some(container) = &request.container {
+        reap_container(&container.runtime, &container.name).await?;
+    }
 
     let exceeded = capture.as_ref().is_some_and(OutputCapture::was_exceeded)
         || output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
@@ -381,7 +514,11 @@ where
         termination: termination.0,
         exit_code: termination.1.code(),
         process_id,
-        containment: Containment::UnixProcessGroup,
+        containment: if request.container.is_some() {
+            Containment::PodmanContainer
+        } else {
+            Containment::UnixProcessGroup
+        },
         stdout: spool_entry(
             &request.workspace,
             &format!("{spool_suffix}/stdout.log"),
@@ -397,6 +534,129 @@ where
         )
         .await?,
     })
+}
+
+/// Removes the named container if it still exists and proves it is absent.
+///
+/// `podman run --rm` removes the container when its client exits normally,
+/// but a client killed by timeout or cancellation leaves conmon holding the
+/// container. Removal is idempotent, and absence is checked by a separate
+/// `container exists` query whose exit status 1 is the only accepted proof.
+/// Terminates the client group like [`terminate_and_prove_group_empty`], but
+/// when that proof fails on a container attempt the container is reaped
+/// before the cleanup error propagates. The group error is what the caller
+/// must see: it already forces unverified containment, and recovery retries
+/// the absence proof if this best-effort reap did not succeed. Without this,
+/// every cancellation, timeout, output-limit and spawn-hook arm would leave
+/// the container running with the workspace mounted until a recovery
+/// session, exactly as the leader-exit arm used to.
+async fn terminate_group_reaping_on_failure(
+    child: &mut Child,
+    process_id: u32,
+    process_group_id: i32,
+    termination_grace: Duration,
+    container: Option<&ContainerSpec>,
+) -> Result<ExitStatus, ExecutionError> {
+    match terminate_and_prove_group_empty(child, process_id, process_group_id, termination_grace)
+        .await
+    {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            if let Some(container) = container {
+                let _ = reap_container(&container.runtime, &container.name).await;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError> {
+    let unverified = |reason: String| ExecutionError::ContainerUnverified {
+        name: name.to_owned(),
+        reason,
+    };
+    // `--time 0` kills rather than asks: the client group is already empty,
+    // so nothing inside deserves a stop timeout, and the whole reap has to
+    // fit the lease reserve the worker set aside for it.
+    let remove = tokio::time::timeout(
+        CONTAINER_REMOVAL_TIMEOUT,
+        Command::new(runtime)
+            .args(["rm", "--force", "--time", "0", "--ignore", name])
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .envs(std::env::vars_os().filter(|(key, _)| {
+                matches!(
+                    key.to_str(),
+                    Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+                )
+            }))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        unverified(format!(
+            "container removal did not return within {} seconds",
+            CONTAINER_REMOVAL_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|error| unverified(format!("container removal could not start: {error}")))?;
+    if !remove.status.success() {
+        return Err(unverified(format!(
+            "container removal exited {:?}: {}",
+            remove.status.code(),
+            String::from_utf8_lossy(&remove.stderr).trim()
+        )));
+    }
+    let exists = tokio::time::timeout(
+        CONTAINER_EXISTENCE_TIMEOUT,
+        Command::new(runtime)
+            .args(["container", "exists", name])
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .envs(std::env::vars_os().filter(|(key, _)| {
+                matches!(
+                    key.to_str(),
+                    Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+                )
+            }))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        unverified(format!(
+            "container existence query did not return within {} seconds",
+            CONTAINER_EXISTENCE_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|error| {
+        unverified(format!(
+            "container existence query could not start: {error}"
+        ))
+    })?;
+    match exists.status.code() {
+        Some(1) => Ok(()),
+        Some(0) => Err(unverified(
+            "container still exists after removal".to_owned(),
+        )),
+        other => Err(unverified(format!(
+            "container existence query exited {other:?}: {}",
+            String::from_utf8_lossy(&exists.stderr).trim()
+        ))),
+    }
 }
 
 async fn wait_for_output_limit_mode(
@@ -968,6 +1228,7 @@ mod tests {
         ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode: ExecutionMode::Direct,
@@ -987,6 +1248,7 @@ mod tests {
         ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
             mode: ExecutionMode::Direct,
@@ -1217,6 +1479,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/success"),
             mode: ExecutionMode::Direct,
@@ -1243,6 +1506,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/long-running-success"),
             mode: ExecutionMode::Direct,
@@ -1274,6 +1538,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/revoked-spool-mode"),
             mode: ExecutionMode::Direct,
@@ -1306,6 +1571,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/environment"),
             mode: ExecutionMode::Direct,
@@ -1341,6 +1607,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/inherited-handle"),
             mode: ExecutionMode::Direct,
@@ -1384,6 +1651,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/quota"),
             mode: ExecutionMode::Direct,
@@ -1409,6 +1677,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/renamed-log"),
             mode: ExecutionMode::Direct,
@@ -1450,6 +1719,7 @@ mod tests {
         let existing = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("existing"),
             mode: ExecutionMode::Direct,
@@ -1469,6 +1739,7 @@ mod tests {
         let linked = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace: PathBuf::from("linked/escape"),
             ..existing
         };
@@ -1491,6 +1762,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: workspace_root.clone(),
             workspace: PathBuf::from("org/replaced-root"),
             mode: ExecutionMode::Direct,
@@ -1549,6 +1821,7 @@ mod private_io_tests {
         ExecutionRequest {
             workspace_seed: None,
             step_ordinal: None,
+            container: None,
             workspace_root: root.to_owned(),
             workspace: "org/private".into(),
             mode: ExecutionMode::Direct,

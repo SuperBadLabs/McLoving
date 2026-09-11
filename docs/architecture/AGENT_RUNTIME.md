@@ -273,6 +273,41 @@ discharge a parked reconciliation).
   the step is neither re-run nor skipped. Workspace transfer, helpers and
   inline terminal logs stay single-step; the Windows agent does not advertise
   the capability.
+- A stage may name a digest-pinned `image` (PAR-011). Such a stage always
+  rides the version-5 envelope and additionally requires the
+  `container-podman-v1` capability, which an agent advertises only when the
+  podman binary pinned by `MCLOVING_AGENT_PODMAN_PATH` answers `--version`
+  at session open. Each step then runs as `podman run --rm --name
+  mcloving-<attempt>-<ordinal> --userns=keep-id` with the attempt workspace
+  bind-mounted at `/workspace` as the working directory and nothing else of
+  the host; workload environment reaches the container through a
+  memory-only env file the podman client reads via an inherited descriptor,
+  never through the podman client's own environment (which the agent fixes,
+  so a workload cannot redirect the runtime through `CONTAINERS_CONF`,
+  `HOME` or `XDG_RUNTIME_DIR`), never through the argument vector, and never
+  through the workspace or any durable path; the transport is line-oriented,
+  so a multiline environment value is refused at admission for a container
+  stage (and a multiline credential value refuses the step by name); the
+  workspace mount carries the private SELinux relabel option; a tag reference
+  is refused at compile, admission and execution. The podman client is the
+  process-group leader, so timeout and cancellation keep the group teardown
+  proof, and the moment the group is empty, on every arm, the executor
+  removes the named container and accepts only a `container exists` exit
+  status of 1 as proof it is gone; anything else is unverified containment.
+  The container name is journaled (`attempts.container_name`, schema 4)
+  before the spawn, so restart recovery reaps exactly the container the
+  recovered step launched, only when it launched one, and parks the attempt
+  reconciliation-required if the proof fails; an unproven reap during
+  execution is likewise reconciliation, never a terminal failure. The
+  capability probe and every reap run under a hard deadline, and a container
+  attempt reserves that reap (`CONTAINER_TEARDOWN_RESERVE`, 20 s: a forced
+  `--time 0` removal plus the existence query) inside its lease on top of the
+  termination grace, so a pre-expiry cancellation finishes the whole teardown
+  before the controller may reclaim the attempt; an agent whose lease cannot
+  hold the reserve with a runtime configured refuses to start. This is the
+  Linux containment
+  answer for container stages and is recorded against `SEC-005` as partial:
+  plain process steps still run as the service account on the host.
 - When `inline-terminal-logs-v1` is negotiated, a stream that fits one chunk
   is verified identically and then carried in the terminal publication's
   `inline_log_chunks` instead of its own `PublishLog` round trip; the

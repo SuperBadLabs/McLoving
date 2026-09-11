@@ -367,7 +367,9 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # (10 -> 11 tickets, 5 -> 6 lanes). No closure exemption or debt change.
 # 137 -> 138 on 2026-09-11 with `AGENT-008`, filed from PAR-010 review: it
 # joins the product-hardening table, so EXPECTED_TABLES does not move.
-MINIMUM_TICKET_ROWS = 138
+# 138 -> 139 on 2026-09-11 with `AGENT-009`, filed from PAR-011 review at
+# the ten-round cap: same table, EXPECTED_TABLES does not move.
+MINIMUM_TICKET_ROWS = 139
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
@@ -392,7 +394,7 @@ CLOSED_TICKETS = frozenset({
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
     "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
     "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",
-    "PAR-000", "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001", "UI-002",
+    "PAR-000", "PAR-010", "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001", "UI-002",
     "UX-001", "UX-002", "WIN-001", "WIN-002", "WIN-003", "WIN-004"
 })
 

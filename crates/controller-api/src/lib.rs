@@ -4385,7 +4385,7 @@ async fn admit_pipeline_parameters(
             required_platform: required_platform.clone(),
             required_trust_pool: required_trust_pool.clone(),
             priority: 0,
-            execution_spec: execution_spec(&stage.steps),
+            execution_spec: execution_spec(stage),
             fail_fast: true,
             max_attempts: 1,
         })
@@ -4592,8 +4592,13 @@ fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<Strin
     // The version-5 envelope must never reach an agent that cannot run it:
     // such an agent refuses terminally, and a refusal is permanent for the
     // payload. Routing on the capability keeps old agents out of the offer.
-    if stage.steps.len() > 1 {
+    if stage.steps.len() > 1 || stage.image.is_some() {
         required.push(mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned());
+    }
+    // A container stage also needs an agent whose pinned podman answered at
+    // session open (PAR-011).
+    if stage.image.is_some() {
+        required.push(mcloving_domain::container::CONTAINER_CAPABILITY.to_owned());
     }
     for step in &stage.steps {
         if let Step::CacheIntent(cache) = step {
@@ -4628,7 +4633,11 @@ fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<Strin
     required
 }
 
-fn execution_spec(steps: &[Step]) -> Value {
+fn execution_spec(stage: &mcloving_pipeline_ir::Stage) -> Value {
+    execution_spec_parts(&stage.steps, stage.image.as_deref())
+}
+
+pub(crate) fn execution_spec_parts(steps: &[Step], image: Option<&str>) -> Value {
     let contains_input_intent = steps
         .iter()
         .any(|step| matches!(step, Step::InputIntent(_)));
@@ -4687,12 +4696,17 @@ fn execution_spec(steps: &[Step]) -> Value {
         3
     } else if contains_connector_intent {
         2
-    } else if steps.len() > 1 {
+    } else if steps.len() > 1 || image.is_some() {
+        // A container stage rides the version-5 envelope even with one step:
+        // the image is a stage-level property the single-step shape never had.
         5
     } else {
         1
     };
-    json!({"version": version, "steps": steps})
+    match image {
+        Some(image) => json!({"version": version, "steps": steps, "image": image}),
+        None => json!({"version": version, "steps": steps}),
+    }
 }
 
 fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
@@ -4728,6 +4742,16 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
                     "stage {} declares {} steps; multi-step stages run on platform linux only",
                     stage.id,
                     stage.steps.len()
+                ),
+            ));
+        }
+        if let Some(stage) = pipeline.stages.iter().find(|stage| stage.image.is_some()) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares an image; container stages run on platform linux only",
+                    stage.id
                 ),
             ));
         }
@@ -8127,7 +8151,7 @@ stages:
             BTreeMap::new(),
         )
         .expect("compile explicit Windows process mode");
-        let spec = execution_spec(&pipeline.stages[0].steps);
+        let spec = execution_spec(&pipeline.stages[0]);
         assert_eq!(spec["steps"][0]["mode"], "power_shell");
         assert_eq!(spec["steps"][0]["program"], "build.ps1");
     }
@@ -8188,6 +8212,58 @@ stages:
     }
 
     #[test]
+    fn container_stages_ride_the_multi_step_envelope_and_are_linux_only() {
+        let digest = "c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
+        let source = format!(
+            "version: 1\nname: container\nstages:\n  - id: build\n    name: Build\n    image: docker.io/library/alpine@sha256:{digest}\n    steps:\n      - process:\n          program: /bin/sh\n          args: [-c, \"cat /etc/os-release\"]\n"
+        );
+        let pipeline = compile_source_with_parameters(&source, BTreeMap::new())
+            .expect("a digest-pinned image validates");
+        let stage = &pipeline.stages[0];
+        let spec = execution_spec(stage);
+        assert_eq!(
+            spec["version"], 5,
+            "one step still rides version 5 when an image is set"
+        );
+        assert_eq!(
+            spec["image"],
+            format!("docker.io/library/alpine@sha256:{digest}")
+        );
+        assert_eq!(
+            stage_required_capabilities(stage),
+            vec![
+                mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned(),
+                mcloving_domain::container::CONTAINER_CAPABILITY.to_owned(),
+            ]
+        );
+        validate_execution_platform(&pipeline, "linux").expect("Linux runs container stages");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("no Windows agent runs containers");
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert!(
+            error
+                .message
+                .contains("container stages run on platform linux only")
+        );
+
+        let tagged = source.replace(&format!("@sha256:{digest}"), ":3.20");
+        let error = compile_source_with_parameters(&tagged, BTreeMap::new())
+            .expect_err("a tag can move and is refused");
+        assert_eq!(error.code, "pipeline_rejected");
+        assert!(error.message.contains("digest-pinned"), "{}", error.message);
+
+        // A multiline value cannot cross the runtime's line-oriented env
+        // transport; it is refused at admission, not at execution.
+        let multiline = source.replace(
+            "          args: [-c, \"cat /etc/os-release\"]\n",
+            "          args: [-c, \"cat /etc/os-release\"]\n          env:\n            PEM: \"line one\\nline two\"\n",
+        );
+        let error = compile_source_with_parameters(&multiline, BTreeMap::new())
+            .expect_err("a multiline value in a container stage is refused");
+        assert!(error.message.contains("single-line"), "{}", error.message);
+    }
+
+    #[test]
     fn multi_step_stages_are_linux_only_at_admission() {
         let pipeline = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
             .expect("two process steps validate");
@@ -8238,14 +8314,8 @@ stages:
         let pipeline = compile_source_with_parameters(&single_stage_source(16), BTreeMap::new())
             .expect("sixteen process steps in one stage are admissible");
         let stage = &pipeline.stages[0];
-        assert_eq!(execution_spec(&stage.steps)["version"], 5);
-        assert_eq!(
-            execution_spec(&stage.steps)["steps"]
-                .as_array()
-                .unwrap()
-                .len(),
-            16
-        );
+        assert_eq!(execution_spec(stage)["version"], 5);
+        assert_eq!(execution_spec(stage)["steps"].as_array().unwrap().len(), 16);
         assert_eq!(
             stage_required_capabilities(stage),
             vec![mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned()]
@@ -8254,7 +8324,7 @@ stages:
         let pipeline = compile_source_with_parameters(&single_stage_source(1), BTreeMap::new())
             .expect("exactly one process step per stage remains admissible");
         let stage = &pipeline.stages[0];
-        assert_eq!(execution_spec(&stage.steps)["version"], 1);
+        assert_eq!(execution_spec(stage)["version"], 1);
         assert!(stage_required_capabilities(stage).is_empty());
     }
 

@@ -46,6 +46,14 @@ pub fn plan_sequential_build(
                 "sequential stage must contain a shell step".to_owned(),
             ));
         }
+        // Sequential planning lowers every step to a version-1 host process
+        // with no capability requirement. A stage that asked for containment
+        // (PAR-011) must not silently run on the agent account instead.
+        if stage.image.is_some() {
+            return Err(StoreError::InvalidDag(
+                "sequential planning does not admit container stages".to_owned(),
+            ));
+        }
         for (step_index, step) in stage.steps.iter().enumerate() {
             let Step::Process(process) = step else {
                 return Err(StoreError::InvalidDag(
@@ -91,7 +99,7 @@ pub fn plan_sequential_build(
                 required_platform: "linux".to_owned(),
                 required_trust_pool: "migration-deny-authority".to_owned(),
                 priority: 0,
-                execution_spec: super::execution_spec(std::slice::from_ref(step)),
+                execution_spec: super::execution_spec_parts(std::slice::from_ref(step), None),
                 fail_fast: false,
                 max_attempts: 1,
             });

@@ -11,7 +11,7 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5};
+use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -123,6 +123,9 @@ pub struct ExpressionBinding {
 pub struct Stage {
     pub id: String,
     pub name: String,
+    /// Digest-pinned image every step of this stage runs in (PAR-011);
+    /// `None` runs the steps directly on the agent host.
+    pub image: Option<String>,
     pub steps: Vec<Step>,
     pub source_span: SourceSpan,
 }
@@ -319,7 +322,9 @@ pub fn compile_strict_yaml_with_parameters(
             .iter()
             .any(|step| matches!(step, Step::CacheIntent(_)))
     });
-    let schema = if stages.iter().any(|stage| {
+    let schema = if stages.iter().any(|stage| stage.image.is_some()) {
+        IR_V1_6
+    } else if stages.iter().any(|stage| {
         stage
             .steps
             .iter()
@@ -583,12 +588,22 @@ fn compile_stages(
             let mut stage = MappingView::new(node, &path)?;
             let id = stage.required_string("id")?;
             let name = stage.required_string("name")?;
+            let image = stage.optional_string("image")?;
             let steps_node = stage.required("steps")?;
             stage.finish()?;
+            if let Some(image) = &image
+                && !mcloving_domain::container::is_digest_pinned_image(image)
+            {
+                return Err(CompileError::schema(
+                    format!("{path}.image"),
+                    "stage image must be a digest-pinned reference (name@sha256:<64 hex>); tags are refused",
+                ));
+            }
             let steps = compile_steps(steps_node, &path, parameters, expressions)?;
             Ok(Stage {
                 id,
                 name,
+                image,
                 steps,
                 source_span: node_span,
             })
@@ -910,7 +925,7 @@ fn compile_resolved_string(
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
     if !matches!(
         pipeline.schema,
-        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5
+        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5 | IR_V1_6
     ) {
         return Err(IrValidationError::new(
             "$.schema",
@@ -988,6 +1003,46 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 "$.stages",
                 format!("total step count exceeds {MAX_STEPS}"),
             ));
+        }
+        if let Some(image) = &stage.image {
+            if pipeline.schema.minor < IR_V1_6.minor {
+                return Err(IrValidationError::new(
+                    format!("{path}.image"),
+                    "container stages require Pipeline IR v1.6",
+                ));
+            }
+            if !mcloving_domain::container::is_digest_pinned_image(image) {
+                return Err(IrValidationError::new(
+                    format!("{path}.image"),
+                    "stage image must be a digest-pinned reference",
+                ));
+            }
+            if !stage
+                .steps
+                .iter()
+                .all(|step| matches!(step, Step::Process(_)))
+            {
+                return Err(IrValidationError::new(
+                    format!("{path}.image"),
+                    "a container stage may hold process steps only",
+                ));
+            }
+            // The container runtime takes environment from a line-oriented
+            // file, so a multiline value cannot reach a container step; refuse
+            // it here rather than fail the attempt at execution.
+            for (step_index, step) in stage.steps.iter().enumerate() {
+                if let Step::Process(process) = step
+                    && let Some((name, _)) = process
+                        .env
+                        .iter()
+                        .find(|(name, value)| name.contains('=') || value.contains('\n'))
+                {
+                    return Err(IrValidationError::new(
+                        format!("{path}.steps[{step_index}].process.env.{name}"),
+                        "container stage environment values must be single-line and names must not contain '='",
+                    ));
+                }
+            }
         }
         for (step_index, step) in stage.steps.iter().enumerate() {
             match step {

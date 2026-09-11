@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod cache;
+mod container;
 pub mod input;
 mod private_helper;
 mod worker;
@@ -51,6 +52,9 @@ const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 pub struct AgentConfig {
     pub input_bindings: Option<input::InputBindings>,
     pub cache_bindings: Option<cache::CacheBindings>,
+    /// Absolute path of the deployment-pinned podman binary (PAR-011).
+    /// Absent means this agent never advertises `container-podman-v1`.
+    pub podman_path: Option<PathBuf>,
     pub agent_id: String,
     pub trust_pool: String,
     pub organization_id: String,
@@ -254,6 +258,35 @@ impl AgentConfig {
                 "agent polling, renewal, or termination timing",
             ));
         }
+        let podman_path = match values.get("MCLOVING_AGENT_PODMAN_PATH") {
+            Some(path) if !path.trim().is_empty() => {
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err(AgentError::InvalidConfig(
+                        "MCLOVING_AGENT_PODMAN_PATH must be absolute",
+                    ));
+                }
+                Some(path)
+            }
+            _ => None,
+        };
+        // A container attempt's pre-expiry cancellation reaps the container
+        // after the grace (PAR-011); both have to fit inside the lease along
+        // with the renewal cadence, or the container could outlive the term.
+        if podman_path.is_some()
+            && Duration::from_millis(renewal_milliseconds)
+                >= worker::execution_lease_budget(
+                    Duration::from_secs(u64::from(lease_seconds)),
+                    worker::termination_reserve(
+                        Duration::from_millis(termination_grace_milliseconds),
+                        true,
+                    ),
+                )
+        {
+            return Err(AgentError::InvalidConfig(
+                "lease cannot hold the container teardown reserve",
+            ));
+        }
         Ok(Self {
             input_bindings: match values.get("MCLOVING_AGENT_INPUT_BINDINGS_PATH") {
                 Some(path) if cfg!(target_os = "linux") => Some(input::load_bindings(
@@ -277,6 +310,7 @@ impl AgentConfig {
                 }
                 None => None,
             },
+            podman_path,
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
             organization_id: required("MCLOVING_AGENT_ORGANIZATION_ID")?,
@@ -554,6 +588,7 @@ async fn open_session(
                 let mut values = session_capabilities();
                 values.extend(cache::scheduling_capabilities(config)?);
                 values.extend(input::scheduling_capabilities(config)?);
+                values.extend(container::scheduling_capabilities(config));
                 values
             },
         };
@@ -821,6 +856,26 @@ async fn send_reconciliation(
                     return Err(AgentError::StaleSession);
                 }
                 let phase = recovered_cancellation_phase(outcome, receipt.disposition)?;
+                // A discharge or retirement receipt retires the fenced
+                // authority, not a container that may still be running with
+                // the workspace mounted: the row stays parked, and its reap
+                // is retried on every session, until absence is proven in
+                // the launching runtime context (PAR-011).
+                let phase = if phase == AttemptPhase::Aborted
+                    && !container::recovered_container_gone(config, attempt)
+                {
+                    eprintln!(
+                        "recovered attempt {}/{} fence {}: kept reconciliation-required past \
+                         its controller receipt because container {} is not proven gone",
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                        attempt.container_name.as_deref().unwrap_or("?")
+                    );
+                    AttemptPhase::ReconciliationRequired
+                } else {
+                    phase
+                };
                 if [
                     CancellationDisposition::RetireStale as i32,
                     CancellationDisposition::DischargeRecovered as i32,
@@ -885,14 +940,69 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
     let report = Journal::open(&config.journal_path)?.reconcile()?;
     let mut journal = Journal::open(&config.journal_path)?;
     for attempt in &report.attempts {
+        // A parked container attempt keeps its journaled container name, and
+        // a reap that failed once may succeed now. Retry the absence proof on
+        // every session so a surviving container never outlives the parked
+        // row unnoticed; the row itself stays parked until the controller
+        // discharges it.
+        if attempt.phase == AttemptPhase::ReconciliationRequired
+            && attempt.container_name.is_some()
+            && !container::recovered_container_gone(config, attempt)
+        {
+            eprintln!(
+                "parked attempt {}/{} fence {}: container {} still cannot be proven gone",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.container_name.as_deref().unwrap_or("?")
+            );
+        }
         if !matches!(
             attempt.phase,
             AttemptPhase::Accepted | AttemptPhase::Running
         ) {
             continue;
         }
-        let outcome =
+        let mut outcome =
             cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
+        // The terminated group was only the podman client of a container
+        // stage; the container it started outlives that client (PAR-011).
+        // Reap it by its derived name and require proof it is gone, or park
+        // the attempt exactly as an unverifiable process group would. The
+        // reap runs even when the group itself could not be verified: that
+        // outcome already parks the attempt, but the container must not keep
+        // writing into the workspace until a later session retries.
+        let container_gone = container::recovered_container_gone(config, attempt);
+        if outcome == RecoveredCancellation::ReconciliationRequired && !container_gone {
+            eprintln!(
+                "recovered attempt {}/{} fence {}: container {} not proven gone while the \
+                 process group was unverifiable; parked reconciliation-required",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.container_name.as_deref().unwrap_or("?")
+            );
+        }
+        if outcome != RecoveredCancellation::ReconciliationRequired && !container_gone {
+            journal.transition(
+                &attempt.organization_id,
+                &attempt.attempt_id,
+                attempt.fence_token,
+                attempt.session_epoch,
+                AttemptPhase::ReconciliationRequired,
+                attempt.process_id,
+            )?;
+            eprintln!(
+                "recovered attempt {}/{} fence {}: container {} could not be proven gone \
+                 (runtime configured: {}); parked reconciliation-required",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.container_name.as_deref().unwrap_or("?"),
+                config.podman_path.is_some()
+            );
+            outcome = RecoveredCancellation::ReconciliationRequired;
+        }
         if outcome != RecoveredCancellation::ReconciliationRequired
             && worker::recovered_cancellation_requires_persistence(config, attempt).await?
         {
@@ -1312,6 +1422,7 @@ pub async fn run_execution_service_smoke(
     let request = ExecutionRequest {
         workspace_seed: None,
         step_ordinal: None,
+        container: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::Direct,
@@ -1376,6 +1487,7 @@ pub async fn run_creation_boundary_service_smoke(
     let request = ExecutionRequest {
         workspace_seed: None,
         step_ordinal: None,
+        container: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::PowerShell,
@@ -1522,6 +1634,40 @@ mod tests {
                 ))
             ),
             "3000 ms of cadence plus 1500 ms of grace does not fit in a 5 s lease"
+        );
+
+        // PAR-011, from review. With a container runtime configured, the
+        // reap that proves a container gone is reserved inside the lease as
+        // well. A lease that holds the grace and cadence but not the reap is
+        // refused for the same reason: the container would outlive the term.
+        let absolute_podman = if cfg!(windows) {
+            "C:\\podman\\podman.exe"
+        } else {
+            "/usr/bin/podman"
+        };
+        let mut reap_overruns_lease = values();
+        reap_overruns_lease.insert(
+            "MCLOVING_AGENT_PODMAN_PATH".to_owned(),
+            absolute_podman.to_owned(),
+        );
+        reap_overruns_lease.insert("MCLOVING_AGENT_LEASE_SECONDS".to_owned(), "20".to_owned());
+        assert!(
+            matches!(
+                AgentConfig::from_values(&reap_overruns_lease),
+                Err(AgentError::InvalidConfig(
+                    "lease cannot hold the container teardown reserve"
+                ))
+            ),
+            "a 20 s lease cannot hold 5 s cadence, 2 s grace and the container reap"
+        );
+        let mut reap_fits_lease = values();
+        reap_fits_lease.insert(
+            "MCLOVING_AGENT_PODMAN_PATH".to_owned(),
+            absolute_podman.to_owned(),
+        );
+        assert!(
+            AgentConfig::from_values(&reap_fits_lease).is_ok(),
+            "the default 30 s lease holds the container reserve"
         );
 
         // The same cadence with a grace that does fit is accepted, so the rule
@@ -1812,6 +1958,8 @@ mod tests {
             process_id: Some(42),
             process_birth_identity: None,
             current_step: None,
+            container_name: None,
+            container_context: None,
             logs: Vec::new(),
             result: None,
         };
@@ -2012,6 +2160,8 @@ mod tests {
                 process_id: Some(42),
                 process_birth_identity: Some("linux-proc-v1:boot:42".to_owned()),
                 current_step: None,
+                container_name: None,
+                container_context: None,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2054,6 +2204,8 @@ mod tests {
             process_id: None,
             process_birth_identity: None,
             current_step: None,
+            container_name: None,
+            container_context: None,
             logs: Vec::new(),
             result: None,
         };

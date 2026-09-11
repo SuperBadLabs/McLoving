@@ -358,3 +358,114 @@ pub mod multi_step {
     /// in PostgreSQL; the schema check mirrors it.
     pub const MAX_STEP_ORDINAL_EXCLUSIVE: u32 = 65_536;
 }
+
+/// Container stages (PAR-011): a stage that names a digest-pinned image runs
+/// every step under rootless podman with the attempt workspace bind-mounted
+/// and nothing else of the host.
+pub mod container {
+    /// Scheduler capability an agent advertises only when its configured
+    /// podman answers; a stage with an image requires it.
+    pub const CONTAINER_CAPABILITY: &str = "container-podman-v1";
+    /// Longest accepted image reference.
+    pub const MAX_IMAGE_REFERENCE_BYTES: usize = 512;
+
+    /// Accepts only `[registry[:port]/]path@sha256:<64 hex>`: a tag can move,
+    /// a digest cannot, so a tagged reference is refused rather than pulled.
+    #[must_use]
+    pub fn is_digest_pinned_image(reference: &str) -> bool {
+        if reference.is_empty() || reference.len() > MAX_IMAGE_REFERENCE_BYTES {
+            return false;
+        }
+        let Some((name, digest)) = reference.split_once('@') else {
+            return false;
+        };
+        let Some(hex) = digest.strip_prefix("sha256:") else {
+            return false;
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return false;
+        }
+        let mut components = name.split('/');
+        let Some(first) = components.next() else {
+            return false;
+        };
+        let rest: Vec<&str> = components.collect();
+        // The first component may be a registry host with a port; every other
+        // component is a plain repository path element without a tag colon.
+        // Reference parsing treats a first component that contains a dot or
+        // is `localhost` as a registry domain, and a domain needs a `/repo`
+        // path after it; `docker.io@sha256:...` names no repository at all.
+        let looks_like_registry = first.contains('.') || first == "localhost";
+        let host_ok = if let Some((host, port)) = first.split_once(':') {
+            !rest.is_empty()
+                && host_like(host)
+                && !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+        } else if looks_like_registry {
+            !rest.is_empty() && host_like(first)
+        } else {
+            path_like(first)
+        };
+        host_ok && !name.ends_with('/') && rest.iter().all(|component| path_like(component))
+    }
+
+    fn host_like(component: &str) -> bool {
+        !component.is_empty()
+            && component.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+            })
+    }
+
+    fn path_like(component: &str) -> bool {
+        !component.is_empty()
+            && component.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'-' | b'_')
+            })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_digest_pinned_image;
+
+        #[test]
+        fn digest_pinned_references_are_accepted_and_tags_refused() {
+            let digest = "c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
+            assert!(is_digest_pinned_image(&format!(
+                "docker.io/library/alpine@sha256:{digest}"
+            )));
+            assert!(is_digest_pinned_image(&format!("alpine@sha256:{digest}")));
+            assert!(is_digest_pinned_image(&format!(
+                "registry.local:5000/team/tool@sha256:{digest}"
+            )));
+            assert!(!is_digest_pinned_image("docker.io/library/alpine:3.20"));
+            assert!(!is_digest_pinned_image(&format!(
+                "docker.io/library/alpine:3.20@sha256:{digest}"
+            )));
+            assert!(!is_digest_pinned_image("alpine@sha256:abc"));
+            assert!(!is_digest_pinned_image(&format!("Alpine@sha256:{digest}")));
+            assert!(!is_digest_pinned_image(&format!("@sha256:{digest}")));
+            assert!(!is_digest_pinned_image(&format!(
+                "registry:5000@sha256:{digest}"
+            )));
+            // A lone registry-looking component names no repository.
+            assert!(!is_digest_pinned_image(&format!(
+                "docker.io@sha256:{digest}"
+            )));
+            assert!(!is_digest_pinned_image(&format!(
+                "localhost@sha256:{digest}"
+            )));
+            assert!(is_digest_pinned_image(&format!(
+                "localhost/tool@sha256:{digest}"
+            )));
+            assert!(is_digest_pinned_image(&format!(
+                "my.registry.example/team/tool@sha256:{digest}"
+            )));
+        }
+    }
+}

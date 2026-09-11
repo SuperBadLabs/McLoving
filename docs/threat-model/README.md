@@ -602,6 +602,7 @@ had never claimed one.
 | TRIG-001 | `docs/evidence/TRIG-001_SECURITY_REVIEW.md` |
 | UI-002 | `docs/evidence/UI-002_SECURITY_REVIEW.md` |
 | PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
+| PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -804,7 +805,7 @@ not what any executable does. Every threat row was reviewed and needs no
 semantic change. Residual: the parity tickets that follow each carry their own
 review before closure.
 
-## PAR-010 multi-step stage execution review, ticket ACTIVE
+## PAR-010 multi-step stage execution review (earned closure)
 
 The version-5 envelope runs one to sixteen ordered process steps of one stage
 inside one attempt. Boundaries touched: TM-003 (agent runtime and lease: one
@@ -823,6 +824,51 @@ terminally). Crash between a step's exit and its finalization parks the attempt
 reconciliation-required naming the step; nothing is re-run or skipped. Focused
 unit tests and the shipped controller/agent integration tests cover the ordered
 run, the first-failure stop, the capability requirement and the exact crash
-point. Closure requires the reviewed merge, exact-main Foundation and native
-Windows runs, and a receipt in `docs/evidence/PAR-010_SECURITY_REVIEW.md`.
+point. Review on PR #145 added: attempt terminals and exit codes derived from
+the last step record, Linux-only admission for multi-step stages, ordinal-0
+records for a first step that never spawned, controller cancellation kept
+distinct from lease loss, finished-step spools relocated by rename into one
+deterministic agent-owned directory that terminal reclaim removes, per-step
+descriptors journaled in one transaction before the next spawn, redaction
+against the union of attempt credentials with the union bounded at eight,
+version-5 work declined rather than refused for a session that did not
+negotiate the feature, and byte-identical initial and replayed summaries.
+Closed on squash merge `cca42de59271820826248c35ed195e8e81e637a6` with
+exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
+`docs/evidence/PAR-010_SECURITY_REVIEW.md`. Residual: journaled step logs are
+not published when recovery completes a cancellation (`AGENT-008`), and
+hostile same-UID access to the relocated spools remains `SEC-005`.
+
+## PAR-011 container stage execution review, ticket ACTIVE
+
+A stage that names a digest-pinned image runs every step under rootless podman
+through the version-5 envelope. Boundaries touched: TM-003 (agent runtime: the
+podman client is the process-group leader, so lease, cancellation and timeout
+keep the existing group teardown proof); TM-005/TM-006 (execution and log
+evidence: the container's stdout and stderr are the step's spools; environment
+reaches the container by name only, so no secret value enters the podman
+argument vector); TM-023 and SEC-005 (workspace and host: only the attempt
+workspace is bind-mounted, at `/workspace`, and the host root, the service
+account's configuration directory, the journal and the mTLS key are not
+visible inside the container; this is partial containment because plain
+process steps still run on the host as the service account); TM-016 and
+TM-023 (supply chain: a tag reference is refused at compile, admission and
+execution, so only the exact image digest ever runs); TM-052 (routing: the
+`container-podman-v1` capability is advertised only when the deployment-pinned
+podman answers, and admission refuses container stages for Windows). After the
+group is empty the executor removes the named container and accepts only a
+`container exists` exit status of 1 as proof; anything else is unverified
+containment, and a group-teardown failure on any arm still attempts the reap
+before its error propagates. A container attempt reserves that bounded reap
+inside its lease on top of the termination grace (TM-003: a pre-expiry
+cancellation finishes the teardown before the attempt is reclaimable, and an
+agent whose lease cannot hold the reserve refuses to start with a runtime
+configured). Residual: `--userns=keep-id` maps the service account into the
+container, so a workload that escapes the container runtime holds the same
+identity as today; image pulls reach the registry the reference names under
+the deployment's network policy. Shipped-binary tests cover a step reading the
+image's os-release with the host root invisible, and a timed-out step whose
+container is proven gone. Closure requires the reviewed merge, exact-main
+Foundation and native Windows runs, and a receipt in
+`docs/evidence/PAR-011_SECURITY_REVIEW.md`.
 
