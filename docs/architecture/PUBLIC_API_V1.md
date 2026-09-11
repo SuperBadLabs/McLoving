@@ -147,8 +147,9 @@ sha256=<HMAC-SHA256 of the exact body under the notification key>`,
 `X-McLoving-Delivery: <build>:<index>:<terminal generation>` (a retried
 build that becomes terminal again starts a new generation, so a receiver
 can tell its outcomes apart; a delivery from an older generation that lands
-after the newer generation was delivered re-queues the newer one, so the
-last write at a target is the latest outcome), `X-McLoving-Attempt` and
+while or after the newer generation delivers makes the newer one post once
+more, so the last write at a target is the latest outcome),
+`X-McLoving-Attempt` and
 `X-McLoving-Event: build.terminal`. Before either connects, the destination
 host is resolved and every address is checked against the loopback,
 private, link-local, shared, benchmarking, documentation, multicast and

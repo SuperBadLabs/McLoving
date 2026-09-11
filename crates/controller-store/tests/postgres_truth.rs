@@ -12718,6 +12718,14 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .iter()
             .all(|row| row.4 == 0)
     );
+    // A due, unclaimed row needs no re-post after an older generation's
+    // write: its own claim posts after that write by construction.
+    assert!(
+        !store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 0)
+            .await
+            .expect("requeue while the newer generation is due and unclaimed")
+    );
     // Two workers claim at once: every due row is held by exactly one.
     let (first, second) = tokio::join!(
         store.claim_due_notifications(organization_id, 10, ALL_KINDS),
@@ -12738,18 +12746,12 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             && delivery.build_status == "succeeded"
     }));
     // A settlement from an earlier terminal generation never lands on a
-    // later one, and nothing pending is re-queued for it.
+    // later one.
     assert!(
         !store
             .settle_notification(organization_id, admission.build_id, 0, 0, 1, None)
             .await
             .expect("settle under a stale generation")
-    );
-    assert!(
-        !store
-            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 0)
-            .await
-            .expect("requeue while the newer generation is pending")
     );
     // A claim leases the row past the delivery deadline, so an attempt still
     // in flight is never claimed by a second worker after the lock is gone.
@@ -12772,6 +12774,37 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .await
             .expect("third claim")
             .is_empty()
+    );
+    // An older generation's write that landed while row 0's claim is in
+    // flight marks it: its successful settlement re-queues it for one more
+    // post instead of resting, and that post settles as delivered.
+    assert!(
+        store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 0)
+            .await
+            .expect("mark the in-flight row for a re-post")
+    );
+    assert!(
+        store
+            .settle_notification(organization_id, admission.build_id, 0, 1, 1, None)
+            .await
+            .expect("settle the in-flight attempt")
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger after the marked settlement");
+    assert_eq!((ledger[0].3.as_str(), ledger[0].4), ("pending", 0));
+    let reposting = store
+        .claim_due_notifications(organization_id, 10, ALL_KINDS)
+        .await
+        .expect("claim the re-post");
+    assert_eq!(
+        reposting
+            .iter()
+            .map(|delivery| delivery.target_index)
+            .collect::<Vec<_>>(),
+        vec![0]
     );
     // Settle: one delivered, the other failed and re-queued with its error.
     assert!(

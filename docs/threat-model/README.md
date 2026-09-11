@@ -1104,9 +1104,9 @@ deadline so two controllers hold disjoint rows even after the lock is
 released, the backoff scheduled when a failed attempt is settled so the row
 is off every scan until due, settlement is keyed on the claim's terminal
 generation and attempt count so an overtaken worker's answer, or one from
-before an operator retry made the build terminal again, is dropped and, if
-the newer generation had already been delivered, that generation is
-re-queued so its outcome is written last, the resolved targets are part of
+before an operator retry made the build terminal again, is dropped and the
+newer generation is posted once more (re-queued if delivered, marked for a
+re-post if in flight) so its outcome is written last, the resolved targets are part of
 the build's replay contract so catalog drift between controllers is an
 idempotency conflict rather than a race, a scan
 abandons a pending row whose attempts are spent rather than claiming it

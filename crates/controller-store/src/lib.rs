@@ -3594,7 +3594,10 @@ impl Store {
     /// Records a claimed delivery's outcome: delivered, or failed with the
     /// error the next attempt will see, abandoned once the attempts are
     /// spent. A row another claim moved on, or one that carries a later
-    /// terminal generation than the claim, is left alone.
+    /// terminal generation than the claim, is left alone. A row marked for a
+    /// re-post (an older generation's write may have landed after this
+    /// one's) goes back to pending on success instead of resting, so it is
+    /// posted once more and the latest outcome is the last write.
     pub async fn settle_notification(
         &self,
         organization_id: Uuid,
@@ -3617,16 +3620,25 @@ impl Store {
         let settled = sqlx::query_scalar::<_, i32>(
             "UPDATE notification_deliveries
              SET state = CASE
+                     WHEN $5::text IS NULL AND repost_required THEN 'pending'
                      WHEN $5::text IS NULL THEN 'delivered'
                      WHEN attempts >= $6 THEN 'abandoned'
                      ELSE 'pending'
                  END,
-                 delivered_at = CASE WHEN $5::text IS NULL THEN clock_timestamp() END,
+                 attempts = CASE
+                     WHEN $5::text IS NULL AND repost_required THEN 0
+                     ELSE attempts
+                 END,
+                 delivered_at = CASE
+                     WHEN $5::text IS NULL AND NOT repost_required THEN clock_timestamp()
+                 END,
                  next_attempt_at = CASE
+                     WHEN $5::text IS NULL AND repost_required THEN clock_timestamp()
                      WHEN $5::text IS NULL THEN next_attempt_at
                      ELSE clock_timestamp()
                          + make_interval(secs => LEAST(power(2, attempts), $7))
                  END,
+                 repost_required = false,
                  last_error = $5
              WHERE organization_id = $1
                AND build_id = $2
@@ -3650,11 +3662,13 @@ impl Store {
         Ok(settled.is_some())
     }
 
-    /// After a settlement was refused as stale, re-queues the row's newer
-    /// terminal generation if it was already delivered: the stale attempt's
-    /// external write may have landed after the newer one, so the newer
-    /// outcome is posted again and ends up last. A row still pending is left
-    /// to its own claim, which posts after the stale write by construction.
+    /// After a settlement was refused as stale, arranges for the row's newer
+    /// terminal generation to be posted once more: the stale attempt's
+    /// external write may have landed after the newer one's. A delivered
+    /// row is re-queued; a row that is claimed or waiting (its next attempt
+    /// in the future) is marked so its next successful settlement re-queues
+    /// it instead of resting; a due, unclaimed row needs nothing, since its
+    /// claim posts after the stale write by construction.
     pub async fn requeue_after_stale_settlement(
         &self,
         organization_id: Uuid,
@@ -3665,16 +3679,21 @@ impl Store {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let requeued = sqlx::query_scalar::<_, i32>(
             "UPDATE notification_deliveries
-             SET state = 'pending',
-                 attempts = 0,
-                 next_attempt_at = clock_timestamp(),
-                 last_error = NULL,
-                 delivered_at = NULL
+             SET attempts = CASE WHEN state = 'delivered' THEN 0 ELSE attempts END,
+                 next_attempt_at = CASE
+                     WHEN state = 'delivered' THEN clock_timestamp()
+                     ELSE next_attempt_at
+                 END,
+                 last_error = CASE WHEN state = 'delivered' THEN NULL ELSE last_error END,
+                 repost_required = state <> 'delivered',
+                 delivered_at = NULL,
+                 state = 'pending'
              WHERE organization_id = $1
                AND build_id = $2
                AND target_index = $3
-               AND state = 'delivered'
                AND terminal_generation > $4
+               AND (state = 'delivered'
+                    OR (state = 'pending' AND next_attempt_at > clock_timestamp()))
              RETURNING terminal_generation",
         )
         .bind(organization_id)

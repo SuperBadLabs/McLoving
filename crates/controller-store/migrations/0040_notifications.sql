@@ -25,6 +25,11 @@ CREATE TABLE notification_deliveries (
     -- build that becomes terminal again starts a new generation, and a
     -- settlement or a delivery identity from the old one cannot match it.
     terminal_generation integer NOT NULL DEFAULT 1 CHECK (terminal_generation >= 1),
+    -- Set when an older generation's write may have landed after this
+    -- generation's while this one was in flight: its next successful
+    -- settlement posts once more instead of resting, so the latest outcome
+    -- is the last write at the target.
+    repost_required boolean NOT NULL DEFAULT false,
     state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'delivered', 'abandoned')),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
