@@ -2046,6 +2046,24 @@ async fn run_assignment(
                         termination: "spawn_failed".to_owned(),
                         reason: Some(spawn_reason.clone()),
                     };
+                    // Whatever step the executor failed, a helper may have
+                    // materialized its acquisition before the failure (the
+                    // acquirer exits, then output capture or spool sync
+                    // fails): discard it now, or park the attempt if that
+                    // fails, before any terminal record is written.
+                    if let Some(helper) = helper
+                        && let Err(reason) = tokio::task::block_in_place(|| helper.discard())
+                    {
+                        return park_unreclaimed_helper(
+                            &mut journal,
+                            &organization,
+                            &attempt,
+                            fence,
+                            session_epoch,
+                            ordinal,
+                            reason,
+                        );
+                    }
                     if index == 0 {
                         // No process ever ran, so this is the processless
                         // completion; a multi-step attempt still records its
@@ -2076,22 +2094,7 @@ async fn run_assignment(
                     }
                     // A later step could not start. The earlier steps ran and
                     // their evidence is journaled below, so this is a failed
-                    // step inside a real attempt, not a processless one. A
-                    // helper that never spawned still discards anything a
-                    // partial start may have left.
-                    if let Some(helper) = helper
-                        && let Err(reason) = tokio::task::block_in_place(|| helper.discard())
-                    {
-                        return park_unreclaimed_helper(
-                            &mut journal,
-                            &organization,
-                            &attempt,
-                            fence,
-                            session_epoch,
-                            ordinal,
-                            reason,
-                        );
-                    }
+                    // step inside a real attempt, not a processless one.
                     step_records.push(spawn_record);
                     break;
                 }

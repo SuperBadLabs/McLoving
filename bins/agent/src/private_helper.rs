@@ -275,6 +275,7 @@ impl PreparedHelper {
 
 /// Why a helper's completion did not happen.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum HelperFailure {
     /// The step failed and nothing of the helper's remains to reclaim.
     Refused(String),
