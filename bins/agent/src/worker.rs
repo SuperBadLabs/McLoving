@@ -214,6 +214,9 @@ struct ProcesslessCompletion<'a> {
     session_epoch: u64,
     outcome: WorkOutcome,
     reason: String,
+    /// Per-step records of a multi-step attempt whose first step never
+    /// spawned; empty for every single-step processless completion.
+    steps: Vec<StepRecord>,
 }
 
 struct DurableResult<'a> {
@@ -1277,6 +1280,7 @@ async fn refuse_unsupported_assignment(
             session_epoch,
             outcome,
             reason,
+            steps: Vec::new(),
         },
         AuthorityRpcControl {
             authority_lost: &authority_lost,
@@ -1386,6 +1390,7 @@ async fn run_assignment(
                 session_epoch,
                 outcome: WorkOutcome::Aborted,
                 reason: "cancelled_before_process_spawn".to_owned(),
+                steps: Vec::new(),
             },
             AuthorityRpcControl {
                 authority_lost: &authority_lost,
@@ -1457,6 +1462,7 @@ async fn run_assignment(
                         .as_ref()
                         .map_or("helper_binding_rejected", HelperIntent::binding_failure)
                         .to_owned(),
+                    steps: Vec::new(),
                 },
                 AuthorityRpcControl {
                     authority_lost: &authority_lost,
@@ -1524,6 +1530,7 @@ async fn run_assignment(
                         session_epoch,
                         outcome: WorkOutcome::Aborted,
                         reason: "cancelled_while_waiting_for_credentials".to_owned(),
+                        steps: Vec::new(),
                     },
                     AuthorityRpcControl {
                         authority_lost: &authority_lost,
@@ -1569,6 +1576,7 @@ async fn run_assignment(
                     session_epoch,
                     outcome: WorkOutcome::Aborted,
                     reason: "cancelled_while_starting_work".to_owned(),
+                    steps: Vec::new(),
                 },
                 AuthorityRpcControl {
                     authority_lost: &authority_lost,
@@ -1730,7 +1738,35 @@ async fn run_assignment(
                             cause: error.to_string(),
                         });
                     }
+                    // One refusal shape for every step that never spawned: a
+                    // lease loss keeps its cause, a seed failure its own name,
+                    // anything else the spawn error.
+                    let spawn_outcome = if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
+                        WorkOutcome::Aborted
+                    } else {
+                        WorkOutcome::Failed
+                    };
+                    let spawn_reason = match &error {
+                        ExecutionError::CancelledBeforeSpawn => lease_loss_reason
+                            .get()
+                            .map(|cause| format!("lease_lost_during_execution:{cause}"))
+                            .unwrap_or_else(|| "cancelled_before_process_spawn".to_owned()),
+                        ExecutionError::WorkspaceTransfer(_) => {
+                            format!("workspace_seed_failed:{error}")
+                        }
+                        _ => bounded_refusal_detail(format!("process_spawn_failed: {error}")),
+                    };
+                    let spawn_record = StepRecord {
+                        ordinal,
+                        outcome: outcome_name(spawn_outcome).to_owned(),
+                        exit_code: None,
+                        termination: "spawn_failed".to_owned(),
+                        reason: Some(spawn_reason.clone()),
+                    };
                     if index == 0 {
+                        // No process ever ran, so this is the processless
+                        // completion; a multi-step attempt still records its
+                        // ordinal-0 failure so the summary keeps the contract.
                         return finalize_without_process(
                             config,
                             client,
@@ -1739,22 +1775,12 @@ async fn run_assignment(
                                 authority: &assignment.authority,
                                 workspace: &assignment.workspace,
                                 session_epoch,
-                                outcome: if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
-                                    WorkOutcome::Aborted
+                                outcome: spawn_outcome,
+                                reason: spawn_reason,
+                                steps: if multi_step {
+                                    vec![spawn_record]
                                 } else {
-                                    WorkOutcome::Failed
-                                },
-                                reason: match &error {
-                                    ExecutionError::CancelledBeforeSpawn => lease_loss_reason
-                                        .get()
-                                        .map(|cause| format!("lease_lost_during_execution:{cause}"))
-                                        .unwrap_or_else(|| {
-                                            "cancelled_before_process_spawn".to_owned()
-                                        }),
-                                    ExecutionError::WorkspaceTransfer(_) => {
-                                        format!("workspace_seed_failed:{error}")
-                                    }
-                                    _ => format!("process_spawn_failed: {error}"),
+                                    Vec::new()
                                 },
                             },
                             AuthorityRpcControl {
@@ -1768,22 +1794,7 @@ async fn run_assignment(
                     // A later step could not start. The earlier steps ran and
                     // their evidence is journaled below, so this is a failed
                     // step inside a real attempt, not a processless one.
-                    step_records.push(StepRecord {
-                        ordinal,
-                        outcome: outcome_name(
-                            if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
-                                WorkOutcome::Aborted
-                            } else {
-                                WorkOutcome::Failed
-                            },
-                        )
-                        .to_owned(),
-                        exit_code: None,
-                        termination: "spawn_failed".to_owned(),
-                        reason: Some(bounded_refusal_detail(format!(
-                            "process_spawn_failed: {error}"
-                        ))),
-                    });
+                    step_records.push(spawn_record);
                     break;
                 }
             };
@@ -3129,6 +3140,7 @@ async fn finalize_without_process(
         session_epoch,
         outcome,
         reason,
+        steps,
     } = completion;
     let result = write_result(
         &config.workspace_root,
@@ -3141,7 +3153,7 @@ async fn finalize_without_process(
             reason: Some(&reason),
             completion_protocol: WORK_COMPLETION_PROTOCOL,
             cancellation_outcome: None,
-            steps: &[],
+            steps: &steps,
         },
     )
     .await?;
