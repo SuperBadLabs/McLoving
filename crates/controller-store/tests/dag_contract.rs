@@ -73,6 +73,7 @@ fn matrix_order_is_presentation_independent_and_bounded() {
             idempotency_key: "matrix-contract".to_owned(),
             pipeline_digest: [1; 32],
             priority: 1,
+            notify_targets: serde_json::json!([]),
             nodes: vec![matrix_node],
         })
         .is_ok()
@@ -129,6 +130,7 @@ fn dag_public_types_preserve_explicit_semantics() {
         idempotency_key: "contract".to_owned(),
         pipeline_digest: [1; 32],
         priority: 1,
+        notify_targets: serde_json::json!([]),
         nodes: vec![NewDagNode {
             node_key: "post".to_owned(),
             kind: DagNodeKind::Post,
@@ -175,6 +177,7 @@ fn capabilities_are_canonical_and_bounded() {
         idempotency_key: "capability-contract".to_owned(),
         pipeline_digest: [1; 32],
         priority: 1,
+        notify_targets: serde_json::json!([]),
         nodes: vec![node],
     };
 

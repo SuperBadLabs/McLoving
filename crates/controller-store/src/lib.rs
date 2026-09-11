@@ -199,6 +199,7 @@ pub const BUILD_WORKSPACE_V36: &str = include_str!("../migrations/0036_build_wor
 pub const STEP_ORDINAL_V37: &str = include_str!("../migrations/0037_step_ordinal.sql");
 pub const WEBHOOK_RECEIPTS_V38: &str = include_str!("../migrations/0038_webhook_receipts.sql");
 pub const LOG_BUILD_POSITION_V39: &str = include_str!("../migrations/0039_log_build_position.sql");
+pub const NOTIFICATIONS_V40: &str = include_str!("../migrations/0040_notifications.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -366,6 +367,24 @@ pub struct AttemptExecution {
     pub pipeline_id: Option<Uuid>,
     pub execution_spec: Value,
     pub cancellation_requested: bool,
+}
+
+/// One notification delivery a build's terminal transaction recorded
+/// (PAR-004): the target as the pipeline named it, resolved against the
+/// mapping catalog at admission, and the build's terminal status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationDelivery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Option<Uuid>,
+    pub build_id: Uuid,
+    pub target_index: i32,
+    pub kind: String,
+    pub mapping_id: String,
+    pub target: Value,
+    pub build_status: String,
+    /// Attempts made so far, this claim included.
+    pub attempts: i32,
 }
 
 /// One transactionally published outbox record.
@@ -894,6 +913,9 @@ impl Store {
                    ('trigger_schedule_watermarks', 'INSERT'),
                    ('trigger_schedule_watermarks', 'UPDATE'),
                    ('webhook_receipts', 'SELECT'), ('webhook_receipts', 'INSERT'),
+                   ('notification_deliveries', 'SELECT'),
+                   ('notification_deliveries', 'INSERT'),
+                   ('notification_deliveries', 'UPDATE'),
                    ('discovery_parent_definitions', 'SELECT'),
                    ('discovery_parent_definitions', 'INSERT'),
                    ('discovery_parent_definitions', 'UPDATE'),
@@ -1224,6 +1246,7 @@ impl Store {
                    ('pipeline_trigger_definitions'),
                    ('pipeline_trigger_versions'), ('trigger_deliveries'),
                    ('trigger_schedule_watermarks'), ('webhook_receipts'),
+                   ('notification_deliveries'),
                    ('discovery_parent_definitions'),
                    ('discovery_parent_versions'), ('discovery_scans'),
                    ('discovery_scan_results'), ('discovery_child_identities'),
@@ -1270,7 +1293,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 61
+             SELECT COUNT(*) = 62
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1299,7 +1322,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 61
+                    AND (SELECT COUNT(*) FROM policies) = 62
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1419,6 +1442,7 @@ impl Store {
         apply_migration(&mut tx, 37, STEP_ORDINAL_V37).await?;
         apply_migration(&mut tx, 38, WEBHOOK_RECEIPTS_V38).await?;
         apply_migration(&mut tx, 39, LOG_BUILD_POSITION_V39).await?;
+        apply_migration(&mut tx, 40, NOTIFICATIONS_V40).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3440,6 +3464,171 @@ impl Store {
     }
 
     /// Publishes a bounded outbox batch exactly once.
+    /// Claims the notification deliveries that are due, at most `limit`,
+    /// skipping rows another worker holds: each claim counts an attempt and
+    /// moves the row's next attempt out by the exponential backoff, so a
+    /// worker that dies mid-delivery leaves the row for a later claim and two
+    /// workers never hold one row at once.
+    pub async fn claim_due_notifications(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<NotificationDelivery>, StoreError> {
+        if !(1..=1_000).contains(&limit) {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Option<Uuid>,
+                Uuid,
+                i32,
+                String,
+                String,
+                Value,
+                String,
+                i32,
+            ),
+        >(
+            "WITH due AS (
+                 SELECT organization_id, build_id, target_index
+                 FROM notification_deliveries
+                 WHERE organization_id = $1
+                   AND state = 'pending'
+                   AND next_attempt_at <= clock_timestamp()
+                 ORDER BY next_attempt_at, build_id, target_index
+                 LIMIT $2
+                 FOR UPDATE SKIP LOCKED
+             ),
+             claimed AS (
+                 UPDATE notification_deliveries AS d
+                 SET attempts = d.attempts + 1,
+                     next_attempt_at = clock_timestamp()
+                         + make_interval(secs => LEAST(power(2, d.attempts + 1), $3))
+                 FROM due
+                 WHERE d.organization_id = due.organization_id
+                   AND d.build_id = due.build_id
+                   AND d.target_index = due.target_index
+                 RETURNING d.organization_id, d.build_id, d.target_index, d.kind,
+                           d.mapping_id, d.target, d.build_status, d.attempts
+             )
+             SELECT b.project_id, b.pipeline_id, c.build_id, c.target_index, c.kind,
+                    c.mapping_id, c.target, c.build_status, c.attempts
+             FROM claimed AS c
+             JOIN builds AS b
+               ON b.organization_id = c.organization_id AND b.id = c.build_id
+             ORDER BY c.build_id, c.target_index",
+        )
+        .bind(organization_id)
+        .bind(limit)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_BACKOFF_SECONDS as f64)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    project_id,
+                    pipeline_id,
+                    build_id,
+                    target_index,
+                    kind,
+                    mapping_id,
+                    target,
+                    build_status,
+                    attempts,
+                )| {
+                    NotificationDelivery {
+                        organization_id,
+                        project_id,
+                        pipeline_id,
+                        build_id,
+                        target_index,
+                        kind,
+                        mapping_id,
+                        target,
+                        build_status,
+                        attempts,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Records a claimed delivery's outcome: delivered, or failed with the
+    /// error the next attempt will see, abandoned once the attempts are
+    /// spent. A row another claim moved on is left alone.
+    pub async fn settle_notification(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        attempts: i32,
+        error: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let error = error.map(|error| {
+            let mut bounded = error.trim().to_owned();
+            bounded.truncate(1024);
+            if bounded.is_empty() {
+                "delivery failed".to_owned()
+            } else {
+                bounded
+            }
+        });
+        let settled = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET state = CASE
+                     WHEN $5::text IS NULL THEN 'delivered'
+                     WHEN attempts >= $6 THEN 'abandoned'
+                     ELSE 'pending'
+                 END,
+                 delivered_at = CASE WHEN $5::text IS NULL THEN clock_timestamp() END,
+                 last_error = $5
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'pending'
+               AND attempts = $4
+             RETURNING attempts",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(attempts)
+        .bind(error.as_deref())
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(settled.is_some())
+    }
+
+    /// Every delivery recorded for a build, in target order, with its state,
+    /// attempts and last error: the ledger a reader or a test inspects.
+    pub async fn build_notifications(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<(i32, String, String, String, i32, Option<String>)>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, (i32, String, String, String, i32, Option<String>)>(
+            "SELECT target_index, kind, mapping_id, state, attempts, last_error
+             FROM notification_deliveries
+             WHERE organization_id = $1 AND build_id = $2
+             ORDER BY target_index",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
     pub async fn publish_outbox(
         &self,
         organization_id: Uuid,
@@ -7511,7 +7700,7 @@ async fn lock_build_pipeline_truth(
     Ok((pipeline_id, admitted_generation, current_generation, state))
 }
 
-async fn append_event_and_outbox(
+pub(crate) async fn append_event_and_outbox(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     build_id: Uuid,

@@ -23,6 +23,14 @@ byId("idempotency-key").value = newUuid();
 byId("pipeline-id").value = newUuid();
 byId("pipeline-state-idempotency").value = newUuid();
 
+// A notification links here with the organization, project and build in
+// the query (PAR-004); the token is never in a link.
+const linked = new URLSearchParams(window.location.search);
+for (const [param, id] of [["organization", "organization"], ["project", "project"], ["build", "build-id"]]) {
+  const value = linked.get(param);
+  if (value) byId(id).value = value;
+}
+
 function projectPath() {
   requireContext();
   return `/api/v1/organizations/${encodeURIComponent(context.organization)}/projects/${encodeURIComponent(context.project)}`;

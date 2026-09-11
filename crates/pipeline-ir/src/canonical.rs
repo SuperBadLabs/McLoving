@@ -146,6 +146,35 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
             }
         }
     }
+    if pipeline.schema.minor >= 9 {
+        writer.u32(pipeline.notify.len());
+        for target in &pipeline.notify {
+            match target {
+                mcloving_domain::notifications::NotifyTarget::GithubStatus {
+                    mapping_id,
+                    commit,
+                    context,
+                    repository,
+                } => {
+                    writer.u8(1);
+                    writer.string(mapping_id);
+                    writer.string(commit);
+                    writer.string(context);
+                    match repository {
+                        Some(repository) => {
+                            writer.u8(1);
+                            writer.string(repository);
+                        }
+                        None => writer.u8(0),
+                    }
+                }
+                mcloving_domain::notifications::NotifyTarget::Webhook { mapping_id } => {
+                    writer.u8(2);
+                    writer.string(mapping_id);
+                }
+            }
+        }
+    }
     writer.bytes
 }
 
@@ -319,7 +348,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 8 {
+    if schema.major != 1 || schema.minor > 9 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -704,6 +733,52 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
             validate_declarations(&specs)
                 .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
         }
+    }
+    if schema.minor >= 9 {
+        use mcloving_domain::notifications::{MAX_NOTIFY_TARGETS, NotifyTarget, validate_targets};
+        let declared = reader.count(MAX_NOTIFY_TARGETS, "notification target")?;
+        let mut targets = Vec::with_capacity(declared);
+        for index in 0..declared {
+            let target = match reader.u8()? {
+                1 => {
+                    let mapping_id = reader.string()?;
+                    let commit = reader.string()?;
+                    let context = reader.string()?;
+                    let repository = match reader.u8()? {
+                        0 => None,
+                        1 => Some(reader.string()?),
+                        _ => {
+                            return Err(CanonicalError::new(
+                                reader.offset.saturating_sub(1),
+                                "invalid notification repository marker",
+                            ));
+                        }
+                    };
+                    materialized_fields.insert(
+                        format!("$.notify[{index}].github_status.commit"),
+                        commit.clone(),
+                    );
+                    NotifyTarget::GithubStatus {
+                        mapping_id,
+                        commit,
+                        context,
+                        repository,
+                    }
+                }
+                2 => NotifyTarget::Webhook {
+                    mapping_id: reader.string()?,
+                },
+                _ => {
+                    return Err(CanonicalError::new(
+                        reader.offset.saturating_sub(1),
+                        "unknown notification target opcode",
+                    ));
+                }
+            };
+            targets.push(target);
+        }
+        validate_targets(&targets)
+            .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
     }
     for (path, expression) in expression_bindings {
         let Some(materialized) = materialized_fields.get(&path) else {

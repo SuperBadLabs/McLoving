@@ -55,3 +55,7 @@ pub const IR_V1_7: SchemaVersion = SchemaVersion { major: 1, minor: 7 };
 /// Declared artifacts: a stage may name bounded workspace path patterns whose
 /// matching files the agent uploads after its steps (PAR-014).
 pub const IR_V1_8: SchemaVersion = SchemaVersion { major: 1, minor: 8 };
+
+/// Notification targets: a pipeline may name, by mapping id alone, where a
+/// build's terminal outcome is delivered (PAR-004).
+pub const IR_V1_9: SchemaVersion = SchemaVersion { major: 1, minor: 9 };

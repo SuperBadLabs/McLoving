@@ -106,6 +106,38 @@ The canonical bytes carry the declarations after the stage's steps; a
 pipeline that declares none keeps its earlier schema and byte encoding.
 Declarations are accepted only on stages of process and checkout steps.
 
+## Pipeline IR v1.9 notification targets
+
+IR v1.9 lets a pipeline name where its builds' terminal outcomes are
+delivered (PAR-004):
+
+```yaml
+notify:
+  - github_status:
+      mapping_id: github.mcloving
+      commit:
+        expression: parameters.revision
+      context: mcloving/foundation
+      repository: SuperBadLabs/McLoving
+  - webhook:
+      mapping_id: hooks.team
+```
+
+A pipeline names at most eight targets, each exactly one of `github_status`
+or `webhook`, and each only by the `mapping_id` of a deployment-owned
+notification mapping. A `github_status` target names the commit (7 to 128
+lowercase hexadecimal digits, literal or an expression: the one notification
+field a parameter may supply, bound at `$.notify[i].github_status.commit`),
+an optional `context` (default `mcloving`, up to 255 printable ASCII
+characters) and an optional `repository` (`owner/name`); the status is
+written to the repository the mapping owns, and a named repository must be
+that one. A `webhook` target names nothing but its mapping: the destination
+is the mapping's. The canonical bytes carry the targets after the stages
+under the new minor; a pipeline that names none keeps its earlier schema and
+bytes. Where a target may be delivered, and with which credential, is
+decided at admission against the deployment's catalog
+(`docs/architecture/PUBLIC_API_V1.md`), never by the pipeline.
+
 ## Compatibility rule
 
 A reader accepts a produced IR when major versions match and the reader minor

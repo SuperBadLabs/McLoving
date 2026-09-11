@@ -9248,6 +9248,7 @@ async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
         idempotency_key: "stable-key".to_owned(),
         pipeline_digest: [0x91; 32],
         priority: 0,
+        notify_targets: serde_json::json!([]),
         nodes: vec![dag_node(
             "build",
             DagNodeKind::Work,
@@ -9295,6 +9296,7 @@ async fn dag_log_cursor_never_hides_later_node_output() {
             idempotency_key: "dag-log-cursor".to_owned(),
             pipeline_digest: [0xd2; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 dag_node("stage-a", DagNodeKind::Work, vec![], "linux", "stage-a"),
                 dag_node("stage-b", DagNodeKind::Work, vec![], "linux", "stage-b"),
@@ -9411,6 +9413,7 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
             idempotency_key: "dag-fail-fast-retry".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![failing, sibling],
         })
         .await
@@ -9533,6 +9536,7 @@ async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
             idempotency_key: "dag-operator-retry".to_owned(),
             pipeline_digest: [0xd3; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![dag_node(
                 "build",
                 DagNodeKind::Work,
@@ -9650,6 +9654,7 @@ async fn rolling_upgrade_attempt_inserts_preserve_runnable_and_blocked_readiness
             idempotency_key: "attempt-readiness-rolling-upgrade".to_owned(),
             pipeline_digest: [0xd5; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 dag_node("root", DagNodeKind::Work, vec![], "linux", "root"),
                 dag_node(
@@ -9835,6 +9840,7 @@ async fn automatic_retry_waits_for_a_reopened_completed_dependency() {
             idempotency_key: "automatic-retry-readiness".to_owned(),
             pipeline_digest: [0xd6; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 dag_node("parent", DagNodeKind::Work, vec![], "linux", "parent"),
                 child,
@@ -9988,6 +9994,7 @@ async fn operator_retry_waits_for_a_reopened_completed_dependency() {
             idempotency_key: "operator-retry-readiness".to_owned(),
             pipeline_digest: [0xd7; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 dag_node("parent", DagNodeKind::Work, vec![], "linux", "parent"),
                 dag_node(
@@ -10187,6 +10194,7 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![linux, windows, join, post],
         })
         .await
@@ -10202,6 +10210,7 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 {
                     let mut node = dag_node("linux", DagNodeKind::Work, vec![], "linux", "build");
@@ -10254,6 +10263,7 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 changed_linux,
                 dag_node("windows", DagNodeKind::Work, vec![], "windows", "build"),
@@ -10521,6 +10531,7 @@ async fn dag_retry_refuses_confirmed_non_idempotent_effects() {
             idempotency_key: "dag-non-idempotent".to_owned(),
             pipeline_digest: [0xe4; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![deploy],
         })
         .await
@@ -10635,6 +10646,7 @@ async fn dag_reconciliation_required_pauses_other_ready_work() {
             idempotency_key: "reconciliation-pauses-dag".to_owned(),
             pipeline_digest: [0xd5; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![uncertain, peer, after],
         })
         .await
@@ -10803,6 +10815,7 @@ async fn dag_fail_fast_cancels_active_skips_queued_and_still_runs_post() {
             idempotency_key: "fail-fast".to_owned(),
             pipeline_digest: [0xf4; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![fast, slow, queued, post],
         })
         .await
@@ -10985,6 +10998,7 @@ async fn dag_fail_fast_cooperative_cancellation_and_retry_race_converge() {
             idempotency_key: "fail-fast-cooperative".to_owned(),
             pipeline_digest: [0xf5; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![fast, cooperative, retry_race, post],
         })
         .await
@@ -11137,6 +11151,7 @@ async fn dag_owner_cancellation_is_durable_idempotent_and_monotonic() {
             idempotency_key: "cancel-dag".to_owned(),
             pipeline_digest: [0xca; 32],
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes: vec![
                 dag_node("active", DagNodeKind::Work, vec![], "linux", "active"),
                 dag_node("queued", DagNodeKind::Work, vec![], "linux", "queued"),
@@ -12541,6 +12556,245 @@ async fn an_attempts_artifacts_are_bounded_by_the_per_attempt_quota() {
             .await
             .expect("an existing object re-registers")
     );
+}
+
+/// PAR-004: the transaction that makes a build terminal records one
+/// delivery per target the build carried since admission and appends one
+/// terminal event; the retry paths re-derive the outcome without a second
+/// event, two workers claiming the ledger hold disjoint rows, and a settled
+/// delivery moves to delivered or, once the attempts are spent, abandoned.
+#[tokio::test]
+async fn a_terminal_build_records_its_notification_deliveries_once() {
+    let Some(store) = test_store().await else {
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "notify",
+        )
+        .await
+        .expect("create notify project");
+    let targets = json!([
+        {"kind": "github_status", "mapping_id": "github.notify", "commit": "0123456789abcdef0123456789abcdef01234567", "context": "mcloving", "repository": "SuperBadLabs/McLoving"},
+        {"kind": "webhook", "mapping_id": "hooks.notify"}
+    ]);
+    let admission = store
+        .admit_test_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "notify-terminal".to_owned(),
+            pipeline_digest: [0xe4; 32],
+            priority: 0,
+            notify_targets: targets.clone(),
+            nodes: vec![dag_node("only", DagNodeKind::Work, vec![], "linux", "only")],
+        })
+        .await
+        .expect("admit notify DAG");
+    assert!(
+        store
+            .build_notifications(organization_id, admission.build_id)
+            .await
+            .expect("read the ledger before the terminal")
+            .is_empty(),
+        "no delivery before the build is terminal"
+    );
+    let claim = store
+        .claim_next(&dag_claim(organization_id, "agent-n", "linux", "only"))
+        .await
+        .expect("claim the only node")
+        .expect("the only node is ready");
+    run_dag_claim(&store, &claim).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"exit_code": 0}),
+            )
+            .await
+            .expect("finalize the only node")
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger");
+    assert_eq!(
+        ledger,
+        vec![
+            (
+                0,
+                "github_status".to_owned(),
+                "github.notify".to_owned(),
+                "pending".to_owned(),
+                0,
+                None
+            ),
+            (
+                1,
+                "webhook".to_owned(),
+                "hooks.notify".to_owned(),
+                "pending".to_owned(),
+                0,
+                None
+            ),
+        ]
+    );
+    let terminal_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM build_events
+         WHERE organization_id = $1 AND build_id = $2 AND kind = 'dag.build_terminal'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count terminal events");
+    assert_eq!(terminal_events, 1);
+    let terminal_outbox = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM outbox
+         WHERE organization_id = $1 AND aggregate_id = $2 AND topic = 'dag.build_terminal'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count terminal outbox rows");
+    assert_eq!(terminal_outbox, 1);
+    // A second finalization of the same attempt is refused and re-derives
+    // nothing: still one event.
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"exit_code": 1}),
+            )
+            .await
+            .expect("a second terminal is refused")
+    );
+    let terminal_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM build_events
+         WHERE organization_id = $1 AND build_id = $2 AND kind = 'dag.build_terminal'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count terminal events again");
+    assert_eq!(terminal_events, 1);
+    // Two workers claim at once: every due row is held by exactly one.
+    let (first, second) = tokio::join!(
+        store.claim_due_notifications(organization_id, 10),
+        store.claim_due_notifications(organization_id, 10)
+    );
+    let first = first.expect("first claim");
+    let second = second.expect("second claim");
+    let mut claimed: Vec<i32> = first
+        .iter()
+        .chain(second.iter())
+        .map(|delivery| delivery.target_index)
+        .collect();
+    claimed.sort_unstable();
+    assert_eq!(claimed, vec![0, 1], "{first:?} {second:?}");
+    assert!(
+        first
+            .iter()
+            .all(|delivery| delivery.attempts == 1 && delivery.build_status == "succeeded")
+    );
+    // Nothing is due again until the backoff passes.
+    assert!(
+        store
+            .claim_due_notifications(organization_id, 10)
+            .await
+            .expect("third claim")
+            .is_empty()
+    );
+    // Settle: one delivered, the other failed and re-queued with its error.
+    assert!(
+        store
+            .settle_notification(organization_id, admission.build_id, 0, 1, None)
+            .await
+            .expect("settle delivered")
+    );
+    assert!(
+        store
+            .settle_notification(
+                organization_id,
+                admission.build_id,
+                1,
+                1,
+                Some("sink answered 503")
+            )
+            .await
+            .expect("settle failed")
+    );
+    // A stale settlement (wrong attempt count) changes nothing.
+    assert!(
+        !store
+            .settle_notification(organization_id, admission.build_id, 1, 7, None)
+            .await
+            .expect("stale settlement is ignored")
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger after settling");
+    assert_eq!(ledger[0].3, "delivered");
+    assert_eq!(ledger[1].3, "pending");
+    assert_eq!(ledger[1].5.as_deref(), Some("sink answered 503"));
+    // Spent attempts abandon: force the row due and to the last attempt.
+    sqlx::query(
+        "UPDATE notification_deliveries
+         SET attempts = $3, next_attempt_at = clock_timestamp()
+         WHERE organization_id = $1 AND build_id = $2 AND target_index = 1",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS - 1)
+    .execute(store.pool())
+    .await
+    .expect("age the row");
+    let last = store
+        .claim_due_notifications(organization_id, 10)
+        .await
+        .expect("last claim");
+    assert_eq!(last.len(), 1);
+    assert_eq!(
+        last[0].attempts,
+        mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS
+    );
+    assert!(
+        store
+            .settle_notification(
+                organization_id,
+                admission.build_id,
+                1,
+                last[0].attempts,
+                Some("still failing"),
+            )
+            .await
+            .expect("settle the last attempt")
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger after abandoning");
+    assert_eq!(ledger[1].3, "abandoned");
 }
 
 #[tokio::test]

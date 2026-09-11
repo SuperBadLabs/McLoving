@@ -35,6 +35,14 @@ pub fn plan_sequential_build(
             "sequential planning requires a bounded parameter-free pipeline".to_owned(),
         ));
     }
+    // Notification targets are resolved against the deployment's mapping
+    // catalog at admission (PAR-004); this planner has no catalog and would
+    // otherwise plan a build whose terminal outcome is silently undelivered.
+    if !pipeline.notify.is_empty() {
+        return Err(StoreError::InvalidDag(
+            "sequential planning carries no notification targets".to_owned(),
+        ));
+    }
     let digest = pipeline
         .semantic_digest()
         .map_err(|error| StoreError::InvalidDag(error.to_string()))?;
@@ -115,6 +123,7 @@ pub fn plan_sequential_build(
             idempotency_key: binding.idempotency_key,
             pipeline_digest: digest,
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes,
         },
         layout,

@@ -1229,6 +1229,7 @@ async fn run_effect_free_build(
             idempotency_key: "mig005a-effect-free-build-3".to_owned(),
             pipeline_digest: receipt.bundle_digest,
             priority: 0,
+            notify_targets: serde_json::json!([]),
             nodes,
         })
         .await?;

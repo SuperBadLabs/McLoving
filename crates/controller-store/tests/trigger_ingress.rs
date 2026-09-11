@@ -396,6 +396,7 @@ fn dag(
         idempotency_key: idempotency_key.to_owned(),
         pipeline_digest: Sha256::digest(b"trigger-semantic-v1").into(),
         priority: 0,
+        notify_targets: serde_json::json!([]),
         nodes: vec![NewDagNode {
             node_key: "run".to_owned(),
             kind: DagNodeKind::Work,

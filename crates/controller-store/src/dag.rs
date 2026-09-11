@@ -85,6 +85,10 @@ pub struct NewDagBuild {
     pub pipeline_digest: [u8; 32],
     pub priority: i32,
     pub nodes: Vec<NewDagNode>,
+    /// Notification targets the pipeline named (PAR-004), as a JSON array of
+    /// `mcloving_domain::notifications::NotifyTarget` values already resolved
+    /// against the deployment's mapping catalog; empty for none.
+    pub notify_targets: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -362,9 +366,9 @@ pub(crate) async fn admit_dag_contract_transaction(
                  pipeline_id, pipeline_revision, pipeline_operational_generation,
                  pipeline_revision_digest,
                  idempotency_key, pipeline_digest, status, priority,
-                 dag_mode, dag_contract
+                 dag_mode, dag_contract, notify_targets
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, true, $11)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, true, $11, $12)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
     )
@@ -379,6 +383,7 @@ pub(crate) async fn admit_dag_contract_transaction(
     .bind(input.pipeline_digest.as_slice())
     .bind(input.priority)
     .bind(&contract)
+    .bind(&input.notify_targets)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -1067,8 +1072,8 @@ async fn derive_build_outcome(
     let reconciliation_required: i64 = counts.try_get("reconciliation_required")?;
     let node_cancelled: Option<bool> = counts.try_get("node_cancelled")?;
     if pending == 0 {
-        let owner_cancelled = sqlx::query_scalar::<_, bool>(
-            "SELECT cancellation_requested_at IS NOT NULL
+        let (owner_cancelled, previous_status) = sqlx::query_as::<_, (bool, String)>(
+            "SELECT cancellation_requested_at IS NOT NULL, status
              FROM builds
              WHERE organization_id = $1 AND id = $2",
         )
@@ -1095,6 +1100,16 @@ async fn derive_build_outcome(
         .bind(status)
         .execute(&mut **tx)
         .await?;
+        // The build's terminal transition (PAR-004): once per transition into
+        // a terminal status, never on the re-derivations the retry paths make
+        // while the build stays terminal or non-terminal, the terminal event
+        // is appended and one delivery per named target is recorded under
+        // this same commit, so a terminal build has its deliveries or is not
+        // terminal. A build re-opened by a retry and terminal again with a
+        // new status resets its deliveries for redelivery.
+        if !matches!(previous_status.as_str(), "succeeded" | "failed" | "aborted") {
+            record_terminal_notifications(tx, organization_id, build_id, status).await?;
+        }
     } else {
         let status = if reconciliation_required > 0 {
             "reconciliation_required"
@@ -1114,6 +1129,56 @@ async fn derive_build_outcome(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+/// Appends the terminal event and records the build's notification
+/// deliveries from the targets it carried since admission.
+async fn record_terminal_notifications(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    status: &str,
+) -> Result<(), StoreError> {
+    let recorded = sqlx::query_scalar::<_, i64>(
+        "WITH inserted AS (
+             INSERT INTO notification_deliveries (
+                 organization_id, build_id, target_index, kind, mapping_id, target,
+                 build_status
+             )
+             SELECT b.organization_id, b.id, (t.ordinality - 1)::integer,
+                    t.target->>'kind', t.target->>'mapping_id', t.target, $3
+             FROM builds AS b
+             CROSS JOIN LATERAL jsonb_array_elements(b.notify_targets)
+                 WITH ORDINALITY AS t(target, ordinality)
+             WHERE b.organization_id = $1 AND b.id = $2
+             ON CONFLICT (organization_id, build_id, target_index) DO UPDATE
+             SET build_status = EXCLUDED.build_status,
+                 state = 'pending',
+                 attempts = 0,
+                 next_attempt_at = clock_timestamp(),
+                 last_error = NULL,
+                 delivered_at = NULL
+             RETURNING 1
+         )
+         SELECT count(*) FROM inserted",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(status)
+    .fetch_one(&mut **tx)
+    .await?;
+    crate::append_event_and_outbox(
+        tx,
+        organization_id,
+        build_id,
+        "dag.build_terminal",
+        json!({
+            "status": status,
+            "notifications": recorded,
+        }),
+    )
+    .await?;
     Ok(())
 }
 

@@ -585,6 +585,7 @@ pub fn expand_component(
         parameter_values: BTreeMap::new(),
         expressions: Vec::new(),
         stages: state.stages,
+        notify: Vec::new(),
         provenance: Provenance {
             source_id: root_component.provenance.source_id.clone(),
             source_sha256: root_component.provenance.source_sha256,

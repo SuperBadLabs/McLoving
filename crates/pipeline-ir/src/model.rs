@@ -11,8 +11,11 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6, IR_V1_7, IR_V1_8};
+use crate::{
+    IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6, IR_V1_7, IR_V1_8, IR_V1_9,
+};
 use mcloving_domain::artifacts::ArtifactSpec;
+use mcloving_domain::notifications::NotifyTarget;
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -72,6 +75,9 @@ pub struct PipelineIr {
     pub parameter_values: BTreeMap<String, ParameterValue>,
     pub expressions: Vec<ExpressionBinding>,
     pub stages: Vec<Stage>,
+    /// Where a build's terminal outcome is delivered (PAR-004); empty for a
+    /// pipeline that names no target.
+    pub notify: Vec<NotifyTarget>,
     pub provenance: Provenance,
     pub source_span: SourceSpan,
 }
@@ -313,12 +319,14 @@ pub fn compile_strict_yaml_with_parameters(
     let name = root.required_string("name")?;
     let parameters_node = root.take("parameters");
     let stages_node = root.required("stages")?;
+    let notify_node = root.take("notify");
     root.finish()?;
 
     let parameters = compile_parameter_definitions(parameters_node)?;
     let (parameter_values, evaluation_context) = bind_parameter_values(&parameters, inputs)?;
     let mut expressions = Vec::new();
     let stages = compile_stages(stages_node, &evaluation_context, &mut expressions)?;
+    let notify = compile_notify(notify_node, &evaluation_context, &mut expressions)?;
     expressions.sort_by(|left, right| left.path.cmp(&right.path));
     let has_connector_intent = stages.iter().any(|stage| {
         stage
@@ -337,7 +345,9 @@ pub fn compile_strict_yaml_with_parameters(
             .iter()
             .any(|step| matches!(step, Step::CacheIntent(_)))
     });
-    let schema = if stages.iter().any(|stage| !stage.artifacts.is_empty()) {
+    let schema = if !notify.is_empty() {
+        IR_V1_9
+    } else if stages.iter().any(|stage| !stage.artifacts.is_empty()) {
         IR_V1_8
     } else if stages.iter().any(|stage| {
         stage
@@ -373,6 +383,7 @@ pub fn compile_strict_yaml_with_parameters(
         parameter_values,
         expressions,
         stages,
+        notify,
         provenance: Provenance {
             source_id: source_id.to_owned(),
             source_sha256: Sha256::digest(source.as_bytes()).into(),
@@ -444,6 +455,15 @@ pub fn instantiate_pipeline(
                     checkout.spec.commit = value;
                 }
             }
+        }
+    }
+    for (index, target) in pipeline.notify.iter_mut().enumerate() {
+        // The commit is the one notification field a parameter may supply
+        // (PAR-004); the mapping and context stay literal.
+        if let NotifyTarget::GithubStatus { commit, .. } = target
+            && let Some(value) = resolved.remove(&format!("$.notify[{index}].github_status.commit"))
+        {
+            *commit = value;
         }
     }
     if let Some(path) = resolved.keys().next() {
@@ -644,6 +664,91 @@ fn compile_stages(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.with_span_if_missing(span))
+}
+
+/// Notification targets (PAR-004): a sequence of single-key mappings,
+/// `github_status: {mapping_id, commit, context?, repository?}` or
+/// `webhook: {mapping_id}`; only the commit may come from a parameter.
+fn compile_notify(
+    node: Option<SpannedValue>,
+    parameters: &BTreeMap<String, EvaluatedValue>,
+    expressions: &mut Vec<ExpressionBinding>,
+) -> Result<Vec<NotifyTarget>, CompileError> {
+    use mcloving_domain::notifications::{DEFAULT_STATUS_CONTEXT, MAX_NOTIFY_TARGETS};
+    let Some(node) = node else {
+        return Ok(Vec::new());
+    };
+    let span = node.span;
+    let YamlValue::Sequence(nodes) = node.value else {
+        return Err(CompileError::schema("$.notify", "expected a sequence").with_span(span));
+    };
+    if nodes.len() > MAX_NOTIFY_TARGETS {
+        return Err(CompileError::schema(
+            "$.notify",
+            format!("at most {MAX_NOTIFY_TARGETS} notification targets are accepted"),
+        )
+        .with_span(span));
+    }
+    let mut targets = Vec::with_capacity(nodes.len());
+    for (index, node) in nodes.into_iter().enumerate() {
+        let entry_path = format!("$.notify[{index}]");
+        let entry_span = node.span;
+        let YamlValue::Mapping(mut entries) = node.value else {
+            return Err(
+                CompileError::schema(&entry_path, "expected a mapping").with_span(entry_span)
+            );
+        };
+        if entries.len() != 1 {
+            return Err(CompileError::schema(
+                &entry_path,
+                "expected exactly one of github_status or webhook",
+            )
+            .with_span(entry_span));
+        }
+        let entry = entries.remove(0);
+        let kind_path = format!("{entry_path}.{}", entry.key);
+        let target = match entry.key.as_str() {
+            "github_status" => {
+                let mut view = MappingView::new(entry.value, &kind_path)?;
+                let mapping_id = view.required_string("mapping_id")?;
+                let commit_node = view.required("commit")?;
+                let context = view
+                    .optional_string("context")?
+                    .unwrap_or_else(|| DEFAULT_STATUS_CONTEXT.to_owned());
+                let repository = view.optional_string("repository")?;
+                view.finish()?;
+                let commit = compile_resolved_string(
+                    commit_node,
+                    &format!("{kind_path}.commit"),
+                    parameters,
+                    expressions,
+                )?;
+                NotifyTarget::GithubStatus {
+                    mapping_id,
+                    commit,
+                    context,
+                    repository,
+                }
+            }
+            "webhook" => {
+                let mut view = MappingView::new(entry.value, &kind_path)?;
+                let mapping_id = view.required_string("mapping_id")?;
+                view.finish()?;
+                NotifyTarget::Webhook { mapping_id }
+            }
+            _ => {
+                return Err(
+                    CompileError::schema(&kind_path, "expected github_status or webhook")
+                        .with_span(entry_span),
+                );
+            }
+        };
+        target.validate().map_err(|error| {
+            CompileError::schema(&kind_path, error.to_string()).with_span(entry_span)
+        })?;
+        targets.push(target);
+    }
+    Ok(targets)
 }
 
 /// Declared artifacts (PAR-014): a sequence of `{name, paths}` mappings, the
@@ -1059,11 +1164,20 @@ fn compile_resolved_string(
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
     if !matches!(
         pipeline.schema,
-        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5 | IR_V1_6 | IR_V1_7 | IR_V1_8
+        IR_V1
+            | IR_V1_1
+            | IR_V1_2
+            | IR_V1_3
+            | IR_V1_4
+            | IR_V1_5
+            | IR_V1_6
+            | IR_V1_7
+            | IR_V1_8
+            | IR_V1_9
     ) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 through v1.8 are accepted",
+            "only Pipeline IR v1.0 through v1.9 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -1088,6 +1202,16 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
 
     let mut stage_ids = HashSet::new();
     let mut total_steps = 0_usize;
+    if !pipeline.notify.is_empty() {
+        if pipeline.schema.minor < IR_V1_9.minor {
+            return Err(IrValidationError::new(
+                "$.notify",
+                "notification targets require Pipeline IR v1.9",
+            ));
+        }
+        mcloving_domain::notifications::validate_targets(&pipeline.notify)
+            .map_err(|error| IrValidationError::new("$.notify", error.to_string()))?;
+    }
     for (stage_index, stage) in pipeline.stages.iter().enumerate() {
         let path = format!("$.stages[{stage_index}]");
         validate_identifier(&format!("{path}.id"), &stage.id)?;
@@ -1513,6 +1637,14 @@ fn expression_materialized_fields(pipeline: &PipelineIr) -> BTreeMap<String, &st
                     checkout.spec.commit.as_str(),
                 );
             }
+        }
+    }
+    for (index, target) in pipeline.notify.iter().enumerate() {
+        if let NotifyTarget::GithubStatus { commit, .. } = target {
+            fields.insert(
+                format!("$.notify[{index}].github_status.commit"),
+                commit.as_str(),
+            );
         }
     }
     fields

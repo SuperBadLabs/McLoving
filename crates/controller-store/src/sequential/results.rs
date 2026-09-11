@@ -237,6 +237,7 @@ impl Store {
                 .map_err(|_| integrity("invalid semantic digest length"))?,
             idempotency_key: build.try_get("idempotency_key")?,
             priority: build.try_get("priority")?,
+            notify_targets: serde_json::json!([]),
             nodes: Vec::new(),
         };
         let input = restore_contract(dag, contract)?;

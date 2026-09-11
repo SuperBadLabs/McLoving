@@ -3,6 +3,7 @@
 pub mod artifacts;
 pub mod cache_intent;
 pub mod input_intent;
+pub mod notifications;
 pub mod source_intent;
 pub mod workspace;
 
