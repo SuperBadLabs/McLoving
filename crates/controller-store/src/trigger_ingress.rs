@@ -372,17 +372,24 @@ pub struct TriggerTransferSnapshot {
     pub versions: Vec<PipelineTrigger>,
     pub deliveries: Vec<TriggerDelivery>,
     pub schedule_watermarks: Vec<TriggerScheduleWatermark>,
+    /// Webhook deliveries authenticated but not admitted (schema 2): part of
+    /// the ledger, so a delivery id decided at the source stays decided at
+    /// the destination.
+    pub webhook_receipts: Vec<WebhookReceipt>,
     pub handoff_audit_event: crate::AuditEvent,
     pub audit_sequence: i64,
     pub audit_event_hash: [u8; 32],
     pub state_sha256: [u8; 32],
 }
 
+/// The trigger transfer snapshot format this build exports and verifies.
+pub const TRIGGER_TRANSFER_SCHEMA_VERSION: u16 = 2;
+
 pub fn verify_trigger_transfer_snapshot(
     snapshot: &TriggerTransferSnapshot,
     trusted_handoff_audit_event_hash: [u8; 32],
 ) -> Result<(), StoreError> {
-    if snapshot.schema_version != 1
+    if snapshot.schema_version != TRIGGER_TRANSFER_SCHEMA_VERSION
         || snapshot.current_generation <= 0
         || snapshot.audit_sequence <= 0
         || snapshot.audit_event_hash == [0; 32]
@@ -460,6 +467,25 @@ pub fn verify_trigger_transfer_snapshot(
             ));
         }
     }
+    let mut receipt_ids = std::collections::BTreeSet::new();
+    for receipt in &snapshot.webhook_receipts {
+        if receipt.organization_id != snapshot.organization_id
+            || receipt.trigger_id != snapshot.trigger_id
+            || !matches!(receipt.status.as_str(), "ignored" | "filtered")
+            || receipt.reason.is_empty()
+            || receipt.event.is_empty()
+            || receipt.caller_identity.is_empty()
+            || receipt.recorded_at_unix_ms < 0
+            || receipt.audit_sequence <= 0
+            || deliveries_by_id.contains_key(receipt.delivery_id.as_str())
+            || !receipt_ids.insert(receipt.delivery_id.as_str())
+        {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger transfer webhook receipts are duplicated, admitted, or substituted"
+                    .to_owned(),
+            ));
+        }
+    }
     let mut watermark_generations = std::collections::BTreeSet::new();
     for watermark in &snapshot.schedule_watermarks {
         if watermark.organization_id != snapshot.organization_id
@@ -531,6 +557,7 @@ pub fn verify_trigger_transfer_snapshot(
         "version_count": snapshot.versions.len(),
         "delivery_count": snapshot.deliveries.len(),
         "schedule_watermark_count": snapshot.schedule_watermarks.len(),
+        "webhook_receipt_count": snapshot.webhook_receipts.len(),
         "ledger_sha256": hex::encode(ledger_sha256),
     });
     if snapshot.handoff_audit_event.category != "trigger"
@@ -570,6 +597,7 @@ pub fn compute_trigger_transfer_snapshot_digest(
         versions: &'a [PipelineTrigger],
         deliveries: &'a [TriggerDelivery],
         schedule_watermarks: &'a [TriggerScheduleWatermark],
+        webhook_receipts: &'a [WebhookReceipt],
         handoff_audit_event: &'a crate::AuditEvent,
         audit_sequence: i64,
         audit_event_hash: [u8; 32],
@@ -584,13 +612,14 @@ pub fn compute_trigger_transfer_snapshot_digest(
         versions: &snapshot.versions,
         deliveries: &snapshot.deliveries,
         schedule_watermarks: &snapshot.schedule_watermarks,
+        webhook_receipts: &snapshot.webhook_receipts,
         handoff_audit_event: &snapshot.handoff_audit_event,
         audit_sequence: snapshot.audit_sequence,
         audit_event_hash: snapshot.audit_event_hash,
     })
     .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mcloving-trigger-transfer-v1\0");
+    hasher.update(b"mcloving-trigger-transfer-v2\0");
     hasher.update(canonical);
     Ok(hasher.finalize().into())
 }
@@ -606,6 +635,7 @@ fn trigger_transfer_ledger_digest(
     versions: &[PipelineTrigger],
     deliveries: &[TriggerDelivery],
     schedule_watermarks: &[TriggerScheduleWatermark],
+    webhook_receipts: &[WebhookReceipt],
 ) -> Result<[u8; 32], StoreError> {
     #[derive(Serialize)]
     struct LedgerDigestInput<'a> {
@@ -618,6 +648,7 @@ fn trigger_transfer_ledger_digest(
         versions: &'a [PipelineTrigger],
         deliveries: &'a [TriggerDelivery],
         schedule_watermarks: &'a [TriggerScheduleWatermark],
+        webhook_receipts: &'a [WebhookReceipt],
     }
     let canonical = serde_json::to_vec(&LedgerDigestInput {
         schema_version,
@@ -629,10 +660,11 @@ fn trigger_transfer_ledger_digest(
         versions,
         deliveries,
         schedule_watermarks,
+        webhook_receipts,
     })
     .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mcloving-trigger-transfer-ledger-v1\0");
+    hasher.update(b"mcloving-trigger-transfer-ledger-v2\0");
     hasher.update(canonical);
     Ok(hasher.finalize().into())
 }
@@ -650,6 +682,7 @@ pub fn compute_trigger_transfer_snapshot_ledger_digest(
         &snapshot.versions,
         &snapshot.deliveries,
         &snapshot.schedule_watermarks,
+        &snapshot.webhook_receipts,
     )
 }
 
@@ -1216,26 +1249,25 @@ impl Store {
             tx.commit().await?;
             return Ok(TriggerDeliveryAdmission::Replayed(delivery));
         }
-        // A receipt-timed id the receiver already acknowledged as unadmitted
-        // was decided once; it does not enter the ledger later under another
-        // event. Checked under the same trigger lock the receipt was written
-        // under, so the two decisions are serialized.
-        if timing == DeliveryTiming::Receipt {
-            let acknowledged = sqlx::query_scalar::<_, i32>(
-                "SELECT 1 FROM webhook_receipts
-                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-            )
-            .bind(input.organization_id)
-            .bind(input.trigger_id)
-            .bind(&input.delivery_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if acknowledged.is_some() {
-                tx.rollback().await?;
-                return Err(StoreError::TriggerIngressConflict(
-                    "delivery ID was already acknowledged as unadmitted".to_owned(),
-                ));
-            }
+        // A delivery id the webhook receiver already acknowledged as
+        // unadmitted was decided once; it does not enter the ledger later
+        // under any path or timing, the bearer route included. Checked under
+        // the same trigger lock the receipt was written under, so the two
+        // decisions are serialized.
+        let acknowledged = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if acknowledged.is_some() {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery ID was already acknowledged as unadmitted".to_owned(),
+            ));
         }
         let generation: i64 = trigger_row.try_get("current_generation")?;
         if generation != input.expected_trigger_generation {
@@ -2438,8 +2470,22 @@ impl Store {
             .into_iter()
             .map(schedule_watermark_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let receipt_rows = sqlx::query(
+            "SELECT * FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2
+             ORDER BY delivery_id
+             FOR SHARE",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let webhook_receipts = receipt_rows
+            .into_iter()
+            .map(webhook_receipt_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
         let ledger_sha256 = trigger_transfer_ledger_digest(
-            1,
+            TRIGGER_TRANSFER_SCHEMA_VERSION,
             organization_id,
             project_id,
             pipeline_id,
@@ -2448,6 +2494,7 @@ impl Store {
             &versions,
             &deliveries,
             &schedule_watermarks,
+            &webhook_receipts,
         )?;
         let audit = crate::audit::append_audit_record(
             &mut tx,
@@ -2464,12 +2511,13 @@ impl Store {
                 "version_count": versions.len(),
                 "delivery_count": deliveries.len(),
                 "schedule_watermark_count": schedule_watermarks.len(),
+                "webhook_receipt_count": webhook_receipts.len(),
                 "ledger_sha256": hex::encode(ledger_sha256),
             }),
         )
         .await?;
         let mut snapshot = TriggerTransferSnapshot {
-            schema_version: 1,
+            schema_version: TRIGGER_TRANSFER_SCHEMA_VERSION,
             organization_id,
             project_id,
             pipeline_id,
@@ -2478,6 +2526,7 @@ impl Store {
             versions,
             deliveries,
             schedule_watermarks,
+            webhook_receipts,
             handoff_audit_event: audit.clone(),
             audit_sequence: audit.sequence,
             audit_event_hash: audit.event_hash,

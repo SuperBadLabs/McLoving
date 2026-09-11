@@ -276,8 +276,9 @@ and as a `webhook_receipts` row (event header, body digest, status, reason)
 rather than as a delivery row. A delivery id's first authenticated decision
 is durable: admitted ids live in `trigger_deliveries`, unadmitted ids in
 `webhook_receipts`, both written under the trigger lock with each write
-refusing an id the other holds, so two concurrent first deliveries cannot be
-decided twice; a repeat of an unadmitted delivery with the same event header
+refusing an id the other holds (acceptance checks receipts on every path and
+timing, the bearer route included), so two concurrent first deliveries
+cannot be decided twice; a repeat of an unadmitted delivery with the same event header
 and body answers the recorded acknowledgement again without a second audit
 record, and a repeat with a different header or body, or an admitted id
 re-sent under an inadmissible event (the signature covers the body, not the
@@ -299,10 +300,13 @@ dead-letter reason, and optional build admission for every normal outcome.
 The database ledger is the transferable source of truth: append-only trigger
 versions, unique event/delivery deduplication records, pending/retry/dead-letter
 sets, admitted build bindings, claim fences, redrive lineage, and
-generation-specific schedule watermarks. The quiesced transfer snapshot also
-binds every trigger version's actor, reason, idempotency key, audit sequence and
-event hash; every accepted delivery's audit sequence and event hash; and the
-handoff export audit event into one domain-separated state digest. Verification
+generation-specific schedule watermarks, and the webhook receipts of
+deliveries authenticated but not admitted (schema 2), so a delivery id
+decided at the source stays decided at the destination. The quiesced transfer
+snapshot also binds every trigger version's actor, reason, idempotency key,
+audit sequence and event hash; every accepted delivery's audit sequence and
+event hash; every webhook receipt's audit sequence; and the handoff export
+audit event into one domain-separated state digest. Verification
 recomputes a separate exact-ledger digest and requires it in the hash-verified
 handoff audit event. Its caller must also supply that event hash from an
 independently retained audit export or chain head; the snapshot cannot establish

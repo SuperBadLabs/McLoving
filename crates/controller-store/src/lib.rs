@@ -91,13 +91,13 @@ pub use test_results::{
 };
 pub use trigger_ingress::{
     DeliveryTiming, NewTriggerDelivery, NewWebhookReceipt, PipelineTrigger, PipelineTriggerState,
-    PipelineTriggerWrite, TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
-    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
-    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
-    TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
-    TriggerScheduleWatermark, TriggerTransferSnapshot, WebhookReceipt, WebhookReceiptOutcome,
-    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
-    verify_trigger_transfer_snapshot,
+    PipelineTriggerWrite, TRIGGER_TRANSFER_SCHEMA_VERSION, TriggerDelivery,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, TriggerScheduleWatermark, TriggerTransferSnapshot,
+    WebhookReceipt, WebhookReceiptOutcome, compute_trigger_transfer_snapshot_digest,
+    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
 };
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
