@@ -885,6 +885,42 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
+## PAR-013 live log streaming review, ticket ACTIVE
+
+A step's output reaches the controller while the step runs and a reader
+follows it by one global cursor. Boundaries touched: TM-003 (agent runtime:
+live chunks travel the existing fenced, session-bound `PublishLog` path with
+the same lease, fence, restore-epoch and session checks, redaction to a fixed
+point and idempotent append, so a stale or fenced-out agent cannot publish
+and a duplicate is a no-op; the per-attempt chunk bound rises to 8 192 only
+for a session that negotiated `live-log-stream-v1`, read from the durable
+session record, and the 64 MiB byte quota is unchanged, TM-018); TM-006
+(durable evidence: every chunk's sequence and byte range are journaled before the
+chunk is sent, so a crash at any point cannot renumber or duplicate a range;
+the terminal pass verifies the executor's durable spool and re-hashes every
+streamed range against its reservation, refusing by name a spool the
+workload rewrote after a range was streamed, and reads the live spool files
+through handles opened without following links so a renamed or unlinked
+visible path cannot redirect the tail; recovery replays from the same
+reservations and sends only ranges without a receipt); TM-052 (API: follow
+mode reads through the same authorization, tenant and fence filters as the
+paged read, holds a request at most 30 seconds re-reading at 200 ms, and
+answers from the ledger only, so a follower observes committed chunks and
+nothing in flight). Residual: a workload can still write anything into its
+own stdout, as before; the live tail opens the spool by path after the
+executor created it, so a workload that swaps the path in that window
+streams other content it could have printed anyway and then fails its
+attempt at the terminal check; a crash while a step runs loses at most the
+chunk reserved but not yet acknowledged, and the interrupted attempt is
+reported as such. Tests cover the journal reservations (uniqueness,
+coverage, stale authority, retirement, schema migration), the store follow
+read and both chunk bounds, and two shipped-binary gates: the first line
+visible while the step runs with the paged read agreeing with the follow,
+and a crash after the first acknowledged terminal chunk replayed under the
+journaled sequences with every chunk exactly once. Closure requires the
+reviewed merge, exact-main Foundation and native Windows runs, and a
+receipt in `docs/evidence/PAR-013_SECURITY_REVIEW.md`.
+
 ## PAR-001 GitHub webhook receiver review (earned closure)
 
 A public route lets GitHub feed an SCM webhook trigger directly. Boundaries

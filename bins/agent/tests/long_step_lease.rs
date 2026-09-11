@@ -53,6 +53,40 @@ stages:
 "#;
 
 /// A step that can only end through cancellation inside the test bound.
+/// Three lines a second apart: the follower must see the first while the
+/// step is still running (PAR-013).
+const LIVE_LOG_PIPELINE: &str = r#"
+version: 1
+name: live-log
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'live-first\\n'; sleep 3; printf 'live-second\\n'; sleep 3; printf 'live-third\\n'"]
+          timeout_seconds: 60
+"#;
+
+/// Two steps, each with its own stdout chunk, so the terminal pass streams
+/// two `PublishLog` chunks a crash can fall between (PAR-013).
+const REPLAY_LOG_PIPELINE: &str = r#"
+version: 1
+name: replay-log
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'replay-a\\n'"]
+          timeout_seconds: 60
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'replay-b\\n'"]
+          timeout_seconds: 60
+"#;
+
 const BLOCKED_RENEWAL_PIPELINE: &str = r#"
 version: 1
 name: blocked-renewal
@@ -175,6 +209,189 @@ async fn shipped_agent_holds_lease_across_a_step_longer_than_three_lease_terms()
             "authority must never waver across the step: unexpected {silent_expiry}"
         );
     }
+
+    stop(&mut agent).await;
+    stop(&mut controller).await;
+}
+
+#[tokio::test]
+async fn live_log_chunks_are_visible_while_the_step_runs() {
+    let Some(harness) = Harness::from_environment("live-log").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller("5", None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    let mut agent = harness
+        .agent_command("5")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped remote agent");
+
+    let admission = harness
+        .submit(&client, "live-log-e2e", LIVE_LOG_PIPELINE)
+        .await;
+    // Follow from the start: every page waits up to two seconds for chunks,
+    // so the loop is a follower, not a poller. The first line must arrive
+    // while the build is still running, which is the whole point.
+    let mut cursor = 0;
+    let mut text = String::new();
+    let mut sequences = Vec::new();
+    let mut first_seen_while_running = false;
+    let followed = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let page = client
+                .logs_after_cursor(
+                    harness.organization_id,
+                    harness.project_id,
+                    admission,
+                    cursor,
+                    2_000,
+                    Some(100),
+                )
+                .await
+                .expect("follow the build log");
+            for item in &page.items {
+                if text.is_empty() && item.text.as_deref() == Some("live-first\n") {
+                    let status = client
+                        .status(harness.organization_id, harness.project_id, admission)
+                        .await
+                        .expect("read build status");
+                    first_seen_while_running = status.status == "running";
+                }
+                assert_eq!(item.stream, "stdout", "{item:?}");
+                text.push_str(item.text.as_deref().unwrap_or_default());
+                sequences.push(item.sequence);
+            }
+            let drained = page.items.is_empty();
+            cursor = page.next_cursor.expect("follow pages carry a cursor");
+            if drained && page.live == Some(false) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        followed.is_ok(),
+        "the follow must end when the build is terminal"
+    );
+    assert!(
+        first_seen_while_running,
+        "the first line must be visible while the step is still running: {text:?}"
+    );
+    assert_eq!(text, "live-first\nlive-second\nlive-third\n");
+    let mut unique = sequences.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), sequences.len(), "every sequence exactly once");
+    assert!(
+        sequences.len() >= 2,
+        "the three lines a second apart must reach the ledger as more than one chunk: {sequences:?}"
+    );
+    let status = client
+        .status(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("read build status");
+    assert_eq!(status.status, "succeeded", "{status:?}");
+    let replayed = client
+        .logs(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("read the whole log");
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|item| item.text.clone().unwrap_or_default())
+            .collect::<String>(),
+        text,
+        "the paged read and the follow agree"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut controller).await;
+}
+
+#[tokio::test]
+async fn a_restart_replays_reserved_chunks_under_their_journaled_sequences() {
+    let Some(harness) = Harness::from_environment("replay-log").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller("10", None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    // The agent dies the moment the controller has acknowledged its first
+    // terminal log chunk: the second chunk is reserved in the journal (or
+    // about to be) and never sent.
+    let mut crashing = harness
+        .agent_command("10")
+        .env("MCLOVING_TEST_CRASH_AFTER_LOG_CHUNKS", "1")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the crashing remote agent");
+
+    let admission = harness
+        .submit(&client, "replay-log-e2e", REPLAY_LOG_PIPELINE)
+        .await;
+    let exit = tokio::time::timeout(Duration::from_secs(60), crashing.wait())
+        .await
+        .expect("the agent crashes after its first acknowledged chunk")
+        .expect("wait for the crashing agent");
+    assert_eq!(
+        exit.code(),
+        Some(89),
+        "the test crash hook exited the agent"
+    );
+
+    // The restarted agent replays finalization from the journal: the
+    // acknowledged chunk keeps its sequence and is not sent again, the
+    // reserved-or-unreserved remainder continues from the next sequence.
+    let mut agent = harness
+        .agent_command("10")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("restart the remote agent");
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = client
+                .status(harness.organization_id, harness.project_id, admission)
+                .await
+                .expect("read build status");
+            if matches!(status.status.as_str(), "succeeded" | "failed" | "aborted") {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("replayed work completes within bound");
+    assert_eq!(status.status, "succeeded", "{status:?}");
+    let logs = client
+        .logs(harness.organization_id, harness.project_id, admission)
+        .await
+        .expect("read replayed logs");
+    let mut chunks: Vec<(i64, i32, String)> = logs
+        .iter()
+        .map(|item| {
+            (
+                item.sequence,
+                item.step_ordinal,
+                item.text.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    chunks.sort();
+    assert_eq!(
+        chunks,
+        vec![
+            (0, 0, "replay-a\n".to_owned()),
+            (1, 1, "replay-b\n".to_owned()),
+        ],
+        "every chunk exactly once under its journaled sequence: {logs:?}"
+    );
+    assert_eq!(
+        harness.count_events(admission, "attempt.terminal").await,
+        1,
+        "exactly one logical terminal outcome"
+    );
 
     stop(&mut agent).await;
     stop(&mut controller).await;

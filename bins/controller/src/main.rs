@@ -802,6 +802,7 @@ impl AgentControl for ControllerAgentService {
             INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
             mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned(),
             mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
+            mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;

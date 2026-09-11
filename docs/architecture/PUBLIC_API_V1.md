@@ -117,7 +117,17 @@ cursor. Continuation requires the complete
 saved cursor remains exact across attempt re-fencing. Every item exposes exact
 `content_hex`; `text` is present only when the
 whole chunk is valid UTF-8, so clients can always reproduce the digest without
-lossy replacement. Errors have stable `code` and `message` fields.
+lossy replacement. Every item also carries its global `cursor`, and the same
+route follows a running build (PAR-013): `after_cursor` (zero from the
+start, exclusive with the attempt tuple) returns chunks after that cursor in
+commit order, `wait_ms` (at most 30 000) holds the request, re-reading at a
+short interval, until a chunk is committed or the build is no longer live,
+and the page answers `next_cursor` to continue from and `live` so a follower
+stops after the terminal drain. An agent that negotiated
+`live-log-stream-v1` publishes a step's output while the step runs, so a
+follower sees a line within about a second of the step writing it; `mcloving
+logs --follow` prints the stream and exits when the build is terminal.
+Errors have stable `code` and `message` fields.
 
 External read-side migration uses only this API. The CLI exposes `pipelines`
 with the stable slug cursor and `builds` with the paired creation-microsecond

@@ -339,6 +339,28 @@ discharge a parked reconciliation).
   and peers without the feature keep the streaming pass — a controller that
   never negotiated it would silently ignore the field, so the agent must not
   inline for such a peer.
+- Every log chunk's sequence is a journal reservation (schema 6,
+  `log_reservations`: sequence, step ordinal, stream, byte range, digest,
+  receipt) written before the chunk is first sent, so the live tail, the
+  terminal pass and a post-crash replay all number one range of one stream
+  once; sequences are attempt-wide and the next is one past the highest
+  reservation. When `live-log-stream-v1` is negotiated (Unix; not for helper
+  steps), the spawn hook opens the step's `stdout.log`/`stderr.log` by their
+  live path without following links, and a tail ticks every 250 ms while the
+  step runs: a stream with at least 64 KiB unpublished, or any unpublished
+  bytes a second after its last chunk, is reserved and sent; a send the
+  controller does not accept stays reserved and is retried, and a stale
+  authority stops the tail without touching the step. The terminal pass then
+  verifies the executor's durable spool as before, checks every streamed
+  range is contiguous from zero and still hashes to what was sent (a spool
+  rewritten after streaming fails the attempt by name), sends only ranges
+  without a receipt, reserves and sends the remainder from the next
+  sequence, and lets a stream nothing was streamed from ride inline under a
+  reservation like any other. Recovery replays from the same reservations.
+  A session with the feature may number chunks up to 8 192 per attempt; the
+  64 MiB byte quota is unchanged. A crash while a step runs leaves at most a
+  reserved, unsent chunk; the interrupted attempt is reported as before and
+  the chunks already accepted stay exactly once.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
   workspace through the same no-follow cleanup, delete controller-owned log

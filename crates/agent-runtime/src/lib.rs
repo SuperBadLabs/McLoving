@@ -24,7 +24,11 @@ pub const MAX_ATTEMPT_OUTPUT_BYTES: u64 = 64 * 1_048_576;
 /// never published from the journaled location rather than from whatever
 /// bindings the restarted agent happens to load. All are NULL for
 /// single-step host work, so an older row reads exactly as it did before.
-const SCHEMA_VERSION: i64 = 5;
+/// Version 6 (PAR-013) adds `log_reservations`: each log chunk's sequence,
+/// stream, step ordinal, byte range and digest, durable before the chunk is
+/// sent, so a chunk published while the step runs and a chunk replayed after
+/// a crash carry one number for one range of bytes.
+const SCHEMA_VERSION: i64 = 6;
 const MAX_PROCESS_BIRTH_IDENTITY_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +107,23 @@ pub struct SpoolEntry {
     pub relative_path: PathBuf,
     pub digest: [u8; 32],
     pub bytes: u64,
+}
+
+/// One log chunk's durable identity (PAR-013): its wire sequence and the
+/// exact byte range of one stream's spool it carries, journaled before the
+/// chunk is first sent so that a live publication, the terminal pass and a
+/// post-crash replay all number that range identically. `acknowledged`
+/// records a controller receipt and only spares a re-send; it is never
+/// required for correctness because the controller's append is idempotent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogReservation {
+    pub sequence: u64,
+    pub step_ordinal: u32,
+    pub stream: String,
+    pub offset: u64,
+    pub bytes: u64,
+    pub digest: [u8; 32],
+    pub acknowledged: bool,
 }
 
 pub struct Finalization<'a> {
@@ -257,7 +278,7 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(schema_version, 1 | 2 | 3 | 4 | SCHEMA_VERSION) {
+        if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | SCHEMA_VERSION) {
             return Err(JournalError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: schema_version,
@@ -368,6 +389,23 @@ impl Journal {
                     ON DELETE CASCADE
             ) STRICT;
 
+            CREATE TABLE IF NOT EXISTS log_reservations (
+                organization_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                fence_token INTEGER NOT NULL CHECK (fence_token >= 0),
+                sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                step_ordinal INTEGER NOT NULL CHECK (step_ordinal >= 0),
+                stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+                offset INTEGER NOT NULL CHECK (offset >= 0),
+                bytes INTEGER NOT NULL CHECK (bytes > 0),
+                digest BLOB NOT NULL CHECK (length(digest) = 32),
+                acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1)),
+                PRIMARY KEY (organization_id, attempt_id, fence_token, sequence),
+                FOREIGN KEY (organization_id, attempt_id, fence_token)
+                    REFERENCES attempts(organization_id, attempt_id, fence_token)
+                    ON DELETE CASCADE
+            ) STRICT;
+
             CREATE TABLE IF NOT EXISTS result_spool (
                 organization_id TEXT NOT NULL,
                 attempt_id TEXT NOT NULL,
@@ -406,7 +444,7 @@ impl Journal {
         )?;
         match schema_version {
             SCHEMA_VERSION => {}
-            found @ 1..=4 => {
+            found @ 1..=5 => {
                 let transaction = connection.unchecked_transaction()?;
                 if found == 1 {
                     transaction.execute(
@@ -424,10 +462,14 @@ impl Journal {
                     transaction
                         .execute("ALTER TABLE attempts ADD COLUMN container_context TEXT", [])?;
                 }
-                transaction.execute(
-                    "ALTER TABLE attempts ADD COLUMN acquisition_directory TEXT",
-                    [],
-                )?;
+                if found <= 4 {
+                    transaction.execute(
+                        "ALTER TABLE attempts ADD COLUMN acquisition_directory TEXT",
+                        [],
+                    )?;
+                }
+                // Version 6 only adds a table, created above for every
+                // journal by the schema batch, so nothing else moves.
                 transaction.execute(
                     "UPDATE journal_metadata SET schema_version = ?1 WHERE singleton = 1",
                     [SCHEMA_VERSION],
@@ -1043,6 +1085,162 @@ impl Journal {
         Ok(())
     }
 
+    /// Journals a log chunk's sequence and byte range before the chunk is
+    /// sent. Refuses a sequence already reserved, a range that does not
+    /// continue its stream's coverage, and any attempt that is not active.
+    pub fn reserve_log_chunk(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+        reservation: &LogReservation,
+    ) -> Result<(), JournalError> {
+        if reservation.bytes == 0 || !matches!(reservation.stream.as_str(), "stdout" | "stderr") {
+            return Err(JournalError::SpoolConflict);
+        }
+        self.ensure_active_authority(organization_id, attempt_id, fence_token, session_epoch)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let fence = to_sql_integer(fence_token)?;
+        let covered: i64 = transaction.query_row(
+            "
+            SELECT COALESCE(MAX(offset + bytes), 0)
+            FROM log_reservations
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+              AND step_ordinal = ?4 AND stream = ?5
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                fence,
+                i64::from(reservation.step_ordinal),
+                reservation.stream,
+            ],
+            |row| row.get(0),
+        )?;
+        if from_sql_integer(covered)? != reservation.offset {
+            return Err(JournalError::SpoolConflict);
+        }
+        let changed = transaction.execute(
+            "
+            INSERT INTO log_reservations(
+                organization_id, attempt_id, fence_token, sequence, step_ordinal,
+                stream, offset, bytes, digest, acknowledged
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)
+            ON CONFLICT(organization_id, attempt_id, fence_token, sequence) DO NOTHING
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                fence,
+                to_sql_integer(reservation.sequence)?,
+                i64::from(reservation.step_ordinal),
+                reservation.stream,
+                to_sql_integer(reservation.offset)?,
+                to_sql_integer(reservation.bytes)?,
+                reservation.digest.as_slice(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::SpoolConflict);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Records the controller's receipt for a reserved chunk, so a later
+    /// pass need not send it again.
+    pub fn acknowledge_log_chunk(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        sequence: u64,
+    ) -> Result<(), JournalError> {
+        self.connection.execute(
+            "
+            UPDATE log_reservations SET acknowledged = 1
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+              AND sequence = ?4
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                to_sql_integer(fence_token)?,
+                to_sql_integer(sequence)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every reserved chunk of an attempt, in sequence order.
+    pub fn log_reservations(
+        &self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+    ) -> Result<Vec<LogReservation>, JournalError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT sequence, step_ordinal, stream, offset, bytes, digest, acknowledged
+            FROM log_reservations
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+            ORDER BY sequence
+            ",
+        )?;
+        let rows = statement.query_map(
+            params![organization_id, attempt_id, to_sql_integer(fence_token)?],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (sequence, step_ordinal, stream, offset, bytes, digest, acknowledged) = row?;
+            Ok(LogReservation {
+                sequence: from_sql_integer(sequence)?,
+                step_ordinal: u32::try_from(step_ordinal)
+                    .map_err(|_| JournalError::AuthorityOverflow)?,
+                stream,
+                offset: from_sql_integer(offset)?,
+                bytes: from_sql_integer(bytes)?,
+                digest: fixed_digest(digest)?,
+                acknowledged: acknowledged == 1,
+            })
+        })
+        .collect()
+    }
+
+    /// The next unused log chunk sequence of an attempt: one past the
+    /// highest reservation, zero when nothing was reserved.
+    pub fn next_log_sequence(
+        &self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+    ) -> Result<u64, JournalError> {
+        let next: i64 = self.connection.query_row(
+            "
+            SELECT COALESCE(MAX(sequence) + 1, 0)
+            FROM log_reservations
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+            ",
+            params![organization_id, attempt_id, to_sql_integer(fence_token)?],
+            |row| row.get(0),
+        )?;
+        from_sql_integer(next)
+    }
+
     pub fn record_result(
         &mut self,
         organization_id: &str,
@@ -1293,6 +1491,13 @@ impl Journal {
         transaction.execute(
             "
             DELETE FROM result_spool
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+            ",
+            params![organization_id, attempt_id, fence_token],
+        )?;
+        transaction.execute(
+            "
+            DELETE FROM log_reservations
             WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
             ",
             params![organization_id, attempt_id, fence_token],
@@ -1583,6 +1788,200 @@ mod tests {
             payload_digest: [7; 32],
             workspace: PathBuf::from("org-1/attempt-1"),
         }
+    }
+
+    #[test]
+    fn log_reservations_number_ranges_once_and_retire_with_the_spools() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("agent.db")).unwrap();
+        let acceptance = acceptance();
+        journal.accept(&acceptance).unwrap();
+        let (org, attempt, fence, epoch) = (
+            acceptance.organization_id.as_str(),
+            acceptance.attempt_id.as_str(),
+            acceptance.fence_token,
+            acceptance.session_epoch,
+        );
+        assert_eq!(journal.next_log_sequence(org, attempt, fence).unwrap(), 0);
+        let first = LogReservation {
+            sequence: 0,
+            step_ordinal: 0,
+            stream: "stdout".to_owned(),
+            offset: 0,
+            bytes: 10,
+            digest: [1; 32],
+            acknowledged: false,
+        };
+        journal
+            .reserve_log_chunk(org, attempt, fence, epoch, &first)
+            .unwrap();
+        // The same sequence again, a gap in the stream's coverage, and an
+        // empty range are all refused.
+        assert!(matches!(
+            journal.reserve_log_chunk(org, attempt, fence, epoch, &first),
+            Err(JournalError::SpoolConflict)
+        ));
+        assert!(matches!(
+            journal.reserve_log_chunk(
+                org,
+                attempt,
+                fence,
+                epoch,
+                &LogReservation {
+                    sequence: 1,
+                    offset: 11,
+                    ..first.clone()
+                }
+            ),
+            Err(JournalError::SpoolConflict)
+        ));
+        assert!(matches!(
+            journal.reserve_log_chunk(
+                org,
+                attempt,
+                fence,
+                epoch,
+                &LogReservation {
+                    sequence: 1,
+                    offset: 10,
+                    bytes: 0,
+                    ..first.clone()
+                }
+            ),
+            Err(JournalError::SpoolConflict)
+        ));
+        // Streams cover independently; sequences are attempt-wide.
+        journal
+            .reserve_log_chunk(
+                org,
+                attempt,
+                fence,
+                epoch,
+                &LogReservation {
+                    sequence: 1,
+                    stream: "stderr".to_owned(),
+                    offset: 0,
+                    bytes: 3,
+                    digest: [2; 32],
+                    ..first.clone()
+                },
+            )
+            .unwrap();
+        journal
+            .reserve_log_chunk(
+                org,
+                attempt,
+                fence,
+                epoch,
+                &LogReservation {
+                    sequence: 2,
+                    offset: 10,
+                    bytes: 5,
+                    digest: [3; 32],
+                    ..first.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(journal.next_log_sequence(org, attempt, fence).unwrap(), 3);
+        journal
+            .acknowledge_log_chunk(org, attempt, fence, 1)
+            .unwrap();
+        let reservations = journal.log_reservations(org, attempt, fence).unwrap();
+        assert_eq!(
+            reservations
+                .iter()
+                .map(|r| (
+                    r.sequence,
+                    r.stream.as_str(),
+                    r.offset,
+                    r.bytes,
+                    r.acknowledged
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "stdout", 0, 10, false),
+                (1, "stderr", 0, 3, true),
+                (2, "stdout", 10, 5, false)
+            ]
+        );
+        // A stale epoch cannot reserve.
+        assert!(matches!(
+            journal.reserve_log_chunk(
+                org,
+                attempt,
+                fence,
+                epoch + 1,
+                &LogReservation {
+                    sequence: 3,
+                    offset: 15,
+                    ..first.clone()
+                }
+            ),
+            Err(JournalError::StaleAuthority)
+        ));
+        // Retirement clears reservations with the spool descriptors.
+        for phase in [
+            AttemptPhase::Running,
+            AttemptPhase::Finalizing,
+            AttemptPhase::Succeeded,
+        ] {
+            journal
+                .transition(org, attempt, fence, epoch, phase, Some(1))
+                .unwrap();
+        }
+        journal
+            .retire_terminal_spools(org, attempt, fence, epoch)
+            .unwrap();
+        assert!(
+            journal
+                .log_reservations(org, attempt, fence)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(journal.next_log_sequence(org, attempt, fence).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_version_five_journal_gains_log_reservations_on_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        {
+            let journal = Journal::open(&path).unwrap();
+            journal
+                .connection
+                .execute_batch(
+                    "
+                    DROP TABLE log_reservations;
+                    UPDATE journal_metadata SET schema_version = 5 WHERE singleton = 1;
+                    ",
+                )
+                .unwrap();
+        }
+        assert_eq!(Journal::observe(&path).unwrap().schema_version, 5);
+        let mut journal = Journal::open(&path).unwrap();
+        assert_eq!(
+            Journal::observe(&path).unwrap().schema_version,
+            SCHEMA_VERSION
+        );
+        let acceptance = acceptance();
+        journal.accept(&acceptance).unwrap();
+        journal
+            .reserve_log_chunk(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+                &LogReservation {
+                    sequence: 0,
+                    step_ordinal: 0,
+                    stream: "stdout".to_owned(),
+                    offset: 0,
+                    bytes: 1,
+                    digest: [9; 32],
+                    acknowledged: false,
+                },
+            )
+            .unwrap();
     }
 
     #[test]
