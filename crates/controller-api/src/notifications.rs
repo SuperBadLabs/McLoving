@@ -647,8 +647,11 @@ async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<()
 
 impl ApiState {
     /// Claims due deliveries and settles each: delivered, or failed with the
-    /// error the next attempt will see. A row whose claim was overtaken is
-    /// left to its new holder. Returns the number of rows claimed.
+    /// error the next attempt will see. The claimed rows are delivered
+    /// concurrently, each under the delivery deadline, so the whole scan
+    /// settles well inside the claim lease however many rows it holds; a row
+    /// whose claim was overtaken is left to its new holder. Returns the
+    /// number of rows claimed.
     pub async fn process_due_notifications(
         &self,
         organization_id: Uuid,
@@ -659,20 +662,39 @@ impl ApiState {
             .claim_due_notifications(organization_id, limit)
             .await
             .map_err(super::internal)?;
-        for delivery in &claimed {
-            let outcome = deliver(self, delivery).await;
-            self.store
-                .settle_notification(
-                    organization_id,
-                    delivery.build_id,
-                    delivery.target_index,
-                    delivery.attempts,
-                    outcome.as_ref().err().map(String::as_str),
-                )
-                .await
-                .map_err(super::internal)?;
+        let mut tasks = tokio::task::JoinSet::new();
+        for delivery in claimed.iter().cloned() {
+            let state = self.clone();
+            tasks.spawn(async move {
+                let outcome = deliver(&state, &delivery).await;
+                state
+                    .store
+                    .settle_notification(
+                        organization_id,
+                        delivery.build_id,
+                        delivery.target_index,
+                        delivery.attempts,
+                        outcome.as_ref().err().map(String::as_str),
+                    )
+                    .await
+            });
         }
-        Ok(claimed.len())
+        let mut failure = None;
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    failure.get_or_insert_with(|| super::internal(error));
+                }
+                Err(error) => {
+                    failure.get_or_insert_with(|| super::internal(error));
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(claimed.len()),
+        }
     }
 }
 

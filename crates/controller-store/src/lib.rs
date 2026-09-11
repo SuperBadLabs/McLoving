@@ -3479,6 +3479,22 @@ impl Store {
             return Ok(Vec::new());
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // A row whose attempts are spent but is still pending was claimed
+        // for its last attempt by a worker that never settled it; once its
+        // lease is over it is abandoned here rather than claimed again.
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET state = 'abandoned',
+                 last_error = COALESCE(last_error, 'attempts exhausted')
+             WHERE organization_id = $1
+               AND state = 'pending'
+               AND attempts >= $2
+               AND next_attempt_at <= clock_timestamp()",
+        )
+        .bind(organization_id)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+        .execute(&mut *tx)
+        .await?;
         let rows = sqlx::query_as::<
             _,
             (
@@ -3498,6 +3514,7 @@ impl Store {
                  FROM notification_deliveries
                  WHERE organization_id = $1
                    AND state = 'pending'
+                   AND attempts < $4
                    AND next_attempt_at <= clock_timestamp()
                  ORDER BY next_attempt_at, build_id, target_index
                  LIMIT $2
@@ -3524,6 +3541,7 @@ impl Store {
         .bind(organization_id)
         .bind(limit)
         .bind(mcloving_domain::notifications::CLAIM_LEASE_SECONDS as f64)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

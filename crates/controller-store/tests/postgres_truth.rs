@@ -12809,6 +12809,38 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         .await
         .expect("read the ledger after abandoning");
     assert_eq!(ledger[1].3, "abandoned");
+    // A row claimed for its last attempt by a worker that died is abandoned
+    // by the next scan once its lease is over, never claimed a thirteenth
+    // time.
+    sqlx::query(
+        "UPDATE notification_deliveries
+         SET state = 'pending', attempts = $3, next_attempt_at = clock_timestamp()
+         WHERE organization_id = $1 AND build_id = $2 AND target_index = 1",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+    .execute(store.pool())
+    .await
+    .expect("revive the spent row as an orphaned claim");
+    assert!(
+        store
+            .claim_due_notifications(organization_id, 10)
+            .await
+            .expect("scan after the orphaned last attempt")
+            .is_empty()
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger after the orphan scan");
+    assert_eq!(
+        (ledger[1].3.as_str(), ledger[1].4),
+        (
+            "abandoned",
+            mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS
+        )
+    );
 }
 
 #[tokio::test]
