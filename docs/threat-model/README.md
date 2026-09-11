@@ -603,6 +603,7 @@ had never claimed one.
 | UI-002 | `docs/evidence/UI-002_SECURITY_REVIEW.md` |
 | PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
 | PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
+| PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -839,7 +840,7 @@ exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
 not published when recovery completes a cancellation (`AGENT-008`), and
 hostile same-UID access to the relocated spools remains `SEC-005`.
 
-## PAR-011 container stage execution review, ticket ACTIVE
+## PAR-011 container stage execution review (earned closure)
 
 A stage that names a digest-pinned image runs every step under rootless podman
 through the version-5 envelope. Boundaries touched: TM-003 (agent runtime: the
@@ -868,7 +869,11 @@ container, so a workload that escapes the container runtime holds the same
 identity as today; image pulls reach the registry the reference names under
 the deployment's network policy. Shipped-binary tests cover a step reading the
 image's os-release with the host root invisible, and a timed-out step whose
-container is proven gone. Closure requires the reviewed merge, exact-main
-Foundation and native Windows runs, and a receipt in
-`docs/evidence/PAR-011_SECURITY_REVIEW.md`.
+container is proven gone. Closed on PR #146 (`0eb949ba`), exact-main
+Foundation `34584499133` and Windows Agent `34584499144`; receipt
+`docs/evidence/PAR-011_SECURITY_REVIEW.md`. Residual, filed as `AGENT-009`:
+the podman store identity is not yet pinned into launch and reap, implicit
+`mounts.conf` binds are not yet disabled by an agent-owned containers
+configuration, and `#`-prefixed environment names are not yet refused for
+container stages; plain process steps remain uncontained (`SEC-005`).
 
