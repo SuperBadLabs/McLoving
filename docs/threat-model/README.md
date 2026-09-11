@@ -1051,8 +1051,10 @@ charge overlaps its registered row until the stream ends, so two uploads
 that exactly fill the quota can see the second refused, and a file larger
 than the controller's per-object limit (64 MiB by default, below the 256 MiB
 attempt quota) is refused by the controller with an answer the agent treats
-as a session error rather than a named refusal (`AGENT-012`); the
-sequential planner, which no pipeline with declarations reaches today,
+as a session error rather than a named refusal, and an exact retry of a
+`pending` object stages a second full copy rather than resuming the first,
+so near the store's total quota such a retry cannot recover the pending
+metadata (`AGENT-012`); the sequential planner, which no pipeline with declarations reaches today,
 would plan such a stage with its declarations dropped rather than refuse it
 (`CTRL-006`). Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
