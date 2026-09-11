@@ -607,6 +607,7 @@ had never claimed one.
 | PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
 | PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
 | PAR-013 | `docs/evidence/PAR-013_SECURITY_REVIEW.md` |
+| PAR-014 | `docs/evidence/PAR-014_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -962,7 +963,7 @@ until reserved chunks are kept in agent custody (`AGENT-011`); the byte
 quota's per-append sum over prior chunks is cost, not exposure
 (`CTRL-005`).
 
-## PAR-014 artifact upload review, ticket ACTIVE
+## PAR-014 artifact upload review (earned closure)
 
 A stage declares the files it publishes and the agent uploads them after its
 steps over its own channel. Boundaries touched: TM-003 (agent runtime: the
@@ -1056,9 +1057,20 @@ as a session error rather than a named refusal, and an exact retry of a
 so near the store's total quota such a retry cannot recover the pending
 metadata (`AGENT-012`); the sequential planner, which no pipeline with declarations reaches today,
 would plan such a stage with its declarations dropped rather than refuse it
-(`CTRL-006`). Closure requires the
-reviewed merge, exact-main Foundation and native Windows runs, and a
-receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
+(`CTRL-006`). Closed on PR #150 (`9208e4e2`), exact-main Foundation `34652565336` and
+Windows Agent `34652565410`; receipt `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
+The review added, before the merge, the workspace root and the attempt
+workspace resolved component by component without following a link, the
+matchers as bounded tables, one object per matching declaration with its
+own file description, non-UTF-8 and control-character names refused,
+entries the walk cannot read and a workspace the step made unreadable
+refused by name, a file that runs short, grows or is rewritten under either
+read refused by name, cancellation ending collection, the session epoch
+re-checked inside registration and availability, an attempt-scoped
+registration lock with byte and object quotas, an in-flight ledger of
+streams charged before staging, header and receive deadlines, exact retries
+answered from the ledger, and the Windows admission refusal. The residuals
+above are carried as `AGENT-012` and `CTRL-006`.
 
 ## PAR-001 GitHub webhook receiver review (earned closure)
 
