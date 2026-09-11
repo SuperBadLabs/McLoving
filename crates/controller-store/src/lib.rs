@@ -3473,14 +3473,19 @@ impl Store {
     /// mid-delivery leaves the row for a later claim and two workers never
     /// hold one row at once, not even across the lock's release; the
     /// exponential backoff is scheduled when a failed attempt is settled.
+    /// Only rows of the given `kinds` are claimed, so a controller that holds
+    /// no credential for a kind never charges an attempt another controller
+    /// could have delivered.
     pub async fn claim_due_notifications(
         &self,
         organization_id: Uuid,
         limit: i64,
+        kinds: &[&str],
     ) -> Result<Vec<NotificationDelivery>, StoreError> {
-        if !(1..=1_000).contains(&limit) {
+        if !(1..=1_000).contains(&limit) || kinds.is_empty() {
             return Ok(Vec::new());
         }
+        let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
         let mut tx = self.tenant_transaction(organization_id).await?;
         // A row whose attempts are spent but is still pending was claimed
         // for its last attempt by a worker that never settled it; once its
@@ -3519,6 +3524,7 @@ impl Store {
                  WHERE organization_id = $1
                    AND state = 'pending'
                    AND attempts < $4
+                   AND kind = ANY($5)
                    AND next_attempt_at <= clock_timestamp()
                  ORDER BY next_attempt_at, build_id, target_index
                  LIMIT $2
@@ -3548,6 +3554,7 @@ impl Store {
         .bind(limit)
         .bind(mcloving_domain::notifications::CLAIM_LEASE_SECONDS as f64)
         .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+        .bind(&kinds)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

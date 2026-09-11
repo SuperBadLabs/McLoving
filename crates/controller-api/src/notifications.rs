@@ -342,13 +342,17 @@ fn embedded_v4(high: u16, low: u16) -> Ipv4Addr {
 
 /// IPv6 is decided by allowlist: only global unicast (`2000::/3`) may be a
 /// destination, less the special-purpose blocks carved out of it, and an
-/// address that embeds an IPv4 address is decided by that address. Every
+/// address that embeds an IPv4 address (IPv4-mapped, well-known NAT64,
+/// 6to4) is decided by that address, so a public destination behind a
+/// DNS64/NAT64 resolver stays reachable. Every
 /// other prefix (loopback, unspecified, the discard and dummy prefixes,
 /// unique-local, link-local, site-local, multicast, and whatever IANA
 /// reserves next) is refused without being named individually.
 fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
+    // An address that embeds an IPv4 address is decided by that address:
+    // a public destination reached through NAT64 or 6to4 stays reachable.
     if let Some(mapped) = v6.to_ipv4_mapped() {
-        return forbidden_v4(mapped).or(Some("IPv4-mapped"));
+        return forbidden_v4(mapped);
     }
     let segments = v6.segments();
     if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1 {
@@ -358,7 +362,7 @@ fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
     }
     if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
         // Well-known NAT64: the embedded IPv4 address decides.
-        return forbidden_v4(embedded_v4(segments[6], segments[7])).or(Some("NAT64"));
+        return forbidden_v4(embedded_v4(segments[6], segments[7]));
     }
     if segments[0] & 0xe000 != 0x2000 {
         return Some(if v6.is_unspecified() {
@@ -381,7 +385,7 @@ fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
     }
     if segments[0] == 0x2002 {
         // 6to4: the embedded IPv4 address decides.
-        forbidden_v4(embedded_v4(segments[1], segments[2])).or(Some("6to4"))
+        forbidden_v4(embedded_v4(segments[1], segments[2]))
     } else if segments[0] == 0x2001 && segments[1] < 0x0200 {
         // 2001::/23, the IETF protocol assignments block: Teredo,
         // benchmarking (2001:2::/48), AMT, AS112, ORCHID and whatever is
@@ -672,6 +676,20 @@ async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<()
 }
 
 impl ApiState {
+    /// The target kinds this controller holds a credential for: the only
+    /// kinds it claims, so a controller without the token or the key never
+    /// charges an attempt against a row another controller can deliver.
+    fn deliverable_notification_kinds(&self) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        if self.notification_github_token.is_some() {
+            kinds.push("github_status");
+        }
+        if self.notification_signing_key.is_some() {
+            kinds.push("webhook");
+        }
+        kinds
+    }
+
     /// Claims due deliveries and settles each: delivered, or failed with the
     /// error the next attempt will see. The claimed rows are delivered
     /// concurrently, each under the delivery deadline, so the whole scan
@@ -683,9 +701,13 @@ impl ApiState {
         organization_id: Uuid,
         limit: i64,
     ) -> Result<usize, ApiError> {
+        let kinds = self.deliverable_notification_kinds();
+        if kinds.is_empty() {
+            return Ok(0);
+        }
         let claimed = self
             .store
-            .claim_due_notifications(organization_id, limit)
+            .claim_due_notifications(organization_id, limit, &kinds)
             .await
             .map_err(super::internal)?;
         let mut tasks = tokio::task::JoinSet::new();
@@ -811,7 +833,6 @@ mod tests {
             "::1",
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
-            "::ffff:8.8.8.8",
             "64:ff9b::10.0.0.1",
             "64:ff9b::a00:1",
             "64:ff9b:1::1",
@@ -855,6 +876,10 @@ mod tests {
             "2001:4860:4860::8888",
             "3ffe::1",
             "3fff:1000::1",
+            "::ffff:8.8.8.8",
+            "64:ff9b::808:808",
+            "64:ff9b::8.8.8.8",
+            "2002:808:808::1",
         ] {
             let address: IpAddr = allowed.parse().unwrap();
             assert_eq!(

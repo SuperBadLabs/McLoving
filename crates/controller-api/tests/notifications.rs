@@ -420,13 +420,42 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         vec![(0, "github_status", "pending"), (1, "webhook", "pending")]
     );
 
-    // First scan: the status sink refuses, the hook accepts.
+    // A controller without credentials claims nothing and charges nothing.
+    let uncredentialed_state =
+        seams(ApiState::new(store.clone(), TOKEN, principal(organization_id)).unwrap());
+    assert_eq!(
+        uncredentialed_state
+            .process_due_notifications(organization_id, 32)
+            .await
+            .unwrap(),
+        0
+    );
+    // A controller holding only the signing key claims only the webhook.
+    let key_only = seams(ApiState::new(store.clone(), TOKEN, principal(organization_id)).unwrap())
+        .with_notification_signing_key(KEY.to_vec())
+        .unwrap()
+        .with_public_base_url("https://mcloving.example.test/prefix")
+        .unwrap();
+    assert_eq!(
+        key_only
+            .process_due_notifications(organization_id, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    let ledger = store
+        .build_notifications(organization_id, build_id)
+        .await
+        .unwrap();
+    assert_eq!((ledger[0].3.as_str(), ledger[0].4), ("pending", 0));
+    assert_eq!((ledger[1].3.as_str(), ledger[1].4), ("delivered", 1));
+    // First full scan: the status sink refuses; the hook is already done.
     assert_eq!(
         state
             .process_due_notifications(organization_id, 32)
             .await
             .unwrap(),
-        2
+        1
     );
     let ledger = store
         .build_notifications(organization_id, build_id)

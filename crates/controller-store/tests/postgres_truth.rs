@@ -12563,6 +12563,8 @@ async fn an_attempts_artifacts_are_bounded_by_the_per_attempt_quota() {
 /// terminal event; the retry paths re-derive the outcome without a second
 /// event, two workers claiming the ledger hold disjoint rows, and a settled
 /// delivery moves to delivered or, once the attempts are spent, abandoned.
+const ALL_KINDS: &[&str] = &["github_status", "webhook"];
+
 #[tokio::test]
 async fn a_terminal_build_records_its_notification_deliveries_once() {
     let Some(store) = test_store().await else {
@@ -12697,10 +12699,29 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     .await
     .expect("count terminal events again");
     assert_eq!(terminal_events, 1);
+    // A controller that can deliver no kind, or only a kind this build does
+    // not carry, claims nothing and charges no attempt.
+    for kinds in [&[][..], &["email"][..]] {
+        assert!(
+            store
+                .claim_due_notifications(organization_id, 10, kinds)
+                .await
+                .expect("claim with no deliverable kind")
+                .is_empty()
+        );
+    }
+    assert!(
+        store
+            .build_notifications(organization_id, admission.build_id)
+            .await
+            .expect("read the ledger after the empty claims")
+            .iter()
+            .all(|row| row.4 == 0)
+    );
     // Two workers claim at once: every due row is held by exactly one.
     let (first, second) = tokio::join!(
-        store.claim_due_notifications(organization_id, 10),
-        store.claim_due_notifications(organization_id, 10)
+        store.claim_due_notifications(organization_id, 10, ALL_KINDS),
+        store.claim_due_notifications(organization_id, 10, ALL_KINDS)
     );
     let first = first.expect("first claim");
     let second = second.expect("second claim");
@@ -12741,7 +12762,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     // Nothing is due again until the lease passes.
     assert!(
         store
-            .claim_due_notifications(organization_id, 10)
+            .claim_due_notifications(organization_id, 10, ALL_KINDS)
             .await
             .expect("third claim")
             .is_empty()
@@ -12793,7 +12814,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     .await
     .expect("age the row");
     let last = store
-        .claim_due_notifications(organization_id, 10)
+        .claim_due_notifications(organization_id, 10, ALL_KINDS)
         .await
         .expect("last claim");
     assert_eq!(last.len(), 1);
@@ -12835,7 +12856,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     .expect("revive the spent row as an orphaned claim");
     assert!(
         store
-            .claim_due_notifications(organization_id, 10)
+            .claim_due_notifications(organization_id, 10, ALL_KINDS)
             .await
             .expect("scan after the orphaned last attempt")
             .is_empty()

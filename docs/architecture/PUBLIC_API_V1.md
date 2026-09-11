@@ -124,7 +124,9 @@ owner-private files) is refused with 422 `notification_mapping_denied`. The
 resolved targets are recorded with the build at admission; the transaction
 that makes the build terminal records one delivery per target and appends
 one `dag.build_terminal` event, so a terminal build has its deliveries or is
-not terminal. Every controller on the database runs a delivery worker that
+not terminal. Every controller on the database runs a delivery worker that claims only
+the kinds it holds a credential for (so a controller without the token or
+the key never charges an attempt another controller could deliver),
 claims due rows under `FOR UPDATE SKIP LOCKED` and leases each past the
 delivery deadline, so a row is delivered by one worker at a time even after
 the lock is released, retries with exponential backoff scheduled when the
