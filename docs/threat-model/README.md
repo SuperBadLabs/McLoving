@@ -894,19 +894,25 @@ the same lease, fence, restore-epoch and session checks, redaction to a fixed
 point and idempotent append, so a stale or fenced-out agent cannot publish
 and a duplicate is a no-op; the per-attempt chunk bound rises to 8 192 only
 for a session that negotiated `live-log-stream-v1`, read from the durable
-session record, and the 64 MiB byte quota is unchanged, TM-018); TM-006
+session record, the live tail stops 128 sequences short of it so the
+terminal pass always has room, and the 64 MiB byte quota is unchanged,
+TM-018); TM-013 (a credential-bearing step is never tailed: its output is
+captured and redacted after it exits, as before, so nothing unredacted
+leaves the agent early); TM-006
 (durable evidence: every chunk's sequence and byte range are journaled before the
 chunk is sent, so a crash at any point cannot renumber or duplicate a range;
 the terminal pass verifies the executor's durable spool and re-hashes every
 streamed range against its reservation, refusing by name a spool the
 workload rewrote after a range was streamed, and reads the live spool files
-through handles opened without following links so a renamed or unlinked
-visible path cannot redirect the tail; recovery replays from the same
+through descriptors opened without following links or blocking and judged
+regular files after the open, so a renamed, unlinked or swapped visible
+path cannot redirect or stall the tail; recovery replays from the same
 reservations and sends only ranges without a receipt); TM-052 (API: follow
 mode reads through the same authorization, tenant and fence filters as the
-paged read, holds a request at most 30 seconds re-reading at 200 ms, and
-answers from the ledger only, so a follower observes committed chunks and
-nothing in flight). Residual: a workload can still write anything into its
+paged read, holds a request at most 30 seconds re-reading at 200 ms, reads
+the chunks once more after observing a terminal status so the drained end
+is exact, and answers from the ledger only, so a follower observes
+committed chunks and nothing in flight). Residual: a workload can still write anything into its
 own stdout, as before; the live tail opens the spool by path after the
 executor created it, so a workload that swaps the path in that window
 streams other content it could have printed anyway and then fails its

@@ -350,10 +350,15 @@ pub mod live_logs {
     pub const LIVE_LOG_STREAM_FEATURE: &str = "live-log-stream-v1";
     /// Exclusive upper bound on a log chunk sequence for a session that
     /// negotiated the feature; the 96-chunk terminal bound stays for every
-    /// other session. Chunks may be as small as one poll interval's output,
-    /// so an attempt at the 64 MiB byte quota needs room for many more of
-    /// them than the terminal pass ever produced.
-    pub const MAX_LIVE_ATTEMPT_LOG_CHUNKS: i64 = 8_192;
+    /// other session. A live chunk may be one second's output of one stream,
+    /// so a nine-hour step heartbeating on both streams still fits; the
+    /// 64 MiB byte quota bounds the bytes regardless.
+    pub const MAX_LIVE_ATTEMPT_LOG_CHUNKS: i64 = 65_536;
+    /// Sequences the live tail leaves unreserved below the bound so the
+    /// terminal pass can always publish every stream's remainder: the byte
+    /// quota is at most 64 one-MiB chunks, plus one partial chunk per stream
+    /// of a sixteen-step stage.
+    pub const LIVE_TAIL_SEQUENCE_HEADROOM: i64 = 128;
     /// Longest a follower may wait on one request for new chunks.
     pub const MAX_FOLLOW_WAIT_MS: u64 = 30_000;
 }

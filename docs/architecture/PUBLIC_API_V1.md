@@ -121,12 +121,16 @@ lossy replacement. Every item also carries its global `cursor`, and the same
 route follows a running build (PAR-013): `after_cursor` (zero from the
 start, exclusive with the attempt tuple) returns chunks after that cursor in
 commit order, `wait_ms` (at most 30 000) holds the request, re-reading at a
-short interval, until a chunk is committed or the build is no longer live,
-and the page answers `next_cursor` to continue from and `live` so a follower
-stops after the terminal drain. An agent that negotiated
+short interval, until a chunk is committed or the build is no longer live
+(the chunks are read once more after a terminal status is observed, so an
+empty page with `live: false` is the drained end of the log), and the page
+answers `next_cursor` to continue from and `live` so a follower stops after
+the terminal drain. An agent that negotiated
 `live-log-stream-v1` publishes a step's output while the step runs, so a
 follower sees a line within about a second of the step writing it; `mcloving
-logs --follow` prints the stream and exits when the build is terminal.
+logs --follow` prints the stream and exits when the build is terminal (with
+`--output json` it prints one document carrying every chunk at the end
+instead), and refuses a controller that does not answer the follow fields.
 Errors have stable `code` and `message` fields.
 
 External read-side migration uses only this API. The CLI exposes `pipelines`

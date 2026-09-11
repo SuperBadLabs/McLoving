@@ -6285,34 +6285,49 @@ async fn follow_logs(
         ));
     }
     let deadline = tokio::time::Instant::now() + Duration::from_millis(wait);
-    loop {
-        let logs = state
+    let read = || async {
+        state
             .store
             .build_logs_after_cursor(organization_id, project_id, build_id, after_cursor, limit)
             .await
-            .map_err(product_error)?;
-        // Read the status after the chunks, never before: a chunk committed
-        // between the two reads is then seen on this page or on the next
-        // one, and a build reported terminal has no chunk still to come.
+            .map_err(product_error)
+    };
+    let page = |logs: Vec<mcloving_controller_store::CommittedLog>, live: bool| {
+        let next_cursor = logs
+            .last()
+            .map(|entry| entry.cursor)
+            .unwrap_or(after_cursor);
+        Json(LogPage {
+            items: logs.into_iter().map(log_response).collect(),
+            next_after: None,
+            next_cursor: Some(next_cursor),
+            live: Some(live),
+        })
+    };
+    loop {
+        let logs = read().await?;
+        // Log publication and completion are separate transactions, so the
+        // status is read after the chunks and, once it reports terminal, the
+        // chunks are read once more: a chunk committed between an empty read
+        // and the completion is then on this page, and an empty page with
+        // `live: false` really is the drained end of the log.
         let live = state
             .store
             .build_snapshot(organization_id, project_id, build_id)
             .await
             .map_err(internal)?
             .is_some_and(|snapshot| build_is_live(&snapshot.build_status));
-        if !logs.is_empty() || !live || tokio::time::Instant::now() >= deadline {
-            let next_cursor = logs
-                .last()
-                .map(|entry| entry.cursor)
-                .unwrap_or(after_cursor);
-            return Ok(Json(LogPage {
-                items: logs.into_iter().map(log_response).collect(),
-                next_after: None,
-                next_cursor: Some(next_cursor),
-                live: Some(live),
-            }));
+        if !logs.is_empty() {
+            return Ok(page(logs, live));
         }
-        tokio::time::sleep(FOLLOW_POLL_INTERVAL.min(deadline - tokio::time::Instant::now())).await;
+        if !live {
+            return Ok(page(read().await?, false));
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(page(logs, true));
+        }
+        tokio::time::sleep(FOLLOW_POLL_INTERVAL.min(deadline.saturating_duration_since(now))).await;
     }
 }
 

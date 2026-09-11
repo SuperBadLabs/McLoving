@@ -1964,20 +1964,25 @@ async fn run_assignment(
             // Live streaming (PAR-013): the spawn hook opens the step's spool
             // files by their live path the moment the step exists, and a tail
             // publishes their growth while the step runs. Helper steps keep
-            // their private IO out of it; a peer without the feature gets the
-            // terminal pass alone.
+            // their private IO out of it; a credential-bearing step's output
+            // is captured and redacted only after the step exits, so nothing
+            // reaches its spool to tail and nothing unredacted may leave the
+            // agent early; a peer without the feature gets the terminal pass
+            // alone.
             let live_spool = Arc::new(std::sync::Mutex::new(None::<LiveSpool>));
-            let live_spool_path = (features.live_log_stream && helper.is_none()).then(|| {
-                let attempt_spool = config
-                    .workspace_root
-                    .join(&assignment.workspace)
-                    .join("spool");
-                if multi_step {
-                    attempt_spool.join(format!("step-{ordinal}"))
-                } else {
-                    attempt_spool
-                }
-            });
+            let live_spool_path =
+                (features.live_log_stream && helper.is_none() && attempt_redactions.is_empty())
+                    .then(|| {
+                        let attempt_spool = config
+                            .workspace_root
+                            .join(&assignment.workspace)
+                            .join("spool");
+                        if multi_step {
+                            attempt_spool.join(format!("step-{ordinal}"))
+                        } else {
+                            attempt_spool
+                        }
+                    });
             let on_spawn = |process_id| {
                 if let Some(spool) = &live_spool_path {
                     match LiveSpool::open(spool) {
@@ -3016,6 +3021,14 @@ fn log_chunk_bound(live_log_stream: bool) -> u64 {
     }
 }
 
+/// The first sequence the live tail will not reserve: the live bound less
+/// the headroom the terminal pass needs for every stream's remainder.
+fn live_tail_sequence_ceiling() -> u64 {
+    log_chunk_bound(true).saturating_sub(
+        u64::try_from(mcloving_domain::live_logs::LIVE_TAIL_SEQUENCE_HEADROOM).unwrap_or(0),
+    )
+}
+
 /// Publishes one `PublishLog` chunk and records its receipt.
 async fn publish_reserved_chunk(
     publication: &mut PublicationContext<'_>,
@@ -3225,21 +3238,26 @@ impl LiveSpool {
     fn open(spool: &Path) -> Result<Self, std::io::Error> {
         let open = |name: &str| -> Result<fs::File, std::io::Error> {
             let path = spool.join(name);
-            let metadata = std::fs::symlink_metadata(&path)?;
-            if !metadata.is_file() {
-                return Err(std::io::Error::other(format!(
-                    "{} is not a regular file",
-                    path.display()
-                )));
-            }
+            // No pathname pre-check: the open itself refuses a link, does not
+            // block on a FIFO, and the descriptor is then judged, so nothing
+            // the workload swaps in between can be read as the spool.
             let mut options = std::fs::OpenOptions::new();
             options.read(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt as _;
-                options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+                options.custom_flags(
+                    nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC,
+                );
             }
-            Ok(fs::File::from_std(options.open(&path)?))
+            let file = options.open(&path)?;
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::other(format!(
+                    "{} is not a regular file",
+                    path.display()
+                )));
+            }
+            Ok(fs::File::from_std(file))
         };
         Ok(Self {
             stdout: open("stdout.log")?,
@@ -3402,10 +3420,17 @@ impl LiveTail {
                 &self.attempt_id,
                 self.fence_token,
             )?;
-            if sequence >= log_chunk_bound(true) {
-                return Err(AgentError::InvalidAssignment(
-                    "log chunk count exceeds the per-attempt quota".to_owned(),
-                ));
+            // Leave the terminal pass room to publish every stream's
+            // remainder: stop reserving live well below the bound rather than
+            // spend the last sequences on heartbeats and strand the attempt.
+            if sequence >= live_tail_sequence_ceiling() {
+                eprintln!(
+                    "live log tail paused for step {}: sequence {sequence} reaches the live \
+                     ceiling; the remainder publishes after the step",
+                    self.step_ordinal
+                );
+                self.stopped = true;
+                return Ok(());
             }
             let reservation = LogReservation {
                 sequence,
