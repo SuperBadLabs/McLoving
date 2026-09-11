@@ -57,7 +57,10 @@ acquirer configuration path and canonical digest, credential, receipt signing
 key and secret marker paths, and an optional `launcher`. The launcher is how a
 host that restricts unprivileged user namespaces enters the acquirer:
 `aa-exec -p <profile> -- /proc/self/fd/N`, the profile granting only
-`userns create` and the image still being the sealed memory file. A
+`userns create` and the image still being the sealed memory file; the
+launcher binary is itself sealed into a memory file against the binding's
+`aa_exec_sha256` before every spawn, so a replaced or writable launcher
+never runs with the helper's environment. A
 `test_mode` binding is a fixture-only operator opt-in that lets the acquirer
 configuration name file or loopback repositories; a configuration that names
 them without it is refused.
@@ -82,7 +85,13 @@ against the same material it configured the helper with: the receipt's
 HMAC signature under the signing key, its configuration, implementation and
 runtime-closure digests, its `request_sha256` against the request the agent
 wrote, its acquisition, attempt and build identities, its checkout name, and
-that the primary tree resolved to exactly the requested commit. Only a typed
+that the primary tree resolved to exactly the requested commit. Immediately
+before publication, with the acquisition directory handle open, the retained
+acquisition itself is verified with the acquirer's own routine
+(`verify_retained_acquisition`): the retained directory and file modes, the
+manifest digest, every materialized file, link and submodule entry byte for
+byte against the manifest, and the tree's exact inventory; a tree that no
+longer matches is refused as `checkout_tree_unverified` and discarded. Only a typed
 public summary (`mcloving.source-invocation/v1`: invocation id, mapping id,
 acquisition id, destination, outcome, resolved commit and tree, file, byte and
 transport counts) reaches the step's public stream; the acquirer's message is

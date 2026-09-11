@@ -40,6 +40,11 @@ pub struct SourceBindings {
 #[serde(deny_unknown_fields)]
 pub struct SourceLauncher {
     pub aa_exec: PathBuf,
+    /// Exact digest of the launcher binary; it is sealed into a memory file
+    /// against this digest before every spawn, like the acquirer itself, so
+    /// a replaced or writable launcher never runs with the helper's
+    /// environment.
+    pub aa_exec_sha256: String,
     pub profile: String,
 }
 
@@ -121,6 +126,7 @@ pub fn load_bindings(path: &Path, expected_sha256: &str) -> Result<SourceBinding
             .any(|path| !path.is_absolute())
             || b.launcher.as_ref().is_some_and(|launcher| {
                 !launcher.aa_exec.is_absolute()
+                    || !canonical_sha256(&launcher.aa_exec_sha256)
                     || launcher.profile.is_empty()
                     || launcher.profile.len() > 128
                     || !launcher.profile.bytes().all(|byte| {
@@ -207,6 +213,8 @@ mod linux {
     pub(crate) struct PreparedSource {
         // Hold the immutable executable through process spawn and containment.
         _executable: File,
+        // Likewise the sealed launcher, when the binding names one.
+        _launcher: Option<File>,
         pub program: PathBuf,
         pub arguments: Vec<OsString>,
         pub environment: BTreeMap<String, String>,
@@ -350,17 +358,25 @@ mod linux {
         }
         let (executable, sealed) =
             seal_executable(&binding.executable, &binding.executable_sha256)?;
-        let (program, arguments) = match &binding.launcher {
-            Some(launcher) => (
-                launcher.aa_exec.clone(),
-                vec![
-                    OsString::from("-p"),
-                    OsString::from(&launcher.profile),
-                    OsString::from("--"),
-                    sealed.into_os_string(),
-                ],
-            ),
-            None => (sealed, Vec::new()),
+        // The launcher is pinned exactly like the acquirer: sealed into a
+        // memory file against the binding's digest and held through the
+        // spawn, so the path it was read from can change without effect.
+        let (launcher_image, program, arguments) = match &binding.launcher {
+            Some(launcher) => {
+                let (image, sealed_launcher) =
+                    seal_executable(&launcher.aa_exec, &launcher.aa_exec_sha256)?;
+                (
+                    Some(image),
+                    sealed_launcher,
+                    vec![
+                        OsString::from("-p"),
+                        OsString::from(&launcher.profile),
+                        OsString::from("--"),
+                        sealed.into_os_string(),
+                    ],
+                )
+            }
+            None => (None, sealed, Vec::new()),
         };
         let mut environment = BTreeMap::new();
         for (name, path) in [
@@ -395,6 +411,7 @@ mod linux {
         }
         Ok(PreparedSource {
             _executable: executable,
+            _launcher: launcher_image,
             program,
             arguments,
             environment,
@@ -662,6 +679,35 @@ mod linux {
                 ))
             })?;
             require_owned(&acquisition).map_err(PublishFailure::Unreclaimed)?;
+            // The answer authenticated only the signed receipt. Before any of
+            // the tree enters the workspace, the retained acquisition itself
+            // is verified with the acquirer's own routine and the material
+            // this agent configured it with: retained modes, the manifest
+            // digest, every file, link and submodule entry byte for byte, and
+            // the tree's exact inventory. The directory handle stays open
+            // across verification and the move.
+            if !interrupted()
+                && let Err(error) = tokio::runtime::Handle::current().block_on(
+                    SourceAcquirer::verify_retained_acquisition(
+                        &self.config,
+                        &self.binding.config_sha256,
+                        &self.binding.executable_sha256,
+                        &self.signing_key,
+                        &receipt,
+                    ),
+                )
+            {
+                return match discard_acquired_tree(&acquisition, self.walk_budget()) {
+                    Ok(()) => Err(PublishFailure::Refused(format!(
+                        "checkout_tree_unverified:{}",
+                        error.code()
+                    ))),
+                    Err(discard) => Err(PublishFailure::Unreclaimed(format!(
+                        "checkout_tree_unverified:{};tree_not_discarded:{discard}",
+                        error.code()
+                    ))),
+                };
+            }
             // A refused publication must not leave the materialized tree
             // under the output root: every such build would otherwise keep a
             // whole checkout on the source volume. The receipt and manifest

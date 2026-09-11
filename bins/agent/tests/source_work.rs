@@ -867,6 +867,7 @@ fn launcher() -> Option<SourceLauncher> {
         "the {PROFILE} AppArmor profile must be loaded under the user-namespace restriction"
     );
     Some(SourceLauncher {
+        aa_exec_sha256: digest(&std::fs::read(&aa_exec).expect("read aa-exec")),
         aa_exec,
         profile: PROFILE.to_owned(),
     })

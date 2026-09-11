@@ -2425,15 +2425,40 @@ impl SourceAcquirer {
     }
 
     pub async fn verify_receipt(&self, receipt: &AcquisitionReceipt) -> Result<(), SourceError> {
-        receipt_auth::authenticate_authority(
+        Self::verify_retained_acquisition(
             &self.config,
             &self.config_sha256,
             &self.implementation_sha256,
             &self.signing_key,
             receipt,
+        )
+        .await
+    }
+
+    /// Authenticates a receipt and verifies the retained acquisition it
+    /// names, byte for byte, against a known configuration, implementation
+    /// digest and signing key, without a running acquirer: the retained
+    /// directory and tree modes, the manifest digest, every materialized
+    /// file, link and submodule entry, and the tree's exact inventory. The
+    /// caller that launched the sealed helper verifies the tree with the
+    /// same material it configured the helper with, immediately before it
+    /// publishes the tree (PAR-012).
+    pub async fn verify_retained_acquisition(
+        config: &SourceConfig,
+        config_sha256: &str,
+        implementation_sha256: &str,
+        signing_key: &[u8],
+        receipt: &AcquisitionReceipt,
+    ) -> Result<(), SourceError> {
+        receipt_auth::authenticate_authority(
+            config,
+            config_sha256,
+            implementation_sha256,
+            signing_key,
+            receipt,
         )?;
-        let manifest_path = acquisition_path(&self.config.output_root, receipt.acquisition_id)
-            .join("manifest.json");
+        let manifest_path =
+            acquisition_path(&config.output_root, receipt.acquisition_id).join("manifest.json");
         let manifest = read_bounded_regular_file(&manifest_path, MAX_GIT_METADATA_BYTES).await?;
         if sha256_hex(&manifest) != receipt.manifest_sha256
             || receipt.content_sha256 != receipt.manifest_sha256
@@ -2449,19 +2474,19 @@ impl SourceAcquirer {
         {
             return Err(SourceError::InvalidStoredReceipt);
         }
-        self.verify_materialized_tree(receipt, &entries).await?;
+        Self::verify_materialized_tree(config, receipt, &entries).await?;
         Ok(())
     }
 
     async fn verify_materialized_tree(
-        &self,
+        config: &SourceConfig,
         receipt: &AcquisitionReceipt,
         entries: &[ManifestEntry],
     ) -> Result<(), SourceError> {
         if entries.windows(2).any(|pair| pair[0].path >= pair[1].path) {
             return Err(SourceError::InvalidStoredReceipt);
         }
-        let acquisition_root = acquisition_path(&self.config.output_root, receipt.acquisition_id);
+        let acquisition_root = acquisition_path(&config.output_root, receipt.acquisition_id);
         let tree_root = acquisition_root.join("tree");
         validate_retained_directory(&acquisition_root, 0o500).await?;
         validate_retained_directory(&tree_root, 0o500).await?;
@@ -2484,7 +2509,7 @@ impl SourceAcquirer {
         let mut expected_directories = BTreeSet::new();
         let mut total_bytes = 0_u64;
         for entry in entries {
-            validate_relative_path(&entry.path, self.config.max_path_bytes)
+            validate_relative_path(&entry.path, config.max_path_bytes)
                 .map_err(|_| SourceError::InvalidStoredReceipt)?;
             if !is_object_id(&entry.git_object_id)
                 || !is_sha256_hex(&entry.sha256)
@@ -2507,7 +2532,7 @@ impl SourceAcquirer {
                     validate_retained_metadata(&metadata, false, expected_mode)?;
                     let bytes = read_bounded_regular_file(
                         &path,
-                        usize::try_from(self.config.max_file_bytes).unwrap_or(usize::MAX),
+                        usize::try_from(config.max_file_bytes).unwrap_or(usize::MAX),
                     )
                     .await
                     .map_err(|_| SourceError::InvalidStoredReceipt)?;
