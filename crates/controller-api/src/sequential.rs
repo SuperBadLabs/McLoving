@@ -91,7 +91,7 @@ pub fn plan_sequential_build(
                 required_platform: "linux".to_owned(),
                 required_trust_pool: "migration-deny-authority".to_owned(),
                 priority: 0,
-                execution_spec: super::execution_spec(std::slice::from_ref(step)),
+                execution_spec: super::execution_spec_parts(std::slice::from_ref(step), None),
                 fail_fast: false,
                 max_attempts: 1,
             });

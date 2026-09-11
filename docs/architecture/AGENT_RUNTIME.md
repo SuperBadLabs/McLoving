@@ -273,6 +273,22 @@ discharge a parked reconciliation).
   the step is neither re-run nor skipped. Workspace transfer, helpers and
   inline terminal logs stay single-step; the Windows agent does not advertise
   the capability.
+- A stage may name a digest-pinned `image` (PAR-011). Such a stage always
+  rides the version-5 envelope and additionally requires the
+  `container-podman-v1` capability, which an agent advertises only when the
+  podman binary pinned by `MCLOVING_AGENT_PODMAN_PATH` answers `--version`
+  at session open. Each step then runs as `podman run --rm --name
+  mcloving-<attempt>-<ordinal> --userns=keep-id` with the attempt workspace
+  bind-mounted at `/workspace` as the working directory and nothing else of
+  the host; environment reaches the container by name only, so no secret
+  value enters the podman argument vector; a tag reference is refused at
+  compile, admission and execution. The podman client is the process-group
+  leader, so timeout and cancellation keep the group teardown proof, and
+  after the group is empty the executor removes the named container and
+  accepts only a `container exists` exit status of 1 as proof it is gone;
+  anything else is unverified containment. This is the Linux containment
+  answer for container stages and is recorded against `SEC-005` as partial:
+  plain process steps still run as the service account on the host.
 - When `inline-terminal-logs-v1` is negotiated, a stream that fits one chunk
   is verified identically and then carried in the terminal publication's
   `inline_log_chunks` instead of its own `PublishLog` round trip; the

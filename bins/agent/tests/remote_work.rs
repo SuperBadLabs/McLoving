@@ -1696,3 +1696,252 @@ stages:
     );
     stop(&mut harness.controller).await;
 }
+
+/// PAR-011: a digest-pinned alpine the container tests run in.
+const ALPINE_DIGEST: &str = "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
+
+/// Container tests need a rootless podman on the agent host; they run only
+/// when the caller says so, and skip (rather than fail) elsewhere.
+fn podman_for_tests() -> Option<PathBuf> {
+    if std::env::var_os("MCLOVING_TEST_PODMAN").is_none() {
+        eprintln!("skipped: MCLOVING_TEST_PODMAN is not set");
+        return None;
+    }
+    let output = StdCommand::new("which")
+        .arg("podman")
+        .output()
+        .expect("locate podman");
+    assert!(
+        output.status.success(),
+        "MCLOVING_TEST_PODMAN is set but podman is not on PATH"
+    );
+    Some(PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("podman path is UTF-8")
+            .trim(),
+    ))
+}
+
+#[tokio::test]
+async fn container_stage_runs_in_the_pinned_image_and_sees_only_the_workspace() {
+    let Some(podman) = podman_for_tests() else {
+        return;
+    };
+    let Some(mut harness) = multi_step_harness("container-agent", "container").await else {
+        return;
+    };
+    let mut agent = agent_command(
+        "container-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .env("MCLOVING_AGENT_PODMAN_PATH", &podman)
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent with a container runtime");
+
+    // The host workspace root must not be visible from inside the container;
+    // only the attempt workspace is mounted, at /workspace.
+    let host_root = harness.workspace.display().to_string();
+    let pipeline = format!(
+        r#"
+version: 1
+name: container
+stages:
+  - id: build
+    name: Build
+    image: {ALPINE_DIGEST}
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "cat /etc/os-release"]
+          timeout_seconds: 120
+      - process:
+          program: /bin/sh
+          args: [-c, "test ! -e '{host_root}' && test -w /workspace && printf 'host-hidden\n'"]
+          timeout_seconds: 30
+"#
+    );
+    let pipeline_id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "container-e2e".to_owned(),
+                source: pipeline,
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("a digest-pinned container stage validates and saves");
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            "container-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+    let required: Vec<String> = sqlx::query_scalar(
+        "SELECT required_capabilities FROM nodes WHERE organization_id = $1 AND build_id = $2",
+    )
+    .bind(harness.organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read the node's required capabilities");
+    assert!(
+        required
+            .iter()
+            .any(|capability| capability == "container-podman-v1"),
+        "{required:?}"
+    );
+    let status = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    let logs = harness
+        .client
+        .logs(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .expect("read logs");
+    let text = logs
+        .iter()
+        .map(|log| {
+            format!(
+                "[{} {}] {}",
+                log.step_ordinal,
+                log.stream,
+                log.text.clone().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(status.status, "succeeded", "{status:?}\n{text}");
+    assert!(
+        text.contains("Alpine Linux"),
+        "step 0 ran inside the image: {text}"
+    );
+    assert!(
+        text.contains("host-hidden"),
+        "the host root is not visible and /workspace is writable: {text}"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}
+
+#[tokio::test]
+async fn timed_out_container_step_leaves_no_container_behind() {
+    let Some(podman) = podman_for_tests() else {
+        return;
+    };
+    let Some(mut harness) =
+        multi_step_harness("container-timeout-agent", "container-timeout").await
+    else {
+        return;
+    };
+    let mut agent = agent_command(
+        "container-timeout-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .env("MCLOVING_AGENT_PODMAN_PATH", &podman)
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent with a container runtime");
+    let pipeline = format!(
+        r#"
+version: 1
+name: container-timeout
+stages:
+  - id: build
+    name: Build
+    image: {ALPINE_DIGEST}
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "sleep 300"]
+          timeout_seconds: 3
+"#
+    );
+    let pipeline_id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "container-timeout-e2e".to_owned(),
+                source: pipeline,
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save pipeline");
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            "container-timeout-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+    let status = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    assert_eq!(status.status, "failed", "{status:?}");
+    let summary = status
+        .terminal_summary
+        .expect("terminal summary is published");
+    assert_eq!(summary["steps"][0]["termination"], "timed_out", "{summary}");
+
+    // The container is named after the attempt and step; after teardown the
+    // runtime must not know it at all (`container exists` exits 1).
+    let name = format!("mcloving-{}-0", status.attempt_id);
+    let exists = StdCommand::new(&podman)
+        .args(["container", "exists", &name])
+        .status()
+        .expect("query the container runtime");
+    assert_eq!(
+        exists.code(),
+        Some(1),
+        "container {name} must be gone after a timed-out step"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}

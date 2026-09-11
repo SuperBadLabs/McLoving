@@ -49,6 +49,15 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
     for stage in &pipeline.stages {
         writer.string(&stage.id);
         writer.string(&stage.name);
+        if pipeline.schema.minor >= 6 {
+            match &stage.image {
+                Some(image) => {
+                    writer.u8(1);
+                    writer.string(image);
+                }
+                None => writer.u8(0),
+            }
+        }
         writer.u32(stage.steps.len());
         for step in &stage.steps {
             match step {
@@ -290,7 +299,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 5 {
+    if schema.major != 1 || schema.minor > 6 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -422,13 +431,43 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
     for stage_index in 0..stages {
         reader.string()?;
         reader.string()?;
+        let container_stage = if schema.minor >= 6 {
+            match reader.u8()? {
+                0 => false,
+                1 => {
+                    let image = reader.string()?;
+                    if !mcloving_domain::container::is_digest_pinned_image(&image) {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(image.len()),
+                            "stage image is not digest-pinned",
+                        ));
+                    }
+                    true
+                }
+                _ => {
+                    return Err(CanonicalError::new(
+                        reader.offset.saturating_sub(1),
+                        "invalid stage image marker",
+                    ));
+                }
+            }
+        } else {
+            false
+        };
         let stage_steps = reader.count(MAX_STEPS, "step")?;
         steps = steps
             .checked_add(stage_steps)
             .filter(|count| *count <= MAX_STEPS)
             .ok_or_else(|| CanonicalError::new(reader.offset, "total step count exceeds limit"))?;
         for step_index in 0..stage_steps {
-            match reader.u8()? {
+            let step_kind = reader.u8()?;
+            if container_stage && step_kind != 1 {
+                return Err(CanonicalError::new(
+                    reader.offset.saturating_sub(1),
+                    "a container stage may hold process steps only",
+                ));
+            }
+            match step_kind {
                 1 => {
                     let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
                     if schema.minor >= 2 {

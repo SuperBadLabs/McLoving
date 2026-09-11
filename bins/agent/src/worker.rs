@@ -58,6 +58,9 @@ const CANCELLATION_COMPLETION_PROTOCOL: &str = "cancellation";
 struct ExecutionSpec {
     version: u16,
     steps: Vec<ProcessSpec>,
+    /// Version-5 only: the digest-pinned image every step runs in (PAR-011).
+    #[serde(default)]
+    image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +181,8 @@ struct ValidatedAssignment {
     /// under per-step spools and step ordinals, and the journal records
     /// each step start before its spawn.
     multi_step: bool,
+    /// Digest-pinned image every step runs in under podman (PAR-011).
+    image: Option<String>,
 }
 
 /// One step's durable outcome inside a multi-step attempt, written into the
@@ -806,9 +811,17 @@ fn validate_assignment_with_features(
                     payload_digest,
                     steps: vec![process],
                     multi_step: false,
+                    image: None,
                 }))
             }
-            SpecClassification::Steps(steps) => {
+            SpecClassification::Steps { steps, image } => {
+                if image.is_some() && (!cfg!(unix) || config.podman_path.is_none()) {
+                    // Routing keeps image work away from agents without a
+                    // runtime; if it arrives anyway, another agent can run it.
+                    return Ok(AssignmentDisposition::ForAnotherRuntime(
+                        "container work requires an agent with a configured podman runtime",
+                    ));
+                }
                 if !features.multi_step {
                     // The capability is advertised at session open, before
                     // negotiation can tell this agent whether the controller
@@ -838,6 +851,7 @@ fn validate_assignment_with_features(
                     payload_digest,
                     steps,
                     multi_step: true,
+                    image,
                 }))
             }
             SpecClassification::Cache(intent) => {
@@ -871,6 +885,7 @@ fn validate_assignment_with_features(
                         payload_digest,
                         steps: vec![process],
                         multi_step: false,
+                        image: None,
                     }))
                 }
             }
@@ -905,6 +920,7 @@ fn validate_assignment_with_features(
                         payload_digest,
                         steps: vec![process],
                         multi_step: false,
+                        image: None,
                     }))
                 }
             }
@@ -928,8 +944,12 @@ enum SpecClassification {
     Input(InputIntentSpec),
     Cache(CacheIntentSpec),
     Process(ProcessSpec),
-    /// The version-5 multi-step envelope: ordered process steps of one stage.
-    Steps(Vec<ProcessSpec>),
+    /// The version-5 multi-step envelope: ordered process steps of one stage,
+    /// optionally all inside one digest-pinned image.
+    Steps {
+        steps: Vec<ProcessSpec>,
+        image: Option<String>,
+    },
     ForAnotherRuntime(&'static str),
     Unsupported(String),
 }
@@ -1050,7 +1070,7 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
         .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(5))
     {
         return match supported_multi_step_spec(execution_spec_json) {
-            Ok(steps) => SpecClassification::Steps(steps),
+            Ok((steps, image)) => SpecClassification::Steps { steps, image },
             Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
         };
     }
@@ -1063,7 +1083,9 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
 /// Classifies the version-5 envelope (PAR-010): one to sixteen bounded
 /// process steps, each held to exactly the per-step rules of the single-step
 /// contract. Every refusal is permanent for this payload.
-fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<Vec<ProcessSpec>, String> {
+fn supported_multi_step_spec(
+    execution_spec_json: &[u8],
+) -> Result<(Vec<ProcessSpec>, Option<String>), String> {
     use mcloving_domain::multi_step::MAX_STEPS_PER_STAGE;
     let spec: ExecutionSpec = serde_json::from_slice(execution_spec_json).map_err(|error| {
         format!("execution spec does not deserialize as a version-5 multi-step spec: {error}")
@@ -1117,7 +1139,12 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<Vec<ProcessSp
             union.len()
         ));
     }
-    Ok(spec.steps)
+    if let Some(image) = &spec.image
+        && !mcloving_domain::container::is_digest_pinned_image(image)
+    {
+        return Err("stage image is not a digest-pinned reference".to_owned());
+    }
+    Ok((spec.steps, spec.image))
 }
 
 /// The refusal reason is written twice into the durable result and sent as the
@@ -1500,6 +1527,22 @@ async fn run_assignment(
     let mut assignment = assignment;
     let mut steps = std::mem::take(&mut assignment.steps);
     let multi_step = assignment.multi_step;
+    // Validation admitted an image only with a configured runtime.
+    let container_runtime = assignment
+        .image
+        .as_ref()
+        .map(|image| {
+            config
+                .podman_path
+                .clone()
+                .map(|runtime| (runtime, image.clone()))
+                .ok_or_else(|| {
+                    AgentError::InvalidAssignment(
+                        "container stage reached an agent without a runtime".to_owned(),
+                    )
+                })
+        })
+        .transpose()?;
     if let Some(prepared) = &prepared_helper {
         let first = steps
             .first_mut()
@@ -1664,6 +1707,13 @@ async fn run_assignment(
                     None
                 },
                 step_ordinal: multi_step.then_some(ordinal),
+                container: container_runtime.as_ref().map(|(runtime, image)| {
+                    mcloving_agent_runtime::executor::ContainerSpec {
+                        runtime: runtime.clone(),
+                        image: image.clone(),
+                        name: format!("mcloving-{attempt}-{ordinal}"),
+                    }
+                }),
                 workspace_root: config.workspace_root.clone(),
                 workspace: assignment.workspace.clone(),
                 mode: match process.mode {
@@ -3504,6 +3554,7 @@ mod tests {
         AgentConfig {
             input_bindings: None,
             cache_bindings: None,
+            podman_path: None,
             agent_id: "agent-1".to_owned(),
             trust_pool: "trusted".to_owned(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),

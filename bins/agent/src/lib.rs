@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod cache;
+mod container;
 pub mod input;
 mod private_helper;
 mod worker;
@@ -51,6 +52,9 @@ const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 pub struct AgentConfig {
     pub input_bindings: Option<input::InputBindings>,
     pub cache_bindings: Option<cache::CacheBindings>,
+    /// Absolute path of the deployment-pinned podman binary (PAR-011).
+    /// Absent means this agent never advertises `container-podman-v1`.
+    pub podman_path: Option<PathBuf>,
     pub agent_id: String,
     pub trust_pool: String,
     pub organization_id: String,
@@ -276,6 +280,18 @@ impl AgentConfig {
                     return Err(AgentError::InvalidConfig("cache bindings path missing"));
                 }
                 None => None,
+            },
+            podman_path: match values.get("MCLOVING_AGENT_PODMAN_PATH") {
+                Some(path) if !path.trim().is_empty() => {
+                    let path = PathBuf::from(path);
+                    if !path.is_absolute() {
+                        return Err(AgentError::InvalidConfig(
+                            "MCLOVING_AGENT_PODMAN_PATH must be absolute",
+                        ));
+                    }
+                    Some(path)
+                }
+                _ => None,
             },
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
@@ -554,6 +570,7 @@ async fn open_session(
                 let mut values = session_capabilities();
                 values.extend(cache::scheduling_capabilities(config)?);
                 values.extend(input::scheduling_capabilities(config)?);
+                values.extend(container::scheduling_capabilities(config));
                 values
             },
         };
@@ -1312,6 +1329,7 @@ pub async fn run_execution_service_smoke(
     let request = ExecutionRequest {
         workspace_seed: None,
         step_ordinal: None,
+        container: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::Direct,
@@ -1376,6 +1394,7 @@ pub async fn run_creation_boundary_service_smoke(
     let request = ExecutionRequest {
         workspace_seed: None,
         step_ordinal: None,
+        container: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::PowerShell,

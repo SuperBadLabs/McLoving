@@ -839,3 +839,31 @@ exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
 not published when recovery completes a cancellation (`AGENT-008`), and
 hostile same-UID access to the relocated spools remains `SEC-005`.
 
+## PAR-011 container stage execution review, ticket ACTIVE
+
+A stage that names a digest-pinned image runs every step under rootless podman
+through the version-5 envelope. Boundaries touched: TM-003 (agent runtime: the
+podman client is the process-group leader, so lease, cancellation and timeout
+keep the existing group teardown proof); TM-005/TM-006 (execution and log
+evidence: the container's stdout and stderr are the step's spools; environment
+reaches the container by name only, so no secret value enters the podman
+argument vector); TM-023 and SEC-005 (workspace and host: only the attempt
+workspace is bind-mounted, at `/workspace`, and the host root, the service
+account's configuration directory, the journal and the mTLS key are not
+visible inside the container; this is partial containment because plain
+process steps still run on the host as the service account); TM-016 and
+TM-023 (supply chain: a tag reference is refused at compile, admission and
+execution, so only the exact image digest ever runs); TM-052 (routing: the
+`container-podman-v1` capability is advertised only when the deployment-pinned
+podman answers, and admission refuses container stages for Windows). After the
+group is empty the executor removes the named container and accepts only a
+`container exists` exit status of 1 as proof; anything else is unverified
+containment. Residual: `--userns=keep-id` maps the service account into the
+container, so a workload that escapes the container runtime holds the same
+identity as today; image pulls reach the registry the reference names under
+the deployment's network policy. Shipped-binary tests cover a step reading the
+image's os-release with the host root invisible, and a timed-out step whose
+container is proven gone. Closure requires the reviewed merge, exact-main
+Foundation and native Windows runs, and a receipt in
+`docs/evidence/PAR-011_SECURITY_REVIEW.md`.
+

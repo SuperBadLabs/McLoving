@@ -211,7 +211,7 @@ mod tests {
                 .is_err()
             );
         }
-        let spec = super::super::execution_spec(&p.stages[0].steps);
+        let spec = super::super::execution_spec(&p.stages[0]);
         assert_eq!(spec["version"], 3);
         assert_eq!(spec["steps"][0]["kind"], "cache_intent");
         let mut step = spec["steps"][0].as_object().unwrap().clone();

@@ -44,3 +44,6 @@ pub const IR_V1_3: SchemaVersion = SchemaVersion { major: 1, minor: 3 };
 pub const IR_V1_4: SchemaVersion = SchemaVersion { major: 1, minor: 4 };
 
 pub const IR_V1_5: SchemaVersion = SchemaVersion { major: 1, minor: 5 };
+
+/// Container stages: a stage may name a digest-pinned image (PAR-011).
+pub const IR_V1_6: SchemaVersion = SchemaVersion { major: 1, minor: 6 };

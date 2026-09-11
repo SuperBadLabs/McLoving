@@ -1,0 +1,18 @@
+# PAR-011 proof fixture: one stage inside a digest-pinned alpine image. The
+# first step prints the image's os-release; the second times out so that
+# `podman ps -a` on the agent host can be checked for a leftover container.
+version: 1
+name: parity-container-os-release
+stages:
+  - id: inside
+    name: Inside the image
+    image: docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "cat /etc/os-release"]
+          timeout_seconds: 120
+      - process:
+          program: /bin/sh
+          args: [-c, "sleep 300"]
+          timeout_seconds: 5

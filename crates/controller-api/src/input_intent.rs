@@ -194,7 +194,7 @@ mod tests {
                 .is_err()
             );
         }
-        let spec = super::super::execution_spec(&p.stages[0].steps);
+        let spec = super::super::execution_spec(&p.stages[0]);
         assert_eq!(spec["version"], 4);
         assert_eq!(spec["steps"][0]["kind"], "input_intent");
         let mut step = spec["steps"][0].as_object().unwrap().clone();
@@ -314,10 +314,7 @@ mod tests {
         mixed.stages.extend(process.stages);
         mixed.canonical_bytes().unwrap();
         for (stage, version) in mixed.stages.iter().zip([4, 3, 1]) {
-            assert_eq!(
-                super::super::execution_spec(&stage.steps)["version"],
-                version
-            );
+            assert_eq!(super::super::execution_spec(stage)["version"], version);
         }
         let plan = super::super::pipeline_plan(&mixed).unwrap();
         let mut old = serde_json::to_value(plan).unwrap();

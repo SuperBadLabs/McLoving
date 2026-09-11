@@ -430,6 +430,7 @@ pub async fn run_claim(
     let request = ExecutionRequest {
         workspace_seed: None,
         step_ordinal: None,
+        container: None,
         workspace_root: config.workspace_root.clone(),
         workspace: workspace.clone(),
         mode: match process.mode {
