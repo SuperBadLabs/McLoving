@@ -6250,10 +6250,22 @@ fn log_response(entry: mcloving_controller_store::CommittedLog) -> LogResponse {
     }
 }
 
-/// Whether a build may still commit log chunks. Anything past queued or
-/// running is terminal for a follower's purposes.
+/// Whether a build may still commit log chunks: anything not terminal. A
+/// build parked in `reconciliation_required` is not terminal (the retry
+/// path can queue another attempt on it), so a follower stays attached to
+/// it; the vocabulary matches the CLI's terminal-status rule.
 fn build_is_live(status: &str) -> bool {
-    matches!(status, "queued" | "running")
+    !matches!(
+        status,
+        "succeeded"
+            | "failed"
+            | "cancelled"
+            | "canceled"
+            | "aborted"
+            | "timed_out"
+            | "dead_lettered"
+            | "completed"
+    )
 }
 
 /// The follower's read (PAR-013): chunks after one build-scoped position in commit
@@ -7580,6 +7592,22 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_follower_stays_attached_to_every_non_terminal_build_status() {
+        for live in ["queued", "running", "reconciliation_required"] {
+            assert!(super::build_is_live(live), "{live}");
+        }
+        for terminal in [
+            "succeeded",
+            "failed",
+            "aborted",
+            "cancelled",
+            "dead_lettered",
+        ] {
+            assert!(!super::build_is_live(terminal), "{terminal}");
+        }
+    }
+
     use super::*;
     use std::collections::BTreeSet;
 
