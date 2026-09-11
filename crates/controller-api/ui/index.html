@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>McLoving</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -50,11 +51,13 @@
           <option value="aborted">cancelled</option>
         </select>
       </label>
-      <table>
-        <caption>Recent builds</caption>
-        <thead><tr><th>Build</th><th>Status</th><th>Created</th><th>Open</th></tr></thead>
-        <tbody id="build-list"></tbody>
-      </table>
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Recent builds table">
+        <table>
+          <caption>Recent builds</caption>
+          <thead><tr><th>Build</th><th>Status</th><th>Created</th><th>Open</th></tr></thead>
+          <tbody id="build-list"></tbody>
+        </table>
+      </div>
     </section>
 
     <section id="pipeline-view" class="view panel hidden" aria-labelledby="pipeline-heading">

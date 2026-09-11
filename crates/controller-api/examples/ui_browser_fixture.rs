@@ -1,9 +1,12 @@
 use axum::Json;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::{Json as JsonBody, Query};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use mcloving_controller_api::static_ui_router;
+use mcloving_pipeline_ir::{ParseLimits, compile_strict_yaml_with_parameters};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 const ORGANIZATION: &str = "11111111-1111-4111-8111-111111111111";
 const PROJECT: &str = "22222222-2222-4222-8222-222222222222";
@@ -31,6 +34,7 @@ async fn main() {
         .route(&format!("{build}/logs"), get(logs))
         .route(&format!("{build}/tests"), get(tests))
         .route(&format!("{build}/artifacts"), get(artifacts))
+        .route(&format!("{build}/artifacts/content"), get(artifact_content))
         .route(&format!("{build}/approvals"), get(approvals).post(approve))
         .route(&format!("{build}/cancel"), post(cancel))
         .route(
@@ -128,10 +132,66 @@ fn state_record(state: &str, generation: i64) -> Value {
     })
 }
 
-async fn validate(headers: HeaderMap) -> impl IntoResponse {
-    authorized(
-        &headers,
-        json!({"valid": true, "semantic_digest": "ab".repeat(32)}),
+// The browser gate has to prove that a strict-YAML refusal reaches the user, so
+// this route cannot answer `valid: true` unconditionally the way the rest of the
+// fixture stubs its responses. It compiles the submitted source through the same
+// `compile_strict_yaml_with_parameters` entry point the shipped
+// `validate_pipeline` handler uses, and reproduces that handler's rejection
+// envelope -- 422 with `pipeline_rejected` and the compiler's own message -- so
+// what the client renders is the production parser's verdict and wording rather
+// than an error this fixture invented.
+async fn validate(headers: HeaderMap, body: Option<JsonBody<Value>>) -> Response {
+    if let Some(denial) = unauthorized(&headers) {
+        return denial;
+    }
+    match compile_submitted_source(body) {
+        Ok(pipeline) => match pipeline.semantic_digest_hex() {
+            Ok(digest) => Json(json!({"valid": true, "semantic_digest": digest})).into_response(),
+            Err(error) => pipeline_rejected(&error.to_string()),
+        },
+        Err(message) => pipeline_rejected(&message),
+    }
+}
+
+fn compile_submitted_source(
+    body: Option<JsonBody<Value>>,
+) -> Result<mcloving_pipeline_ir::PipelineIr, String> {
+    let source = body
+        .as_ref()
+        .and_then(|JsonBody(value)| value.get("source"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "request body must carry a pipeline source string".to_owned())?;
+    compile_strict_yaml_with_parameters(
+        "public-api",
+        source,
+        ParseLimits::default(),
+        BTreeMap::new(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn pipeline_rejected(message: &str) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"code": "pipeline_rejected", "message": message})),
+    )
+        .into_response()
+}
+
+fn unauthorized(headers: &HeaderMap) -> Option<Response> {
+    let expected = format!("Bearer {TOKEN}");
+    let presented = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    if presented == Some(expected.as_str()) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"code": "unauthorized", "message": "token required"})),
+        )
+            .into_response(),
     )
 }
 
@@ -196,8 +256,87 @@ async fn tests(headers: HeaderMap) -> impl IntoResponse {
     )
 }
 
+// The listing and the content route are driven from ONE table, and the content
+// route resolves it the way production does.
+//
+// `ArtifactQuery` carries only `attempt_id` and `name`, and `find_artifact`
+// takes the FIRST match with no fence in the predicate or the ordering. A
+// fixture that answered a fence-specific record for that query would manufacture
+// behaviour the shipped controller does not have, and the gate would stay green
+// on it.
+//
+// `report.txt` appears twice, sharing an attempt and a name and differing only
+// by fence, because that pair is what makes the client's focus key -- which does
+// carry the fence -- load-bearing. It is deliberately ambiguous to the download
+// query, and the shipped client cannot disambiguate it; that is a real client
+// limitation, filed separately rather than papered over here. `build.log` is
+// uniquely named, so it is the row the delivery journey uses.
+fn artifact_table() -> Vec<(&'static str, i64, &'static str)> {
+    vec![
+        ("report.txt", 1, "twelve bytes"),
+        ("build.log", 1, "browser fixture build log\n"),
+        ("report.txt", 2, "browser fixture artifact bytes\n123"),
+    ]
+}
+
 async fn artifacts(headers: HeaderMap) -> impl IntoResponse {
-    authorized(&headers, json!([]))
+    let items: Vec<Value> = artifact_table()
+        .into_iter()
+        .map(|(name, fence, body)| {
+            json!({
+                "build_id": BUILD,
+                "node_id": "55555555-5555-4555-8555-555555555555",
+                "attempt_id": ATTEMPT,
+                "fence": fence,
+                "name": name,
+                "sha256": "11".repeat(32),
+                "bytes": body.len(),
+                "media_type": "text/plain",
+                "status": "available"
+            })
+        })
+        .collect();
+    authorized(&headers, Value::Array(items))
+}
+
+// Resolved exactly as `find_artifact` resolves it: first record matching the
+// attempt and name, fence ignored. For `report.txt` that is the fence-1 record,
+// not the fence-2 one the user may have clicked -- which is the production
+// behaviour, faithfully reproduced rather than corrected here.
+async fn artifact_content(
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    if let Some(denial) = unauthorized(&headers) {
+        return denial;
+    }
+    if query.get("attempt_id").map(String::as_str) != Some(ATTEMPT) {
+        return artifact_not_found(&query);
+    }
+    let requested = query.get("name").map(String::as_str).unwrap_or_default();
+    match artifact_table()
+        .into_iter()
+        .find(|(name, _, _)| *name == requested)
+    {
+        Some((_, _, body)) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            body,
+        )
+            .into_response(),
+        None => artifact_not_found(&query),
+    }
+}
+
+fn artifact_not_found(query: &BTreeMap<String, String>) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "code": "artifact_not_found",
+            "message": format!("no artifact for {query:?}")
+        })),
+    )
+        .into_response()
 }
 
 async fn approvals(headers: HeaderMap) -> impl IntoResponse {

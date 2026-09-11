@@ -26,7 +26,8 @@ button {
   border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink);
   padding: .65rem .9rem; font: inherit; font-weight: 700; cursor: pointer;
 }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible,
+.table-scroll:focus-visible {
   outline: 3px solid #6fb7ff; outline-offset: 2px;
 }
 label { display: grid; gap: .35rem; margin-bottom: .8rem; color: var(--muted); }
@@ -36,7 +37,8 @@ input, textarea, select {
 }
 form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; }
 form label:has(textarea) { grid-column: 1 / -1; }
-.actions { display: flex; gap: .5rem; align-items: end; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
+.table-scroll { overflow-x: auto; }
 .hint { color: var(--muted); font-size: .85rem; }
 .hidden { display: none; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
