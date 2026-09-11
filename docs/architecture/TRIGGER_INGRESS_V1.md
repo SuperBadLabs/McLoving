@@ -236,9 +236,12 @@ time before it interprets anything; a forged or unsigned delivery is refused
 with 401 and leaves no receipt. The body is bounded at GitHub's own 25 MiB
 payload maximum, so no delivery GitHub can send is refused unread, and the
 route holds at most eight deliveries in flight, the permit taken before any
-body is buffered, so an unauthenticated sender can pin at most eight bodies
-in memory; a saturated route answers 503 `webhook_busy` with `Retry-After`
-and reads nothing, and the refused delivery is redeliverable. The OpenAPI
+body is buffered and released at a 30-second deadline, so an
+unauthenticated sender can pin at most eight bodies in memory and none of
+them for longer than the deadline; a saturated route answers 503
+`webhook_busy` with `Retry-After` and reads nothing, a delivery that
+outlives the deadline answers 408 `webhook_timeout`, and either refused
+delivery is redeliverable. The OpenAPI
 operation `receiveGithubDelivery` declares the three headers, the
 `GithubDelivery` body and the 200/201/202/422 answers. The secret-bearing
 `GET .../webhook` answer is marked `Cache-Control: no-store`. A `push` to a
@@ -284,9 +287,9 @@ rather than as a delivery row. A delivery id's first authenticated decision
 is durable: admitted ids live in `trigger_deliveries`, unadmitted ids in
 `webhook_receipts`, both written under the trigger lock with each write
 refusing an id the other holds across both the delivery and the event
-identifier namespaces (acceptance checks receipts on every path and timing,
-the bearer route included), so two concurrent first deliveries cannot be
-decided twice; a receipt carries the trigger generation whose filter and
+identifier namespaces (acceptance and redrive check receipts on every path
+and timing, the bearer route included), so two concurrent first deliveries
+cannot be decided twice; a receipt carries the trigger generation whose filter and
 state decided it and is refused under the lock if the trigger was revised
 meanwhile, so a stale decision never bars an id from admission under the new
 filter; a repeat of an unadmitted delivery with the same event header

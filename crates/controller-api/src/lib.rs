@@ -102,6 +102,10 @@ pub struct ApiState {
     /// signature over the whole body is checked, so its memory is bounded by
     /// permits times the body limit rather than by whoever connects.
     webhook_deliveries: Arc<tokio::sync::Semaphore>,
+    /// How long one public webhook delivery may hold its permit, from the
+    /// first body byte to the response: a sender that withholds or trickles
+    /// a body cannot pin a permit past this.
+    webhook_delivery_deadline: Duration,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -211,6 +215,7 @@ impl ApiState {
             webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
                 github_webhook::MAX_CONCURRENT_DELIVERIES,
             )),
+            webhook_delivery_deadline: github_webhook::DELIVERY_DEADLINE,
         })
     }
 
@@ -237,6 +242,7 @@ impl ApiState {
             webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
                 github_webhook::MAX_CONCURRENT_DELIVERIES,
             )),
+            webhook_delivery_deadline: github_webhook::DELIVERY_DEADLINE,
         }
     }
 
@@ -414,6 +420,18 @@ impl ApiState {
             ));
         }
         self.webhook_deliveries = Arc::new(tokio::sync::Semaphore::new(limit));
+        Ok(self)
+    }
+
+    /// Bounds how long one public webhook delivery may hold its permit
+    /// (default [`github_webhook::DELIVERY_DEADLINE`]).
+    pub fn with_webhook_delivery_deadline(mut self, deadline: Duration) -> Result<Self, ApiError> {
+        if deadline.is_zero() {
+            return Err(ApiError::configuration(
+                "webhook delivery deadline must be positive",
+            ));
+        }
+        self.webhook_delivery_deadline = deadline;
         Ok(self)
     }
 

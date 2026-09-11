@@ -2607,6 +2607,24 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             .await,
         Err(StoreError::TriggerIngressConflict(_))
     ));
+    // A redrive may not mint its new identifiers onto an acknowledged id.
+    assert!(matches!(
+        store
+            .redrive_trigger_delivery(&TriggerDeliveryRedrive {
+                organization_id,
+                project_id,
+                pipeline_id,
+                trigger_id,
+                dead_letter_delivery_id: "dead-1".to_owned(),
+                new_delivery_id: "hook-ignored-1".to_owned(),
+                new_event_id: "redrive-event-onto-receipt".to_owned(),
+                actor_subject: "recovery@example.test".to_owned(),
+                accepted_at_unix_ms: handoff_now,
+            })
+            .await,
+        Err(StoreError::TriggerIngressConflict(message))
+            if message.contains("acknowledged as unadmitted")
+    ));
     let trusted_handoff_audit_hash = handoff.audit_event_hash;
     verify_trigger_transfer_snapshot(&handoff, trusted_handoff_audit_hash)
         .expect("verify handoff snapshot against independently retained audit hash");

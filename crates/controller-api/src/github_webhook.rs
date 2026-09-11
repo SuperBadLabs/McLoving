@@ -43,6 +43,11 @@ pub(super) const MAX_DELIVERY_BODY_BYTES: usize = 25 * 1024 * 1024;
 /// retry. GitHub does not retry on its own, but a refused delivery is
 /// redeliverable and replays exactly once admitted.
 pub(super) const MAX_CONCURRENT_DELIVERIES: usize = 8;
+/// Longest one delivery may hold a permit, body read included. GitHub
+/// delivers from its own infrastructure in well under this; a sender that
+/// opens a request and withholds or trickles the body loses the permit at
+/// the deadline instead of pinning it.
+pub(super) const DELIVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 /// Shortest webhook key file accepted, in bytes.
 pub(super) const MIN_WEBHOOK_KEY_BYTES: usize = 32;
 const SIGNATURE_HEADER: &str = "x-hub-signature-256";
@@ -308,8 +313,11 @@ fn replay_receipt(
 }
 
 /// Route middleware: takes a delivery permit before the request body is
-/// buffered and holds it until the response is produced. A saturated route
-/// answers 503 `webhook_busy` with `Retry-After` and reads nothing.
+/// buffered and holds it until the response is produced or the delivery
+/// deadline passes. A saturated route answers 503 `webhook_busy` with
+/// `Retry-After` and reads nothing; a delivery that outlives the deadline
+/// (a withheld or trickled body) answers 408 `webhook_timeout` and releases
+/// its permit, so no sender can pin the route's permits indefinitely.
 pub(super) async fn bound_deliveries(
     State(state): State<Arc<ApiState>>,
     request: Request,
@@ -327,7 +335,15 @@ pub(super) async fn bound_deliveries(
             .insert(RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
         return response;
     };
-    next.run(request).await
+    match tokio::time::timeout(state.webhook_delivery_deadline, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => ApiError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "webhook_timeout",
+            "the delivery was not received within the deadline",
+        )
+        .into_response(),
+    }
 }
 
 fn webhooks_not_configured() -> ApiError {
@@ -840,6 +856,76 @@ mod tests {
         assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
         let third = app.oneshot(request()).await.unwrap();
         assert_eq!(third.status(), StatusCode::OK, "the permit is released");
+    }
+
+    #[tokio::test]
+    async fn a_delivery_that_outlives_the_deadline_releases_its_permit() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::post;
+        use std::sync::Mutex;
+        use tower::ServiceExt as _;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        let principal = Principal {
+            subject: "service:webhook-test".to_owned(),
+            kind: mcloving_controller_store::authz::PrincipalKind::Service,
+            organization_id: Uuid::new_v4(),
+            project_roles: Default::default(),
+            service_scopes: Default::default(),
+            mapped_projects: Default::default(),
+            action_grants: Default::default(),
+        };
+        let state = Arc::new(
+            ApiState::new(
+                mcloving_controller_store::Store::new(pool),
+                "webhook-test-bearer-token-at-least-32-bytes",
+                principal,
+            )
+            .expect("construct state")
+            .with_webhook_delivery_limit(1)
+            .expect("one permit")
+            .with_webhook_delivery_deadline(std::time::Duration::from_millis(50))
+            .expect("short deadline"),
+        );
+        // The first request never finishes reading (its body future never
+        // resolves); the deadline must release the permit for the second.
+        let (_hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        let hold = Arc::new(Mutex::new(Some(hold_rx)));
+        let app = Router::new()
+            .route(
+                "/hook",
+                post(move || {
+                    let hold = hold.clone();
+                    async move {
+                        let hold = hold.lock().unwrap().take();
+                        if let Some(hold) = hold {
+                            let _ = hold.await;
+                        }
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                bound_deliveries,
+            ))
+            .with_state(state);
+        let request = || {
+            axum::http::Request::post("/hook")
+                .body(Body::from("{}"))
+                .unwrap()
+        };
+        let stalled = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(stalled.status(), StatusCode::REQUEST_TIMEOUT);
+        let next = app.oneshot(request()).await.unwrap();
+        assert_eq!(
+            next.status(),
+            StatusCode::OK,
+            "the deadline released the permit"
+        );
     }
 
     #[test]

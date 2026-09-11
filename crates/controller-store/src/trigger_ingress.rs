@@ -2197,6 +2197,26 @@ impl Store {
             tx.commit().await?;
             return Ok(TriggerDeliveryAdmission::Replayed(replay));
         }
+        // The redrive's new identifiers are new admissions: an id the webhook
+        // receiver already acknowledged as unadmitted is refused here as it
+        // is in acceptance, under the same trigger lock.
+        let acknowledged = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM webhook_receipts
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND delivery_id IN ($3, $4)",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.new_delivery_id)
+        .bind(&input.new_event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if acknowledged.is_some() {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "redrive delivery or event ID was already acknowledged as unadmitted".to_owned(),
+            ));
+        }
         let trigger = sqlx::query(
             "SELECT definition.current_generation, version.state,
                     version.event_source_identity

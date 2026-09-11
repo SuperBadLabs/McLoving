@@ -904,9 +904,10 @@ controller's webhook key file and the trigger's identity and
 `source_generation`, never stored, rotated by event-source rotation, and
 verified before any byte of the body is interpreted, so a forged delivery
 leaves no receipt; deliveries in flight are bounded to eight, the permit
-taken before the body is buffered, so an unauthenticated sender pins at
-most eight bodies of the 25 MiB bound in memory and a saturated route
-answers 503 without reading; the key file is secret-class and nofollow in
+taken before the body is buffered and released at a 30-second deadline, so
+an unauthenticated sender pins at most eight bodies of the 25 MiB bound in
+memory and none past the deadline, a saturated route answers 503 without
+reading and a stalled body 408; the key file is secret-class and nofollow in
 the deployment contract, opened without following symlinks, and refused
 unless owner-private; the secret-bearing read answer is `no-store`); TM-052 (routing: the receiver answers
 only enabled-or-paused `scm_webhook` triggers whose configuration names
