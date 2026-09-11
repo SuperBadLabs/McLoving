@@ -602,6 +602,7 @@ had never claimed one.
 | TRIG-001 | `docs/evidence/TRIG-001_SECURITY_REVIEW.md` |
 | UI-002 | `docs/evidence/UI-002_SECURITY_REVIEW.md` |
 | PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
+| PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -804,7 +805,7 @@ not what any executable does. Every threat row was reviewed and needs no
 semantic change. Residual: the parity tickets that follow each carry their own
 review before closure.
 
-## PAR-010 multi-step stage execution review, ticket ACTIVE
+## PAR-010 multi-step stage execution review (earned closure)
 
 The version-5 envelope runs one to sixteen ordered process steps of one stage
 inside one attempt. Boundaries touched: TM-003 (agent runtime and lease: one
@@ -823,6 +824,18 @@ terminally). Crash between a step's exit and its finalization parks the attempt
 reconciliation-required naming the step; nothing is re-run or skipped. Focused
 unit tests and the shipped controller/agent integration tests cover the ordered
 run, the first-failure stop, the capability requirement and the exact crash
-point. Closure requires the reviewed merge, exact-main Foundation and native
-Windows runs, and a receipt in `docs/evidence/PAR-010_SECURITY_REVIEW.md`.
+point. Review on PR #145 added: attempt terminals and exit codes derived from
+the last step record, Linux-only admission for multi-step stages, ordinal-0
+records for a first step that never spawned, controller cancellation kept
+distinct from lease loss, finished-step spools relocated by rename into one
+deterministic agent-owned directory that terminal reclaim removes, per-step
+descriptors journaled in one transaction before the next spawn, redaction
+against the union of attempt credentials with the union bounded at eight,
+version-5 work declined rather than refused for a session that did not
+negotiate the feature, and byte-identical initial and replayed summaries.
+Closed on squash merge `cca42de59271820826248c35ed195e8e81e637a6` with
+exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
+`docs/evidence/PAR-010_SECURITY_REVIEW.md`. Residual: journaled step logs are
+not published when recovery completes a cancellation (`AGENT-008`), and
+hostile same-UID access to the relocated spools remains `SEC-005`.
 
