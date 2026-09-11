@@ -369,7 +369,9 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # joins the product-hardening table, so EXPECTED_TABLES does not move.
 # 138 -> 139 on 2026-09-11 with `AGENT-009`, filed from PAR-011 review at
 # the ten-round cap: same table, EXPECTED_TABLES does not move.
-MINIMUM_TICKET_ROWS = 139
+# 139 -> 140 on 2026-09-11 with `AGENT-010`, filed from PAR-012 review past
+# the ten-round cap: same table, EXPECTED_TABLES does not move.
+MINIMUM_TICKET_ROWS = 140
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
