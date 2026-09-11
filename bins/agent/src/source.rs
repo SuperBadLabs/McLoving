@@ -660,7 +660,7 @@ mod linux {
         pub fn publish(
             &self,
             workspace: &Path,
-            interrupted: &dyn Fn() -> bool,
+            interrupted: &(dyn Fn() -> bool + Sync),
         ) -> Result<PublishedCheckout, PublishFailure> {
             let receipt = self
                 .verified
@@ -694,6 +694,7 @@ mod linux {
                         &self.binding.executable_sha256,
                         &self.signing_key,
                         &receipt,
+                        interrupted,
                     ),
                 )
             {
@@ -749,7 +750,7 @@ mod linux {
         workspace: &Path,
         destination: &str,
         walk_budget: usize,
-        interrupted: &dyn Fn() -> bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), PublishFailure> {
         match move_verified_tree(
             acquisition,
@@ -773,7 +774,7 @@ mod linux {
         workspace: &Path,
         destination: &str,
         walk_budget: usize,
-        interrupted: &dyn Fn() -> bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), String> {
         if interrupted() {
             return Err("checkout_publication_interrupted".to_owned());
@@ -1088,7 +1089,7 @@ mod linux {
     fn make_owner_writable(
         directory: OwnedFd,
         budget: &mut usize,
-        interrupted: &dyn Fn() -> bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), String> {
         use nix::dir::{Dir, Type};
         use nix::fcntl::{OFlag, openat};

@@ -243,7 +243,7 @@ impl PreparedHelper {
     pub fn complete(
         &self,
         workspace: &Path,
-        interrupted: &dyn Fn() -> bool,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<Option<String>, HelperFailure> {
         match self {
             Self::Cache(_) | Self::Input(_) => {

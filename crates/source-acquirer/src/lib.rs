@@ -2431,6 +2431,7 @@ impl SourceAcquirer {
             &self.implementation_sha256,
             &self.signing_key,
             receipt,
+            &|| false,
         )
         .await
     }
@@ -2442,13 +2443,17 @@ impl SourceAcquirer {
     /// file, link and submodule entry, and the tree's exact inventory. The
     /// caller that launched the sealed helper verifies the tree with the
     /// same material it configured the helper with, immediately before it
-    /// publishes the tree (PAR-012).
+    /// publishes the tree (PAR-012). Files are hashed by bounded streaming,
+    /// never buffered whole; `interrupted` is consulted per entry and per
+    /// streamed chunk and ends verification as an expired request, so a
+    /// caller's deadline or cancellation bounds the whole scan.
     pub async fn verify_retained_acquisition(
         config: &SourceConfig,
         config_sha256: &str,
         implementation_sha256: &str,
         signing_key: &[u8],
         receipt: &AcquisitionReceipt,
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), SourceError> {
         receipt_auth::authenticate_authority(
             config,
@@ -2474,7 +2479,7 @@ impl SourceAcquirer {
         {
             return Err(SourceError::InvalidStoredReceipt);
         }
-        Self::verify_materialized_tree(config, receipt, &entries).await?;
+        Self::verify_materialized_tree(config, receipt, &entries, interrupted).await?;
         Ok(())
     }
 
@@ -2482,6 +2487,7 @@ impl SourceAcquirer {
         config: &SourceConfig,
         receipt: &AcquisitionReceipt,
         entries: &[ManifestEntry],
+        interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), SourceError> {
         if entries.windows(2).any(|pair| pair[0].path >= pair[1].path) {
             return Err(SourceError::InvalidStoredReceipt);
@@ -2509,6 +2515,9 @@ impl SourceAcquirer {
         let mut expected_directories = BTreeSet::new();
         let mut total_bytes = 0_u64;
         for entry in entries {
+            if interrupted() {
+                return Err(SourceError::ExpiredRequest);
+            }
             validate_relative_path(&entry.path, config.max_path_bytes)
                 .map_err(|_| SourceError::InvalidStoredReceipt)?;
             if !is_object_id(&entry.git_object_id)
@@ -2530,15 +2539,10 @@ impl SourceAcquirer {
                         0o400
                     };
                     validate_retained_metadata(&metadata, false, expected_mode)?;
-                    let bytes = read_bounded_regular_file(
-                        &path,
-                        usize::try_from(config.max_file_bytes).unwrap_or(usize::MAX),
-                    )
-                    .await
-                    .map_err(|_| SourceError::InvalidStoredReceipt)?;
-                    if u64::try_from(bytes.len()).ok() != Some(entry.bytes)
-                        || sha256_hex(&bytes) != entry.sha256
-                    {
+                    let (length, digest) =
+                        sha256_bounded_regular_file(&path, config.max_file_bytes, interrupted)
+                            .await?;
+                    if length != entry.bytes || digest != entry.sha256 {
                         return Err(SourceError::InvalidStoredReceipt);
                     }
                     total_bytes = total_bytes
@@ -2580,7 +2584,15 @@ impl SourceAcquirer {
         if total_bytes != receipt.materialized_bytes {
             return Err(SourceError::InvalidStoredReceipt);
         }
-        let (actual_leaves, actual_directories) = inventory_materialized_tree(&tree_root).await?;
+        // The inventory can hold every admitted file plus every ancestor
+        // directory a path of the admitted length can have, plus the
+        // submodule roots, exactly as acquisition admitted them.
+        let inventory_bound = config
+            .max_files
+            .saturating_mul(config.max_path_bytes / 2 + 1)
+            .saturating_add(config.max_submodules);
+        let (actual_leaves, actual_directories) =
+            inventory_materialized_tree(&tree_root, inventory_bound, interrupted).await?;
         let expected_non_directory_leaves = entries
             .iter()
             .filter(|entry| entry.git_mode != "160000")
@@ -3265,6 +3277,55 @@ pub async fn read_bounded_regular_file(
     read_bounded(file, max_bytes)
         .await
         .map_err(|_| SourceError::StateUnavailable)
+}
+
+/// Length and SHA-256 of a regular file, hashed through a bounded stream
+/// rather than buffered whole, refusing a link, a non-file, or a file longer
+/// than `max_bytes`; `interrupted` is consulted per chunk.
+async fn sha256_bounded_regular_file(
+    path: &Path,
+    max_bytes: u64,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<(u64, String), SourceError> {
+    use tokio::io::AsyncReadExt as _;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(path)
+        .await
+        .map_err(|_| SourceError::InvalidStoredReceipt)?;
+    let opened = file
+        .metadata()
+        .await
+        .map_err(|_| SourceError::InvalidStoredReceipt)?;
+    if !opened.file_type().is_file() || opened.len() > max_bytes {
+        return Err(SourceError::InvalidStoredReceipt);
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 256 * 1_024];
+    loop {
+        if interrupted() {
+            return Err(SourceError::ExpiredRequest);
+        }
+        let count = file
+            .read(&mut buffer)
+            .await
+            .map_err(|_| SourceError::InvalidStoredReceipt)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .filter(|total| *total <= max_bytes)
+            .ok_or(SourceError::InvalidStoredReceipt)?;
+        hasher.update(&buffer[..count]);
+    }
+    Ok((total, format!("{:x}", hasher.finalize())))
 }
 
 pub async fn read_private_bounded_regular_file(
@@ -4557,6 +4618,8 @@ fn validate_retained_metadata(
 
 async fn inventory_materialized_tree(
     root: &Path,
+    bound: usize,
+    interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<(BTreeSet<String>, BTreeSet<String>), SourceError> {
     let mut leaves = BTreeSet::new();
     let mut directory_paths = BTreeSet::new();
@@ -4573,6 +4636,9 @@ async fn inventory_materialized_tree(
             .await
             .map_err(|_| SourceError::InvalidStoredReceipt)?
         {
+            if interrupted() {
+                return Err(SourceError::ExpiredRequest);
+            }
             let path = entry.path();
             let relative = path
                 .strip_prefix(root)
@@ -4592,9 +4658,7 @@ async fn inventory_materialized_tree(
             } else {
                 return Err(SourceError::InvalidStoredReceipt);
             }
-            if leaves.len().saturating_add(directory_paths.len())
-                > MAX_CONFIGURED_FILES.saturating_add(MAX_CONFIGURED_SUBMODULES)
-            {
+            if leaves.len().saturating_add(directory_paths.len()) > bound {
                 return Err(SourceError::InvalidStoredReceipt);
             }
         }

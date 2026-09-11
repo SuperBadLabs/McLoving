@@ -90,7 +90,9 @@ before publication, with the acquisition directory handle open, the retained
 acquisition itself is verified with the acquirer's own routine
 (`verify_retained_acquisition`): the retained directory and file modes, the
 manifest digest, every materialized file, link and submodule entry byte for
-byte against the manifest, and the tree's exact inventory; a tree that no
+byte against the manifest through bounded streaming rather than whole-file
+buffers, and the tree's exact inventory bounded as acquisition admitted it;
+the step's deadline and cancellation end the scan as well. A tree that no
 longer matches is refused as `checkout_tree_unverified` and discarded. Only a typed
 public summary (`mcloving.source-invocation/v1`: invocation id, mapping id,
 acquisition id, destination, outcome, resolved commit and tree, file, byte and
