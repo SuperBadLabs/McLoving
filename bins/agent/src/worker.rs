@@ -642,20 +642,37 @@ async fn replay_finalization(
     // unreceipted ranges and the unstreamed tail) before the cancellation
     // completes, so the interrupted step's output is not stranded.
     let interrupted_ordinal = attempt.current_step.unwrap_or(0);
-    let live_spool = match attempt.current_step {
+    // A multi-step crash can also fall between the finished step's spool
+    // relocation and its journaling: the files then sit under the
+    // deterministic relocated step directory with `current_step` still set,
+    // so both places are probed, the live one first.
+    let mut candidates = vec![match attempt.current_step {
         Some(step) => attempt.workspace.join("spool").join(format!("step-{step}")),
         None => attempt.workspace.join("spool"),
-    };
+    }];
+    if let Some(step) = attempt.current_step {
+        candidates.push(step_spool_area(&attempt.workspace).join(format!("step-{step}")));
+    }
     for stream in ["stdout", "stderr"] {
         if journaled.contains(&(interrupted_ordinal, stream)) {
             continue;
         }
-        let relative_path = live_spool.join(format!("{stream}.log"));
-        let path = config.workspace_root.join(&relative_path);
-        let Ok(metadata) = fs::symlink_metadata(&path).await else {
+        let mut located = None;
+        for directory in &candidates {
+            let relative_path = directory.join(format!("{stream}.log"));
+            let path = config.workspace_root.join(&relative_path);
+            if let Ok(metadata) = fs::symlink_metadata(&path).await
+                && metadata.is_file()
+                && !is_link_or_reparse_point(&metadata)
+            {
+                located = Some((relative_path, path, metadata));
+                break;
+            }
+        }
+        let Some((relative_path, path, metadata)) = located else {
             continue;
         };
-        if !metadata.is_file() || metadata.len() == 0 {
+        if metadata.len() == 0 {
             continue;
         }
         let entry = SpoolEntry {

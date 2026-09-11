@@ -380,9 +380,11 @@ discharge a parked reconciliation).
   reserved, unsent chunk; on restart the recovered attempt is quiesced and
   reported as interrupted as before, and before its cancellation completes
   the agent, under the renewed lease the controller still retains for it,
-  publishes the interrupted step's live spool from its reservations (the
-  unreceipted ranges and the unstreamed tail), so the output up to the
-  quiesce is in the ledger; if the lease was reclaimed meanwhile, the chunks
+  publishes the interrupted step's spool from its reservations (the
+  unreceipted ranges and the unstreamed tail), probing the live step
+  directory first and then the relocated one, since a multi-step crash may
+  fall between a finished step's relocation and its journaling, so the
+  output up to the quiesce is in the ledger; if the lease was reclaimed meanwhile, the chunks
   already accepted stay exactly once.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
