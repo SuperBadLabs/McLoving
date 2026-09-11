@@ -152,7 +152,10 @@ sha256=<HMAC-SHA256 of the exact body under the notification key>`,
 build that becomes terminal again starts a new generation, so a receiver
 can tell its outcomes apart; a delivery from an older generation that lands
 while or after the newer generation delivers makes the newer one post once
-more, so the last write at a target is the latest outcome),
+more, and an attempt recorded in flight when the build becomes terminal
+again delays the new outcome's first post past that attempt's deadline, so
+the last write at a target is the latest outcome even across a controller
+crash),
 `X-McLoving-Attempt` and
 `X-McLoving-Event: build.terminal`. Before either connects, the destination
 host is resolved and every address is checked against the loopback,

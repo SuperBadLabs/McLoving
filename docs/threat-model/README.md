@@ -1106,7 +1106,10 @@ is off every scan until due, settlement is keyed on the claim's terminal
 generation and attempt count so an overtaken worker's answer, or one from
 before an operator retry made the build terminal again, is dropped and the
 newer generation is posted once more (re-queued if delivered, marked for a
-re-post if in flight) so its outcome is written last, the resolved targets are part of
+re-post if in flight) so its outcome is written last, and an attempt is
+recorded in flight before its request is sent so a build that becomes
+terminal again meanwhile delays its new outcome past that attempt's
+deadline whether or not the controller lives to settle it, the resolved targets are part of
 the build's replay contract so catalog drift between controllers is an
 idempotency conflict rather than a race, a commit status is held by the
 latest build for its repository, commit and context so an earlier build's

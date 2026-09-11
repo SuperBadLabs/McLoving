@@ -3533,6 +3533,7 @@ impl Store {
              claimed AS (
                  UPDATE notification_deliveries AS d
                  SET attempts = d.attempts + 1,
+                     in_flight = false,
                      next_attempt_at = clock_timestamp() + make_interval(secs => $3)
                  FROM due
                  WHERE d.organization_id = due.organization_id
@@ -3639,6 +3640,7 @@ impl Store {
                          + make_interval(secs => LEAST(power(2, attempts), $7))
                  END,
                  repost_required = false,
+                 in_flight = false,
                  last_error = $5
              WHERE organization_id = $1
                AND build_id = $2
@@ -3686,6 +3688,7 @@ impl Store {
                  END,
                  last_error = CASE WHEN state = 'delivered' THEN NULL ELSE last_error END,
                  repost_required = state <> 'delivered',
+                 in_flight = CASE WHEN state = 'delivered' THEN false ELSE in_flight END,
                  delivered_at = NULL,
                  state = 'pending'
              WHERE organization_id = $1
@@ -3704,6 +3707,43 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(requeued.is_some())
+    }
+
+    /// Records, before its request is sent, that a claimed attempt may write
+    /// at its target from now on: a build that becomes terminal again while
+    /// this stands delays its new outcome's first post past the attempt's
+    /// deadline, so the old write cannot land after the new one even if the
+    /// controller dies between the write and its settlement. Answers false
+    /// when the claim was overtaken, and then nothing must be sent.
+    pub async fn mark_notification_in_flight(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        terminal_generation: i32,
+        attempts: i32,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let marked = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET in_flight = true
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'pending'
+               AND terminal_generation = $4
+               AND attempts = $5
+             RETURNING attempts",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(terminal_generation)
+        .bind(attempts)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(marked.is_some())
     }
 
     /// The later build, if any, whose `github_status` delivery names the same
@@ -3764,6 +3804,7 @@ impl Store {
             "UPDATE notification_deliveries
              SET state = 'abandoned',
                  repost_required = false,
+                 in_flight = false,
                  last_error = 'superseded by build ' || $6::text
              WHERE organization_id = $1
                AND build_id = $2

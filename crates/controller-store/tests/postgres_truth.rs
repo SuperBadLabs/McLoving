@@ -13054,6 +13054,86 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         ledger[0].5.as_deref(),
         Some(format!("superseded by build {}", admission.build_id).as_str())
     );
+    // An attempt recorded in flight whose build becomes terminal again (an
+    // operator retry) delays the new outcome's first post past the
+    // attempt's deadline, so the old write cannot land after the new one
+    // even if the controller died before settling; an overtaken claim
+    // cannot be marked at all.
+    assert!(
+        !store
+            .mark_notification_in_flight(organization_id, later.build_id, 1, 1, 5)
+            .await
+            .expect("mark an overtaken claim")
+    );
+    assert!(
+        store
+            .mark_notification_in_flight(organization_id, later.build_id, 1, 1, 1)
+            .await
+            .expect("mark the webhook attempt in flight")
+    );
+    let RetryDecision::Scheduled { created: true, .. } = store
+        .schedule_retry(organization_id, claim.attempt_id, 3, "operator retry")
+        .await
+        .expect("schedule a retry of the later build")
+    else {
+        panic!("expected a scheduled retry");
+    };
+    let retried = store
+        .claim_next(&dag_claim(organization_id, "agent-n2", "linux", "only"))
+        .await
+        .expect("claim the retried node")
+        .expect("the retried node is ready");
+    run_dag_claim(&store, &retried).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                retried.attempt_id,
+                retried.fence,
+                retried.restore_epoch,
+                &retried.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"exit_code": 0}),
+            )
+            .await
+            .expect("finalize the retried node")
+    );
+    let rows = sqlx::query_as::<_, (i32, String, i32, bool, bool, bool)>(
+        "SELECT target_index, state, terminal_generation, in_flight, repost_required,
+                next_attempt_at > clock_timestamp() + make_interval(secs => $3)
+         FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2
+         ORDER BY target_index",
+    )
+    .bind(organization_id)
+    .bind(later.build_id)
+    .bind(mcloving_domain::notifications::DELIVERY_DEADLINE_SECONDS as f64)
+    .fetch_all(store.pool())
+    .await
+    .expect("read the second generation");
+    assert_eq!(
+        rows,
+        vec![
+            (0, "pending".to_owned(), 2, false, false, false),
+            (1, "pending".to_owned(), 2, false, false, true),
+        ]
+    );
+    let due_now = store
+        .claim_due_notifications(organization_id, 10, ALL_KINDS)
+        .await
+        .expect("claim what the second generation offers now");
+    assert_eq!(
+        due_now
+            .iter()
+            .map(|delivery| (
+                delivery.build_id,
+                delivery.target_index,
+                delivery.terminal_generation
+            ))
+            .collect::<Vec<_>>(),
+        vec![(later.build_id, 0, 2)],
+        "the delayed row is not due until the old attempt's deadline has passed"
+    );
 }
 
 #[tokio::test]

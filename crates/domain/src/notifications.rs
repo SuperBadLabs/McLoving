@@ -24,6 +24,11 @@ pub const DELIVERY_DEADLINE_SECONDS: u64 = 30;
 /// the deadline, so an attempt still in flight is never claimed twice.
 pub const CLAIM_LEASE_SECONDS: u64 = 3 * DELIVERY_DEADLINE_SECONDS;
 const _: () = assert!(CLAIM_LEASE_SECONDS > DELIVERY_DEADLINE_SECONDS);
+/// How long a build that becomes terminal again waits before its new
+/// outcome is first posted when an attempt of the old outcome was recorded
+/// in flight: past the deadline of that attempt, so its write cannot land
+/// after the new one even if the controller died before settling it.
+pub const STALE_WRITE_QUIET_SECONDS: u64 = DELIVERY_DEADLINE_SECONDS + 5;
 /// Longest body a notification target may answer with before the answer is
 /// discarded unread.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;

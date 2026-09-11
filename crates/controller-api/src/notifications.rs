@@ -697,6 +697,24 @@ async fn deliver_webhook(
 
 async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<Delivered, String> {
     let attempt = async {
+        // Recorded before anything is sent, so a build that becomes
+        // terminal again while this request is out delays its new outcome
+        // past this attempt's deadline whether or not this process lives
+        // to settle it.
+        let mine = state
+            .store
+            .mark_notification_in_flight(
+                delivery.organization_id,
+                delivery.build_id,
+                delivery.target_index,
+                delivery.terminal_generation,
+                delivery.attempts,
+            )
+            .await
+            .map_err(|error| format!("in-flight mark failed: {error}"))?;
+        if !mine {
+            return Err("claim overtaken before the request was sent".to_owned());
+        }
         match delivery.kind.as_str() {
             "github_status" => deliver_github_status(state, delivery).await,
             "webhook" => deliver_webhook(state, delivery).await,

@@ -30,6 +30,10 @@ CREATE TABLE notification_deliveries (
     -- settlement posts once more instead of resting, so the latest outcome
     -- is the last write at the target.
     repost_required boolean NOT NULL DEFAULT false,
+    -- Set just before an attempt's request is sent and cleared by its
+    -- settlement: a build that becomes terminal again while this is set
+    -- delays its new outcome's first post past the attempt's deadline.
+    in_flight boolean NOT NULL DEFAULT false,
     state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'delivered', 'abandoned')),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),

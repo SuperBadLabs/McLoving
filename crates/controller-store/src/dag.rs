@@ -1157,7 +1157,13 @@ async fn record_terminal_notifications(
                  terminal_generation = notification_deliveries.terminal_generation + 1,
                  state = 'pending',
                  attempts = 0,
-                 next_attempt_at = clock_timestamp(),
+                 next_attempt_at = CASE
+                     WHEN notification_deliveries.in_flight
+                         THEN clock_timestamp() + make_interval(secs => $4)
+                     ELSE clock_timestamp()
+                 END,
+                 in_flight = false,
+                 repost_required = false,
                  last_error = NULL,
                  delivered_at = NULL
              RETURNING 1
@@ -1167,6 +1173,7 @@ async fn record_terminal_notifications(
     .bind(organization_id)
     .bind(build_id)
     .bind(status)
+    .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
     .fetch_one(&mut **tx)
     .await?;
     crate::append_event_and_outbox(
