@@ -605,6 +605,7 @@ had never claimed one.
 | PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
 | PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
 | PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
+| PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -884,7 +885,7 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
-## PAR-001 GitHub webhook receiver review, ticket ACTIVE
+## PAR-001 GitHub webhook receiver review (earned closure)
 
 A public route lets GitHub feed an SCM webhook trigger directly. Boundaries
 touched: TM-039 (trigger ingress: the receiver admits through the same
@@ -935,9 +936,19 @@ which is what GitHub's own redelivery contract guarantees; `revision` and
 Tests cover admission, exact redelivery with one build, reused-id conflict,
 forged signature without receipt, missing headers, the unkeyed controller,
 filtered and ignored acknowledgements with their audit records, and the
-pull-request mapping. Closure requires the reviewed merge, exact-main
-Foundation and native Windows runs, and a receipt in
-`docs/evidence/PAR-001_SECURITY_REVIEW.md`.
+pull-request mapping. Closed on PR #148 (`327a032a`), exact-main Foundation
+`34612940947` and Windows Agent `34612940719`; receipt
+`docs/evidence/PAR-001_SECURITY_REVIEW.md`. The review added, before the
+merge, receipt-timed acceptance on the database clock, durable indexed
+receipts for unadmitted deliveries serialized with acceptance and redrive
+under the trigger lock, replay ahead of the current filter and pause state
+under the recorded caller identity, the body digest in the canonical
+payload, generation revalidation for receipts, receipts in the transfer
+snapshot, a permit bound with a deadline ahead of body buffering, and
+`no-store` on the secret-bearing read. Residual: the operator carries the
+secret to GitHub; GitHub's delivery id is trusted as the idempotency key;
+an event filtered under a narrower filter is not re-decided on redelivery
+(push again or use the bearer route).
 
 ## PAR-012 checkout step execution review (earned closure)
 
