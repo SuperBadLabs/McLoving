@@ -104,9 +104,13 @@ fn work_completion_summary(
     digest: &[u8; 32],
     legacy_replay: bool,
 ) -> Result<Vec<u8>, AgentError> {
+    // The legacy reason-only replay shape predates step records; a multi-step
+    // result keeps the modern shape on replay so a crash before terminal
+    // publication never changes the fields a client sees.
     let mut summary = if result.workspace_transfer.is_none()
         && legacy_replay
         && result.reason.is_some()
+        && result.steps.is_empty()
     {
         json!({"reason": result.reason, "result_sha256": hex(digest)})
     } else {
