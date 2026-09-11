@@ -349,7 +349,9 @@ discharge a parked reconciliation).
   redacted only after it exits so nothing unredacted may leave the agent
   early), the spawn hook opens the step's `stdout.log`/`stderr.log` by their
   live path (`O_NOFOLLOW|O_NONBLOCK`, the opened descriptor judged a regular
-  file), and a tail ticks every 250 ms while the step runs: a stream with at
+  file), and a tail runs as its own task, ticking every 250 ms while the
+  step runs so a slow send never suspends the executor's timeout,
+  cancellation or output-limit polling: a stream with at
   least 64 KiB unpublished, or any unpublished bytes a second after its last
   chunk, is reserved and sent; a send the controller does not accept stays
   reserved and is retried, a stale authority stops the tail without touching

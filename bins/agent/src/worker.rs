@@ -2042,7 +2042,7 @@ async fn run_assignment(
             );
             let execution = match live_spool_path.is_some() {
                 true => {
-                    let mut tail = LiveTail::open(
+                    let tail = LiveTail::open(
                         config,
                         &organization,
                         &attempt,
@@ -2051,17 +2051,23 @@ async fn run_assignment(
                         ordinal,
                         live_spool.clone(),
                     )?;
-                    tail.run_alongside(
-                        execution,
-                        client,
-                        &assignment.authority,
-                        AuthorityRpcControl {
-                            authority_lost: &authority_lost,
-                            stop: &stop,
-                            lease_window,
-                        },
-                    )
-                    .await
+                    // The tail is its own task: a slow or blocked PublishLog
+                    // must never suspend the executor's timeout, cancellation
+                    // and output-limit polling. Once the step is over the task
+                    // is aborted; an abort mid-send leaves at most a
+                    // reservation without a receipt, which the terminal pass
+                    // sends.
+                    let tail_task = tail.spawn(
+                        client.clone(),
+                        assignment.authority.clone(),
+                        authority_lost.clone(),
+                        stop.clone(),
+                        lease_window,
+                    );
+                    let outcome = execution.await;
+                    tail_task.abort();
+                    let _ = tail_task.await;
+                    outcome
                 }
                 false => execution.await,
             };
@@ -3328,42 +3334,44 @@ impl LiveTail {
         })
     }
 
-    /// Drives `execution` to completion, ticking the tail while it runs.
-    async fn run_alongside<F, T>(
-        &mut self,
-        execution: F,
-        client: &mut AgentControlClient<Channel>,
-        authority: &WorkAuthority,
-        control: AuthorityRpcControl<'_>,
-    ) -> T
-    where
-        F: Future<Output = T>,
-    {
-        tokio::pin!(execution);
-        let mut interval = tokio::time::interval(LIVE_TAIL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                outcome = &mut execution => return outcome,
-                _ = interval.tick(), if !self.stopped => {
-                    let mut publication = PublicationContext {
-                        client,
-                        authority,
-                        session_epoch: self.session_epoch,
-                        control,
-                    };
-                    if let Err(error) = self.tick(&mut publication).await {
-                        // The step is unaffected; the terminal pass publishes
-                        // whatever the tail did not.
-                        eprintln!(
-                            "live log tail stopped for step {}: {error}",
-                            self.step_ordinal
-                        );
-                        self.stopped = true;
-                    }
+    /// Runs the tail as its own task until it is aborted or stops itself:
+    /// publication never suspends the executor's polling, and an abort in
+    /// the middle of a send only leaves a reservation without a receipt for
+    /// the terminal pass to send.
+    fn spawn(
+        mut self,
+        mut client: AgentControlClient<Channel>,
+        authority: WorkAuthority,
+        authority_lost: CancellationToken,
+        stop: CancellationToken,
+        lease_window: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(LIVE_TAIL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while !self.stopped {
+                interval.tick().await;
+                let mut publication = PublicationContext {
+                    client: &mut client,
+                    authority: &authority,
+                    session_epoch: self.session_epoch,
+                    control: AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
+                };
+                if let Err(error) = self.tick(&mut publication).await {
+                    // The step is unaffected; the terminal pass publishes
+                    // whatever the tail did not.
+                    eprintln!(
+                        "live log tail stopped for step {}: {error}",
+                        self.step_ordinal
+                    );
+                    self.stopped = true;
                 }
             }
-        }
+        })
     }
 
     async fn tick(&mut self, publication: &mut PublicationContext<'_>) -> Result<(), AgentError> {
