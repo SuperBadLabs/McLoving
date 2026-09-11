@@ -1,0 +1,22 @@
+# PAR-012 proof fixture: one stage that checks a repository out at an exact
+# commit through the deployment's source binding, then runs the checkout's own
+# test command in it. Replace the mapping digest and commit with the deployed
+# binding's digest and the branch head to run it; the acquirer refuses a ref
+# that no longer resolves to the requested commit.
+version: 1
+name: parity-checkout-and-test
+stages:
+  - id: build
+    name: Check out and test
+    steps:
+      - checkout:
+          mapping_id: mcloving-github
+          mapping_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          ref: refs/heads/main
+          commit: "0000000000000000000000000000000000000000"
+          destination: source
+          timeout_seconds: 600
+      - process:
+          program: /bin/sh
+          args: [-ec, "cd source && cat README.md | head -5 && ls"]
+          timeout_seconds: 300

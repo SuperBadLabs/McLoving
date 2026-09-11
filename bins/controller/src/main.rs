@@ -26,7 +26,7 @@ use mcloving_controller_api::{
     ApiState, CacheMappingCatalog, ConnectorMappingCatalog, InputMappingCatalog,
     InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
     MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
-    OidcClientConfig, router,
+    OidcClientConfig, SourceMappingCatalog, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -131,6 +131,7 @@ async fn main() -> Result<()> {
     let connector_mapping_catalog = connector_mapping_catalog_from_environment()?;
     let cache_mapping_catalog = cache_mapping_catalog_from_environment()?;
     let input_mapping_catalog = input_mapping_catalog_from_environment()?;
+    let source_mapping_catalog = source_mapping_catalog_from_environment()?;
     validate_effect_mapping_configuration(
         worker.config.effect_plan.as_ref().map(|plan| {
             (
@@ -220,6 +221,11 @@ async fn main() -> Result<()> {
         state = state
             .with_input_mapping_catalog(catalog)
             .context("configure input mapping admission catalog")?;
+    }
+    if let Some(catalog) = source_mapping_catalog {
+        state = state
+            .with_source_mapping_catalog(catalog)
+            .context("configure source mapping admission catalog")?;
     }
     if let Some(oidc) = &oidc {
         state = state
@@ -2645,6 +2651,81 @@ fn load_input_mapping_catalog(
     _expected: &str,
 ) -> Result<InputMappingCatalog> {
     bail!("input catalog is supported only on Linux controllers")
+}
+
+fn source_mapping_catalog_from_environment() -> Result<Option<SourceMappingCatalog>> {
+    let path = match std::env::var("MCLOVING_SOURCE_MAPPING_CATALOG") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_SOURCE_MAPPING_CATALOG must not be empty"),
+        Err(std::env::VarError::NotPresent) => {
+            if std::env::var_os("MCLOVING_SOURCE_MAPPING_CATALOG_SHA256").is_some() {
+                bail!("source catalog digest requires catalog path");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read source mapping catalog path"),
+    };
+    let expected = required("MCLOVING_SOURCE_MAPPING_CATALOG_SHA256")?;
+    load_source_mapping_catalog(&path, &expected).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn load_source_mapping_catalog(
+    path: &std::path::Path,
+    expected: &str,
+) -> Result<SourceMappingCatalog> {
+    use std::io::Read as _;
+    if !path.is_absolute() || !mcloving_domain::cache_intent::canonical_sha256(expected) {
+        bail!("source catalog needs absolute path and canonical SHA-256");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .context("open pinned source mapping catalog")?;
+    let metadata = file.metadata().context("inspect opened source catalog")?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("source catalog must be bounded regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o022 != 0 {
+            bail!("source catalog must not be writable by group or other users");
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .context("read opened source catalog")?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("source catalog grew beyond bound");
+    }
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        bail!("source catalog digest mismatch");
+    }
+    let catalog: SourceMappingCatalog =
+        mcloving_external_connector::parse_json_no_duplicates(&bytes)
+            .context("parse strict source catalog")?;
+    catalog.validate().context("validate source catalog")?;
+    Ok(catalog)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_source_mapping_catalog(
+    _path: &std::path::Path,
+    _expected: &str,
+) -> Result<SourceMappingCatalog> {
+    bail!("source catalog is supported only on Linux controllers")
 }
 
 fn connector_mapping_catalog_from_environment() -> Result<Option<ConnectorMappingCatalog>> {

@@ -32,7 +32,10 @@ uuid = { version = "=1.18.1", features = ["v4"] }
 windows-services = "=0.26.1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "=0.31.3", features = ["signal", "fs", "user"] }
+nix = { version = "=0.31.3", features = ["dir", "signal", "fs", "user"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mcloving-source-acquirer = { version = "0.0.0", path = "../../crates/source-acquirer" }
 
 [dev-dependencies]
 tokio-stream = { version = "=0.1.19", features = ["net"] }
@@ -42,6 +45,7 @@ mcloving-controller-store = { version = "0.0.0", path = "../../crates/controller
 sha2 = "=0.10.9"
 sqlx = { version = "=0.8.6", features = ["postgres", "runtime-tokio"] }
 tempfile = "=3.27.0"
+url = "=2.5.8"
 uuid = { version = "=1.18.1", features = ["v4"] }
 
 [lints]

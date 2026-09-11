@@ -496,13 +496,15 @@ deployment_contract_path_variables() {
         "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG file" \
         "trust nofollow MCLOVING_CACHE_MAPPING_CATALOG file" \
         "trust nofollow MCLOVING_INPUT_MAPPING_CATALOG file" \
+        "trust nofollow MCLOVING_SOURCE_MAPPING_CATALOG file" \
         "state follow MCLOVING_OBJECT_ROOT directory" \
         "state follow MCLOVING_WORKSPACE_ROOT directory" \
         "state follow MCLOVING_AGENT_JOURNAL file"
       ;;
     agent)
-      # Cache bindings are optional owner-private immutable configuration;
-      # the guard additionally enforces their exact mode/owner/link contract.
+      # Cache, input and source bindings are optional owner-private immutable
+      # configuration; the guard additionally enforces their exact
+      # mode/owner/link contract.
       # The session receipt is an optional durable output the agent writes;
       # state-class like the journal, absence legal before first use. The
       # podman path (PAR-011) is optional and trust-class: an executable the
@@ -514,6 +516,7 @@ deployment_contract_path_variables() {
         "secret follow MCLOVING_AGENT_PRIVATE_KEY_PATH file" \
         "secret nofollow MCLOVING_AGENT_CACHE_BINDINGS_PATH file" \
         "secret nofollow MCLOVING_AGENT_INPUT_BINDINGS_PATH file" \
+        "secret nofollow MCLOVING_AGENT_SOURCE_BINDINGS_PATH file" \
         "trust follow MCLOVING_CONTROLLER_CA_PATH file" \
         "trust follow MCLOVING_AGENT_CERTIFICATE_PATH file" \
         "trust follow MCLOVING_AGENT_PODMAN_PATH file" \

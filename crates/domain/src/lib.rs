@@ -2,6 +2,7 @@
 
 pub mod cache_intent;
 pub mod input_intent;
+pub mod source_intent;
 pub mod workspace;
 
 use std::collections::BTreeMap;

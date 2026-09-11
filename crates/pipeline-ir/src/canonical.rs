@@ -90,6 +90,16 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
                     writer.string(&input.intent.mapping_digest);
                     writer.u64(input.intent.timeout_seconds);
                 }
+                Step::Checkout(checkout) => {
+                    let spec = &checkout.spec;
+                    writer.u8(5);
+                    writer.string(&spec.mapping_id);
+                    writer.string(&spec.mapping_digest);
+                    writer.string(&spec.reference);
+                    writer.string(&spec.commit);
+                    writer.string(&spec.destination);
+                    writer.u64(spec.timeout_seconds);
+                }
                 Step::CacheIntent(cache) => {
                     let intent = &cache.intent;
                     writer.u8(3);
@@ -299,7 +309,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 6 {
+    if schema.major != 1 || schema.minor > 7 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -455,16 +465,17 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
             false
         };
         let stage_steps = reader.count(MAX_STEPS, "step")?;
+        let mut checkouts_in_stage = 0_usize;
         steps = steps
             .checked_add(stage_steps)
             .filter(|count| *count <= MAX_STEPS)
             .ok_or_else(|| CanonicalError::new(reader.offset, "total step count exceeds limit"))?;
         for step_index in 0..stage_steps {
             let step_kind = reader.u8()?;
-            if container_stage && step_kind != 1 {
+            if container_stage && !matches!(step_kind, 1 | 5) {
                 return Err(CanonicalError::new(
                     reader.offset.saturating_sub(1),
-                    "a container stage may hold process steps only",
+                    "a container stage may hold process and checkout steps only",
                 ));
             }
             match step_kind {
@@ -507,6 +518,29 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                             ));
                         }
                     }
+                }
+                5 if schema.minor >= 7 => {
+                    if checkouts_in_stage > 0 {
+                        return Err(CanonicalError::new(
+                            reader.offset,
+                            "a stage may hold at most one checkout step",
+                        ));
+                    }
+                    checkouts_in_stage += 1;
+                    let spec = mcloving_domain::source_intent::CheckoutStepSpec {
+                        mapping_id: reader.string()?,
+                        mapping_digest: reader.string()?,
+                        reference: reader.string()?,
+                        commit: reader.string()?,
+                        destination: reader.string()?,
+                        timeout_seconds: reader.u64()?,
+                    };
+                    spec.validate()
+                        .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
+                    materialized_fields.insert(
+                        format!("$.stages[{stage_index}].steps[{step_index}].checkout.commit"),
+                        spec.commit,
+                    );
                 }
                 4 if schema.minor >= 5 => {
                     if stage_steps != 1 {

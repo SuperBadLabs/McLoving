@@ -2396,6 +2396,34 @@ impl SourceAcquirer {
         Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
     }
 
+    /// Digest of an acquisition request exactly as the acquirer binds it into
+    /// the receipt's `request_sha256`, for a caller that holds the request
+    /// and must match it against a returned receipt.
+    pub fn request_sha256(request: &AcquisitionRequest) -> Result<String, SourceError> {
+        canonical_digest(request)
+    }
+
+    /// Authenticates a receipt against a known configuration, implementation
+    /// digest and signing key without a running acquirer and without touching
+    /// the retained tree: the caller that launched the sealed helper verifies
+    /// the helper's answer with the same material it configured the helper
+    /// with (PAR-012). Retained-tree custody is not asserted here.
+    pub fn authenticate_receipt(
+        config: &SourceConfig,
+        config_sha256: &str,
+        implementation_sha256: &str,
+        signing_key: &[u8],
+        receipt: &AcquisitionReceipt,
+    ) -> Result<(), SourceError> {
+        receipt_auth::authenticate_authority(
+            config,
+            config_sha256,
+            implementation_sha256,
+            signing_key,
+            receipt,
+        )
+    }
+
     pub async fn verify_receipt(&self, receipt: &AcquisitionReceipt) -> Result<(), SourceError> {
         receipt_auth::authenticate_authority(
             &self.config,

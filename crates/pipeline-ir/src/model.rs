@@ -11,7 +11,7 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6};
+use crate::{IR_V1, IR_V1_1, IR_V1_2, IR_V1_3, IR_V1_4, IR_V1_5, IR_V1_6, IR_V1_7};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -137,6 +137,17 @@ pub enum Step {
     ConnectorIntent(ConnectorIntentStep),
     CacheIntent(CacheIntentStep),
     InputIntent(InputIntentStep),
+    Checkout(CheckoutStep),
+}
+
+/// A literal checkout through the sealed source acquirer (PAR-012); the
+/// repository, credential and executable are resolved by deployment bindings,
+/// the pipeline names only the binding, the ref, the exact commit and the
+/// workspace destination.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckoutStep {
+    pub spec: mcloving_domain::source_intent::CheckoutStepSpec,
+    pub source_span: SourceSpan,
 }
 
 /// A literal bounded input capture; authority is resolved by deployment catalogs.
@@ -322,7 +333,14 @@ pub fn compile_strict_yaml_with_parameters(
             .iter()
             .any(|step| matches!(step, Step::CacheIntent(_)))
     });
-    let schema = if stages.iter().any(|stage| stage.image.is_some()) {
+    let schema = if stages.iter().any(|stage| {
+        stage
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Checkout(_)))
+    }) {
+        IR_V1_7
+    } else if stages.iter().any(|stage| stage.image.is_some()) {
         IR_V1_6
     } else if stages.iter().any(|stage| {
         stage
@@ -411,6 +429,13 @@ pub fn instantiate_pipeline(
                     if let Some(resolved_value) = resolved.remove(&format!("{base}.env.{name}")) {
                         *value = resolved_value;
                     }
+                }
+            } else if let Step::Checkout(checkout) = step {
+                // The commit is the one checkout field a parameter may supply
+                // (PAR-012); the binding, ref and destination stay literal.
+                let path = format!("$.stages[{stage_index}].steps[{step_index}].checkout.commit");
+                if let Some(value) = resolved.remove(&path) {
+                    checkout.spec.commit = value;
                 }
             }
         }
@@ -642,22 +667,27 @@ fn compile_steps(
             let connector_intent = step.take("connector_intent");
             let cache_intent = step.take("cache_intent");
             let input_intent = step.take("input_intent");
+            let checkout = step.take("checkout");
             step.finish()?;
-            match (process, connector_intent, cache_intent, input_intent) {
-                (Some(process), None, None, None) => {
+            match (process, connector_intent, cache_intent, input_intent, checkout) {
+                (Some(process), None, None, None, None) => {
                     compile_process(process, &path, step_span, parameters, expressions)
                         .map(Step::Process)
                 }
-                (None, Some(intent), None, None) => {
+                (None, Some(intent), None, None, None) => {
                     compile_connector_intent(intent, &path, step_span).map(Step::ConnectorIntent)
                 }
-                (None, None, Some(intent), None) => {
+                (None, None, Some(intent), None, None) => {
                     compile_cache_intent(intent, &path, step_span).map(Step::CacheIntent)
                 }
-                (None, None, None, Some(intent)) => compile_input_intent(intent, &path, step_span).map(Step::InputIntent),
+                (None, None, None, Some(intent), None) => compile_input_intent(intent, &path, step_span).map(Step::InputIntent),
+                (None, None, None, None, Some(checkout)) => {
+                    compile_checkout(checkout, &path, step_span, parameters, expressions)
+                        .map(Step::Checkout)
+                }
                 _ => Err(CompileError::schema(
                     &path,
-                    "exactly one of process, connector_intent, cache_intent or input_intent is required",
+                    "exactly one of process, connector_intent, cache_intent, input_intent or checkout is required",
                 )),
             }
         })
@@ -686,6 +716,47 @@ fn compile_input_intent(
         intent,
         source_span,
     })
+}
+
+/// `checkout:` names a deployment source binding, the ref, the exact commit
+/// (a literal or an expression over typed parameters, so a webhook or a
+/// submission can supply it) and the workspace destination.
+fn compile_checkout(
+    node: SpannedValue,
+    step_path: &str,
+    source_span: SourceSpan,
+    parameters: &BTreeMap<String, EvaluatedValue>,
+    expressions: &mut Vec<ExpressionBinding>,
+) -> Result<CheckoutStep, CompileError> {
+    use mcloving_domain::source_intent::CheckoutStepSpec;
+    let path = format!("{step_path}.checkout");
+    let mut view = MappingView::new(node, &path)?;
+    let mapping_id = view.required_string("mapping_id")?;
+    let mapping_digest = view.required_string("mapping_digest")?;
+    let reference = view.required_string("ref")?;
+    let commit = view
+        .take("commit")
+        .map(|node| {
+            compile_resolved_string(node, &format!("{path}.commit"), parameters, expressions)
+        })
+        .transpose()?
+        .ok_or_else(|| CompileError::schema(&path, "checkout commit is required"))?;
+    let destination = view
+        .optional_string("destination")?
+        .unwrap_or_else(|| "source".to_owned());
+    let timeout_seconds = view.optional_u64("timeout_seconds")?.unwrap_or(600);
+    view.finish()?;
+    let spec = CheckoutStepSpec {
+        mapping_id,
+        mapping_digest,
+        reference,
+        commit,
+        destination,
+        timeout_seconds,
+    };
+    spec.validate()
+        .map_err(|error| CompileError::schema(&path, error.to_string()))?;
+    Ok(CheckoutStep { spec, source_span })
 }
 
 fn compile_cache_intent(
@@ -925,11 +996,11 @@ fn compile_resolved_string(
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
     if !matches!(
         pipeline.schema,
-        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5 | IR_V1_6
+        IR_V1 | IR_V1_1 | IR_V1_2 | IR_V1_3 | IR_V1_4 | IR_V1_5 | IR_V1_6 | IR_V1_7
     ) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 through v1.5 are accepted",
+            "only Pipeline IR v1.0 through v1.7 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -997,6 +1068,18 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 },
             ));
         }
+        if stage
+            .steps
+            .iter()
+            .filter(|step| matches!(step, Step::Checkout(_)))
+            .count()
+            > 1
+        {
+            return Err(IrValidationError::new(
+                format!("{path}.steps"),
+                "a stage may hold at most one checkout step",
+            ));
+        }
         total_steps = total_steps.saturating_add(stage.steps.len());
         if total_steps > MAX_STEPS {
             return Err(IrValidationError::new(
@@ -1017,14 +1100,17 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                     "stage image must be a digest-pinned reference",
                 ));
             }
+            // A checkout step never runs in the image: the sealed acquirer
+            // has its own containment and the tree lands in the workspace
+            // that the image steps see at /workspace.
             if !stage
                 .steps
                 .iter()
-                .all(|step| matches!(step, Step::Process(_)))
+                .all(|step| matches!(step, Step::Process(_) | Step::Checkout(_)))
             {
                 return Err(IrValidationError::new(
                     format!("{path}.image"),
-                    "a container stage may hold process steps only",
+                    "a container stage may hold process and checkout steps only",
                 ));
             }
             // The container runtime takes environment from a line-oriented
@@ -1120,6 +1206,19 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                     }
                     cache
                         .intent
+                        .validate()
+                        .map_err(|error| IrValidationError::new(&base, error.to_string()))?;
+                }
+                Step::Checkout(checkout) => {
+                    let base = format!("{path}.steps[{step_index}].checkout");
+                    if pipeline.schema.minor < IR_V1_7.minor {
+                        return Err(IrValidationError::new(
+                            &base,
+                            "checkout steps require Pipeline IR v1.7",
+                        ));
+                    }
+                    checkout
+                        .spec
                         .validate()
                         .map_err(|error| IrValidationError::new(&base, error.to_string()))?;
                 }
@@ -1334,6 +1433,11 @@ fn expression_materialized_fields(pipeline: &PipelineIr) -> BTreeMap<String, &st
                 for (name, value) in &process.env {
                     fields.insert(format!("{base}.env.{name}"), value.as_str());
                 }
+            } else if let Step::Checkout(checkout) = step {
+                fields.insert(
+                    format!("$.stages[{stage_index}].steps[{step_index}].checkout.commit"),
+                    checkout.spec.commit.as_str(),
+                );
             }
         }
     }

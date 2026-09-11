@@ -585,7 +585,8 @@ fn process_arg(step: &mcloving_pipeline_ir::Step) -> &str {
         mcloving_pipeline_ir::Step::Process(process) => &process.args[0],
         mcloving_pipeline_ir::Step::ConnectorIntent(_)
         | mcloving_pipeline_ir::Step::CacheIntent(_)
-        | mcloving_pipeline_ir::Step::InputIntent(_) => {
+        | mcloving_pipeline_ir::Step::InputIntent(_)
+        | mcloving_pipeline_ir::Step::Checkout(_) => {
             panic!("fixture contains only process steps")
         }
     }

@@ -70,8 +70,9 @@ dynamic provisioning remain unwired. All production cases remain ineligible
 for CANARY-001 and CUTOVER-001 pending their implementation and downstream
 qualification gates. The initial no-caller inspection in the acceptance row
 is historical; it must not erase remaining helper gates. The bounded contracts
-are `docs/architecture/CACHE_PRODUCT_PATH_V1.md` and
-`docs/architecture/INPUT_PRODUCT_PATH_V1.md`.
+are `docs/architecture/CACHE_PRODUCT_PATH_V1.md`,
+`docs/architecture/INPUT_PRODUCT_PATH_V1.md` and, for the source slice
+`PAR-012` delivers, `docs/architecture/SOURCE_PRODUCT_PATH_V1.md`.
 
 The standalone source-helper custody prerequisite supports a pinned acquisition
 configuration and execution from a sealed caller image while preserving the

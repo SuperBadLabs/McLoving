@@ -123,6 +123,8 @@ pub(crate) fn seal_executable(_: &Path, _: &str) -> Result<(File, PathBuf), Agen
 pub(crate) enum PreparedHelper {
     Cache(Box<crate::cache::PreparedCache>),
     Input(Box<crate::input::PreparedInput>),
+    #[cfg(target_os = "linux")]
+    Source(Box<crate::source::PreparedSource>),
 }
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl PreparedHelper {
@@ -130,36 +132,48 @@ impl PreparedHelper {
         match self {
             Self::Cache(v) => &v.program,
             Self::Input(v) => &v.program,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => &v.program,
         }
     }
     pub fn arguments(&self) -> &[std::ffi::OsString] {
         match self {
             Self::Cache(v) => &v.arguments,
             Self::Input(v) => &v.arguments,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => &v.arguments,
         }
     }
     pub fn environment(&self) -> std::collections::BTreeMap<String, String> {
         match self {
             Self::Cache(_) => Default::default(),
             Self::Input(v) => v.environment.clone(),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.environment.clone(),
         }
     }
     pub fn request(&self) -> &[u8] {
         match self {
             Self::Cache(v) => &v.request,
             Self::Input(v) => &v.request,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => &v.request,
         }
     }
     pub fn output_limit(&self) -> u64 {
         match self {
             Self::Cache(v) => v.output_limit,
             Self::Input(v) => v.output_limit,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.output_limit,
         }
     }
     pub fn response_failure(&self) -> &'static str {
         match self {
             Self::Cache(_) => "cache_response_rejected",
             Self::Input(_) => "input_response_rejected",
+            #[cfg(target_os = "linux")]
+            Self::Source(_) => "source_response_rejected",
         }
     }
     pub fn transform(
@@ -170,6 +184,41 @@ impl PreparedHelper {
         match self {
             Self::Cache(v) => v.transform(stdout, stderr),
             Self::Input(v) => v.transform(stdout, stderr),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.transform(stdout, stderr),
+        }
+    }
+    /// The step reason when the helper's answer was not accepted: the fixed
+    /// rejection name, extended with the sealed acquirer's closed failure
+    /// code for a checkout so the terminal summary says why.
+    pub fn failure_reason(&self) -> String {
+        match self {
+            Self::Cache(_) | Self::Input(_) => self.response_failure().to_owned(),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => match v.last_outcome() {
+                Some(outcome) if outcome != "acquired" => {
+                    format!("{}:{outcome}", self.response_failure())
+                }
+                _ => self.response_failure().to_owned(),
+            },
+        }
+    }
+    /// Work a helper still owes once its process has exited and its answer
+    /// was accepted: a checkout publishes its verified tree into the
+    /// workspace. Cache and input helpers owe nothing.
+    pub fn complete(&self, workspace: &Path) -> Result<Option<String>, String> {
+        match self {
+            Self::Cache(_) | Self::Input(_) => {
+                let _ = workspace;
+                Ok(None)
+            }
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.publish(workspace).map(|published| {
+                Some(format!(
+                    "checkout {} at {} ({} files)",
+                    published.destination, published.resolved_commit, published.materialized_files
+                ))
+            }),
         }
     }
 }

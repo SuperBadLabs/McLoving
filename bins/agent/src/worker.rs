@@ -31,6 +31,7 @@ use mcloving_agent_runtime::{
 use mcloving_domain::ConnectorIntentSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
 use mcloving_domain::input_intent::{InputIntentSpec, InputWorkContext, input_assignment_digest};
+use mcloving_domain::source_intent::CheckoutStepSpec;
 use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -171,6 +172,11 @@ impl HelperIntent {
 }
 struct ValidatedAssignment {
     helper: Option<HelperIntent>,
+    /// Checkout steps of a version-5 envelope by ordinal (PAR-012); each is
+    /// prepared into a sealed acquirer invocation before the first spawn.
+    checkouts: Vec<(usize, CheckoutStepSpec)>,
+    /// The controller-authorized work identity every helper binds to.
+    work_context: CacheWorkContext,
     workspace_grant: Option<WorkspaceGrant>,
     authority: WorkAuthority,
     workspace: PathBuf,
@@ -805,6 +811,8 @@ fn validate_assignment_with_features(
                 }
                 AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
                     helper: None,
+                    checkouts: Vec::new(),
+                    work_context: cache_context,
                     workspace_grant,
                     authority,
                     workspace,
@@ -814,7 +822,24 @@ fn validate_assignment_with_features(
                     image: None,
                 }))
             }
-            SpecClassification::Steps { steps, image } => {
+            SpecClassification::Steps {
+                steps,
+                image,
+                checkouts,
+            } => {
+                if !checkouts.is_empty()
+                    && (!cfg!(target_os = "linux") || config.source_bindings.is_none())
+                {
+                    // Routing keeps checkout work away from agents without a
+                    // source binding; if it arrives anyway, the refusal names
+                    // it rather than running the stage without its checkout.
+                    return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                        authority,
+                        workspace,
+                        payload_digest,
+                        detail: "source runtime binding unavailable for a checkout step".to_owned(),
+                    }));
+                }
                 if image.is_some() && (!cfg!(unix) || config.podman_path.is_none()) {
                     // Routing keeps image work away from agents without a
                     // runtime; if it arrives anyway, another agent can run it.
@@ -845,6 +870,8 @@ fn validate_assignment_with_features(
                 }
                 AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
                     helper: None,
+                    checkouts,
+                    work_context: cache_context,
                     workspace_grant: None,
                     authority,
                     workspace,
@@ -878,7 +905,9 @@ fn validate_assignment_with_features(
                         timeout_seconds: Some(intent.timeout_seconds),
                     };
                     AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
-                        helper: Some(HelperIntent::Cache(intent, cache_context)),
+                        helper: Some(HelperIntent::Cache(intent, cache_context.clone())),
+                        checkouts: Vec::new(),
+                        work_context: cache_context,
                         workspace_grant,
                         authority,
                         workspace,
@@ -913,7 +942,9 @@ fn validate_assignment_with_features(
                         timeout_seconds: Some(intent.timeout_seconds),
                     };
                     AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
-                        helper: Some(HelperIntent::Input(intent, cache_context)),
+                        helper: Some(HelperIntent::Input(intent, cache_context.clone())),
+                        checkouts: Vec::new(),
+                        work_context: cache_context,
                         workspace_grant,
                         authority,
                         workspace,
@@ -949,6 +980,7 @@ enum SpecClassification {
     Steps {
         steps: Vec<ProcessSpec>,
         image: Option<String>,
+        checkouts: Vec<(usize, CheckoutStepSpec)>,
     },
     ForAnotherRuntime(&'static str),
     Unsupported(String),
@@ -1070,7 +1102,11 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
         .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(5))
     {
         return match supported_multi_step_spec(execution_spec_json) {
-            Ok((steps, image)) => SpecClassification::Steps { steps, image },
+            Ok((steps, image, checkouts)) => SpecClassification::Steps {
+                steps,
+                image,
+                checkouts,
+            },
             Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
         };
     }
@@ -1080,32 +1116,95 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
     }
 }
 
+/// The admitted version-5 envelope: ordered steps (checkouts as placeholder
+/// processes), the optional stage image, and the checkout specs by ordinal.
+type MultiStepSpec = (
+    Vec<ProcessSpec>,
+    Option<String>,
+    Vec<(usize, CheckoutStepSpec)>,
+);
+
 /// Classifies the version-5 envelope (PAR-010): one to sixteen bounded
 /// process steps, each held to exactly the per-step rules of the single-step
 /// contract. Every refusal is permanent for this payload.
-fn supported_multi_step_spec(
-    execution_spec_json: &[u8],
-) -> Result<(Vec<ProcessSpec>, Option<String>), String> {
+fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<MultiStepSpec, String> {
     use mcloving_domain::multi_step::MAX_STEPS_PER_STAGE;
-    let spec: ExecutionSpec = serde_json::from_slice(execution_spec_json).map_err(|error| {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Envelope {
+        version: u16,
+        steps: Vec<serde_json::Value>,
+        #[serde(default)]
+        image: Option<String>,
+    }
+    let envelope: Envelope = serde_json::from_slice(execution_spec_json).map_err(|error| {
         format!("execution spec does not deserialize as a version-5 multi-step spec: {error}")
     })?;
-    if spec.version != 5 {
+    if envelope.version != 5 {
         return Err(format!(
             "execution spec version {} is not supported (expected 5)",
-            spec.version
+            envelope.version
         ));
     }
-    if spec.steps.is_empty() || spec.steps.len() > MAX_STEPS_PER_STAGE {
+    if envelope.steps.is_empty() || envelope.steps.len() > MAX_STEPS_PER_STAGE {
         return Err(format!(
-            "execution spec declares {} steps (expected 1..={MAX_STEPS_PER_STAGE} process steps)",
-            spec.steps.len()
+            "execution spec declares {} steps (expected 1..={MAX_STEPS_PER_STAGE} process or checkout steps)",
+            envelope.steps.len()
         ));
     }
+    // A checkout step (PAR-012) carries the typed checkout spec instead of a
+    // program; it is held as a placeholder process the prepared acquirer
+    // fills in, exactly as the single-step helper envelopes do.
+    let mut steps = Vec::with_capacity(envelope.steps.len());
+    let mut checkouts = Vec::new();
+    for (index, value) in envelope.steps.into_iter().enumerate() {
+        let kind = value
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if kind == "checkout" {
+            let mut fields = value;
+            fields
+                .as_object_mut()
+                .ok_or_else(|| format!("execution spec step {index} is not an object"))?
+                .remove("kind");
+            let spec: CheckoutStepSpec = serde_json::from_value(fields).map_err(|error| {
+                format!("execution spec step {index} does not deserialize as a checkout: {error}")
+            })?;
+            spec.validate()
+                .map_err(|error| format!("execution spec step {index} checkout: {error}"))?;
+            if checkouts.len() == 1 {
+                return Err(format!(
+                    "execution spec step {index} is a second checkout; a stage holds at most one"
+                ));
+            }
+            steps.push(ProcessSpec {
+                kind,
+                mode: ProcessMode::Direct,
+                program: String::new(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                credentials: Vec::new(),
+                timeout_seconds: Some(spec.timeout_seconds),
+            });
+            checkouts.push((index, spec));
+            continue;
+        }
+        let process: ProcessSpec = serde_json::from_value(value).map_err(|error| {
+            format!("execution spec step {index} does not deserialize as a process step: {error}")
+        })?;
+        steps.push(process);
+    }
+    let spec = ExecutionSpec {
+        version: 5,
+        steps,
+        image: envelope.image,
+    };
     for (index, process) in spec.steps.iter().enumerate() {
-        if process.kind != "process" {
+        if process.kind != "process" && process.kind != "checkout" {
             return Err(format!(
-                "execution spec step {index} kind {:?} is not supported (expected \"process\")",
+                "execution spec step {index} kind {:?} is not supported (expected \"process\" or \"checkout\")",
                 process.kind
             ));
         }
@@ -1144,7 +1243,7 @@ fn supported_multi_step_spec(
     {
         return Err("stage image is not a digest-pinned reference".to_owned());
     }
-    Ok((spec.steps, spec.image))
+    Ok((spec.steps, spec.image, checkouts))
 }
 
 /// The refusal reason is written twice into the durable result and sent as the
@@ -1535,6 +1634,39 @@ async fn run_assignment(
             return renewal;
         }
     };
+    // Checkout steps (PAR-012) are prepared exactly like the single-step
+    // helpers, before the first spawn, so a binding refusal is a processless
+    // failure and not a half-run stage.
+    let prepared_checkouts = match prepare_checkouts(config, &assignment) {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            let result = finalize_without_process(
+                config,
+                client,
+                &mut journal,
+                ProcesslessCompletion {
+                    authority: &assignment.authority,
+                    workspace: &assignment.workspace,
+                    session_epoch,
+                    outcome: WorkOutcome::Failed,
+                    reason: "source_binding_rejected".to_owned(),
+                    steps: Vec::new(),
+                },
+                AuthorityRpcControl {
+                    authority_lost: &authority_lost,
+                    stop: &stop,
+                    lease_window,
+                },
+            )
+            .await;
+            lease_stop.cancel();
+            let renewal = lease_task.await.map_err(|error| {
+                AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+            })?;
+            result?;
+            return renewal;
+        }
+    };
     let mut assignment = assignment;
     let mut steps = std::mem::take(&mut assignment.steps);
     let multi_step = assignment.multi_step;
@@ -1565,6 +1697,18 @@ async fn run_assignment(
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
         first.env = prepared.environment();
+    }
+    for (index, prepared) in &prepared_checkouts {
+        let step = steps
+            .get_mut(*index)
+            .expect("checkout ordinals were taken from the validated steps");
+        step.program = prepared.program().to_string_lossy().into_owned();
+        step.args = prepared
+            .arguments()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        step.env = prepared.environment();
     }
     // Credentials are granted per attempt. Every step's targets are fetched
     // once, and each step below binds only the targets it declared.
@@ -1696,10 +1840,25 @@ async fn run_assignment(
                 .cloned()
                 .collect::<Vec<_>>();
             let execution_environment = execution_environment(process.env, step_credentials)?;
+            // The single-step helpers ride step zero; a checkout is a helper
+            // at its own ordinal. A helper step runs the sealed helper on the
+            // host with its own containment, never inside the stage image.
+            let helper = if index == 0 {
+                prepared_helper.as_ref()
+            } else {
+                None
+            }
+            .or_else(|| {
+                prepared_checkouts
+                    .iter()
+                    .find(|(checkout, _)| *checkout == index)
+                    .map(|(_, prepared)| prepared)
+            });
             // Journaled before the spawn so recovery reaps exactly the
             // container this step launched, and only when it launched one.
             let step_container = container_runtime
                 .as_ref()
+                .filter(|_| helper.is_none())
                 .map(|_| crate::container::container_name(&attempt, ordinal));
             if multi_step {
                 // Durable before the spawn: a crash anywhere after this point
@@ -1755,9 +1914,7 @@ async fn run_assignment(
                 // The per-attempt output quota is shared by every step, so a
                 // later step may only spend what earlier steps left.
                 output_limit_bytes: Some(
-                    prepared_helper
-                        .as_ref()
-                        .map_or(output_budget, |helper| helper.output_limit()),
+                    helper.map_or(output_budget, |helper| helper.output_limit()),
                 ),
                 timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
                 termination_grace: config.termination_grace,
@@ -1787,11 +1944,6 @@ async fn run_assignment(
                     ),
                 }
                 .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
-            };
-            let helper = if index == 0 {
-                prepared_helper.as_ref()
-            } else {
-                None
             };
             let execution = execute_prepared(
                 &request,
@@ -1947,12 +2099,35 @@ async fn run_assignment(
             output_budget = output_budget
                 .saturating_sub(outcome.stdout.bytes)
                 .saturating_sub(outcome.stderr.bytes);
-            let step_terminal = match outcome.termination {
+            let mut step_terminal = match outcome.termination {
                 Termination::Cancelled => WorkOutcome::Aborted,
                 Termination::TimedOut | Termination::OutputLimitExceeded => WorkOutcome::Failed,
                 Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
                 Termination::Exited => WorkOutcome::Failed,
             };
+            let mut step_reason = None;
+            if let Some(helper) = helper
+                && step_terminal == WorkOutcome::Succeeded
+            {
+                // A helper's exit status says nothing on its own: its answer
+                // must have been authenticated, and a checkout must then land
+                // in the workspace, before the step counts as succeeded.
+                if outcome.private_response_accepted != Some(true) {
+                    step_terminal = WorkOutcome::Failed;
+                    step_reason = Some(helper.failure_reason());
+                } else {
+                    let workspace_path = config.workspace_root.join(&assignment.workspace);
+                    match tokio::task::block_in_place(|| helper.complete(&workspace_path)) {
+                        Ok(_) => {}
+                        Err(reason) => {
+                            step_terminal = WorkOutcome::Failed;
+                            step_reason = Some(bounded_refusal_detail(format!(
+                                "checkout_publication_rejected:{reason}"
+                            )));
+                        }
+                    }
+                }
+            }
             logs.push(outcome.stdout.clone());
             logs.push(outcome.stderr.clone());
             step_records.push(StepRecord {
@@ -1960,7 +2135,7 @@ async fn run_assignment(
                 outcome: outcome_name(step_terminal).to_owned(),
                 exit_code: outcome.exit_code,
                 termination: termination_name(outcome.termination).to_owned(),
-                reason: None,
+                reason: step_reason,
             });
             let stop_here = step_terminal != WorkOutcome::Succeeded;
             last_outcome = Some(outcome);
@@ -3596,6 +3771,7 @@ mod tests {
         AgentConfig {
             input_bindings: None,
             cache_bindings: None,
+            source_bindings: None,
             podman_path: None,
             agent_id: "agent-1".to_owned(),
             trust_pool: "trusted".to_owned(),
@@ -3692,7 +3868,7 @@ mod tests {
 
         let foreign_kind = serde_json::to_vec(&json!({"version": 5, "steps": [
             {"kind": "process", "program": "/bin/true"},
-            {"kind": "checkout", "program": ""}
+            {"kind": "artifact", "program": ""}
         ]}))
         .unwrap();
         let refusal = unsupported(
@@ -5437,6 +5613,42 @@ mod tests {
 
 #[cfg(test)]
 mod renewal_tests;
+
+/// Prepares every checkout step of the assignment into a sealed acquirer
+/// invocation (PAR-012). Validation admitted checkouts only with source
+/// bindings on Linux, so the non-Linux arm never sees one.
+#[cfg(target_os = "linux")]
+fn prepare_checkouts(
+    config: &AgentConfig,
+    assignment: &ValidatedAssignment,
+) -> Result<Vec<(usize, PreparedHelper)>, AgentError> {
+    assignment
+        .checkouts
+        .iter()
+        .map(|(index, spec)| {
+            crate::source::prepare(
+                config,
+                spec,
+                &assignment.work_context,
+                &assignment.payload_digest,
+                u32::try_from(*index).expect("step count is bounded"),
+            )
+            .map(|prepared| (*index, PreparedHelper::Source(Box::new(prepared))))
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_checkouts(
+    _config: &AgentConfig,
+    assignment: &ValidatedAssignment,
+) -> Result<Vec<(usize, PreparedHelper)>, AgentError> {
+    if assignment.checkouts.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Err(AgentError::InvalidConfig("checkout steps require Linux"))
+    }
+}
 
 async fn execute_prepared<F>(
     request: &ExecutionRequest,

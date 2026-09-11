@@ -12,6 +12,7 @@ pub mod cache;
 mod container;
 pub mod input;
 mod private_helper;
+pub mod source;
 mod worker;
 
 use mcloving_agent_protocol::wire;
@@ -52,6 +53,9 @@ const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 pub struct AgentConfig {
     pub input_bindings: Option<input::InputBindings>,
     pub cache_bindings: Option<cache::CacheBindings>,
+    /// Deployment source bindings for checkout steps (PAR-012); absent means
+    /// this agent never advertises `sealed-source-v1`.
+    pub source_bindings: Option<source::SourceBindings>,
     /// Absolute path of the deployment-pinned podman binary (PAR-011).
     /// Absent means this agent never advertises `container-podman-v1`.
     pub podman_path: Option<PathBuf>,
@@ -307,6 +311,17 @@ impl AgentConfig {
                 Some(_) => return Err(AgentError::InvalidConfig("cache helpers require Linux")),
                 None if values.contains_key("MCLOVING_AGENT_CACHE_BINDINGS_SHA256") => {
                     return Err(AgentError::InvalidConfig("cache bindings path missing"));
+                }
+                None => None,
+            },
+            source_bindings: match values.get("MCLOVING_AGENT_SOURCE_BINDINGS_PATH") {
+                Some(path) if cfg!(target_os = "linux") => Some(source::load_bindings(
+                    Path::new(path),
+                    &required("MCLOVING_AGENT_SOURCE_BINDINGS_SHA256")?,
+                )?),
+                Some(_) => return Err(AgentError::InvalidConfig("source helpers require Linux")),
+                None if values.contains_key("MCLOVING_AGENT_SOURCE_BINDINGS_SHA256") => {
+                    return Err(AgentError::InvalidConfig("source bindings path missing"));
                 }
                 None => None,
             },
@@ -588,6 +603,7 @@ async fn open_session(
                 let mut values = session_capabilities();
                 values.extend(cache::scheduling_capabilities(config)?);
                 values.extend(input::scheduling_capabilities(config)?);
+                values.extend(source::scheduling_capabilities(config)?);
                 values.extend(container::scheduling_capabilities(config));
                 values
             },

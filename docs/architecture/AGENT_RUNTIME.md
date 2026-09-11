@@ -308,6 +308,29 @@ discharge a parked reconciliation).
   Linux containment
   answer for container stages and is recorded against `SEC-005` as partial:
   plain process steps still run as the service account on the host.
+- A stage may hold one `checkout` step (PAR-012) beside its process steps.
+  It always rides the version-5 envelope and additionally requires
+  `sealed-source-v1` plus the exact binding capability derived from the
+  step's mapping id and digest, which an agent advertises only for the
+  mappings in `MCLOVING_AGENT_SOURCE_BINDINGS_PATH` in its own trust pool. The
+  step is a helper at its own ordinal: before the first spawn the agent
+  re-reads the binding's acquirer configuration, checks its digests and the
+  ref's allowed prefix, writes the acquirer's own request from the
+  controller-authorized work context, seals the pinned acquirer into a memory
+  file and enters it directly or, where the host restricts unprivileged user
+  namespaces, through the binding's `aa-exec` launcher and AppArmor profile;
+  a checkout never runs inside a stage image. The one-line answer is
+  authenticated against the configured signing key, digests and the written
+  request, and only a typed `mcloving.source-invocation/v1` summary reaches
+  the public stream. The verified tree is then moved into
+  `<workspace>/<destination>` by `renameat2(RENAME_NOREPLACE)` between two
+  `O_NOFOLLOW` directory descriptors with the destination checked absent
+  before and its inode checked after, refusing a pre-created destination by
+  name and reporting one that appeared in between as substituted, and is made
+  owner-writable by a descriptor walk that skips links. A clean exit whose
+  answer was not accepted or whose publication was refused is the failed step
+  that stops the stage. The contract is
+  `docs/architecture/SOURCE_PRODUCT_PATH_V1.md`.
 - When `inline-terminal-logs-v1` is negotiated, a stream that fits one chunk
   is verified identically and then carried in the terminal publication's
   `inline_log_chunks` instead of its own `PublishLog` round trip; the
