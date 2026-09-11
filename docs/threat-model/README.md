@@ -1037,9 +1037,11 @@ where the quota is authoritative; the walk's aggregate matching work is
 bounded per pattern-and-path pair but not across the walk, a zero-length
 file is not probed for growth before its header-only stream closes, the
 collector holds every collected file open at once so a set near the object
-bound needs a descriptor limit above the default 1 024, and the controller
-finalizes a staging writer (its fsync) on a runtime worker thread
-(`AGENT-012`). Closure requires the
+bound needs a descriptor limit above the default 1 024, the controller
+finalizes a staging writer (its fsync) on a runtime worker thread, and a
+set is published one object at a time, so a file that changes under a later
+upload fails the attempt by name with the earlier objects of the set already
+visible rather than none (`AGENT-012`). Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
 
