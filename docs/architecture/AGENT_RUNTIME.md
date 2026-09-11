@@ -437,9 +437,13 @@ discharge a parked reconciliation).
   left behind is a changed length, never an unbounded read), streamed over the session's
   mTLS channel as an `UploadArtifact` client stream (a header carrying the
   work authority, name, length and SHA-256, then one-MiB data frames) under
-  the attempt's live lease, with an RPC budget that grows one second per
-  MiB and ended by a lost lease, a stop, or the attempt's cancellation (a
-  cancellation that lands after the last step collects nothing more); the controller stages it into the same object store the public
+  the attempt's live lease, with the upload budget both sides share
+  (thirty seconds plus one second per MiB, at most fifteen minutes, not the
+  lease-sized RPC budget) and ended by a lost lease, a stop, or the
+  attempt's cancellation (a cancellation that lands after the last step
+  collects nothing more); a file that runs short under the streaming read
+  is the same `changed_length` refusal as one that changes under the digest
+  read; the controller stages it into the same object store the public
   upload routes use, with the declared length reserved against the store
   quota before the first byte, charges the declared length against the
   attempt's quota in an in-process ledger of streams still in flight before

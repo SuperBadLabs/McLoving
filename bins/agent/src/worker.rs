@@ -3347,9 +3347,9 @@ async fn upload_artifact(
     };
     let bytes = file.bytes;
     let mut source = file.file;
-    let reader = tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+    let reader = tokio::task::spawn_blocking(move || -> Result<FrameRead, std::io::Error> {
         if frames.blocking_send(header).is_err() {
-            return Ok(());
+            return Ok(FrameRead::Closed);
         }
         let mut remaining = bytes;
         let mut buffer = vec![0_u8; MAX_ARTIFACT_FRAME_BYTES];
@@ -3358,21 +3358,25 @@ async fn upload_artifact(
                 .unwrap_or(MAX_ARTIFACT_FRAME_BYTES);
             let read = source.read(&mut buffer[..want])?;
             if read == 0 {
-                // Shorter than identified: the server refuses the short
-                // upload and the RPC fails; nothing partial is registered.
-                return Ok(());
+                // Shorter than identified: the stream ends short, the
+                // server refuses it and nothing partial is registered; the
+                // caller reads this as the step's changed-length refusal.
+                return Ok(FrameRead::Short);
             }
             remaining -= read as u64;
             let frame = ArtifactUploadFrame {
                 frame: Some(Frame::Data(buffer[..read].to_vec())),
             };
             if frames.blocking_send(frame).is_err() {
-                return Ok(());
+                return Ok(FrameRead::Closed);
             }
         }
-        Ok(())
+        Ok(FrameRead::Complete)
     });
-    let budget = artifact_upload_budget(control.lease_window, bytes);
+    // The shared upload budget the controller enforces on its side, not the
+    // lease-sized one: a small artifact under a five-second lease still gets
+    // the thirty seconds the server allows, while the lease renews meanwhile.
+    let budget = artifact_upload_budget(bytes);
     let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
     let receipt = tokio::select! {
         biased;
@@ -3387,7 +3391,18 @@ async fn upload_artifact(
                 .map_err(AgentError::from)
         },
     };
-    reader.abort();
+    // The RPC future is gone by now, so the reader's channel is closed and
+    // it finishes on its next send at the latest; join it to learn whether
+    // the file ran short under the streaming read.
+    let frames_read = reader.await.map_err(|error| {
+        AgentError::InvalidAssignment(format!("artifact reader failed: {error}"))
+    })??;
+    if matches!(frames_read, FrameRead::Short) && receipt.is_err() {
+        return Ok(UploadOutcome::Refused(format!(
+            "artifact_refused:changed_length:{}",
+            file.relative_path
+        )));
+    }
     let Some(receipt) = receipt? else {
         return Ok(UploadOutcome::Cancelled);
     };
@@ -3405,20 +3420,21 @@ enum UploadOutcome {
     Refused(String),
 }
 
-/// The lease-sized authority budget plus one second per MiB, bounded at
-/// fifteen minutes.
+/// How the streaming read of one artifact ended: every identified byte
+/// sent, the file shorter than identified, or the stream closed by the
+/// RPC's end before the file was done.
 #[cfg(unix)]
-fn artifact_upload_budget(lease_window: Duration, bytes: u64) -> Duration {
-    use mcloving_domain::artifacts::{
-        ARTIFACT_UPLOAD_SECONDS_PER_MIB, MAX_ARTIFACT_UPLOAD_SECONDS,
-    };
-    lease_rpc_budget(lease_window)
-        .saturating_add(Duration::from_secs(
-            bytes
-                .div_ceil(1_048_576)
-                .saturating_mul(ARTIFACT_UPLOAD_SECONDS_PER_MIB),
-        ))
-        .min(Duration::from_secs(MAX_ARTIFACT_UPLOAD_SECONDS))
+enum FrameRead {
+    Complete,
+    Short,
+    Closed,
+}
+
+/// The upload budget both sides share: thirty seconds plus one second per
+/// MiB, bounded at fifteen minutes.
+#[cfg(unix)]
+fn artifact_upload_budget(bytes: u64) -> Duration {
+    Duration::from_secs(mcloving_domain::artifacts::artifact_upload_seconds(bytes))
 }
 
 async fn authority_rpc<T>(

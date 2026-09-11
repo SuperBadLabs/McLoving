@@ -1013,10 +1013,10 @@ their product rather than a combinatorial search, a walk bounded at depth
 counted by the agent before the first upload and both enforced by the store
 at every registration under the attempt-scoped lock, so a custom peer
 cannot register unbounded rows under one lease, the agent's reads bounded by the length identified at open so a writer the
-step left behind cannot keep it reading, one-MiB frames, an RPC budget of
-one second per MiB bounded at fifteen minutes under a lease the agent keeps
-renewing, and the attempt's cancellation ending collection and any upload
-in flight);
+step left behind cannot keep it reading, one-MiB frames, the upload budget both
+sides share (thirty seconds plus one second per MiB, bounded at fifteen
+minutes) under a lease the agent keeps renewing, and the attempt's
+cancellation ending collection and any upload in flight);
 TM-052 (API: no new public route; the existing authorized artifact listing
 and download routes serve the objects). Residual: an attempt's own steps
 choose the bytes, as before; a crash between the steps and the durable
