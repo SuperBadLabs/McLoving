@@ -22,10 +22,15 @@ pub(crate) fn scheduling_capabilities(config: &AgentConfig) -> Vec<String> {
     if runtime_answers(runtime) {
         vec![mcloving_domain::container::CONTAINER_CAPABILITY.to_owned()]
     } else {
-        eprintln!(
-            "container runtime {} did not answer --version; container-podman-v1 is not advertised",
-            runtime.display()
-        );
+        // Session opens repeat on every reconnect; the report is worth one
+        // line per process, not one per reconnect.
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| {
+            eprintln!(
+                "container runtime {} did not answer --version; container-podman-v1 is not advertised",
+                runtime.display()
+            );
+        });
         Vec::new()
     }
 }

@@ -396,13 +396,19 @@ pub mod container {
         let rest: Vec<&str> = components.collect();
         // The first component may be a registry host with a port; every other
         // component is a plain repository path element without a tag colon.
+        // Reference parsing treats a first component that contains a dot or
+        // is `localhost` as a registry domain, and a domain needs a `/repo`
+        // path after it; `docker.io@sha256:...` names no repository at all.
+        let looks_like_registry = first.contains('.') || first == "localhost";
         let host_ok = if let Some((host, port)) = first.split_once(':') {
             !rest.is_empty()
                 && host_like(host)
                 && !port.is_empty()
                 && port.bytes().all(|byte| byte.is_ascii_digit())
+        } else if looks_like_registry {
+            !rest.is_empty() && host_like(first)
         } else {
-            host_like(first) || path_like(first)
+            path_like(first)
         };
         host_ok && !name.ends_with('/') && rest.iter().all(|component| path_like(component))
     }
@@ -446,6 +452,19 @@ pub mod container {
             assert!(!is_digest_pinned_image(&format!("@sha256:{digest}")));
             assert!(!is_digest_pinned_image(&format!(
                 "registry:5000@sha256:{digest}"
+            )));
+            // A lone registry-looking component names no repository.
+            assert!(!is_digest_pinned_image(&format!(
+                "docker.io@sha256:{digest}"
+            )));
+            assert!(!is_digest_pinned_image(&format!(
+                "localhost@sha256:{digest}"
+            )));
+            assert!(is_digest_pinned_image(&format!(
+                "localhost/tool@sha256:{digest}"
+            )));
+            assert!(is_digest_pinned_image(&format!(
+                "my.registry.example/team/tool@sha256:{digest}"
             )));
         }
     }
