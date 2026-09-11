@@ -4,7 +4,7 @@ use std::fs::File;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use nix::errno::Errno;
@@ -25,8 +25,9 @@ use tokio_util::sync::CancellationToken;
 use crate::SpoolEntry;
 
 use super::{
-    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
-    Termination, create_workspace, sync_boundaries, validate_redactions, write_redacted_output,
+    CONTAINER_EXISTENCE_TIMEOUT, CONTAINER_REMOVAL_TIMEOUT, ContainerSpec, Containment,
+    ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture, Termination,
+    create_workspace, sync_boundaries, validate_redactions, write_redacted_output,
 };
 
 /// Executes one process in a new process group.
@@ -320,11 +321,12 @@ where
     let process_group_id =
         i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
     if let Err(error) = on_spawn(process_id) {
-        terminate_and_prove_group_empty(
+        terminate_group_reaping_on_failure(
             &mut child,
             process_id,
             process_group_id,
             request.termination_grace,
+            request.container.as_ref(),
         )
         .await?;
         if let Some(container) = &request.container {
@@ -370,21 +372,23 @@ where
             }
         },
         () = cancellation.cancelled() => {
-            let status = terminate_and_prove_group_empty(
+            let status = terminate_group_reaping_on_failure(
                 &mut child,
                 process_id,
                 process_group_id,
                 request.termination_grace,
+                request.container.as_ref(),
             )
             .await?;
             (Termination::Cancelled, status)
         }
         () = sleep_until(deadline) => {
-            let status = terminate_and_prove_group_empty(
+            let status = terminate_group_reaping_on_failure(
                 &mut child,
                 process_id,
                 process_group_id,
                 request.termination_grace,
+                request.container.as_ref(),
             )
             .await?;
             (Termination::TimedOut, status)
@@ -396,11 +400,12 @@ where
             request.output_limit_bytes,
         ) => {
             if let Err(error) = result {
-                terminate_and_prove_group_empty(
+                terminate_group_reaping_on_failure(
                     &mut child,
                     process_id,
                     process_group_id,
                     request.termination_grace,
+                    request.container.as_ref(),
                 )
                 .await?;
                 // The monitor failed, not the workload: the container may
@@ -411,11 +416,12 @@ where
                 }
                 return Err(error.into());
             }
-            let status = terminate_and_prove_group_empty(
+            let status = terminate_group_reaping_on_failure(
                 &mut child,
                 process_id,
                 process_group_id,
                 request.termination_grace,
+                request.container.as_ref(),
             )
             .await?;
             (Termination::OutputLimitExceeded, status)
@@ -529,15 +535,46 @@ where
 /// but a client killed by timeout or cancellation leaves conmon holding the
 /// container. Removal is idempotent, and absence is checked by a separate
 /// `container exists` query whose exit status 1 is the only accepted proof.
+/// Terminates the client group like [`terminate_and_prove_group_empty`], but
+/// when that proof fails on a container attempt the container is reaped
+/// before the cleanup error propagates. The group error is what the caller
+/// must see: it already forces unverified containment, and recovery retries
+/// the absence proof if this best-effort reap did not succeed. Without this,
+/// every cancellation, timeout, output-limit and spawn-hook arm would leave
+/// the container running with the workspace mounted until a recovery
+/// session, exactly as the leader-exit arm used to.
+async fn terminate_group_reaping_on_failure(
+    child: &mut Child,
+    process_id: u32,
+    process_group_id: i32,
+    termination_grace: Duration,
+    container: Option<&ContainerSpec>,
+) -> Result<ExitStatus, ExecutionError> {
+    match terminate_and_prove_group_empty(child, process_id, process_group_id, termination_grace)
+        .await
+    {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            if let Some(container) = container {
+                let _ = reap_container(&container.runtime, &container.name).await;
+            }
+            Err(error)
+        }
+    }
+}
+
 async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError> {
     let unverified = |reason: String| ExecutionError::ContainerUnverified {
         name: name.to_owned(),
         reason,
     };
+    // `--time 0` kills rather than asks: the client group is already empty,
+    // so nothing inside deserves a stop timeout, and the whole reap has to
+    // fit the lease reserve the worker set aside for it.
     let remove = tokio::time::timeout(
-        Duration::from_secs(60),
+        CONTAINER_REMOVAL_TIMEOUT,
         Command::new(runtime)
-            .args(["rm", "--force", "--ignore", name])
+            .args(["rm", "--force", "--time", "0", "--ignore", name])
             .env_clear()
             .env(
                 "PATH",
@@ -553,7 +590,12 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
             .output(),
     )
     .await
-    .map_err(|_| unverified("container removal did not return within 60 seconds".to_owned()))?
+    .map_err(|_| {
+        unverified(format!(
+            "container removal did not return within {} seconds",
+            CONTAINER_REMOVAL_TIMEOUT.as_secs()
+        ))
+    })?
     .map_err(|error| unverified(format!("container removal could not start: {error}")))?;
     if !remove.status.success() {
         return Err(unverified(format!(
@@ -563,7 +605,7 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
         )));
     }
     let exists = tokio::time::timeout(
-        Duration::from_secs(30),
+        CONTAINER_EXISTENCE_TIMEOUT,
         Command::new(runtime)
             .args(["container", "exists", name])
             .env_clear()
@@ -582,7 +624,10 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
     )
     .await
     .map_err(|_| {
-        unverified("container existence query did not return within 30 seconds".to_owned())
+        unverified(format!(
+            "container existence query did not return within {} seconds",
+            CONTAINER_EXISTENCE_TIMEOUT.as_secs()
+        ))
     })?
     .map_err(|error| {
         unverified(format!(

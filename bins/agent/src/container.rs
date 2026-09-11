@@ -106,7 +106,7 @@ pub(crate) fn recovered_container_gone(
 /// containment unverified and the caller parks the attempt.
 pub(crate) fn reap_recovered_container(runtime: &Path, name: &str) -> bool {
     let removed = bounded_status(
-        runtime_command(runtime).args(["rm", "--force", "--ignore", name]),
+        runtime_command(runtime).args(["rm", "--force", "--time", "0", "--ignore", name]),
         REAP_DEADLINE,
     );
     if !removed.is_some_and(|status| status.success()) {

@@ -90,6 +90,23 @@ pub enum Termination {
     OutputLimitExceeded,
 }
 
+/// Time the executor may spend proving a container gone after its client
+/// group is empty: forced removal (`rm --force --time 0`, up to
+/// [`CONTAINER_REMOVAL_TIMEOUT`]) followed by the existence query (up to
+/// [`CONTAINER_EXISTENCE_TIMEOUT`]). A container attempt's lease must reserve
+/// this on top of the termination grace, because a pre-expiry cancellation
+/// that cannot finish the reap before the term ends leaves a container
+/// writing into the workspace while the attempt is already reclaimable.
+pub const CONTAINER_TEARDOWN_RESERVE: Duration = Duration::from_secs(20);
+/// Bound on `podman rm --force --time 0 <name>` during teardown.
+pub const CONTAINER_REMOVAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on `podman container exists <name>` during teardown.
+pub const CONTAINER_EXISTENCE_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    CONTAINER_REMOVAL_TIMEOUT.as_secs() + CONTAINER_EXISTENCE_TIMEOUT.as_secs()
+        <= CONTAINER_TEARDOWN_RESERVE.as_secs()
+);
+
 /// One container execution (PAR-011): a pinned runtime binary, a digest-pinned
 /// image, and the agent-chosen container name teardown reaps and proves absent.
 #[derive(Clone, Debug, Eq, PartialEq)]

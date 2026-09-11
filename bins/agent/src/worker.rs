@@ -1377,6 +1377,12 @@ async fn run_assignment(
     })?;
 
     let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
+    // Everything a pre-expiry cancellation must finish before the term ends:
+    // the group's termination grace, plus the container reap on a container
+    // attempt (PAR-011), so the controller can never reclaim an attempt whose
+    // container is still writing into the workspace.
+    let termination_reserve =
+        termination_reserve(config.termination_grace, assignment.image.is_some());
     let receipt = lease_window_rpc(
         lease_window,
         client.accept_work(assignment.authority.clone()),
@@ -1393,7 +1399,7 @@ async fn run_assignment(
     // response cannot leave a process starting without termination reserve.
     let lease_started_at = accepted_at;
     let lease = lease_deadline_rpc(
-        lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace),
+        lease_cancellation_deadline(lease_started_at, lease_window, termination_reserve),
         client.renew_work_lease(WorkLeaseRenewal {
             authority: Some(assignment.authority.clone()),
             lease_seconds: config.lease_seconds,
@@ -1405,7 +1411,7 @@ async fn run_assignment(
         return Err(AgentError::StaleAuthority);
     }
     if tokio::time::Instant::now()
-        >= lease_cancellation_deadline(lease_started_at, lease_window, config.termination_grace)
+        >= lease_cancellation_deadline(lease_started_at, lease_window, termination_reserve)
     {
         return Err(AgentError::LeaseRenewalTimeout);
     }
@@ -1468,7 +1474,7 @@ async fn run_assignment(
             renewal_interval: config.lease_renewal_interval,
             lease_started_at,
             lease_window,
-            termination_grace: config.termination_grace,
+            termination_grace: termination_reserve,
             execution_cancellation: execution_cancellation.clone(),
             authority_lost: authority_lost.clone(),
             stop: lease_stop.clone(),
@@ -2571,6 +2577,18 @@ fn accept_consumed_claim_lease(
 ) -> bool {
     claimed_no_later_than + lease_window.saturating_sub(Duration::from_secs(1))
         < accepted_at + renewal_interval
+}
+
+/// The time a pre-expiry cancellation reserves inside the lease: the
+/// termination grace alone for a process attempt, plus the bounded container
+/// reap for a container attempt. The agent configuration refuses a lease that
+/// cannot hold the container reserve when a runtime is configured.
+pub(super) fn termination_reserve(termination_grace: Duration, container: bool) -> Duration {
+    if container {
+        termination_grace + mcloving_agent_runtime::executor::CONTAINER_TEARDOWN_RESERVE
+    } else {
+        termination_grace
+    }
 }
 
 pub(super) fn execution_lease_budget(
@@ -4399,6 +4417,34 @@ mod tests {
         assert_eq!(
             lease_cancellation_deadline(start, Duration::from_secs(5), Duration::from_secs(30)),
             start
+        );
+    }
+
+    /// PAR-011, from review. A container outlives its killed client, and the
+    /// reap that proves it gone is bounded but not free. A container attempt
+    /// therefore reserves the reap on top of the grace, so the pre-expiry
+    /// cancellation still finishes the whole teardown inside the term.
+    #[test]
+    fn container_attempts_reserve_the_reap_inside_the_lease() {
+        use mcloving_agent_runtime::executor::CONTAINER_TEARDOWN_RESERVE;
+        let start = tokio::time::Instant::now();
+        let window = Duration::from_secs(30);
+        let grace = Duration::from_secs(2);
+        assert_eq!(termination_reserve(grace, false), grace);
+        assert_eq!(
+            termination_reserve(grace, true),
+            grace + CONTAINER_TEARDOWN_RESERVE
+        );
+        let deadline = lease_cancellation_deadline(start, window, termination_reserve(grace, true));
+        assert_eq!(deadline, start + Duration::from_secs(7));
+        assert!(
+            deadline + grace + CONTAINER_TEARDOWN_RESERVE <= start + window,
+            "grace and reap both fit before lease expiry"
+        );
+        // The default cadence (5 s) still fits in the default 30 s lease.
+        assert!(
+            Duration::from_secs(5)
+                < execution_lease_budget(window, termination_reserve(grace, true))
         );
     }
 

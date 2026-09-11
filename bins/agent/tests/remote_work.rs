@@ -1739,6 +1739,9 @@ async fn container_stage_runs_in_the_pinned_image_and_sees_only_the_workspace() 
         &harness.workspace,
     )
     .env("MCLOVING_AGENT_PODMAN_PATH", &podman)
+    // A container attempt reserves the bounded reap inside its lease on top
+    // of the grace and cadence; the harness's 5 s term cannot hold it.
+    .env("MCLOVING_AGENT_LEASE_SECONDS", "30")
     .kill_on_drop(true)
     .spawn()
     .expect("start shipped remote agent with a container runtime");
@@ -1883,6 +1886,9 @@ async fn timed_out_container_step_leaves_no_container_behind() {
         &harness.workspace,
     )
     .env("MCLOVING_AGENT_PODMAN_PATH", &podman)
+    // A container attempt reserves the bounded reap inside its lease on top
+    // of the grace and cadence; the harness's 5 s term cannot hold it.
+    .env("MCLOVING_AGENT_LEASE_SECONDS", "30")
     .kill_on_drop(true)
     .spawn()
     .expect("start shipped remote agent with a container runtime");

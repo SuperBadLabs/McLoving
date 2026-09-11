@@ -258,6 +258,35 @@ impl AgentConfig {
                 "agent polling, renewal, or termination timing",
             ));
         }
+        let podman_path = match values.get("MCLOVING_AGENT_PODMAN_PATH") {
+            Some(path) if !path.trim().is_empty() => {
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err(AgentError::InvalidConfig(
+                        "MCLOVING_AGENT_PODMAN_PATH must be absolute",
+                    ));
+                }
+                Some(path)
+            }
+            _ => None,
+        };
+        // A container attempt's pre-expiry cancellation reaps the container
+        // after the grace (PAR-011); both have to fit inside the lease along
+        // with the renewal cadence, or the container could outlive the term.
+        if podman_path.is_some()
+            && Duration::from_millis(renewal_milliseconds)
+                >= worker::execution_lease_budget(
+                    Duration::from_secs(u64::from(lease_seconds)),
+                    worker::termination_reserve(
+                        Duration::from_millis(termination_grace_milliseconds),
+                        true,
+                    ),
+                )
+        {
+            return Err(AgentError::InvalidConfig(
+                "lease cannot hold the container teardown reserve",
+            ));
+        }
         Ok(Self {
             input_bindings: match values.get("MCLOVING_AGENT_INPUT_BINDINGS_PATH") {
                 Some(path) if cfg!(target_os = "linux") => Some(input::load_bindings(
@@ -281,18 +310,7 @@ impl AgentConfig {
                 }
                 None => None,
             },
-            podman_path: match values.get("MCLOVING_AGENT_PODMAN_PATH") {
-                Some(path) if !path.trim().is_empty() => {
-                    let path = PathBuf::from(path);
-                    if !path.is_absolute() {
-                        return Err(AgentError::InvalidConfig(
-                            "MCLOVING_AGENT_PODMAN_PATH must be absolute",
-                        ));
-                    }
-                    Some(path)
-                }
-                _ => None,
-            },
+            podman_path,
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
             organization_id: required("MCLOVING_AGENT_ORGANIZATION_ID")?,
@@ -1604,6 +1622,35 @@ mod tests {
                 ))
             ),
             "3000 ms of cadence plus 1500 ms of grace does not fit in a 5 s lease"
+        );
+
+        // PAR-011, from review. With a container runtime configured, the
+        // reap that proves a container gone is reserved inside the lease as
+        // well. A lease that holds the grace and cadence but not the reap is
+        // refused for the same reason: the container would outlive the term.
+        let mut reap_overruns_lease = values();
+        reap_overruns_lease.insert(
+            "MCLOVING_AGENT_PODMAN_PATH".to_owned(),
+            "/usr/bin/podman".to_owned(),
+        );
+        reap_overruns_lease.insert("MCLOVING_AGENT_LEASE_SECONDS".to_owned(), "20".to_owned());
+        assert!(
+            matches!(
+                AgentConfig::from_values(&reap_overruns_lease),
+                Err(AgentError::InvalidConfig(
+                    "lease cannot hold the container teardown reserve"
+                ))
+            ),
+            "a 20 s lease cannot hold 5 s cadence, 2 s grace and the container reap"
+        );
+        let mut reap_fits_lease = values();
+        reap_fits_lease.insert(
+            "MCLOVING_AGENT_PODMAN_PATH".to_owned(),
+            "/usr/bin/podman".to_owned(),
+        );
+        assert!(
+            AgentConfig::from_values(&reap_fits_lease).is_ok(),
+            "the default 30 s lease holds the container reserve"
         );
 
         // The same cadence with a grace that does fit is accepted, so the rule

@@ -858,7 +858,12 @@ execution, so only the exact image digest ever runs); TM-052 (routing: the
 podman answers, and admission refuses container stages for Windows). After the
 group is empty the executor removes the named container and accepts only a
 `container exists` exit status of 1 as proof; anything else is unverified
-containment. Residual: `--userns=keep-id` maps the service account into the
+containment, and a group-teardown failure on any arm still attempts the reap
+before its error propagates. A container attempt reserves that bounded reap
+inside its lease on top of the termination grace (TM-003: a pre-expiry
+cancellation finishes the teardown before the attempt is reclaimable, and an
+agent whose lease cannot hold the reserve refuses to start with a runtime
+configured). Residual: `--userns=keep-id` maps the service account into the
 container, so a workload that escapes the container runtime holds the same
 identity as today; image pulls reach the registry the reference names under
 the deployment's network policy. Shipped-binary tests cover a step reading the
