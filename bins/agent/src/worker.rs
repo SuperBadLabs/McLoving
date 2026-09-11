@@ -1881,6 +1881,22 @@ async fn run_assignment(
                         .map(|(name, context)| (*name, context.as_str())),
                 )?;
             }
+            // A helper's own frame bound never outranks what the attempt has
+            // left: its public summary counts against the same quota as every
+            // other step's output. Nothing left means the step cannot start.
+            let step_output_limit = helper.map_or(output_budget, |helper| {
+                helper.output_limit().min(output_budget)
+            });
+            if helper.is_some() && step_output_limit == 0 {
+                step_records.push(StepRecord {
+                    ordinal,
+                    outcome: outcome_name(WorkOutcome::Failed).to_owned(),
+                    exit_code: None,
+                    termination: termination_name(Termination::OutputLimitExceeded).to_owned(),
+                    reason: Some("attempt_output_budget_exhausted".to_owned()),
+                });
+                break;
+            }
             let request = ExecutionRequest {
                 workspace_seed: if index == 0 {
                     assignment
@@ -1914,9 +1930,7 @@ async fn run_assignment(
                     .collect(),
                 // The per-attempt output quota is shared by every step, so a
                 // later step may only spend what earlier steps left.
-                output_limit_bytes: Some(
-                    helper.map_or(output_budget, |helper| helper.output_limit()),
-                ),
+                output_limit_bytes: Some(step_output_limit),
                 timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
                 termination_grace: config.termination_grace,
             };
