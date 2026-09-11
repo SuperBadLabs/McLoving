@@ -3791,7 +3791,30 @@ async fn admit_trigger_event(
     caller_identity: &str,
     timing: DeliveryTiming,
 ) -> Result<Response, ApiError> {
-    validate_trigger_event_filter(trigger, request)?;
+    // The trigger's pause state and filter describe new input. A receipt-timed
+    // delivery id the ledger already holds is a redelivery of an accepted
+    // event, which must replay however the trigger has been revised or paused
+    // since, so the current-generation gate is skipped for it and the
+    // serialized acceptance decides replay or conflict under the trigger
+    // lock. The lookup is advisory: a miss that races a concurrent first
+    // acceptance takes the gate against the same current configuration and
+    // still replays inside the lock.
+    let redelivery = match timing {
+        DeliveryTiming::Declared => false,
+        DeliveryTiming::Receipt => state
+            .store
+            .trigger_delivery(
+                trigger.organization_id,
+                trigger.trigger_id,
+                &request.delivery_id,
+            )
+            .await
+            .map_err(trigger_error)?
+            .is_some(),
+    };
+    if !redelivery {
+        validate_trigger_event_filter(trigger, request)?;
+    }
     // Reject parameter shapes before durable capture. The processing path
     // repeats this validation for crash/restart and legacy-corruption safety.
     parameter_values(request.parameters.clone())?;

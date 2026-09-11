@@ -895,8 +895,9 @@ receipt-timed, the event time being the database clock read inside the
 serialized acceptance so one delivery id gets one time across controllers
 and no controller clock can reject a legitimate delivery, and a redelivery is
 matched on the authenticated delivery alone rather than on the trigger
-generation or parameters current at redelivery, so it replays rather than
-conflicts after a configuration change); TM-002/TM-011
+generation or parameters current at redelivery, and ahead of the trigger's
+current pause state and filter, so it replays rather than conflicts, refuses
+or acknowledges as filtered after a configuration change); TM-002/TM-011
 (authentication: no bearer, the raw body's `X-Hub-Signature-256` is verified
 in constant time under a per-trigger secret derived by HMAC from the
 controller's webhook key file and the trigger's identity and

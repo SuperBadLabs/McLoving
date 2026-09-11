@@ -525,4 +525,77 @@ stages:
     let pull_response = json_body(pull_response).await;
     assert_eq!(pull_response["delivery"]["event_kind"], "pull_request");
     assert_ne!(pull_response["admission"]["build_id"], build_id);
+
+    // The trigger is paused and its branch filter narrowed so the accepted
+    // push no longer matches. GitHub redelivers it: still the same build,
+    // because pause state and filters describe new input. A genuinely new
+    // delivery is refused as paused.
+    let narrowed_filter = json!({"event_kinds": ["push", "pull_request"], "branches": ["release"], "path_prefixes": []});
+    let narrowed_configuration = json!({
+        "provider": "github",
+        "repository_identity": "SuperBadLabs/cljest",
+        "filter": narrowed_filter.clone()
+    });
+    let paused = app
+        .clone()
+        .oneshot(
+            Request::put(&trigger_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"2\"")
+                .header(IDEMPOTENCY_HEADER, "scm-webhook-pause")
+                .body(Body::from(
+                    json!({
+                        "kind": "scm_webhook",
+                        "state": "paused",
+                        "implementation_sha256": sha256_hex(b"scm-webhook-v1"),
+                        "configuration_sha256": sha256_hex(&serde_json::to_vec(&narrowed_configuration).unwrap()),
+                        "filter_sha256": sha256_hex(&serde_json::to_vec(&narrowed_filter).unwrap()),
+                        "event_source_identity": "scm:github:webhook:cljest",
+                        "source_generation": "hook-generation-1",
+                        "configuration": narrowed_configuration,
+                        "deduplication_window_seconds": 7200,
+                        "max_delivery_attempts": 3,
+                        "delivery_ttl_seconds": 7200,
+                        "reason": "paused for a release branch",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(paused.status(), StatusCode::OK);
+    assert_eq!(json_body(paused).await["generation"], 3);
+    let replayed_while_paused = post(
+        app.clone(),
+        &hook_route,
+        delivery_id,
+        "push",
+        body.clone(),
+        sign(&secret, &body),
+    )
+    .await;
+    assert_eq!(replayed_while_paused.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(replayed_while_paused).await["admission"]["build_id"],
+        build_id
+    );
+    let fresh = post(
+        app.clone(),
+        &hook_route,
+        "delivery-while-paused",
+        "push",
+        body.clone(),
+        sign(&secret, &body),
+    )
+    .await;
+    assert_eq!(fresh.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(fresh).await["code"], "trigger_paused");
+    let builds: i64 = sqlx::query_scalar("SELECT count(*) FROM builds WHERE organization_id = $1")
+        .bind(organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(builds, 2, "the push and the pull request, nothing else");
 }

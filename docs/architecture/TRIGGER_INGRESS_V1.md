@@ -256,7 +256,11 @@ a redelivery is matched on the authenticated delivery alone (ids, kind,
 caller, canonical `{event_kind, payload}`, platform, trust pool), never on
 the trigger generation or the parameters current at redelivery, so a trigger
 revision or a pipeline parameter change after acceptance does not turn an
-exact redelivery into a conflict. Created deliveries answer 201 with the
+exact redelivery into a conflict. For the same reason a delivery id the
+ledger already holds is replayed before the trigger's current pause state
+and filter are applied: those describe new input, and a paused trigger or a
+narrowed branch filter must not turn an accepted delivery's redelivery into
+a refusal or a `filtered` acknowledgement. Created deliveries answer 201 with the
 build admission, exact redeliveries answer 200 with the same build and mint
 nothing, and a reused delivery id with a different authenticated body is a
 409 `trigger_ingress_conflict`. Deliveries that authenticate but are not
