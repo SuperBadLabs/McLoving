@@ -715,7 +715,7 @@ impl ApiState {
             let state = self.clone();
             tasks.spawn(async move {
                 let outcome = deliver(&state, &delivery).await;
-                state
+                let settled = state
                     .store
                     .settle_notification(
                         organization_id,
@@ -725,7 +725,24 @@ impl ApiState {
                         delivery.attempts,
                         outcome.as_ref().err().map(String::as_str),
                     )
-                    .await
+                    .await?;
+                if !settled && outcome.is_ok() {
+                    // The row moved on to a later terminal generation while
+                    // this attempt was in flight, so this write may have
+                    // landed after the newer outcome's; if that outcome is
+                    // already delivered it is posted again so it ends up
+                    // last, and a pending one posts after this write anyway.
+                    state
+                        .store
+                        .requeue_after_stale_settlement(
+                            organization_id,
+                            delivery.build_id,
+                            delivery.target_index,
+                            delivery.terminal_generation,
+                        )
+                        .await?;
+                }
+                Ok::<bool, mcloving_controller_store::StoreError>(settled)
             });
         }
         let mut failure = None;

@@ -1318,11 +1318,23 @@ pub(crate) fn normalized_dag_contract(input: &NewDagBuild) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut contract = json!({
         "version": 1,
         "priority": input.priority,
         "nodes": nodes,
-    })
+    });
+    // The resolved targets are part of what a replay must repeat: two
+    // controllers whose catalogs resolve one mapping id differently must
+    // conflict rather than let the race pick where a credential acts. A
+    // build without targets keeps the contract older builds recorded.
+    if input
+        .notify_targets
+        .as_array()
+        .is_some_and(|targets| !targets.is_empty())
+    {
+        contract["notify_targets"] = input.notify_targets.clone();
+    }
+    contract
 }
 
 /// Validates the complete bounded DAG contract without requiring a database.

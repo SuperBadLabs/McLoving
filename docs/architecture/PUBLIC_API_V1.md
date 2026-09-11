@@ -121,7 +121,10 @@ names a repository must name the mapping's, and a kind whose credential the
 controller does not hold (`MCLOVING_GITHUB_TOKEN_FILE` for commit statuses,
 `MCLOVING_NOTIFICATION_KEY_FILE` for webhooks, both secret-class
 owner-private files) is refused with 422 `notification_mapping_denied`. The
-resolved targets are recorded with the build at admission; the transaction
+resolved targets are recorded with the build at admission and are part of
+its replay contract, so two controllers whose catalogs resolve one mapping
+differently answer an idempotency conflict rather than letting the race
+choose; the transaction
 that makes the build terminal records one delivery per target and appends
 one `dag.build_terminal` event, so a terminal build has its deliveries or is
 not terminal. Every controller on the database runs a delivery worker that claims only
@@ -143,7 +146,9 @@ POSTed to the mapping's `https` destination with `X-McLoving-Signature-256:
 sha256=<HMAC-SHA256 of the exact body under the notification key>`,
 `X-McLoving-Delivery: <build>:<index>:<terminal generation>` (a retried
 build that becomes terminal again starts a new generation, so a receiver
-can tell its outcomes apart), `X-McLoving-Attempt` and
+can tell its outcomes apart; a delivery from an older generation that lands
+after the newer generation was delivered re-queues the newer one, so the
+last write at a target is the latest outcome), `X-McLoving-Attempt` and
 `X-McLoving-Event: build.terminal`. Before either connects, the destination
 host is resolved and every address is checked against the loopback,
 private, link-local, shared, benchmarking, documentation, multicast and

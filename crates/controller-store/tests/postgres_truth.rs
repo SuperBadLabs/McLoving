@@ -12738,12 +12738,18 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             && delivery.build_status == "succeeded"
     }));
     // A settlement from an earlier terminal generation never lands on a
-    // later one.
+    // later one, and nothing pending is re-queued for it.
     assert!(
         !store
             .settle_notification(organization_id, admission.build_id, 0, 0, 1, None)
             .await
             .expect("settle under a stale generation")
+    );
+    assert!(
+        !store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 0)
+            .await
+            .expect("requeue while the newer generation is pending")
     );
     // A claim leases the row past the delivery deadline, so an attempt still
     // in flight is never claimed by a second worker after the lock is gone.
@@ -12801,6 +12807,70 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     assert_eq!(ledger[0].3, "delivered");
     assert_eq!(ledger[1].3, "pending");
     assert_eq!(ledger[1].5.as_deref(), Some("sink answered 503"));
+    // A stale settlement against a delivered newer generation re-queues it
+    // so the newer outcome is posted again and lands last; a settlement of
+    // the current generation re-queues nothing.
+    assert!(
+        !store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 1)
+            .await
+            .expect("requeue under the current generation")
+    );
+    assert!(
+        store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 0)
+            .await
+            .expect("requeue under a stale generation")
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger after the requeue");
+    assert_eq!((ledger[0].3.as_str(), ledger[0].4), ("pending", 0));
+    let reposted = store
+        .claim_due_notifications(organization_id, 10, ALL_KINDS)
+        .await
+        .expect("claim the re-queued row");
+    assert_eq!(reposted.len(), 1);
+    assert_eq!(reposted[0].target_index, 0);
+    assert!(
+        store
+            .settle_notification(organization_id, admission.build_id, 0, 1, 1, None)
+            .await
+            .expect("settle the re-post")
+    );
+    // A stale settlement against a delivered newer generation re-queues it
+    // so the newer outcome is posted again and lands last; a settlement of
+    // the current generation re-queues nothing.
+    assert!(
+        !store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 1)
+            .await
+            .expect("requeue under the current generation")
+    );
+    assert!(
+        store
+            .requeue_after_stale_settlement(organization_id, admission.build_id, 0, 0)
+            .await
+            .expect("requeue under a stale generation")
+    );
+    let ledger = store
+        .build_notifications(organization_id, admission.build_id)
+        .await
+        .expect("read the ledger after the requeue");
+    assert_eq!((ledger[0].3.as_str(), ledger[0].4), ("pending", 0));
+    let reposted = store
+        .claim_due_notifications(organization_id, 10, ALL_KINDS)
+        .await
+        .expect("claim the re-queued row");
+    assert_eq!(reposted.len(), 1);
+    assert_eq!(reposted[0].target_index, 0);
+    assert!(
+        store
+            .settle_notification(organization_id, admission.build_id, 0, 1, 1, None)
+            .await
+            .expect("settle the re-post")
+    );
     // Spent attempts abandon: force the row due and to the last attempt.
     sqlx::query(
         "UPDATE notification_deliveries

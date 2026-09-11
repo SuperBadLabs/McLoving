@@ -3650,6 +3650,43 @@ impl Store {
         Ok(settled.is_some())
     }
 
+    /// After a settlement was refused as stale, re-queues the row's newer
+    /// terminal generation if it was already delivered: the stale attempt's
+    /// external write may have landed after the newer one, so the newer
+    /// outcome is posted again and ends up last. A row still pending is left
+    /// to its own claim, which posts after the stale write by construction.
+    pub async fn requeue_after_stale_settlement(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        stale_generation: i32,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let requeued = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET state = 'pending',
+                 attempts = 0,
+                 next_attempt_at = clock_timestamp(),
+                 last_error = NULL,
+                 delivered_at = NULL
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'delivered'
+               AND terminal_generation > $4
+             RETURNING terminal_generation",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(stale_generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(requeued.is_some())
+    }
+
     /// Every delivery recorded for a build, in target order, with its state,
     /// attempts and last error: the ledger a reader or a test inspects.
     pub async fn build_notifications(
