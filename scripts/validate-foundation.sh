@@ -140,7 +140,7 @@ podman run --rm \
 test "$(
   find "${repo_root}/docs/adr" -maxdepth 1 \
     -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l
-)" -eq 15
+)" -eq 16
 test -s "${repo_root}/docs/architecture/CHARTER.md"
 test -s "${repo_root}/docs/threat-model/README.md"
 test -s "${repo_root}/docs/EXECUTION_BOARD.md"

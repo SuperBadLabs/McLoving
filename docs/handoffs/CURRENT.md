@@ -1,5 +1,48 @@
 # Current custodian handoff
 
+## 2026-09-10 re-orientation: product parity (read this first)
+
+On 2026-09-10 the owner re-oriented the project after a code-level audit that
+compared shipped behaviour against Jenkins. The decisions are ADR 0016 and the
+GROOVY-001 amendment to ADR 0006. In one line: daily-workflow parity first,
+native YAML is the product, Jenkinsfile support is compile-only, the
+migration-authority ceremony and web-interface chains are `DEFERRED`, and the
+first users are the owner's GitHub repositories and McLoving building itself.
+
+The dispatch queue is now the parity lane on the board, one pull request per
+ticket, in this order:
+
+`PAR-000` -> `PAR-010` -> `PAR-011` -> `PAR-012` -> `PAR-001` -> `PAR-013` ->
+`PAR-014` -> `PAR-004` -> `PAR-005` -> `PAR-003` -> `PAR-002` -> `PAR-015`
+
+`PAR-000` (this re-orientation) is `ACTIVE` in slot 1. `EXEC-005` stays
+`ACTIVE` but rescoped: its cache and input slices are merged, its source slice
+is delivered by `PAR-012`, and its dependency-resolver and provisioner slices
+are dropped. The `JCOMP-001` through `JCOMP-003` milestone is complete and its
+receipts stand as bounded evidence.
+
+**Progress metric: distance.** Count the unclosed tickets from the head of the
+chain to `PAR-005`. Today it is 9 (`PAR-000`, `PAR-010`, `PAR-011`, `PAR-012`,
+`PAR-001`, `PAR-013`, `PAR-014`, `PAR-004`, `PAR-005`). Report it here every
+two weeks; it must fall. A ticket added to the chain is reported as a
+regression in this file, not filed silently.
+
+| Date | Distance | Demonstrable |
+|---|---|---|
+| 2026-09-30 | 6 | `PAR-000` merged; a three-step stage runs in a digest-pinned container |
+| 2026-10-31 | 3 | a GitHub push checks the repository out and runs its tests |
+| 2026-11-30 | 1 | logs stream while running, artifacts download, the pull request shows a commit status |
+| 2026-12-31 | 0 | ten consecutive main pushes where McLoving's verdict equals Foundation's |
+
+Each parity ticket names a proof command; run it on HeMan and paste the
+command and output into the pull request body. The threat-model row rule and
+every protected-merge obligation are unchanged. The standing successor-head
+gate below still applies: observe Foundation and Windows green on the exact
+head before starting on it.
+
+Everything below this section is the pre-re-orientation handoff and is kept
+as history.
+
 The current dated handoff is the
 [September 9 Master Chief bundle](2026-09-09-master-chief/README.md), including a
 [next-chief briefing](2026-09-09-master-chief/NEXT_CHIEF.md), verified checkpoint,

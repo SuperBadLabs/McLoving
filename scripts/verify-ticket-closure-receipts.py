@@ -330,9 +330,13 @@ KNOWN_TABLE_HEADERS = frozenset(
 # campaign)` section adds a ticket table holding `GROOVY-001`. Raised with the
 # section, not ahead of it, which is the point of the ratchet: an unadmitted
 # table is invisible to every check in this file while the gate stays green.
+#
+# 10 -> 11 tickets and 5 -> 6 lanes on 2026-09-10: the `Parity tickets
+# (2026-09-10 re-orientation)` section adds the PAR ticket table, and the
+# remaining topology gains the `Parity lane` table (PAR-000).
 EXPECTED_TABLES = {
-    TICKET_TABLE_HEADER: 10,
-    LANE_TABLE_HEADER: 5,
+    TICKET_TABLE_HEADER: 11,
+    LANE_TABLE_HEADER: 6,
     BATCH_TABLE_HEADER: 1,
     DISPATCH_TABLE_HEADER: 1,
 }
@@ -356,7 +360,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # move.
 # 124 -> 125 on 2026-09-10 for the bounded JCOMP-002C diagnostic correction.
 # The ticket joins an existing table; no closure exemption or debt change.
-MINIMUM_TICKET_ROWS = 125
+MINIMUM_TICKET_ROWS = 137
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the

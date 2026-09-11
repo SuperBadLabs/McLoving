@@ -664,8 +664,8 @@ class RequiredEdgeWiringTests(ExecutionBoardVerifierTests):
         """A dropped row is not merely unparsed; it is entirely unchecked."""
         def pad(text: str) -> str:
             return text.replace(
-                "| CASE-002 | PENDING |", "| CASE-002  |  PENDING  |", 1
-            ).replace("| CASE-002  |  PENDING  | CASE-001", "| CASE-002  |  PENDING  | GHOST-404", 1)
+                "| CASE-002 | DEFERRED |", "| CASE-002  |  DEFERRED  |", 1
+            ).replace("| CASE-002  |  DEFERRED  | CASE-001", "| CASE-002  |  DEFERRED  | GHOST-404", 1)
 
         code, _stdout, stderr = self.run_verifier(board_transform=pad)
         self.assertEqual(code, 1, stderr)
