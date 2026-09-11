@@ -3221,9 +3221,12 @@ async fn collect_and_upload_artifacts(
     if !features.artifact_upload {
         return Ok(Some("artifact_upload_unsupported".to_owned()));
     }
-    let workspace = config.workspace_root.join(&assignment.workspace);
     let files = match tokio::task::block_in_place(|| {
-        crate::artifacts::collect(&workspace, &assignment.artifacts)
+        crate::artifacts::collect(
+            &config.workspace_root,
+            &assignment.workspace,
+            &assignment.artifacts,
+        )
     }) {
         Ok(files) => files,
         Err(crate::artifacts::CollectionError::Refused(refusal)) => {

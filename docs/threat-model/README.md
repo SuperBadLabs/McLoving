@@ -972,22 +972,30 @@ is accepted only for a session that negotiated `artifact-upload-v1`, and
 the scheduling capability is kept only for such a session, so an older
 agent or peer is never offered a stage that declares artifacts and never
 strands its files); TM-013 (credential and host exposure: the collector
-walks the workspace descriptor-relative from a root opened once, opens
-every directory and file `O_NOFOLLOW` and re-identifies each against the
-entry it was reached by, never visits the agent's own spool, enters a
-directory only when a pattern can match below it, and refuses the whole
-set by name when a link stands where a declaration would collect or
-descend, so a step that plants a link to a service-account file gets a
-named refusal and no upload; a Windows agent has no collector and is not
+opens the agent-owned workspace root by path without following a link,
+reaches the attempt workspace from it one component at a time `O_NOFOLLOW`
+so a step that swaps its workspace for a link is refused by name rather
+than followed, opens every directory and file below `O_NOFOLLOW` and
+re-identifies each against the entry it was reached by, never visits the
+agent's own spool, enters a directory only when a pattern can match below
+it, refuses an entry whose name is not UTF-8 when a declaration would
+collect or enter it rather than naming an object by a lossy spelling, and
+refuses the whole set by name when a link stands where a declaration would
+collect or descend, so a step that plants a link to a service-account file
+gets a named refusal and no upload; a Windows agent has no collector and is not
 routed such work); TM-006 (durable evidence: the controller stages each
 object into the same content-addressed store the public upload routes use,
 with the declared length reserved against the store quota before the first
 byte and a short or mismatching upload discarded, registers it through the
-same fenced `register_artifact` predicate under the per-attempt artifact
-lock, and commits it into the immutable digest namespace, so an artifact is
-either registered with its digest and length or absent); TM-018 (capacity:
-sixteen declarations of thirty-two patterns per stage, a walk bounded at
-depth 32 and 65 536 entries, at most 1 024 files and 256 MiB per attempt
+same fenced `register_artifact` predicate under an attempt-scoped
+artifact lock shared by every name (so concurrent uploads cannot each fit
+the quota and together exceed it) and then the per-name lock, and commits
+it into the immutable digest namespace, so an artifact is either registered
+with its digest and length or absent); TM-018 (capacity: sixteen
+declarations of thirty-two patterns per stage, pattern matching a table
+over pattern and path segments so a pattern of many `**` segments costs
+their product rather than a combinatorial search, a walk bounded at depth
+32 and 65 536 entries, at most 1 024 objects and 256 MiB per attempt
 counted by the agent before the first upload and enforced by the store at
 every registration, one-MiB frames, and an RPC budget of one second per MiB
 bounded at fifteen minutes under a lease the agent keeps renewing);

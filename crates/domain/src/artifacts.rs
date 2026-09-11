@@ -150,51 +150,69 @@ pub fn validate_pattern(pattern: &str) -> Result<(), ArtifactSpecError> {
     Ok(())
 }
 
+/// The pattern's segments with consecutive `**` collapsed to one: the two
+/// forms match the same paths, and the matcher's table is sized by the
+/// collapsed length.
+fn normalized_segments(pattern: &str) -> Vec<&str> {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in pattern.split('/') {
+        if segment == "**" && segments.last() == Some(&"**") {
+            continue;
+        }
+        segments.push(segment);
+    }
+    segments
+}
+
 /// Whether the pattern could match something strictly below the directory
 /// at `dir` (workspace-relative, `/` form): the walk descends only into
 /// such directories and refuses a link in their place before looking below.
+/// A table over (pattern segment, path segment), so the work is the product
+/// of the two lengths whatever the pattern's shape.
 #[must_use]
 pub fn pattern_may_descend(pattern: &str, dir: &str) -> bool {
-    let pattern: Vec<&str> = pattern.split('/').collect();
+    let pattern = normalized_segments(pattern);
     let dir: Vec<&str> = dir.split('/').collect();
-    may_descend(&pattern, &dir)
-}
-
-fn may_descend(pattern: &[&str], dir: &[&str]) -> bool {
-    match (pattern.split_first(), dir.split_first()) {
-        (None, _) => false,
-        (Some(_), None) => true,
-        (Some((&"**", rest)), Some((_, remaining))) => {
-            may_descend(rest, dir) || may_descend(pattern, remaining)
-        }
-        (Some((head, rest)), Some((name, remaining))) => {
-            segment_matches(head, name) && may_descend(rest, remaining)
+    let (m, n) = (pattern.len(), dir.len());
+    // table[i][j]: pattern[i..] can match something strictly below dir[j..].
+    let mut table = vec![vec![false; n + 1]; m + 1];
+    for i in (0..m).rev() {
+        for j in (0..=n).rev() {
+            table[i][j] = if j == n {
+                // The directory is fully matched and pattern remains: a
+                // deeper entry can still match.
+                true
+            } else if pattern[i] == "**" {
+                table[i + 1][j] || table[i][j + 1]
+            } else {
+                segment_matches(pattern[i], dir[j]) && table[i + 1][j + 1]
+            };
         }
     }
+    table[0][0]
 }
 
-/// Whether a workspace-relative path in `/` form matches the pattern.
+/// Whether a workspace-relative path in `/` form matches the pattern. A
+/// table over (pattern segment, path segment), so a pattern of many `**`
+/// segments costs their product, never a combinatorial search.
 #[must_use]
 pub fn pattern_matches(pattern: &str, path: &str) -> bool {
-    let pattern: Vec<&str> = pattern.split('/').collect();
+    let pattern = normalized_segments(pattern);
     let path: Vec<&str> = path.split('/').collect();
-    segments_match(&pattern, &path)
-}
-
-fn segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    match pattern.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => {
-            // Zero or more whole segments; try every split point.
-            (0..=path.len()).any(|skip| segments_match(rest, &path[skip..]))
+    let (m, n) = (pattern.len(), path.len());
+    // table[i][j]: pattern[i..] matches path[j..] exactly.
+    let mut table = vec![vec![false; n + 1]; m + 1];
+    table[m][n] = true;
+    for i in (0..m).rev() {
+        for j in (0..=n).rev() {
+            table[i][j] = if pattern[i] == "**" {
+                table[i + 1][j] || (j < n && table[i][j + 1])
+            } else {
+                j < n && segment_matches(pattern[i], path[j]) && table[i + 1][j + 1]
+            };
         }
-        Some((head, rest)) => match path.split_first() {
-            Some((name, remaining)) => {
-                segment_matches(head, name) && segments_match(rest, remaining)
-            }
-            None => false,
-        },
     }
+    table[0][0]
 }
 
 fn segment_matches(pattern: &str, name: &str) -> bool {
@@ -244,6 +262,25 @@ mod tests {
         assert!(!pattern_matches("a*b*c", "aXXbYY"));
         // A wildcard never crosses a separator.
         assert!(!pattern_matches("*.log", "dir/x.log"));
+    }
+
+    #[test]
+    fn matching_is_bounded_for_patterns_of_many_globstars() {
+        // Roughly 170 `**` segments fit the pattern bound; against a
+        // depth-32 non-matching path a recursive matcher would search
+        // combinatorially many splits. The table finishes at once.
+        let many = format!("{}absent", "**/".repeat(170));
+        let path = (0..32).map(|_| "d").collect::<Vec<_>>().join("/");
+        let started = std::time::Instant::now();
+        assert!(!pattern_matches(&many, &path));
+        assert!(pattern_may_descend(&many, &path));
+        let alternating = (0..80).map(|_| "**/x").collect::<Vec<_>>().join("/");
+        let path = (0..32).map(|_| "x").collect::<Vec<_>>().join("/");
+        assert!(!pattern_matches(&alternating, &path));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(pattern_matches("a/**/**/b", "a/b"));
+        assert!(pattern_matches("a/**/**/b", "a/x/y/b"));
+        assert_eq!(normalized_segments("a/**/**/**/b"), ["a", "**", "b"]);
     }
 
     #[test]

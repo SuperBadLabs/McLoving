@@ -409,18 +409,25 @@ discharge a parked reconciliation).
   within a segment; never absolute, never `.` or `..`). After the steps of an
   attempt that was not cancelled, and before its terminal is made durable,
   the agent collects the matching regular files by a descriptor-relative
-  walk from the workspace: every directory is opened `O_DIRECTORY|O_NOFOLLOW`
-  and re-identified against the entry it was reached by, every matching
+  walk: the agent-owned workspace root is opened by path without following
+  a link, the attempt workspace is reached from it one component at a time
+  `O_DIRECTORY|O_NOFOLLOW` (a link in its place, a step having swapped its
+  workspace, is refused by name), every directory below is opened the same
+  way and re-identified against the entry it was reached by, every matching
   file is opened `O_NOFOLLOW` and re-identified the same way, the agent's
   own `spool/` is never visited, a directory is entered only when some
-  pattern can match below it, and the walk is bounded (depth 32, 65 536
-  entries, 1 024 files, 256 MiB). A link that a declaration would collect
-  or descend into refuses the whole set by name (`artifact_refused:link:
-  <path>`), as does a matching entry that is not a regular file, a name
-  that would exceed the store's 512-byte object name, or a bound; a refusal
-  fails an attempt whose steps succeeded and is its recorded reason, and
-  nothing of a refused set is uploaded. Each collected file is one object
-  named `<artifact name>/<workspace path>`, streamed over the session's
+  pattern can match below it, an entry whose name is not UTF-8 is refused
+  when a declaration would collect or enter it and skipped otherwise, and
+  the walk is bounded (depth 32, 65 536 entries, 1 024 objects, 256 MiB).
+  Pattern matching is a table over pattern and path segments, so a pattern
+  of many `**` segments costs their product. A link that a declaration
+  would collect or descend into refuses the whole set by name
+  (`artifact_refused:link:<path>`), as does a matching entry that is not a
+  regular file, a name that would exceed the store's 512-byte object name,
+  or a bound; a refusal fails an attempt whose steps succeeded and is its
+  recorded reason, and nothing of a refused set is uploaded. Each collected
+  file is one object per declaration that matches it (declarations may
+  overlap), named `<artifact name>/<workspace path>`, streamed over the session's
   mTLS channel as an `UploadArtifact` client stream (a header carrying the
   work authority, name, length and SHA-256, then one-MiB data frames) under
   the attempt's live lease, with an RPC budget that grows one second per
@@ -428,9 +435,10 @@ discharge a parked reconciliation).
   upload routes use, with the declared length reserved against the store
   quota before the first byte, registers it through the same
   `register_artifact` predicate (lease owner, fence, restore epoch, build
-  and node) under the per-attempt artifact lock, refuses the registration
-  when the attempt's artifacts would pass 256 MiB, and commits it into the
-  immutable digest namespace. The stream is accepted only for a session
+  and node) under an attempt-scoped artifact lock shared by every name and
+  then the per-name lock, refuses the registration when the attempt's
+  artifacts would pass 256 MiB, and commits it into the immutable digest
+  namespace. The stream is accepted only for a session
   that negotiated `artifact-upload-v1`; the agent advertises the
   `artifact-upload-v1` capability on Unix, the controller keeps it for
   scheduling only when the feature was negotiated, and a node whose stage

@@ -5277,6 +5277,16 @@ impl Store {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         acquire_object_deletion_fence(&mut tx, &digest).await?;
+        // The attempt-scoped lock first (PAR-014): every registration for the
+        // attempt, whatever its name, reads the quota and inserts under it,
+        // so two concurrent uploads cannot each fit and together exceed it.
+        // Then the per-name lock the availability transition also takes.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.artifact.attempt.{organization_id}.{attempt_id}.{fence}"
+            ))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"

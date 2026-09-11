@@ -2,7 +2,10 @@
 //! files under the attempt workspace that match its declarations are found
 //! by a descriptor-relative walk that never follows a link, opened without
 //! following a link and re-identified after the open, and counted against
-//! bounds before the first byte leaves the agent. A link that a declaration
+//! bounds before the first byte leaves the agent. The workspace itself is
+//! reached the same way, from the agent-owned workspace root through each
+//! component without following a link, so a step that swaps its workspace
+//! for a link cannot point the walk elsewhere. A link that a declaration
 //! would collect or descend into refuses the whole set by name: a step that
 //! plants a link to a host file gets a named refusal, not an upload.
 
@@ -39,7 +42,8 @@ pub struct CollectedFile {
 /// so the attempt's failure reason says which path or bound refused it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CollectionRefusal {
-    /// A link the declarations would collect or descend into.
+    /// A link the declarations would collect or descend into, or a link
+    /// standing where the attempt workspace itself should be.
     Link(String),
     /// A matching entry that is neither a regular file nor a directory.
     NotRegular(String),
@@ -110,19 +114,43 @@ struct Walk<'a> {
     entries: usize,
 }
 
-/// Collects every regular file under `workspace` that a declaration matches.
-/// The workspace itself is opened by path once; everything below is reached
-/// descriptor-relative with `O_NOFOLLOW`.
+/// Collects every regular file under the attempt workspace that a
+/// declaration matches. The agent-owned `workspace_root` is opened by path
+/// once, without following a link; the attempt workspace below it and
+/// everything under that are reached descriptor-relative with `O_NOFOLLOW`.
 pub fn collect(
+    workspace_root: &Path,
     workspace: &Path,
     specs: &[ArtifactSpec],
 ) -> Result<Vec<CollectedFile>, CollectionError> {
-    let root = File::open(workspace)?;
-    let root_stat = fstat(&root)?;
-    if !is_directory(&root_stat) {
-        return Err(std::io::Error::other("workspace root is not a directory").into());
+    let mut root = open_directory_by_path(workspace_root)?;
+    let mut reached = String::new();
+    for component in workspace.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(std::io::Error::other("attempt workspace must be a relative path").into());
+        };
+        let name = std::ffi::CString::new(component.as_encoded_bytes())
+            .map_err(|_| std::io::Error::other("attempt workspace component contains NUL"))?;
+        reached = if reached.is_empty() {
+            component.to_string_lossy().into_owned()
+        } else {
+            format!("{reached}/{}", component.to_string_lossy())
+        };
+        root = match openat(
+            &root,
+            name.as_c_str(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            // A link where a workspace component should be: the step
+            // swapped its workspace for one. Named, never followed.
+            Err(nix::errno::Errno::ELOOP | nix::errno::Errno::ENOTDIR) => {
+                return Err(CollectionRefusal::Link(format!("<workspace>/{reached}")).into());
+            }
+            Err(error) => return Err(error.into()),
+        };
     }
-    let root: OwnedFd = root.into();
     let mut walk = Walk {
         specs,
         files: Vec::new(),
@@ -162,13 +190,23 @@ fn walk_directory(
         if depth == 0 && display_name == AGENT_SPOOL_DIRECTORY {
             continue;
         }
-        let stat = fstatat(directory, raw_name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
         let collects = walk.specs.iter().any(|spec| spec.matches(&path));
         let descends = walk.specs.iter().any(|spec| {
             spec.paths
                 .iter()
                 .any(|pattern| pattern_may_descend(pattern, &path))
         });
+        // An entry whose name is not UTF-8 has no exact object name: if a
+        // declaration would collect it or look below it, the set is refused
+        // before anything is matched against its lossy spelling; otherwise
+        // it is not an artifact and is not entered.
+        if std::str::from_utf8(raw_name.to_bytes()).is_err() {
+            if collects || descends {
+                return Err(CollectionRefusal::UnnameableEntry(path).into());
+            }
+            continue;
+        }
+        let stat = fstatat(directory, raw_name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
         if is_link(&stat) {
             if collects || descends {
                 return Err(CollectionRefusal::Link(path).into());
@@ -201,39 +239,52 @@ fn walk_directory(
         if !is_regular(&stat) {
             return Err(CollectionRefusal::NotRegular(path).into());
         }
-        if std::str::from_utf8(raw_name.to_bytes()).is_err() {
-            return Err(CollectionRefusal::UnnameableEntry(path).into());
-        }
-        let spec = walk
-            .specs
-            .iter()
-            .find(|spec| spec.matches(&path))
-            .expect("a collected path matches a declaration");
-        let name = format!("{}/{path}", spec.name);
-        if name.len() > MAX_ARTIFACT_OBJECT_NAME_BYTES {
-            return Err(CollectionRefusal::NameTooLong(path).into());
-        }
         let opened = open_regular(directory, raw_name)?;
         let opened_stat = fstat(&opened)?;
         if !same_identity(&stat, &opened_stat) || !is_regular(&opened_stat) {
             return Err(CollectionRefusal::IdentityChanged(path).into());
         }
         let bytes = u64::try_from(opened_stat.st_size).unwrap_or(u64::MAX);
-        if walk.files.len() + 1 > MAX_ARTIFACT_FILES_PER_ATTEMPT {
-            return Err(CollectionRefusal::TooManyFiles(walk.files.len() + 1).into());
+        let opened = File::from(opened);
+        // One object per declaration that matches: declarations may
+        // overlap on purpose, and the object's identity includes the
+        // declaration's name, so each emitted object counts against the
+        // file and byte bounds.
+        for spec in walk.specs.iter().filter(|spec| spec.matches(&path)) {
+            let name = format!("{}/{path}", spec.name);
+            if name.len() > MAX_ARTIFACT_OBJECT_NAME_BYTES {
+                return Err(CollectionRefusal::NameTooLong(path).into());
+            }
+            if walk.files.len() + 1 > MAX_ARTIFACT_FILES_PER_ATTEMPT {
+                return Err(CollectionRefusal::TooManyFiles(walk.files.len() + 1).into());
+            }
+            walk.bytes = walk.bytes.saturating_add(bytes);
+            if walk.bytes > MAX_ATTEMPT_ARTIFACT_BYTES {
+                return Err(CollectionRefusal::TooManyBytes(walk.bytes).into());
+            }
+            walk.files.push(CollectedFile {
+                name,
+                relative_path: path.clone(),
+                bytes,
+                file: opened.try_clone()?,
+            });
         }
-        walk.bytes = walk.bytes.saturating_add(bytes);
-        if walk.bytes > MAX_ATTEMPT_ARTIFACT_BYTES {
-            return Err(CollectionRefusal::TooManyBytes(walk.bytes).into());
-        }
-        walk.files.push(CollectedFile {
-            name,
-            relative_path: path,
-            bytes,
-            file: File::from(opened),
-        });
     }
     Ok(())
+}
+
+/// Opens the agent-owned workspace root by its path: a directory reached
+/// without following a link in its final component.
+fn open_directory_by_path(path: &Path) -> Result<OwnedFd, CollectionError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    if !is_directory(&fstat(&directory)?) {
+        return Err(std::io::Error::other("workspace root is not a directory").into());
+    }
+    Ok(directory.into())
 }
 
 fn open_regular(directory: &OwnedFd, name: &CStr) -> Result<OwnedFd, CollectionError> {
@@ -277,9 +328,19 @@ mod tests {
         }
     }
 
+    const WORKSPACE: &str = "org/attempt/1";
+
+    fn collect_in(
+        directory: &tempfile::TempDir,
+        specs: &[ArtifactSpec],
+    ) -> Result<Vec<CollectedFile>, CollectionError> {
+        collect(directory.path(), Path::new(WORKSPACE), specs)
+    }
+
     fn workspace() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
+        let root = directory.path().join(WORKSPACE);
+        let root = root.as_path();
         std::fs::create_dir_all(root.join("target/debug/deep")).unwrap();
         std::fs::create_dir_all(root.join("spool/step-0")).unwrap();
         std::fs::create_dir_all(root.join("other")).unwrap();
@@ -294,8 +355,8 @@ mod tests {
     #[test]
     fn matching_regular_files_are_collected_by_object_name_in_order() {
         let directory = workspace();
-        let files = collect(
-            directory.path(),
+        let files = collect_in(
+            &directory,
             &[
                 spec("logs", &["**/*.log"]),
                 spec("reports", &["other/report-?.xml"]),
@@ -323,9 +384,9 @@ mod tests {
     #[test]
     fn a_link_the_declarations_would_collect_or_enter_refuses_the_set_by_name() {
         let directory = workspace();
-        std::os::unix::fs::symlink("/etc/hostname", directory.path().join("target/planted.log"))
-            .unwrap();
-        let error = collect(directory.path(), &[spec("logs", &["target/*.log"])]).unwrap_err();
+        let root = directory.path().join(WORKSPACE);
+        std::os::unix::fs::symlink("/etc/hostname", root.join("target/planted.log")).unwrap();
+        let error = collect_in(&directory, &[spec("logs", &["target/*.log"])]).unwrap_err();
         let CollectionError::Refused(refusal) = error else {
             panic!("a link is a refusal, not an I/O error");
         };
@@ -339,44 +400,106 @@ mod tests {
         );
         // A link the declarations would descend into is refused too, before
         // anything below it is looked at.
-        std::fs::remove_file(directory.path().join("target/planted.log")).unwrap();
-        std::os::unix::fs::symlink("/etc", directory.path().join("outward")).unwrap();
-        let error = collect(directory.path(), &[spec("cfg", &["outward/*"])]).unwrap_err();
+        std::fs::remove_file(root.join("target/planted.log")).unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("outward")).unwrap();
+        let error = collect_in(&directory, &[spec("cfg", &["outward/*"])]).unwrap_err();
         assert!(matches!(
             error,
             CollectionError::Refused(CollectionRefusal::Link(path)) if path == "outward"
         ));
         // A link nothing declares is simply not an artifact.
-        let files = collect(directory.path(), &[spec("logs", &["target/*.log"])]).unwrap();
+        let files = collect_in(&directory, &[spec("logs", &["target/*.log"])]).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn a_workspace_swapped_for_a_link_is_refused_not_followed() {
+        let directory = workspace();
+        let root = directory.path().join(WORKSPACE);
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::rename(&root, &elsewhere).unwrap();
+        std::os::unix::fs::symlink("/etc", &root).unwrap();
+        let error = collect_in(&directory, &[spec("all", &["**/*"])]).unwrap_err();
+        assert!(matches!(
+            error,
+            CollectionError::Refused(CollectionRefusal::Link(path)) if path == "<workspace>/org/attempt/1"
+        ));
+        // A parent component swapped for a link is caught the same way.
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&elsewhere, &root).unwrap();
+        let parent = directory.path().join("org/attempt");
+        std::fs::rename(&parent, directory.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("moved"), &parent).unwrap();
+        let error = collect_in(&directory, &[spec("all", &["**/*"])]).unwrap_err();
+        assert!(matches!(
+            error,
+            CollectionError::Refused(CollectionRefusal::Link(path)) if path == "<workspace>/org/attempt"
+        ));
+    }
+
+    #[test]
+    fn overlapping_declarations_each_emit_their_object() {
+        let directory = workspace();
+        let files = collect_in(
+            &directory,
+            &[
+                spec("logs", &["target/**/*.log"]),
+                spec("all", &["target/**/*"]),
+            ],
+        )
+        .unwrap();
+        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "all/target/build.log",
+                "all/target/debug/deep/x.log",
+                "all/target/debug/x.txt",
+                "logs/target/build.log",
+                "logs/target/debug/deep/x.log",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_directory_whose_name_is_not_utf8_is_refused_when_declared_and_skipped_otherwise() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let directory = workspace();
+        let root = directory.path().join(WORKSPACE);
+        let odd = root.join(std::ffi::OsStr::from_bytes(b"odd-\xff-dir"));
+        std::fs::create_dir(&odd).unwrap();
+        std::fs::write(odd.join("x.log"), b"x").unwrap();
+        let error = collect_in(&directory, &[spec("logs", &["**/*.log"])]).unwrap_err();
+        assert!(matches!(
+            error,
+            CollectionError::Refused(CollectionRefusal::UnnameableEntry(path)) if path == "odd-\u{fffd}-dir"
+        ));
+        let files = collect_in(&directory, &[spec("logs", &["target/**/*.log"])]).unwrap();
+        assert_eq!(files.len(), 2);
     }
 
     #[test]
     fn non_regular_matches_and_bounds_refuse_by_name() {
         let directory = workspace();
-        nix::unistd::mkfifo(
-            &directory.path().join("target/pipe.log"),
-            nix::sys::stat::Mode::S_IRWXU,
-        )
-        .unwrap();
-        let error = collect(directory.path(), &[spec("logs", &["target/*.log"])]).unwrap_err();
+        let root = directory.path().join(WORKSPACE);
+        nix::unistd::mkfifo(&root.join("target/pipe.log"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let error = collect_in(&directory, &[spec("logs", &["target/*.log"])]).unwrap_err();
         assert!(matches!(
             error,
             CollectionError::Refused(CollectionRefusal::NotRegular(path)) if path == "target/pipe.log"
         ));
-        std::fs::remove_file(directory.path().join("target/pipe.log")).unwrap();
+        std::fs::remove_file(root.join("target/pipe.log")).unwrap();
         // A path whose object name would pass the store's 512-byte bound:
         // three nested 200-byte components under the walk.
         let component = "n".repeat(200);
-        let deep = directory
-            .path()
+        let deep = root
             .join("target")
             .join(&component)
             .join(&component)
             .join(&component);
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("x.log"), b"x").unwrap();
-        let error = collect(directory.path(), &[spec("logs", &["target/**/*.log"])]).unwrap_err();
+        let error = collect_in(&directory, &[spec("logs", &["target/**/*.log"])]).unwrap_err();
         assert!(matches!(
             error,
             CollectionError::Refused(CollectionRefusal::NameTooLong(_))
