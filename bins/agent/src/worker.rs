@@ -681,7 +681,12 @@ async fn replay_finalization(
             digest: file_digest(&path).await?,
             bytes: metadata.len(),
         };
-        if let Err(error) = spools
+        // Not best effort: a transient publication failure must not let the
+        // cancellation complete and reclaim the spool with output the ledger
+        // lacks. The error propagates like a journaled spool's would; the
+        // attempt stays cancelling and the next session replays it, and a
+        // definitively lost authority retires it the same way.
+        spools
             .publish(
                 &mut publication,
                 stream,
@@ -690,15 +695,7 @@ async fn replay_finalization(
                 &entry,
                 None,
             )
-            .await
-        {
-            // Best effort by design: the attempt is being reported as
-            // interrupted either way, and the ledger keeps what it has.
-            eprintln!(
-                "interrupted step {interrupted_ordinal} {stream} of {}/{} not fully published: {error}",
-                attempt.organization_id, attempt.attempt_id
-            );
-        }
+            .await?;
     }
     let outcome = persisted_outcome(&result.outcome)?;
     if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)

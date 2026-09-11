@@ -932,9 +932,11 @@ executor created it, so a workload that swaps the path in that window
 streams other content it could have printed anyway and then fails its
 attempt at the terminal check; a crash while a step runs is followed, on
 restart, by publication of the interrupted step's spool from its
-reservations under the renewed lease before the cancellation completes,
-and the interrupted attempt is reported as such (a lease reclaimed in the
-meantime leaves the accepted chunks exactly once). Tests cover the journal reservations (uniqueness,
+reservations under the renewed lease before the cancellation completes (a
+failed publication keeps the attempt cancelling for the next session
+rather than reclaiming the spool), and the interrupted attempt is reported
+as such (a lease definitively lost in the meantime retires it with the
+accepted chunks exactly once). Tests cover the journal reservations (uniqueness,
 coverage, stale authority, retirement, schema migration), the store follow
 read and both chunk bounds, and two shipped-binary gates: the first line
 visible while the step runs with the paged read agreeing with the follow,

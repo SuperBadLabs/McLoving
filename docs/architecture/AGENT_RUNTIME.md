@@ -383,9 +383,10 @@ discharge a parked reconciliation).
   publishes the interrupted step's spool from its reservations (the
   unreceipted ranges and the unstreamed tail), probing the live step
   directory first and then the relocated one, since a multi-step crash may
-  fall between a finished step's relocation and its journaling, so the
-  output up to the quiesce is in the ledger; if the lease was reclaimed meanwhile, the chunks
-  already accepted stay exactly once.
+  fall between a finished step's relocation and its journaling, so the output up to the quiesce is in the ledger; a failed publication keeps the
+  attempt cancelling for the next session rather than completing and
+  reclaiming the spool, and a lease definitively lost meanwhile retires the
+  attempt with the chunks already accepted exactly once.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
   workspace through the same no-follow cleanup, delete controller-owned log
