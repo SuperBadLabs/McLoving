@@ -4717,6 +4717,20 @@ fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
 
 fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<(), ApiError> {
     if platform == "windows" {
+        // The shipped Windows agent never advertises `multi-step-v1`, so a
+        // multi-step node submitted for Windows would queue forever. Refuse it
+        // here with the same actionable diagnostic as other unrunnable shapes.
+        if let Some(stage) = pipeline.stages.iter().find(|stage| stage.steps.len() > 1) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares {} steps; multi-step stages run on platform linux only",
+                    stage.id,
+                    stage.steps.len()
+                ),
+            ));
+        }
         return Ok(());
     }
     let windows_mode = pipeline
@@ -8171,6 +8185,21 @@ stages:
         .expect("compile direct process mode");
         validate_execution_platform(&pipeline, "linux").expect("Linux accepts direct mode");
         validate_execution_platform(&pipeline, "windows").expect("Windows accepts direct mode");
+    }
+
+    #[test]
+    fn multi_step_stages_are_linux_only_at_admission() {
+        let pipeline = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
+            .expect("two process steps validate");
+        validate_execution_platform(&pipeline, "linux").expect("Linux runs multi-step stages");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("no shipped Windows agent advertises multi-step-v1");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "stage build declares 2 steps; multi-step stages run on platform linux only"
+        );
     }
 
     fn single_stage_source(step_count: usize) -> String {

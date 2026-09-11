@@ -1839,15 +1839,13 @@ async fn run_assignment(
             .last()
             .expect("every executed step leaves a record");
         validate_log_spool_quota(&logs)?;
-        let mut terminal = match outcome.termination {
-            Termination::Cancelled => WorkOutcome::Aborted,
-            Termination::TimedOut | Termination::OutputLimitExceeded => WorkOutcome::Failed,
-            Termination::Exited
-                if outcome.exit_code == Some(0) && last_record.outcome == "succeeded" =>
-            {
-                WorkOutcome::Succeeded
-            }
-            Termination::Exited => WorkOutcome::Failed,
+        // The attempt's terminal is the last step's, whether that step ran
+        // and exited or never spawned; `outcome` is only the last process that
+        // ran and must not outrank a later step's refusal to start.
+        let mut terminal = match last_record.outcome.as_str() {
+            "succeeded" => WorkOutcome::Succeeded,
+            "aborted" => WorkOutcome::Aborted,
+            _ => WorkOutcome::Failed,
         };
         let helper_failure = (outcome.private_response_accepted == Some(false)).then(|| {
             prepared_helper
