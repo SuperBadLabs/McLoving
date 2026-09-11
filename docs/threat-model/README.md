@@ -994,9 +994,9 @@ collect or descend, so a step that plants a link to a service-account file
 gets a named refusal and no upload; a Windows agent has no collector and is not
 routed such work); TM-006 (durable evidence: the controller stages each
 object into the same content-addressed store the public upload routes use,
-with the declared length charged against the attempt's quota in an
-in-process ledger of streams in flight and then reserved against the store
-quota before the first byte (an exact retry of an available object is
+with the declared length and the object itself charged against the
+attempt's byte and object quotas in an in-process ledger of streams in
+flight and then reserved against the store quota before the first byte (an exact retry of an available object is
 answered without receiving a byte, so retries cannot stage; a pending one is
 charged once), the header and the receive phase bounded so a
 stream opened and never written or stalled mid-way releases the reservation,

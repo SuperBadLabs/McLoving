@@ -3403,6 +3403,21 @@ async fn upload_artifact(
             file.relative_path
         )));
     }
+    // Every byte went and the controller found them hashing to something
+    // other than the digest read first: a writer the step left behind
+    // rewrote the file in place between the passes. The step's doing, so
+    // the attempt's refusal by name, not the session's end.
+    if let (FrameRead::Complete, Err(AgentError::Rpc(status))) = (&frames_read, &receipt)
+        && status.code() == tonic::Code::InvalidArgument
+        && status
+            .message()
+            .contains(mcloving_domain::artifacts::ARTIFACT_DIGEST_MISMATCH)
+    {
+        return Ok(UploadOutcome::Refused(format!(
+            "artifact_refused:changed_content:{}",
+            file.relative_path
+        )));
+    }
     let Some(receipt) = receipt? else {
         return Ok(UploadOutcome::Cancelled);
     };

@@ -5246,6 +5246,32 @@ impl Store {
         Ok(used)
     }
 
+    /// Artifact objects registered under an attempt and fence, the figure
+    /// the per-attempt object-count quota is enforced against.
+    pub async fn attempt_artifact_count(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM attempt_objects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(count)
+    }
+
     /// The status (`pending` or `available`) under which exactly this
     /// artifact (name, digest and length) is already registered for the
     /// attempt and fence, if it is: a retry of an upload whose receipt was

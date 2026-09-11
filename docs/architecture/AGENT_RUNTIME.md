@@ -443,12 +443,14 @@ discharge a parked reconciliation).
   attempt's cancellation (a cancellation that lands after the last step
   collects nothing more); a file that runs short under the streaming read
   is the same `changed_length` refusal as one that changes under the digest
-  read; the controller stages it into the same object store the public
+  read, and one rewritten in place between the passes, which the controller
+  refuses for its digest, is the `changed_content` refusal; the controller stages it into the same object store the public
   upload routes use, with the declared length reserved against the store
   quota before the first byte, charges the declared length against the
   attempt's quota in an in-process ledger of streams still in flight before
-  staging (so concurrent streams for one attempt cannot each pass the
-  committed figure; an exact retry of an object the attempt already holds
+  staging, bytes and objects both (so concurrent streams for one attempt
+  cannot each pass the committed figures and together reserve the store or
+  its staging slots; an exact retry of an object the attempt already holds
   is answered from the ledger without receiving a byte when the object is
   available, and charged once, not twice, while it is pending), and bounds the header and the whole
   receive phase by the declared length (thirty seconds for the header,

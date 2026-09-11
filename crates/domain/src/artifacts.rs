@@ -34,6 +34,9 @@ pub const MAX_ARTIFACT_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARTIFACT_WALK_DEPTH: usize = 32;
 /// Most directory entries the collector visits before refusing the set.
 pub const MAX_ARTIFACT_WALK_ENTRIES: usize = 65_536;
+/// The controller's refusal of an upload whose bytes do not hash to the
+/// declared digest; the agent reads it back as the step's own doing.
+pub const ARTIFACT_DIGEST_MISMATCH: &str = "artifact bytes do not match the declared digest";
 /// Media type every collected artifact is registered under.
 pub const ARTIFACT_MEDIA_TYPE: &str = "application/octet-stream";
 /// Retention the agent requests for a collected artifact.

@@ -1492,8 +1492,8 @@ impl AgentControl for ControllerAgentService {
         request: Request<tonic::Streaming<ArtifactUploadFrame>>,
     ) -> Result<Response<WorkReceipt>, Status> {
         use mcloving_domain::artifacts::{
-            ARTIFACT_UPLOAD_FEATURE, MAX_ARTIFACT_FRAME_BYTES, MAX_ARTIFACT_OBJECT_NAME_BYTES,
-            MAX_ATTEMPT_ARTIFACT_BYTES,
+            ARTIFACT_DIGEST_MISMATCH, ARTIFACT_UPLOAD_FEATURE, MAX_ARTIFACT_FILES_PER_ATTEMPT,
+            MAX_ARTIFACT_FRAME_BYTES, MAX_ARTIFACT_OBJECT_NAME_BYTES, MAX_ATTEMPT_ARTIFACT_BYTES,
         };
         let identity = self.identities.authenticate(&request)?.clone();
         let mut frames = request.into_inner();
@@ -1596,21 +1596,33 @@ impl AgentControl for ControllerAgentService {
             .attempt_artifact_bytes(context.organization_id, context.attempt_id, context.fence)
             .await
             .map_err(internal_store_error)?;
-        let committed = if registered.is_some() {
-            used.saturating_sub(declared)
+        let count = self
+            .store
+            .attempt_artifact_count(context.organization_id, context.attempt_id, context.fence)
+            .await
+            .map_err(internal_store_error)?;
+        let (committed_bytes, committed_count) = if registered.is_some() {
+            (used.saturating_sub(declared), count.saturating_sub(1))
         } else {
-            used
+            (used, count)
         };
-        // The committed figure plus every stream this process is still
-        // receiving for the attempt, charged before staging so concurrent
-        // streams cannot each fit and together reserve the store; released
-        // when this stream ends however it ends.
+        // The committed figures plus every stream this process is still
+        // receiving for the attempt, bytes and objects both, charged before
+        // staging so concurrent streams cannot each fit and together reserve
+        // the store or its staging slots; released when this stream ends
+        // however it ends.
         let _reservation = ArtifactReservation::take(
             &self.artifact_reservations,
             (context.organization_id, context.attempt_id, context.fence),
-            committed,
+            ArtifactUsage {
+                bytes: committed_bytes,
+                objects: committed_count,
+            },
             declared,
-            i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX),
+            ArtifactUsage {
+                bytes: i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX),
+                objects: i64::try_from(MAX_ARTIFACT_FILES_PER_ATTEMPT).unwrap_or(i64::MAX),
+            },
         )?;
         let mut writer = self
             .object_store
@@ -1658,9 +1670,7 @@ impl AgentControl for ControllerAgentService {
         if reference.sha256.as_slice() != header.sha256.as_slice()
             || reference.bytes != header.bytes
         {
-            return Err(Status::invalid_argument(
-                "artifact bytes do not match the declared digest",
-            ));
+            return Err(Status::invalid_argument(ARTIFACT_DIGEST_MISMATCH));
         }
         let pending = staged.persist().map_err(object_store_status)?;
         let pending = self
@@ -2258,10 +2268,18 @@ fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status 
 }
 
 /// In-flight declared artifact bytes per (organization, attempt, fence).
-type ArtifactLedger = Arc<Mutex<BTreeMap<(Uuid, Uuid, i64), i64>>>;
+type ArtifactLedger = Arc<Mutex<BTreeMap<(Uuid, Uuid, i64), ArtifactUsage>>>;
 
-/// Declared bytes of one in-flight artifact stream, charged against the
-/// attempt's quota alongside the committed figure and released on drop.
+/// Bytes and objects of an attempt's artifacts, committed or in flight.
+#[derive(Clone, Copy, Debug, Default)]
+struct ArtifactUsage {
+    bytes: i64,
+    objects: i64,
+}
+
+/// One in-flight artifact stream's declared bytes and its one object,
+/// charged against the attempt's quotas alongside the committed figures and
+/// released on drop.
 struct ArtifactReservation {
     ledger: ArtifactLedger,
     key: (Uuid, Uuid, i64),
@@ -2272,20 +2290,36 @@ impl ArtifactReservation {
     fn take(
         ledger: &ArtifactLedger,
         key: (Uuid, Uuid, i64),
-        committed: i64,
+        committed: ArtifactUsage,
         bytes: i64,
-        quota: i64,
+        quota: ArtifactUsage,
     ) -> Result<Self, Status> {
         let mut in_flight = ledger
             .lock()
             .map_err(|_| Status::internal("artifact reservation ledger is poisoned"))?;
-        let pending = in_flight.get(&key).copied().unwrap_or(0);
-        if committed.saturating_add(pending).saturating_add(bytes) > quota {
+        let pending = in_flight.get(&key).copied().unwrap_or_default();
+        if committed
+            .bytes
+            .saturating_add(pending.bytes)
+            .saturating_add(bytes)
+            > quota.bytes
+            || committed
+                .objects
+                .saturating_add(pending.objects)
+                .saturating_add(1)
+                > quota.objects
+        {
             return Err(Status::resource_exhausted(
                 "artifact exceeds the per-attempt artifact quota",
             ));
         }
-        in_flight.insert(key, pending.saturating_add(bytes));
+        in_flight.insert(
+            key,
+            ArtifactUsage {
+                bytes: pending.bytes.saturating_add(bytes),
+                objects: pending.objects.saturating_add(1),
+            },
+        );
         Ok(Self {
             ledger: Arc::clone(ledger),
             key,
@@ -2297,12 +2331,12 @@ impl ArtifactReservation {
 impl Drop for ArtifactReservation {
     fn drop(&mut self) {
         if let Ok(mut in_flight) = self.ledger.lock() {
-            let remaining = in_flight
-                .get(&self.key)
-                .copied()
-                .unwrap_or(0)
-                .saturating_sub(self.bytes);
-            if remaining <= 0 {
+            let pending = in_flight.get(&self.key).copied().unwrap_or_default();
+            let remaining = ArtifactUsage {
+                bytes: pending.bytes.saturating_sub(self.bytes),
+                objects: pending.objects.saturating_sub(1),
+            };
+            if remaining.objects <= 0 {
                 in_flight.remove(&self.key);
             } else {
                 in_flight.insert(self.key, remaining);
