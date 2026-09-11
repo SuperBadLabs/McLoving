@@ -1239,7 +1239,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 60
+             SELECT COUNT(*) = 61
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1268,7 +1268,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 60
+                    AND (SELECT COUNT(*) FROM policies) = 61
                FROM relations",
         )
         .fetch_one(&mut *tx)
