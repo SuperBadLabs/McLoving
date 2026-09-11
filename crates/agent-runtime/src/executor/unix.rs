@@ -357,7 +357,17 @@ where
             request.termination_grace,
         ) => match status {
             Ok(status) => (Termination::Exited, status),
-            Err(error) => return Err(error),
+            Err(error) => {
+                // The leader cleanup already forces unverified containment;
+                // still reap the container now so it does not keep the
+                // workspace mounted until a recovery session. The original
+                // error is what the caller must see either way, and recovery
+                // retries the absence proof if this reap did not succeed.
+                if let Some(container) = &request.container {
+                    let _ = reap_container(&container.runtime, &container.name).await;
+                }
+                return Err(error);
+            }
         },
         () = cancellation.cancelled() => {
             let status = terminate_and_prove_group_empty(
