@@ -1,7 +1,7 @@
 //! Unix process-group execution.
 
 use std::fs::File;
-use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path};
 use std::process::Stdio;
 use std::time::Duration;
@@ -206,6 +206,34 @@ where
                     "image reference is not digest-pinned",
                 ));
             }
+            // Workload variables travel in an agent-owned env file the
+            // podman client never interprets itself: they must not share the
+            // client's own environment, where names such as CONTAINERS_CONF,
+            // HOME or XDG_RUNTIME_DIR would redirect the runtime, and they
+            // must not enter the argument vector, where values are visible.
+            let env_file = spool.join("container.env");
+            let mut env_lines = Vec::new();
+            for (key, value) in &request.environment {
+                let (key, value) = (key.to_string_lossy(), value.to_string_lossy());
+                if key.contains(['=', '\n', '\0']) || value.contains(['\n', '\0']) {
+                    return Err(ExecutionError::ContainerUnsupported(
+                        "environment entries must not contain newlines, NUL or '=' in names",
+                    ));
+                }
+                env_lines.push(format!("{key}={value}\n"));
+            }
+            {
+                use std::io::Write as _;
+                let mut file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&env_file)?;
+                for line in &env_lines {
+                    file.write_all(line.as_bytes())?;
+                }
+                file.sync_all()?;
+            }
             let mut command = Command::new(&container.runtime);
             command
                 .arg("run")
@@ -218,11 +246,9 @@ where
                 .arg("--volume")
                 .arg(format!("{}:/workspace", workspace.display()))
                 .arg("--workdir")
-                .arg("/workspace");
-            for key in request.environment.keys() {
-                command.arg("--env").arg(key);
-            }
-            command
+                .arg("/workspace")
+                .arg("--env-file")
+                .arg(&env_file)
                 .arg("--entrypoint")
                 .arg(&request.program)
                 .arg(&container.image)
@@ -241,8 +267,20 @@ where
             "PATH",
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
-        .env("LANG", "C.UTF-8")
-        .envs(&request.environment)
+        .env("LANG", "C.UTF-8");
+    if request.container.is_some() {
+        // The podman client's control environment is fixed by the agent and
+        // never touched by the workload; rootless podman needs these four.
+        command.envs(std::env::vars_os().filter(|(key, _)| {
+            matches!(
+                key.to_str(),
+                Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+            )
+        }));
+    } else {
+        command.envs(&request.environment);
+    }
+    command
         .current_dir(&workspace)
         .stdin(if private_io.is_some() {
             Stdio::piped()
@@ -277,6 +315,9 @@ where
             request.termination_grace,
         )
         .await?;
+        if let Some(container) = &request.container {
+            reap_container(&container.runtime, &container.name).await?;
+        }
         return Err(error);
     }
 
@@ -352,6 +393,13 @@ where
             (Termination::OutputLimitExceeded, status)
         }
     };
+    // The group is empty on every arm above, but a container outlives its
+    // killed client. Reap it before any output is inspected or made durable,
+    // so nothing keeps writing into the mounted workspace meanwhile, and
+    // before any later fallible step could skip the proof.
+    if let Some(container) = &request.container {
+        reap_container(&container.runtime, &container.name).await?;
+    }
 
     let exceeded = capture.as_ref().is_some_and(OutputCapture::was_exceeded)
         || output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
@@ -419,11 +467,6 @@ where
         }
         super::workspace_transfer::capture(&workspace, &workspace_control)
     });
-    // The process group is empty, but a container outlives its detached
-    // client. Reap it by name and prove it is gone before the outcome exists.
-    if let Some(container) = &request.container {
-        reap_container(&container.runtime, &container.name).await?;
-    }
     Ok(ExecutionOutcome {
         private_response_accepted,
         workspace_snapshot,

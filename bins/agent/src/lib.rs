@@ -908,8 +908,34 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         ) {
             continue;
         }
-        let outcome =
+        let mut outcome =
             cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
+        // The terminated group was only the podman client of a container
+        // stage; the container it started outlives that client (PAR-011).
+        // Reap it by its derived name and require proof it is gone, or park
+        // the attempt exactly as an unverifiable process group would.
+        if outcome != RecoveredCancellation::ReconciliationRequired
+            && let (Some(runtime), Some(step)) = (&config.podman_path, attempt.current_step)
+            && !container::reap_recovered_container(runtime, &attempt.attempt_id, step)
+        {
+            journal.transition(
+                &attempt.organization_id,
+                &attempt.attempt_id,
+                attempt.fence_token,
+                attempt.session_epoch,
+                AttemptPhase::ReconciliationRequired,
+                attempt.process_id,
+            )?;
+            eprintln!(
+                "recovered attempt {}/{} fence {}: container {} could not be proven gone; \
+                 parked reconciliation-required",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                container::container_name(&attempt.attempt_id, step)
+            );
+            outcome = RecoveredCancellation::ReconciliationRequired;
+        }
         if outcome != RecoveredCancellation::ReconciliationRequired
             && worker::recovered_cancellation_requires_persistence(config, attempt).await?
         {

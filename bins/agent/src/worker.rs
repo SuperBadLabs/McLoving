@@ -1711,7 +1711,7 @@ async fn run_assignment(
                     mcloving_agent_runtime::executor::ContainerSpec {
                         runtime: runtime.clone(),
                         image: image.clone(),
-                        name: format!("mcloving-{attempt}-{ordinal}"),
+                        name: crate::container::container_name(&attempt, ordinal),
                     }
                 }),
                 workspace_root: config.workspace_root.clone(),

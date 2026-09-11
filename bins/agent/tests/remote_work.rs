@@ -1763,6 +1763,13 @@ stages:
           program: /bin/sh
           args: [-c, "test ! -e '{host_root}' && test -w /workspace && printf 'host-hidden\n'"]
           timeout_seconds: 30
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'greeting=%s home=%s\n' \"$GREETING\" \"$HOME\""]
+          env:
+            GREETING: hello-from-env-file
+            HOME: /workspace
+          timeout_seconds: 30
 "#
     );
     let pipeline_id = Uuid::new_v4();
@@ -1844,6 +1851,13 @@ stages:
     assert!(
         text.contains("host-hidden"),
         "the host root is not visible and /workspace is writable: {text}"
+    );
+    // Workload variables reach the container through the agent-owned env
+    // file, including names the podman client itself would honour if they
+    // were in its own environment.
+    assert!(
+        text.contains("greeting=hello-from-env-file home=/workspace"),
+        "env reaches the container by file, not by the client's environment: {text}"
     );
 
     stop(&mut agent).await;
