@@ -1097,6 +1097,28 @@ impl AgentControl for ControllerAgentService {
                 capability != mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY
             });
         }
+        // A session opened against a previous-release controller stored the
+        // agent's `multi-step-v1` capability while negotiating the feature
+        // away. Scheduling on that capability would hand the session a
+        // version-5 node its agent must then refuse terminally, so the
+        // capability only schedules once the wire feature was negotiated.
+        if capabilities
+            .iter()
+            .any(|capability| capability == mcloving_domain::multi_step::MULTI_STEP_CAPABILITY)
+            && !self
+                .store
+                .agent_session_supports(
+                    &request.agent_id,
+                    request.session_epoch,
+                    mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE,
+                )
+                .await
+                .map_err(internal_store_error)?
+        {
+            capabilities.retain(|capability| {
+                capability != mcloving_domain::multi_step::MULTI_STEP_CAPABILITY
+            });
+        }
         // Subscribe before the first claim query. PostgreSQL notifications are
         // hints and may be coalesced, but this ordering prevents the ordinary
         // check-then-sleep race within one healthy controller process.

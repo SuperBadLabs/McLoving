@@ -1761,8 +1761,11 @@ async fn run_assignment(
                         WorkOutcome::Failed
                     };
                     let spawn_reason = match &error {
+                        // A controller-requested cancellation is not a lease
+                        // loss; only an actual authority loss keeps its cause.
                         ExecutionError::CancelledBeforeSpawn => lease_loss_reason
                             .get()
+                            .filter(|cause| **cause != CONTROLLER_CANCELLATION_TRIGGER)
                             .map(|cause| format!("lease_lost_during_execution:{cause}"))
                             .unwrap_or_else(|| "cancelled_before_process_spawn".to_owned()),
                         ExecutionError::WorkspaceTransfer(_) => {
@@ -1844,6 +1847,25 @@ async fn run_assignment(
             // own pair so no step's evidence collides with another's.
             outcome.stdout.sequence = u64::from(ordinal) * 2;
             outcome.stderr.sequence = u64::from(ordinal) * 2 + 1;
+            if multi_step {
+                // Durable before the next step spawns: a crash while a later
+                // step runs must still let recovery publish and reclaim this
+                // step's evidence rather than leave it referenced by nothing.
+                journal.record_log(
+                    &organization,
+                    &attempt,
+                    fence,
+                    session_epoch,
+                    &outcome.stdout,
+                )?;
+                journal.record_log(
+                    &organization,
+                    &attempt,
+                    fence,
+                    session_epoch,
+                    &outcome.stderr,
+                )?;
+            }
             output_budget = output_budget
                 .saturating_sub(outcome.stdout.bytes)
                 .saturating_sub(outcome.stderr.bytes);
