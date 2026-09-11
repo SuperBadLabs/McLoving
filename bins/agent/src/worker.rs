@@ -1858,19 +1858,12 @@ async fn run_assignment(
                 // Durable before the next step spawns: a crash while a later
                 // step runs must still let recovery publish and reclaim this
                 // step's evidence rather than leave it referenced by nothing.
-                journal.record_log(
+                journal.record_logs(
                     &organization,
                     &attempt,
                     fence,
                     session_epoch,
-                    &outcome.stdout,
-                )?;
-                journal.record_log(
-                    &organization,
-                    &attempt,
-                    fence,
-                    session_epoch,
-                    &outcome.stderr,
+                    &[outcome.stdout.clone(), outcome.stderr.clone()],
                 )?;
             }
             output_budget = output_budget

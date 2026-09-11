@@ -946,62 +946,45 @@ impl Journal {
     ) -> Result<(), JournalError> {
         validate_relative_path(&entry.relative_path)?;
         self.ensure_active_authority(organization_id, attempt_id, fence_token, session_epoch)?;
-        let relative_path = path_text(&entry.relative_path)?;
-        let sequence = to_sql_integer(entry.sequence)?;
-        let bytes = to_sql_integer(entry.bytes)?;
-        let changed = self.connection.execute(
-            "
-            INSERT INTO log_spool(
-                organization_id, attempt_id, fence_token, sequence,
-                relative_path, digest, bytes
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(organization_id, attempt_id, fence_token, sequence) DO NOTHING
-            ",
-            params![
+        record_log_row(
+            &self.connection,
+            organization_id,
+            attempt_id,
+            fence_token,
+            entry,
+        )
+    }
+
+    /// Records several spool descriptors in one transaction (PAR-010): a
+    /// finished step's stdout and stderr become durable together, so a crash
+    /// between them cannot leave recovery referencing one stream and leaking
+    /// the other.
+    pub fn record_logs(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+        entries: &[SpoolEntry],
+    ) -> Result<(), JournalError> {
+        for entry in entries {
+            validate_relative_path(&entry.relative_path)?;
+        }
+        self.ensure_active_authority(organization_id, attempt_id, fence_token, session_epoch)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for entry in entries {
+            record_log_row(
+                &transaction,
                 organization_id,
                 attempt_id,
-                to_sql_integer(fence_token)?,
-                sequence,
-                relative_path,
-                entry.digest.as_slice(),
-                bytes,
-            ],
-        )?;
-        if changed == 1 {
-            return Ok(());
+                fence_token,
+                entry,
+            )?;
         }
-        let existing = self.connection.query_row(
-            "
-            SELECT relative_path, digest, bytes
-            FROM log_spool
-            WHERE organization_id = ?1
-              AND attempt_id = ?2
-              AND fence_token = ?3
-              AND sequence = ?4
-            ",
-            params![
-                organization_id,
-                attempt_id,
-                to_sql_integer(fence_token)?,
-                sequence
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )?;
-        if existing.0 == relative_path
-            && existing.1.as_slice() == entry.digest
-            && existing.2 == bytes
-        {
-            Ok(())
-        } else {
-            Err(JournalError::SpoolConflict)
-        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn record_result(
@@ -1391,6 +1374,70 @@ fn validate_process_birth_identity(
         return Err(JournalError::InvalidProcessIdentity);
     }
     Ok(())
+}
+
+/// Records one spool descriptor on `connection`, which may be a transaction
+/// so several descriptors commit together.
+fn record_log_row(
+    connection: &Connection,
+    organization_id: &str,
+    attempt_id: &str,
+    fence_token: u64,
+    entry: &SpoolEntry,
+) -> Result<(), JournalError> {
+    let relative_path = path_text(&entry.relative_path)?;
+    let sequence = to_sql_integer(entry.sequence)?;
+    let bytes = to_sql_integer(entry.bytes)?;
+    let changed = connection.execute(
+        "
+        INSERT INTO log_spool(
+            organization_id, attempt_id, fence_token, sequence,
+            relative_path, digest, bytes
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(organization_id, attempt_id, fence_token, sequence) DO NOTHING
+        ",
+        params![
+            organization_id,
+            attempt_id,
+            to_sql_integer(fence_token)?,
+            sequence,
+            relative_path,
+            entry.digest.as_slice(),
+            bytes,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(());
+    }
+    let existing = connection.query_row(
+        "
+        SELECT relative_path, digest, bytes
+        FROM log_spool
+        WHERE organization_id = ?1
+          AND attempt_id = ?2
+          AND fence_token = ?3
+          AND sequence = ?4
+        ",
+        params![
+            organization_id,
+            attempt_id,
+            to_sql_integer(fence_token)?,
+            sequence
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    )?;
+    if existing.0 == relative_path && existing.1.as_slice() == entry.digest && existing.2 == bytes {
+        Ok(())
+    } else {
+        Err(JournalError::SpoolConflict)
+    }
 }
 
 fn valid_transition(from: AttemptPhase, to: AttemptPhase) -> bool {
