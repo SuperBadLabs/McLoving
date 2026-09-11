@@ -653,33 +653,72 @@ async fn replay_finalization(
     if let Some(step) = attempt.current_step {
         candidates.push(step_spool_area(&attempt.workspace).join(format!("step-{step}")));
     }
+    let mut interrupted: Vec<(&str, PathBuf, PathBuf, std::fs::File)> = Vec::new();
     for stream in ["stdout", "stderr"] {
         if journaled.contains(&(interrupted_ordinal, stream)) {
             continue;
         }
-        let mut located = None;
         for directory in &candidates {
             let relative_path = directory.join(format!("{stream}.log"));
             let path = config.workspace_root.join(&relative_path);
-            if let Ok(metadata) = fs::symlink_metadata(&path).await
-                && metadata.is_file()
-                && !is_link_or_reparse_point(&metadata)
-            {
-                located = Some((relative_path, path, metadata));
+            if let Ok(file) = open_spool_for_cut(&path) {
+                interrupted.push((stream, relative_path, path, file));
                 break;
             }
         }
-        let Some((relative_path, path, metadata)) = located else {
-            continue;
-        };
-        if metadata.len() == 0 {
+    }
+    if !interrupted.is_empty() {
+        // The crashed session never reached the executor's quota cut, and an
+        // orphaned process may have kept writing until the quiesce. Apply the
+        // same aggregate cut now, with the journaled reservations as floors,
+        // so what is published is exactly what the executor would have
+        // retained and never more than the ledger admits; the budget is what
+        // the finished steps of this attempt left.
+        let journaled_bytes: u64 = attempt.logs.iter().map(|entry| entry.bytes).sum();
+        let budget = MAX_ATTEMPT_OUTPUT_BYTES.saturating_sub(journaled_bytes);
+        let floors = OutputFloors::default();
+        {
+            let mut held = floors.lock();
+            for reservation in spools.journal.log_reservations(
+                spools.organization_id,
+                spools.attempt_id,
+                spools.fence_token,
+            )? {
+                if reservation.step_ordinal != interrupted_ordinal {
+                    continue;
+                }
+                let end = reservation.offset.saturating_add(reservation.bytes);
+                match reservation.stream.as_str() {
+                    "stdout" => held.0 = held.0.max(end),
+                    _ => held.1 = held.1.max(end),
+                }
+            }
+        }
+        let stdout = interrupted
+            .iter()
+            .find(|(stream, ..)| *stream == "stdout")
+            .map(|(.., file)| file);
+        let stderr = interrupted
+            .iter()
+            .find(|(stream, ..)| *stream == "stderr")
+            .map(|(.., file)| file);
+        mcloving_agent_runtime::executor::cut_spool_pair_to_limit(
+            stdout,
+            stderr,
+            budget,
+            Some(&floors),
+        )?;
+    }
+    for (stream, relative_path, path, file) in &interrupted {
+        let bytes = file.metadata()?.len();
+        if bytes == 0 {
             continue;
         }
         let entry = SpoolEntry {
-            sequence: u64::from(interrupted_ordinal) * 2 + u64::from(stream == "stderr"),
-            relative_path,
-            digest: file_digest(&path).await?,
-            bytes: metadata.len(),
+            sequence: u64::from(interrupted_ordinal) * 2 + u64::from(*stream == "stderr"),
+            relative_path: relative_path.clone(),
+            digest: file_digest(path).await?,
+            bytes,
         };
         // Not best effort: a transient publication failure must not let the
         // cancellation complete and reclaim the spool with output the ledger
@@ -3143,6 +3182,27 @@ async fn publish_reserved_chunk(
     )?;
     crash_after_log_chunks_for_test();
     Ok(())
+}
+
+/// Opens an interrupted step's spool for the recovery cut: a regular file
+/// by its path, never through a link, readable and writable so it can be
+/// truncated to the quota.
+fn open_spool_for_cut(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(file)
 }
 
 /// The SHA-256 of a whole file, streamed.

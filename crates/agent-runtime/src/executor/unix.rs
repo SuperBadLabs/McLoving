@@ -753,30 +753,10 @@ fn truncate_output_to_limit(
     limit: Option<u64>,
     floors: Option<&super::OutputFloors>,
 ) -> Result<(), std::io::Error> {
-    let Some(limit) = limit else {
-        return Ok(());
-    };
-    // Held through the cut: a publisher cannot read a range and raise its
-    // floor between this measurement and the truncation.
-    let held = floors.map(|floors| floors.lock());
-    let stdout_bytes = stdout.metadata()?.len();
-    let stderr_bytes = stderr.metadata()?.len();
-    // stdout is preserved first, but never below what a live publisher
-    // already sent of either stream: those bytes are in the controller's
-    // ledger and the durable spool must keep vouching for them. The floors'
-    // sum stays within the limit by the publisher's own bound, so the
-    // aggregate still fits.
-    let (stdout_floor, stderr_floor) = held.as_deref().copied().unwrap_or((0, 0));
-    let stdout_floor = stdout_floor.min(stdout_bytes).min(limit);
-    let stderr_floor = stderr_floor
-        .min(stderr_bytes)
-        .min(limit.saturating_sub(stdout_floor));
-    let retained_stdout = stdout_bytes
-        .min(limit.saturating_sub(stderr_floor))
-        .max(stdout_floor);
-    let retained_stderr = stderr_bytes.min(limit.saturating_sub(retained_stdout));
-    stdout.set_len(retained_stdout)?;
-    stderr.set_len(retained_stderr)
+    match limit {
+        Some(limit) => super::cut_spools_to_limit(stdout, stderr, limit, floors),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {

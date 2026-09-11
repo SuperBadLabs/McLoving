@@ -110,6 +110,61 @@ impl OutputFloors {
     }
 }
 
+/// Cuts a step's two spool files to the aggregate byte limit: stdout is
+/// preserved first, but never below what a live publisher already sent of
+/// either stream (`floors`), whose sum the publisher keeps within the
+/// limit. Held under the floors lock for the whole cut so a publisher cannot
+/// read a range and raise its floor in between. Used by the executor at
+/// process exit and by recovery for a step the crashed session was still
+/// running.
+pub fn cut_spools_to_limit(
+    stdout: &std::fs::File,
+    stderr: &std::fs::File,
+    limit: u64,
+    floors: Option<&OutputFloors>,
+) -> Result<(), std::io::Error> {
+    cut_spool_pair_to_limit(Some(stdout), Some(stderr), limit, floors)
+}
+
+/// [`cut_spools_to_limit`] for a pair of which either stream may not exist
+/// (recovery of an interrupted step): a missing stream counts as empty.
+pub fn cut_spool_pair_to_limit(
+    stdout: Option<&std::fs::File>,
+    stderr: Option<&std::fs::File>,
+    limit: u64,
+    floors: Option<&OutputFloors>,
+) -> Result<(), std::io::Error> {
+    let held = floors.map(|floors| floors.lock());
+    let stdout_bytes = stdout
+        .map(|file| file.metadata())
+        .transpose()?
+        .map_or(0, |m| m.len());
+    let stderr_bytes = stderr
+        .map(|file| file.metadata())
+        .transpose()?
+        .map_or(0, |m| m.len());
+    let (stdout_floor, stderr_floor) = held.as_deref().copied().unwrap_or((0, 0));
+    let stdout_floor = stdout_floor.min(stdout_bytes).min(limit);
+    let stderr_floor = stderr_floor
+        .min(stderr_bytes)
+        .min(limit.saturating_sub(stdout_floor));
+    let retained_stdout = stdout_bytes
+        .min(limit.saturating_sub(stderr_floor))
+        .max(stdout_floor);
+    let retained_stderr = stderr_bytes.min(limit.saturating_sub(retained_stdout));
+    if let Some(stdout) = stdout
+        && retained_stdout < stdout_bytes
+    {
+        stdout.set_len(retained_stdout)?;
+    }
+    if let Some(stderr) = stderr
+        && retained_stderr < stderr_bytes
+    {
+        stderr.set_len(retained_stderr)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Termination {
     Exited,
