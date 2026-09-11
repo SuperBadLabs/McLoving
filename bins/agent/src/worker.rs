@@ -674,6 +674,9 @@ async fn replay_finalization(
             }
         }
     }
+    // The interrupted step's reservations, as floors the cut below keeps and
+    // as the reason an empty spool still goes through the publisher.
+    let floors = OutputFloors::default();
     if !interrupted.is_empty() {
         // The crashed session never reached the executor's quota cut, and an
         // orphaned process may have kept writing until the quiesce. Apply the
@@ -683,7 +686,6 @@ async fn replay_finalization(
         // the finished steps of this attempt left.
         let journaled_bytes: u64 = attempt.logs.iter().map(|entry| entry.bytes).sum();
         let budget = MAX_ATTEMPT_OUTPUT_BYTES.saturating_sub(journaled_bytes);
-        let floors = OutputFloors::default();
         {
             let mut held = floors.lock();
             for reservation in spools.journal.log_reservations(
@@ -716,9 +718,21 @@ async fn replay_finalization(
             Some(&floors),
         )?;
     }
+    let (reserved_stdout, reserved_stderr) = floors.load();
     for (stream, relative_path, path, file) in &interrupted {
         let bytes = file.metadata()?.len();
-        if bytes == 0 {
+        // An empty stream with nothing reserved has nothing to publish. One
+        // with a reservation outstanding goes through the publisher, whose
+        // coverage check then fails the same way a spool truncated short of
+        // its reservations does, so a workload that emptied its spool after
+        // a chunk was reserved cannot make the reserved sequence vanish
+        // silently (its custody is AGENT-011).
+        let reserved = if *stream == "stdout" {
+            reserved_stdout
+        } else {
+            reserved_stderr
+        };
+        if bytes == 0 && reserved == 0 {
             continue;
         }
         let entry = SpoolEntry {
