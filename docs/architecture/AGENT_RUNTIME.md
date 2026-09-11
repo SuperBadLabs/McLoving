@@ -344,7 +344,11 @@ discharge a parked reconciliation).
   receipt) written before the chunk is first sent, so the live tail, the
   terminal pass and a post-crash replay all number one range of one stream
   once; sequences are attempt-wide and the next is one past the highest
-  reservation. When `live-log-stream-v1` is negotiated (Unix; not for helper
+  reservation; an attempt whose reservations already pass the terminal-only
+  bound is replayed only under a session that negotiates the feature, and
+  a session with an older peer (a rolling upgrade) leaves it in the journal
+  rather than failing every other attempt's recovery with it. When
+  `live-log-stream-v1` is negotiated (Unix; not for helper
   steps, and not for a credential-bearing step, whose output is captured and
   redacted only after it exits so nothing unredacted may leave the agent
   early), the spawn hook opens the step's `stdout.log`/`stderr.log` by their
