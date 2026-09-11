@@ -49,15 +49,26 @@ pub(crate) fn container_name(attempt_id: &str, ordinal: u32) -> String {
 /// the pinned podman path plus the environment rootless podman keys its
 /// storage on. Recovery under a different context can only see a different
 /// store, so it must not claim anything about the original container.
+///
+/// Every field is the exact bytes of the value, hex-encoded, and an unset
+/// variable is recorded as unset rather than as empty: two distinct contexts
+/// cannot serialize alike through lossy UTF-8 replacement or a delimiter
+/// inside a value.
 pub(crate) fn runtime_context(runtime: &Path) -> String {
-    let variable = |key: &str| {
-        std::env::var_os(key)
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default()
+    let hex = |value: &std::ffi::OsStr| {
+        value
+            .as_encoded_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let variable = |key: &str| match std::env::var_os(key) {
+        Some(value) => hex(&value),
+        None => "unset".to_owned(),
     };
     format!(
-        "{}|HOME={}|XDG_RUNTIME_DIR={}",
-        runtime.display(),
+        "v2|runtime={}|HOME={}|XDG_RUNTIME_DIR={}",
+        hex(runtime.as_os_str()),
         variable("HOME"),
         variable("XDG_RUNTIME_DIR")
     )
@@ -165,7 +176,7 @@ fn bounded_status(command: &mut Command, deadline: Duration) -> Option<ExitStatu
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_status, container_name, runtime_answers};
+    use super::{bounded_status, container_name, runtime_answers, runtime_context};
     use std::path::Path;
     use std::process::Command;
     use std::time::Duration;
@@ -197,6 +208,21 @@ mod tests {
         );
         assert!(status.is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// PAR-011, from review. The context is compared byte-for-byte, so a
+    /// delimiter inside a value or a non-UTF-8 value must not collide with a
+    /// different context; the encoding is exact bytes, never lossy text.
+    #[test]
+    fn runtime_context_is_exact_bytes_with_no_delimiter_ambiguity() {
+        let context = runtime_context(Path::new("/usr/bin/pod|man"));
+        assert!(context.starts_with("v2|runtime=2f7573722f62696e2f706f647c6d616e|HOME="));
+        assert_eq!(context.matches('|').count(), 3);
+        assert!(context.contains("|XDG_RUNTIME_DIR="));
+        assert_ne!(
+            runtime_context(Path::new("/usr/bin/podman")),
+            runtime_context(Path::new("/usr/bin/podman ")),
+        );
     }
 
     #[test]

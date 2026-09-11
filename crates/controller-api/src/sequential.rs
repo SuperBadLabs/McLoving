@@ -46,6 +46,14 @@ pub fn plan_sequential_build(
                 "sequential stage must contain a shell step".to_owned(),
             ));
         }
+        // Sequential planning lowers every step to a version-1 host process
+        // with no capability requirement. A stage that asked for containment
+        // (PAR-011) must not silently run on the agent account instead.
+        if stage.image.is_some() {
+            return Err(StoreError::InvalidDag(
+                "sequential planning does not admit container stages".to_owned(),
+            ));
+        }
         for (step_index, step) in stage.steps.iter().enumerate() {
             let Step::Process(process) = step else {
                 return Err(StoreError::InvalidDag(

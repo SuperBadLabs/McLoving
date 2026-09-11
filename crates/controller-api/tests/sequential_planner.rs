@@ -57,6 +57,23 @@ fn steps_preserve_literals_order_frozen_digest_and_utf8_labels() {
     }
 }
 
+/// PAR-011, from review. The sequential planner lowers steps to version-1
+/// host processes; a stage that requested an image would otherwise run
+/// uncontained under the agent account.
+#[test]
+fn container_stages_are_refused_rather_than_lowered_to_host_processes() {
+    let mut ir = pipeline(1, 1, ":");
+    ir.stages[0].image = Some(
+        "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"
+            .to_owned(),
+    );
+    let error = plan_sequential_build(&ir, binding()).unwrap_err();
+    assert!(
+        error.to_string().contains("container stages"),
+        "unexpected refusal: {error}"
+    );
+}
+
 #[test]
 fn stage_step_and_script_bounds_are_exact() {
     assert!(plan_sequential_build(&pipeline(32, 2, ":"), binding()).is_ok());

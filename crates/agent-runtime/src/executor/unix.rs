@@ -244,6 +244,13 @@ where
             };
             let env_path = format!("/proc/self/fd/{}", transport.as_raw_fd());
             env_transport = Some(transport);
+            // The child starts inside the workspace, and podman reads a
+            // volume source that does not begin with `/` or `.` as a named
+            // volume, so a relative workspace root would mount the wrong
+            // storage and drop the cidfile under a duplicated path. Both
+            // paths are made absolute against this process's directory.
+            let mounted_workspace = std::path::absolute(&workspace)?;
+            let cidfile = std::path::absolute(spool.join("container.cid"))?;
             let mut command = Command::new(&container.runtime);
             command
                 .arg("run")
@@ -251,10 +258,10 @@ where
                 .arg("--name")
                 .arg(&container.name)
                 .arg("--cidfile")
-                .arg(spool.join("container.cid"))
+                .arg(cidfile)
                 .arg("--userns=keep-id")
                 .arg("--volume")
-                .arg(format!("{}:/workspace:Z", workspace.display()))
+                .arg(format!("{}:/workspace:Z", mounted_workspace.display()))
                 .arg("--workdir")
                 .arg("/workspace")
                 .arg("--env-file")
