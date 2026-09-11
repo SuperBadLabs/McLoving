@@ -3281,16 +3281,20 @@ async fn finalize_without_process(
         logs: &[],
         result: &result,
     })?;
+    // The immediate summary is built from the persisted result exactly as a
+    // replay builds it, so a client sees the same bytes (reason, digest and,
+    // for a multi-step attempt whose first step never spawned, its step
+    // record) whether or not publication was replayed.
+    let result_content = verified_spool_content(&config.workspace_root, &result, "result").await?;
+    let persisted: PersistedResult = serde_json::from_slice(&result_content)?;
+    let summary = work_completion_summary(&persisted, &result.digest, true)?;
     let published = published_work_outcome(
         authority_rpc(
             control,
             client.complete_work(WorkCompletion {
                 authority: Some(authority.clone()),
                 outcome: outcome as i32,
-                summary_json: serde_json::to_vec(&json!({
-                    "reason": reason,
-                    "result_sha256": hex(&result.digest),
-                }))?,
+                summary_json: summary,
                 // A processless completion journals no log spools.
                 inline_log_chunks: Vec::new(),
             }),
