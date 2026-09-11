@@ -945,6 +945,9 @@ pub struct PipelineStagePlan {
     pub cache_intent_steps: usize,
     #[serde(default)]
     pub input_intent_steps: usize,
+    /// Checkout steps through the sealed source acquirer (PAR-012).
+    #[serde(default)]
+    pub checkout_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -5155,6 +5158,11 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
                     .steps
                     .iter()
                     .filter(|step| matches!(step, Step::ConnectorIntent(_)))
+                    .count(),
+                checkout_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Checkout(_)))
                     .count(),
             })
             .collect(),

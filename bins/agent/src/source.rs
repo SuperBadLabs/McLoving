@@ -16,12 +16,15 @@ use crate::{AgentConfig, AgentError};
 
 const MAX_BINDINGS_BYTES: usize = 262_144;
 /// One NDJSON request line to the acquirer; its own bound is 64 KiB.
+#[cfg(target_os = "linux")]
 const MAX_REQUEST_BYTES: usize = 65_536;
 /// One NDJSON receipt line back; the private-IO executor caps output here.
+#[cfg(target_os = "linux")]
 const MAX_RESPONSE_BYTES: u64 = 262_144;
 /// Directory entries the publication walk will visit before refusing: the
 /// receipt bounds files, and this bounds a tree whose directory count the
 /// receipt does not carry.
+#[cfg(target_os = "linux")]
 const MAX_PUBLICATION_ENTRIES: usize = 262_144;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -199,11 +202,14 @@ mod linux {
         pub program: PathBuf,
         pub arguments: Vec<OsString>,
         pub environment: BTreeMap<String, String>,
-        pub request: Vec<u8>,
         pub output_limit: u64,
         config: SourceConfig,
         signing_key: Vec<u8>,
+        /// The request without its time window; `begin` opens the window
+        /// into `live` when the step is about to spawn.
         acquisition: AcquisitionRequest,
+        timeout_seconds: u64,
+        live: Mutex<Option<AcquisitionRequest>>,
         binding: SourceBinding,
         invocation_id: String,
         verified: Mutex<Option<AcquisitionReceipt>>,
@@ -301,10 +307,9 @@ mod linux {
             ));
         }
         let uuid = |value: &str| Uuid::parse_str(value).map_err(|_| denied());
-        let requested_at = now_ms()?;
-        let expires_at = requested_at
-            .checked_add(i64::try_from(spec.timeout_seconds * 1_000).map_err(|_| denied())?)
-            .ok_or_else(denied)?;
+        // The time window is opened by `begin`, immediately before the step's
+        // spawn: a checkout prepared with the attempt but placed after long
+        // steps must not reach the acquirer already expired.
         let acquisition = AcquisitionRequest {
             acquisition_id: acquisition_id(context, ordinal),
             organization_id: uuid(&context.organization_id)?,
@@ -334,16 +339,18 @@ mod linux {
             depth: 1,
             sparse_roots: Vec::new(),
             submodules: Vec::new(),
-            requested_at_unix_ms: requested_at,
-            expires_at_unix_ms: expires_at,
+            requested_at_unix_ms: 0,
+            expires_at_unix_ms: 0,
             audit_lineage: format!(
                 "mcloving.build/{}/attempt/{}/step/{ordinal}",
                 context.build_id, context.attempt_id
             ),
         };
-        let mut request = serde_json::to_vec(&acquisition)?;
-        request.push(b'\n');
-        if request.len() > MAX_REQUEST_BYTES {
+        // Bounded with the window's widest possible spelling in place of the
+        // placeholders it carries until `begin`.
+        if serde_json::to_vec(&acquisition)?.len() + 2 * i64::MAX.to_string().len() + 1
+            > MAX_REQUEST_BYTES
+        {
             return Err(denied());
         }
         let (executable, sealed) =
@@ -396,11 +403,12 @@ mod linux {
             program,
             arguments,
             environment,
-            request,
             output_limit: MAX_RESPONSE_BYTES,
             config: source_config,
             signing_key,
             acquisition,
+            timeout_seconds: spec.timeout_seconds,
+            live: Mutex::new(None),
             binding: binding.clone(),
             invocation_id: format!("sha256:{}", hex(payload_digest)),
             verified: Mutex::new(None),
@@ -444,6 +452,41 @@ mod linux {
     }
 
     impl PreparedSource {
+        /// Opens the request's time window now, for exactly the step's
+        /// timeout, and fixes the request the helper will read. Called right
+        /// before the spawn, so waiting for credentials or earlier steps
+        /// never spends the checkout's own time.
+        pub fn begin(&self) -> Result<(), AgentError> {
+            let requested_at = now_ms()?;
+            let expires_at = requested_at
+                .checked_add(i64::try_from(self.timeout_seconds * 1_000).map_err(|_| denied())?)
+                .ok_or_else(denied)?;
+            let mut live = self.acquisition.clone();
+            live.requested_at_unix_ms = requested_at;
+            live.expires_at_unix_ms = expires_at;
+            *self.live.lock().map_err(|_| denied())? = Some(live);
+            Ok(())
+        }
+
+        /// The NDJSON request line for the helper: the live request once
+        /// `begin` opened its window, otherwise the windowless template, which
+        /// the acquirer refuses as expired rather than running.
+        pub fn request(&self) -> Vec<u8> {
+            let request = self
+                .live
+                .lock()
+                .ok()
+                .and_then(|live| live.clone())
+                .unwrap_or_else(|| self.acquisition.clone());
+            let mut bytes = serde_json::to_vec(&request).unwrap_or_default();
+            bytes.push(b'\n');
+            bytes
+        }
+
+        fn live_request(&self) -> Option<AcquisitionRequest> {
+            self.live.lock().ok().and_then(|live| live.clone())
+        }
+
         /// Authenticates the acquirer's one-line answer against the request
         /// this agent wrote and the material it configured the helper with,
         /// and emits only a typed public summary. Nothing of the answer
@@ -521,8 +564,12 @@ mod linux {
                 &receipt,
             )
             .map_err(|_| "response_rejected")?;
-            let request_sha256 = SourceAcquirer::request_sha256(&self.acquisition)
-                .map_err(|_| "response_rejected")?;
+            let request_sha256 =
+                self.live_request()
+                    .ok_or("response_rejected")
+                    .and_then(|live| {
+                        SourceAcquirer::request_sha256(&live).map_err(|_| "response_rejected")
+                    })?;
             let primary = receipt
                 .repository_trees
                 .first()

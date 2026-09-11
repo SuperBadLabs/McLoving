@@ -219,6 +219,11 @@ mod tests {
         // Windows never runs the sealed acquirer.
         assert!(super::super::validate_execution_platform(&p, "windows").is_err());
         super::super::validate_execution_platform(&p, "linux").unwrap();
+        // A plan reports the checkout as its own step kind, so a checkout
+        // plus one process is not mistaken for a one-step process stage.
+        let plan = super::super::pipeline_plan(&p).unwrap();
+        assert_eq!(plan.stages[0].checkout_steps, 1);
+        assert_eq!(plan.stages[0].process_steps, 1);
     }
     #[test]
     fn malformed_source_catalog_never_becomes_admission_authority() {

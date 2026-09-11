@@ -18,5 +18,5 @@ if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null 
   aa-exec -p mcloving-source-acquirer -- /bin/true
 fi
 bash scripts/run-verified-rust-test.sh \
-  1 source-product --require-postgres \
+  2 source-product --require-postgres \
   cargo test --locked -p mcloving-agent --test source_work -- --nocapture --test-threads=1

@@ -176,6 +176,7 @@ struct ValidatedAssignment {
     /// prepared into a sealed acquirer invocation before the first spawn.
     checkouts: Vec<(usize, CheckoutStepSpec)>,
     /// The controller-authorized work identity every helper binds to.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     work_context: CacheWorkContext,
     workspace_grant: Option<WorkspaceGrant>,
     authority: WorkAuthority,
@@ -1945,6 +1946,9 @@ async fn run_assignment(
                 }
                 .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
             };
+            if let Some(helper) = helper {
+                helper.begin()?;
+            }
             let execution = execute_prepared(
                 &request,
                 execution_cancellation.clone(),
@@ -5663,11 +5667,12 @@ where
     #[cfg(target_os = "linux")]
     if let Some(helper) = helper {
         let transform = |stdout: &[u8], stderr: &[u8]| helper.transform(stdout, stderr);
+        let private_request = helper.request();
         return mcloving_agent_runtime::executor::execute_with_spawn_hook_and_private_io(
             request,
             cancellation,
             mcloving_agent_runtime::executor::PrivateExecutionIo {
-                request: helper.request(),
+                request: &private_request,
                 transform: &transform,
             },
             on_spawn,

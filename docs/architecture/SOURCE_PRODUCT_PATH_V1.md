@@ -36,7 +36,8 @@ mapping records binding mapping id/digest, organization/project/pipeline and
 trust pool. Every validate, plan, save, submission and saved replay admission
 checks the relevant authoritative scope; validation and planning need an
 explicit pipeline ID; Windows and scope/digest mismatches are refused before
-queueing. Catalog updates require restart.
+queueing. A pipeline plan reports `checkout_steps` per stage beside the
+other step-kind counts. Catalog updates require restart.
 
 Scheduling requires `multi-step-v1`, `sealed-source-v1` and a
 domain-separated capability for the exact mapping id and full mapping digest.
@@ -68,7 +69,9 @@ job cannot learn about a binding by probing it. The request it writes is the
 acquirer's own `AcquisitionRequest`: identities from the controller-authorized
 work context, a deterministic acquisition id per attempt and step, the
 repository from the configuration, depth 1, no sparse roots or submodules, and
-an expiry equal to the step timeout. The acquirer is entered with the sealed
+a time window opened immediately before the step's own spawn, for exactly
+the step timeout, so waiting for credentials or earlier steps never spends
+the checkout's time. The acquirer is entered with the sealed
 image, the four private paths in its environment, and no argument the job
 wrote.
 

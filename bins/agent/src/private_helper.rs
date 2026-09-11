@@ -152,12 +152,21 @@ impl PreparedHelper {
             Self::Source(v) => v.environment.clone(),
         }
     }
-    pub fn request(&self) -> &[u8] {
+    /// Opens whatever time window the helper's request carries, immediately
+    /// before its spawn. Cache and input requests carry none.
+    pub fn begin(&self) -> Result<(), crate::AgentError> {
         match self {
-            Self::Cache(v) => &v.request,
-            Self::Input(v) => &v.request,
+            Self::Cache(_) | Self::Input(_) => Ok(()),
             #[cfg(target_os = "linux")]
-            Self::Source(v) => &v.request,
+            Self::Source(v) => v.begin(),
+        }
+    }
+    pub fn request(&self) -> Vec<u8> {
+        match self {
+            Self::Cache(v) => v.request.clone(),
+            Self::Input(v) => v.request.clone(),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.request(),
         }
     }
     pub fn output_limit(&self) -> u64 {
