@@ -1640,10 +1640,15 @@ mod tests {
         // reap that proves a container gone is reserved inside the lease as
         // well. A lease that holds the grace and cadence but not the reap is
         // refused for the same reason: the container would outlive the term.
+        let absolute_podman = if cfg!(windows) {
+            "C:\\podman\\podman.exe"
+        } else {
+            "/usr/bin/podman"
+        };
         let mut reap_overruns_lease = values();
         reap_overruns_lease.insert(
             "MCLOVING_AGENT_PODMAN_PATH".to_owned(),
-            "/usr/bin/podman".to_owned(),
+            absolute_podman.to_owned(),
         );
         reap_overruns_lease.insert("MCLOVING_AGENT_LEASE_SECONDS".to_owned(), "20".to_owned());
         assert!(
@@ -1658,7 +1663,7 @@ mod tests {
         let mut reap_fits_lease = values();
         reap_fits_lease.insert(
             "MCLOVING_AGENT_PODMAN_PATH".to_owned(),
-            "/usr/bin/podman".to_owned(),
+            absolute_podman.to_owned(),
         );
         assert!(
             AgentConfig::from_values(&reap_fits_lease).is_ok(),
