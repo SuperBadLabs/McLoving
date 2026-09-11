@@ -355,8 +355,12 @@ discharge a parked reconciliation).
   least 64 KiB unpublished, or any unpublished bytes a second after its last
   chunk, is reserved and sent; a send the controller does not accept stays
   reserved and is retried, a stale authority stops the tail without touching
-  the step, and the tail stops reserving 128 sequences below the live bound
-  so the terminal pass always has room for every stream's remainder. The terminal pass then
+  the step, the tail stops reserving 128 sequences below the live bound so
+  the terminal pass always has room for every stream's remainder, and it
+  never streams past the step's aggregate output limit. A step that exceeds
+  that limit has its spools cut by the executor (stdout preserved first,
+  stderr shortened) after the tail may have streamed past the cut; those
+  ranges stand as published rather than parking the already-failed attempt. The terminal pass then
   verifies the executor's durable spool as before, checks every streamed
   range is contiguous from zero and still hashes to what was sent (a spool
   rewritten after streaming fails the attempt by name), sends only ranges

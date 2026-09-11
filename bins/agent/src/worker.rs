@@ -602,6 +602,14 @@ async fn replay_finalization(
     // no receipt was recorded, and the rest continues from the next unused
     // sequence, so the replayed ledger is exactly the one a crash-free run
     // would have produced.
+    let result_entry = attempt.result.as_ref().ok_or_else(|| {
+        AgentError::InvalidAssignment(
+            "finalizing journal attempt has no durable result spool".to_owned(),
+        )
+    })?;
+    let result_content =
+        verified_spool_content(&config.workspace_root, result_entry, "result").await?;
+    let result: PersistedResult = serde_json::from_slice(&result_content)?;
     let mut journal = Journal::open(&config.journal_path)?;
     let mut spools = SpoolPublisher {
         journal: &mut journal,
@@ -610,6 +618,7 @@ async fn replay_finalization(
         fence_token: attempt.fence_token,
         session_epoch: attempt.session_epoch,
         chunk_bound: log_chunk_bound(live_log_stream),
+        quota_truncated: result.termination == termination_name(Termination::OutputLimitExceeded),
     };
     for entry in &attempt.logs {
         let (stream, step_ordinal) = spool_stream(entry)?;
@@ -624,14 +633,6 @@ async fn replay_finalization(
             )
             .await?;
     }
-    let result_entry = attempt.result.as_ref().ok_or_else(|| {
-        AgentError::InvalidAssignment(
-            "finalizing journal attempt has no durable result spool".to_owned(),
-        )
-    })?;
-    let result_content =
-        verified_spool_content(&config.workspace_root, result_entry, "result").await?;
-    let result: PersistedResult = serde_json::from_slice(&result_content)?;
     let outcome = persisted_outcome(&result.outcome)?;
     if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)
         || (attempt.phase == AttemptPhase::Cancelling && outcome != WorkOutcome::Aborted)
@@ -2044,11 +2045,14 @@ async fn run_assignment(
                 true => {
                     let tail = LiveTail::open(
                         config,
-                        &organization,
-                        &attempt,
-                        fence,
-                        session_epoch,
-                        ordinal,
+                        LiveTailScope {
+                            organization_id: &organization,
+                            attempt_id: &attempt,
+                            fence_token: fence,
+                            session_epoch,
+                            step_ordinal: ordinal,
+                            output_limit: step_output_limit,
+                        },
                         live_spool.clone(),
                     )?;
                     // The tail is its own task: a slow or blocked PublishLog
@@ -2430,6 +2434,7 @@ async fn run_assignment(
             fence_token: fence,
             session_epoch,
             chunk_bound: log_chunk_bound(features.live_log_stream),
+            quota_truncated: outcome.termination == Termination::OutputLimitExceeded,
         };
         for entry in &logs {
             let (stream, step_ordinal) = spool_stream(entry)?;
@@ -3104,6 +3109,13 @@ struct SpoolPublisher<'a> {
     fence_token: u64,
     session_epoch: u64,
     chunk_bound: u64,
+    /// The step ended by exceeding the output quota, so the executor cut the
+    /// durable spools to the limit (stdout preserved first, stderr shortened)
+    /// after the tail may already have streamed bytes past the cut. Those
+    /// ranges stand as published: the bytes were the step's output when
+    /// sent, they cannot be re-read or re-sent, and refusing them would park
+    /// an attempt that has already failed for its output.
+    quota_truncated: bool,
 }
 
 impl SpoolPublisher<'_> {
@@ -3134,15 +3146,27 @@ impl SpoolPublisher<'_> {
             .collect();
         let mut covered = 0_u64;
         for reservation in &reservations {
-            if reservation.offset != covered
-                || reservation
-                    .offset
-                    .checked_add(reservation.bytes)
-                    .is_none_or(|end| end > entry.bytes)
-            {
+            let end = reservation.offset.checked_add(reservation.bytes);
+            if reservation.offset != covered || end.is_none() {
                 return Err(AgentError::InvalidAssignment(
                     "streamed log reservations do not cover the durable spool".to_owned(),
                 ));
+            }
+            if end.is_some_and(|end| end > entry.bytes) {
+                if !self.quota_truncated {
+                    return Err(AgentError::InvalidAssignment(
+                        "streamed log reservations do not cover the durable spool".to_owned(),
+                    ));
+                }
+                if !reservation.acknowledged {
+                    eprintln!(
+                        "log chunk {} of {stream} step {step_ordinal} was streamed past the \
+                         quota cut and never acknowledged; it cannot be sent again",
+                        reservation.sequence
+                    );
+                }
+                covered = entry.bytes;
+                continue;
             }
             let content =
                 read_spool_range(&mut file, reservation.offset, reservation.bytes).await?;
@@ -3272,6 +3296,17 @@ impl LiveSpool {
     }
 }
 
+/// What one live tail publishes for: the attempt's authority, the step and
+/// the step's aggregate output limit.
+struct LiveTailScope<'a> {
+    organization_id: &'a str,
+    attempt_id: &'a str,
+    fence_token: u64,
+    session_epoch: u64,
+    step_ordinal: u32,
+    output_limit: u64,
+}
+
 struct LiveStream {
     stream: &'static str,
     offset: u64,
@@ -3295,19 +3330,26 @@ struct LiveTail {
     streams: [LiveStream; 2],
     pending: Option<(LogReservation, Vec<u8>)>,
     stopped: bool,
+    /// The step's aggregate output limit: the tail never streams past it in
+    /// total, since the executor retains nothing beyond it.
+    output_limit: u64,
 }
 
 impl LiveTail {
     fn open(
         config: &AgentConfig,
-        organization_id: &str,
-        attempt_id: &str,
-        fence_token: u64,
-        session_epoch: u64,
-        step_ordinal: u32,
+        scope: LiveTailScope<'_>,
         slot: Arc<std::sync::Mutex<Option<LiveSpool>>>,
     ) -> Result<Self, AgentError> {
         let now = tokio::time::Instant::now();
+        let LiveTailScope {
+            organization_id,
+            attempt_id,
+            fence_token,
+            session_epoch,
+            step_ordinal,
+            output_limit,
+        } = scope;
         Ok(Self {
             journal: Journal::open(&config.journal_path)?,
             organization_id: organization_id.to_owned(),
@@ -3331,6 +3373,7 @@ impl LiveTail {
             ],
             pending: None,
             stopped: false,
+            output_limit,
         })
     }
 
@@ -3421,7 +3464,17 @@ impl LiveTail {
             {
                 continue;
             }
-            let bytes = available.min(MAX_LOG_CHUNK_BYTES as u64);
+            // Never past the aggregate limit: the executor retains at most
+            // that many bytes across both streams, and the terminal pass can
+            // only vouch for what it retained.
+            let streamed = self.streams[0].offset + self.streams[1].offset;
+            let headroom = self.output_limit.saturating_sub(streamed);
+            if headroom == 0 {
+                self.stopped = true;
+                return Ok(());
+            }
+            let bytes = available.min(MAX_LOG_CHUNK_BYTES as u64).min(headroom);
+            let stream = &mut self.streams[index];
             let content = read_spool_range(file, stream.offset, bytes).await?;
             let sequence = self.journal.next_log_sequence(
                 &self.organization_id,

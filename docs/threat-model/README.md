@@ -903,7 +903,9 @@ leaves the agent early); TM-006
 chunk is sent, so a crash at any point cannot renumber or duplicate a range;
 the terminal pass verifies the executor's durable spool and re-hashes every
 streamed range against its reservation, refusing by name a spool the
-workload rewrote after a range was streamed, and reads the live spool files
+workload rewrote after a range was streamed (a quota-terminated step is the
+one exception: ranges streamed past the executor's cut stand as published
+so the failed attempt still finalizes), and reads the live spool files
 through descriptors opened without following links or blocking and judged
 regular files after the open, so a renamed, unlinked or swapped visible
 path cannot redirect or stall the tail; recovery replays from the same
