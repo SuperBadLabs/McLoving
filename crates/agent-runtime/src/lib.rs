@@ -27,8 +27,12 @@ pub const MAX_ATTEMPT_OUTPUT_BYTES: u64 = 64 * 1_048_576;
 /// Version 6 (PAR-013) adds `log_reservations`: each log chunk's sequence,
 /// stream, step ordinal, byte range and digest, durable before the chunk is
 /// sent, so a chunk published while the step runs and a chunk replayed after
-/// a crash carry one number for one range of bytes.
-const SCHEMA_VERSION: i64 = 6;
+/// a crash carry one number for one range of bytes. Version 7 (PAR-013)
+/// adds `attempts.live_log_stream`, set when the attempt's first live tail
+/// starts: such an attempt's reservations may number past the terminal-only
+/// bound, so only a session negotiating `live-log-stream-v1` can replay it,
+/// and a session with an older peer leaves it in the journal.
+const SCHEMA_VERSION: i64 = 7;
 const MAX_PROCESS_BIRTH_IDENTITY_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +175,10 @@ pub struct ReconciliationAttempt {
     /// recorded before its spawn; `None` for steps that acquire nothing, so
     /// recovery reclaims only what a checkout could have left behind.
     pub acquisition_directory: Option<String>,
+    /// Whether a live tail streamed this attempt's output (PAR-013): its
+    /// log reservations may number past the terminal-only bound, so only a
+    /// session negotiating `live-log-stream-v1` can replay them.
+    pub live_log_stream: bool,
     pub logs: Vec<SpoolEntry>,
     pub result: Option<SpoolEntry>,
 }
@@ -278,7 +286,7 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | SCHEMA_VERSION) {
+        if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | 6 | SCHEMA_VERSION) {
             return Err(JournalError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: schema_version,
@@ -370,6 +378,7 @@ impl Journal {
                 container_name TEXT,
                 container_context TEXT,
                 acquisition_directory TEXT,
+                live_log_stream INTEGER NOT NULL DEFAULT 0 CHECK (live_log_stream IN (0, 1)),
                 accepted_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY (organization_id, attempt_id, fence_token)
@@ -444,7 +453,7 @@ impl Journal {
         )?;
         match schema_version {
             SCHEMA_VERSION => {}
-            found @ 1..=5 => {
+            found @ 1..=6 => {
                 let transaction = connection.unchecked_transaction()?;
                 if found == 1 {
                     transaction.execute(
@@ -470,6 +479,22 @@ impl Journal {
                 }
                 // Version 6 only adds a table, created above for every
                 // journal by the schema batch, so nothing else moves.
+                // Version 7 adds a column the schema batch above already
+                // gives a journal created by this build; only a journal an
+                // older build created lacks it.
+                let has_live_log_stream: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('attempts') \
+                     WHERE name = 'live_log_stream'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if found <= 6 && has_live_log_stream == 0 {
+                    transaction.execute(
+                        "ALTER TABLE attempts ADD COLUMN live_log_stream INTEGER NOT NULL \
+                         DEFAULT 0 CHECK (live_log_stream IN (0, 1))",
+                        [],
+                    )?;
+                }
                 transaction.execute(
                     "UPDATE journal_metadata SET schema_version = ?1 WHERE singleton = 1",
                     [SCHEMA_VERSION],
@@ -1298,13 +1323,49 @@ impl Journal {
         }
     }
 
+    /// Records that a live tail streams this attempt's output, before the
+    /// first chunk is reserved, so recovery knows the attempt's reservations
+    /// may number past the terminal-only bound.
+    pub fn mark_live_log_stream(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+    ) -> Result<(), JournalError> {
+        let fence_token = to_sql_integer(fence_token)?;
+        let session_epoch = to_sql_integer(session_epoch)?;
+        let changed = self.connection.execute(
+            "
+            UPDATE attempts
+            SET live_log_stream = 1, updated_at_unix_ms = ?5
+            WHERE organization_id = ?1
+              AND attempt_id = ?2
+              AND fence_token = ?3
+              AND session_epoch = ?4
+              AND phase IN ('accepted', 'running')
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                fence_token,
+                session_epoch,
+                unix_time_ms()?
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::StaleAuthority);
+        }
+        Ok(())
+    }
+
     pub fn reconcile(&self) -> Result<ReconciliationReport, JournalError> {
         let mut statement = self.connection.prepare(
             "
             SELECT organization_id, attempt_id, fence_token, session_epoch,
                    payload_digest, phase, workspace, process_group_id,
                    process_birth_identity, current_step, container_name,
-                   container_context, acquisition_directory
+                   container_context, acquisition_directory, live_log_stream
             FROM attempts
             WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
             ORDER BY organization_id, attempt_id, fence_token
@@ -1325,6 +1386,7 @@ impl Journal {
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
                 row.get::<_, Option<String>>(12)?,
+                row.get::<_, i64>(13)?,
             ))
         })?;
 
@@ -1344,6 +1406,7 @@ impl Journal {
                 container_name,
                 container_context,
                 acquisition_directory,
+                live_log_stream,
             ) = row?;
             attempts.push(ReconciliationAttempt {
                 logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
@@ -1365,6 +1428,7 @@ impl Journal {
                 container_name,
                 container_context,
                 acquisition_directory,
+                live_log_stream: live_log_stream != 0,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -1443,6 +1507,7 @@ impl Journal {
                 container_name: None,
                 container_context: None,
                 acquisition_directory: None,
+                live_log_stream: false,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -1791,6 +1856,33 @@ mod tests {
     }
 
     #[test]
+    fn a_live_streamed_attempt_is_journaled_as_such() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        let mut journal = Journal::open(&path).unwrap();
+        let acceptance = acceptance();
+        journal.accept(&acceptance).unwrap();
+        let (org, attempt, fence, epoch) = (
+            acceptance.organization_id.as_str(),
+            acceptance.attempt_id.as_str(),
+            acceptance.fence_token,
+            acceptance.session_epoch,
+        );
+        assert!(!journal.reconcile().unwrap().attempts[0].live_log_stream);
+        journal
+            .mark_live_log_stream(org, attempt, fence, epoch)
+            .unwrap();
+        // A stale epoch cannot mark it.
+        assert!(matches!(
+            journal.mark_live_log_stream(org, attempt, fence, epoch + 1),
+            Err(JournalError::StaleAuthority)
+        ));
+        drop(journal);
+        let journal = Journal::open(&path).unwrap();
+        assert!(journal.reconcile().unwrap().attempts[0].live_log_stream);
+    }
+
+    #[test]
     fn log_reservations_number_ranges_once_and_retire_with_the_spools() {
         let directory = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(directory.path().join("agent.db")).unwrap();
@@ -1939,6 +2031,33 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(journal.next_log_sequence(org, attempt, fence).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_version_six_journal_reads_its_attempts_as_terminal_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        {
+            let mut journal = Journal::open(&path).unwrap();
+            journal.accept(&acceptance()).unwrap();
+            journal
+                .connection
+                .execute_batch(
+                    "
+                    ALTER TABLE attempts DROP COLUMN live_log_stream;
+                    UPDATE journal_metadata SET schema_version = 6 WHERE singleton = 1;
+                    ",
+                )
+                .unwrap();
+        }
+        assert_eq!(Journal::observe(&path).unwrap().schema_version, 6);
+        let journal = Journal::open(&path).unwrap();
+        assert_eq!(
+            Journal::observe(&path).unwrap().schema_version,
+            SCHEMA_VERSION
+        );
+        // An attempt an older build journaled was never streamed live.
+        assert!(!journal.reconcile().unwrap().attempts[0].live_log_stream);
     }
 
     #[test]

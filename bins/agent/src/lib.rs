@@ -2056,6 +2056,7 @@ mod tests {
             container_name: None,
             container_context: None,
             acquisition_directory: None,
+            live_log_stream: false,
             logs: Vec::new(),
             result: None,
         };
@@ -2259,6 +2260,7 @@ mod tests {
                 container_name: None,
                 container_context: None,
                 acquisition_directory: None,
+                live_log_stream: false,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2304,6 +2306,7 @@ mod tests {
             container_name: None,
             container_context: None,
             acquisition_directory: None,
+            live_log_stream: false,
             logs: Vec::new(),
             result: None,
         };

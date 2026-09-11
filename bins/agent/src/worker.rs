@@ -463,8 +463,7 @@ pub(super) async fn recover_finalizations(
     stop: &CancellationToken,
 ) -> Result<(), AgentError> {
     reclaim_terminal_spools(config).await?;
-    let journal = Journal::open(&config.journal_path)?;
-    let report = journal.reconcile()?;
+    let report = Journal::open(&config.journal_path)?.reconcile()?;
     for attempt in report.attempts {
         if !matches!(
             attempt.phase,
@@ -472,25 +471,19 @@ pub(super) async fn recover_finalizations(
         ) {
             continue;
         }
-        // An attempt streamed past the terminal chunk bound under a session
-        // that negotiated `live-log-stream-v1` can be replayed only by a
-        // controller that negotiates it too: an older replica admitted
-        // during a rolling upgrade would refuse its high sequences, and
-        // failing here would end this session and every other attempt's
-        // recovery with it. Leave such an attempt in the journal for a
-        // session with a compatible peer; its lease is not renewed meanwhile.
-        if !live_log_stream
-            && replay_needs_live_log_stream(
-                &journal,
-                &attempt.organization_id,
-                &attempt.attempt_id,
-                attempt.fence_token,
-            )?
-        {
+        // An attempt a live tail streamed under a session that negotiated
+        // `live-log-stream-v1` (journaled as such before its first chunk was
+        // reserved) can be replayed only by a controller that negotiates it
+        // too: its reservations, and the chunks its spool remainder still
+        // needs, may number past the terminal-only bound an older replica
+        // admitted during a rolling upgrade enforces, and failing here would
+        // end this session and every other attempt's recovery with it. Leave
+        // such an attempt in the journal for a session with a compatible
+        // peer; its lease is not renewed meanwhile.
+        if attempt.live_log_stream && !live_log_stream {
             eprintln!(
-                "deferring recovery of attempt {}: its log reservations pass the terminal \
-                 chunk bound and this session's controller does not negotiate \
-                 live-log-stream-v1",
+                "deferring recovery of attempt {}: a live tail streamed its output and this \
+                 session's controller does not negotiate live-log-stream-v1",
                 attempt.attempt_id
             );
             continue;
@@ -2137,6 +2130,13 @@ async fn run_assignment(
                             attempt_spool
                         }
                     });
+            if live_spool_path.is_some() {
+                // Durable before the first reservation: recovery under a peer
+                // without the feature must know this attempt's sequences may
+                // pass the terminal-only bound and leave it for a session
+                // that can replay them.
+                journal.mark_live_log_stream(&organization, &attempt, fence, session_epoch)?;
+            }
             let on_spawn = |process_id| {
                 if let Some(spool) = &live_spool_path {
                     match LiveSpool::open(spool) {
@@ -3178,21 +3178,6 @@ async fn authority_rpc<T>(
 
 /// The per-attempt chunk bound the session negotiated: the terminal bound,
 /// or the live bound when chunks are published while steps run.
-/// Whether an attempt's journaled reservations already number past the
-/// terminal-only chunk bound, so only a session negotiating
-/// `live-log-stream-v1` can replay them.
-fn replay_needs_live_log_stream(
-    journal: &Journal,
-    organization_id: &str,
-    attempt_id: &str,
-    fence_token: u64,
-) -> Result<bool, AgentError> {
-    Ok(
-        journal.next_log_sequence(organization_id, attempt_id, fence_token)?
-            > log_chunk_bound(false),
-    )
-}
-
 fn log_chunk_bound(live_log_stream: bool) -> u64 {
     if live_log_stream {
         u64::try_from(mcloving_domain::live_logs::MAX_LIVE_ATTEMPT_LOG_CHUNKS)
@@ -4634,54 +4619,6 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_replay_past_the_terminal_bound_waits_for_a_live_log_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut journal = Journal::open(directory.path().join("agent.db")).unwrap();
-        let acceptance = mcloving_agent_runtime::Acceptance {
-            organization_id: "org-1".to_owned(),
-            attempt_id: "attempt-1".to_owned(),
-            fence_token: 9,
-            session_epoch: 4,
-            payload_digest: [7; 32],
-            workspace: PathBuf::from("org-1/attempt-1"),
-        };
-        journal.accept(&acceptance).unwrap();
-        let (org, attempt, fence, epoch) = ("org-1", "attempt-1", 9, 4);
-        let reserve = |journal: &mut Journal, sequence: u64, offset: u64| {
-            journal
-                .reserve_log_chunk(
-                    org,
-                    attempt,
-                    fence,
-                    epoch,
-                    &mcloving_agent_runtime::LogReservation {
-                        sequence,
-                        step_ordinal: 0,
-                        stream: "stdout".to_owned(),
-                        offset,
-                        bytes: 1,
-                        digest: [1; 32],
-                        acknowledged: false,
-                    },
-                )
-                .unwrap();
-        };
-        assert!(!replay_needs_live_log_stream(&journal, org, attempt, fence).unwrap());
-        for sequence in 0..MAX_LOG_CHUNKS_PER_ATTEMPT {
-            reserve(&mut journal, sequence, sequence);
-        }
-        // Exactly the terminal bound's worth of sequences still replays
-        // through a terminal-only session.
-        assert!(!replay_needs_live_log_stream(&journal, org, attempt, fence).unwrap());
-        reserve(
-            &mut journal,
-            MAX_LOG_CHUNKS_PER_ATTEMPT,
-            MAX_LOG_CHUNKS_PER_ATTEMPT,
-        );
-        assert!(replay_needs_live_log_stream(&journal, org, attempt, fence).unwrap());
-    }
 
     #[tokio::test]
     async fn prompt_acceptance_keeps_the_folded_accept_renewal_free() {
@@ -6128,6 +6065,7 @@ mod tests {
             container_name: None,
             container_context: None,
             acquisition_directory: None,
+            live_log_stream: false,
             logs: Vec::new(),
             result: Some(result),
         };
