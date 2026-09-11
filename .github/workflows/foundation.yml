@@ -93,6 +93,24 @@ jobs:
   rust-source-acquirer:
     name: Rust source-acquirer suite
     runs-on: ubuntu-24.04
+    # The submitted checkout product gate (PAR-012) runs here rather than in
+    # the PostgreSQL job because it needs what only this job prepares: the
+    # bounded transport tmpfs and the source-acquirer AppArmor profile.
+    services:
+      postgres:
+        image: >-
+          postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: mcloving
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: mcloving
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username mcloving --dbname mcloving"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,6 +150,21 @@ jobs:
           aa-exec -p mcloving-source-acquirer --
           cargo +1.97.1 test --locked -p mcloving-source-acquirer
           -- --test-threads=1
+      - name: Build the shipped controller and source acquirer for the checkout gate
+        run: >-
+          cargo +1.97.1 build --locked
+          -p mcloving-controller -p mcloving-source-acquirer
+      - name: Run submitted checkout product gate
+        # Serial after the acquirer suite: both use the host-global bounded
+        # transport tmpfs. The whole gate runs under the profile exactly as
+        # the suite does, so the agent enters the sealed acquirer directly.
+        env:
+          MCLOVING_TEST_DATABASE_URL: postgres://mcloving@127.0.0.1:5432/mcloving
+          MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
+          MCLOVING_SOURCE_ACQUIRER_BINARY: ${{ github.workspace }}/target/debug/mcloving-source-acquirer
+        run: >-
+          aa-exec -p mcloving-source-acquirer --
+          bash scripts/test-source-product.sh
 
   rust-boundary-suites:
     name: Rust boundary suites
@@ -344,6 +377,7 @@ jobs:
           bash -n scripts/run-verified-rust-test.sh
           bash -n scripts/test-cache-product.sh
           bash -n scripts/test-input-product.sh
+          bash -n scripts/test-source-product.sh
           bash -n scripts/verify-boundary-runtime.sh
           bash -n scripts/test-ui-browser.sh
           bash -n scripts/ui-browser/build-image.sh

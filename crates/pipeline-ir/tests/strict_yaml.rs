@@ -213,7 +213,10 @@ stages:
         .iter()
         .map(|step| match step {
             Step::Process(process) => process.mode,
-            Step::ConnectorIntent(_) | Step::CacheIntent(_) | Step::InputIntent(_) => {
+            Step::ConnectorIntent(_)
+            | Step::CacheIntent(_)
+            | Step::InputIntent(_)
+            | Step::Checkout(_) => {
                 panic!("fixture contains only process steps")
             }
         })

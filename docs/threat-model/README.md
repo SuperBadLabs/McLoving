@@ -603,6 +603,7 @@ had never claimed one.
 | UI-002 | `docs/evidence/UI-002_SECURITY_REVIEW.md` |
 | PAR-000 | `docs/evidence/PAR-000_SECURITY_REVIEW.md` |
 | PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
+| PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -839,7 +840,7 @@ exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
 not published when recovery completes a cancellation (`AGENT-008`), and
 hostile same-UID access to the relocated spools remains `SEC-005`.
 
-## PAR-011 container stage execution review, ticket ACTIVE
+## PAR-011 container stage execution review (earned closure)
 
 A stage that names a digest-pinned image runs every step under rootless podman
 through the version-5 envelope. Boundaries touched: TM-003 (agent runtime: the
@@ -868,7 +869,49 @@ container, so a workload that escapes the container runtime holds the same
 identity as today; image pulls reach the registry the reference names under
 the deployment's network policy. Shipped-binary tests cover a step reading the
 image's os-release with the host root invisible, and a timed-out step whose
-container is proven gone. Closure requires the reviewed merge, exact-main
-Foundation and native Windows runs, and a receipt in
-`docs/evidence/PAR-011_SECURITY_REVIEW.md`.
+container is proven gone. Closed on PR #146 (`0eb949ba`), exact-main
+Foundation `34584499133` and Windows Agent `34584499144`; receipt
+`docs/evidence/PAR-011_SECURITY_REVIEW.md`. Residual, filed as `AGENT-009`:
+the podman store identity is not yet pinned into launch and reap, implicit
+`mounts.conf` binds are not yet disabled by an agent-owned containers
+configuration, and `#`-prefixed environment names are not yet refused for
+container stages; plain process steps remain uncontained (`SEC-005`).
+
+## PAR-012 checkout step execution review, ticket ACTIVE
+
+A `checkout` step puts the sealed source acquirer on the product path: a
+submitted pipeline names a deployment source binding, a ref, an exact commit
+and a workspace destination, and the steps that follow in the same stage build
+in the checkout. Boundaries touched: TM-003 (agent runtime: the acquirer is a
+helper step at its own ordinal inside the version-5 envelope, prepared before
+the first spawn from startup-frozen bindings, entered as a sealed memory file
+and, under the user-namespace restriction, through the `aa-exec` launcher and
+its profile, never inside a stage image); TM-005/TM-006 (execution and log
+evidence: the acquirer's answer is authenticated against the configured
+signing key, configuration, implementation and runtime-closure digests and the
+request the agent wrote, and only a typed public summary reaches the log; the
+acquirer's message is dropped and unknown failure codes collapse to one);
+TM-016/TM-023 (source and workspace: the repository, credential and executable
+come from the binding and never from the job; the ref must be inside the
+binding's allowed prefixes and must resolve to exactly the requested commit,
+so a moved branch is refused rather than checked out at its new tip; the tree
+is published by a descriptor-relative `RENAME_NOREPLACE` move with the
+destination checked absent before and by inode after, so a preceding untrusted
+step cannot pre-create or race-replace the destination with a link and write
+through it into agent-owned files; the output root must share the workspace's
+filesystem or publication is refused); TM-052 (routing: `sealed-source-v1`
+plus the exact binding capability keeps the node away from agents without the
+mapping, and admission refuses checkout stages for Windows and for any scope,
+digest or trust pool the controller's startup-frozen source catalog does not
+name). Residual: the acquirer's transport containment and its retained-tree
+custody are unchanged and remain the acquirer's own reviewed boundaries; the
+published tree is owner-writable by design, so a later step in the stage can
+modify it, exactly as it can modify anything else in the workspace; the
+commit reaches the pipeline as a literal or a typed parameter until `PAR-001`
+supplies it from a delivery. Shipped-binary tests cover an ineligible agent
+leaving the checkout queued, the branch head landing with a following step
+building in it, a planted symlink destination refused by name, and five API
+refusals. Closure requires the reviewed merge, exact-main Foundation and
+native Windows runs, and a receipt in
+`docs/evidence/PAR-012_SECURITY_REVIEW.md`.
 

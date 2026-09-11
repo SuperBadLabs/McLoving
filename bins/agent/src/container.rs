@@ -179,9 +179,13 @@ fn bounded_status(command: &mut Command, deadline: Duration) -> Option<ExitStatu
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_status, container_name, runtime_answers, runtime_context};
+    #[cfg(unix)]
+    use super::bounded_status;
+    use super::{container_name, runtime_answers, runtime_context};
     use std::path::Path;
+    #[cfg(unix)]
     use std::process::Command;
+    #[cfg(unix)]
     use std::time::Duration;
 
     #[test]

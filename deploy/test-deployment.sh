@@ -291,6 +291,13 @@ excluded_literals = {
     "MCLOVING_INPUT_ADAPTER_SECRET_MARKERS_FILE": "sealed child env from pinned input binding",
     "MCLOVING_INPUT_ADAPTER_SIGNING_KEY_FILE": "sealed child env from pinned input binding",
     "MCLOVING_INPUT_ADAPTER_TEST_MODE": "sealed child loopback flag from pinned input binding",
+    # Likewise for the sealed source acquirer (PAR-012): synthesized by the
+    # agent from the pinned source bindings, never read from a contract.
+    "MCLOVING_SOURCE_ACQUIRER_CONFIG": "sealed child env from pinned source binding",
+    "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE": "sealed child env from pinned source binding",
+    "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE": "sealed child env from pinned source binding",
+    "MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE": "sealed child env from pinned source binding",
+    "MCLOVING_SOURCE_ACQUIRER_TEST_MODE": "sealed child fixture flag from pinned source binding",
 
     # Compile-time-only provenance inputs consumed by build.rs and embedded in
     # the binaries. Runtime contract files neither read nor set them.

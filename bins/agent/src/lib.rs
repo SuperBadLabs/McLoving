@@ -12,6 +12,7 @@ pub mod cache;
 mod container;
 pub mod input;
 mod private_helper;
+pub mod source;
 mod worker;
 
 use mcloving_agent_protocol::wire;
@@ -52,6 +53,9 @@ const STALE_SESSION_COLLISION_THRESHOLD: u32 = 2;
 pub struct AgentConfig {
     pub input_bindings: Option<input::InputBindings>,
     pub cache_bindings: Option<cache::CacheBindings>,
+    /// Deployment source bindings for checkout steps (PAR-012); absent means
+    /// this agent never advertises `sealed-source-v1`.
+    pub source_bindings: Option<source::SourceBindings>,
     /// Absolute path of the deployment-pinned podman binary (PAR-011).
     /// Absent means this agent never advertises `container-podman-v1`.
     pub podman_path: Option<PathBuf>,
@@ -307,6 +311,17 @@ impl AgentConfig {
                 Some(_) => return Err(AgentError::InvalidConfig("cache helpers require Linux")),
                 None if values.contains_key("MCLOVING_AGENT_CACHE_BINDINGS_SHA256") => {
                     return Err(AgentError::InvalidConfig("cache bindings path missing"));
+                }
+                None => None,
+            },
+            source_bindings: match values.get("MCLOVING_AGENT_SOURCE_BINDINGS_PATH") {
+                Some(path) if cfg!(target_os = "linux") => Some(source::load_bindings(
+                    Path::new(path),
+                    &required("MCLOVING_AGENT_SOURCE_BINDINGS_SHA256")?,
+                )?),
+                Some(_) => return Err(AgentError::InvalidConfig("source helpers require Linux")),
+                None if values.contains_key("MCLOVING_AGENT_SOURCE_BINDINGS_SHA256") => {
+                    return Err(AgentError::InvalidConfig("source bindings path missing"));
                 }
                 None => None,
             },
@@ -588,6 +603,7 @@ async fn open_session(
                 let mut values = session_capabilities();
                 values.extend(cache::scheduling_capabilities(config)?);
                 values.extend(input::scheduling_capabilities(config)?);
+                values.extend(source::scheduling_capabilities(config)?);
                 values.extend(container::scheduling_capabilities(config));
                 values
             },
@@ -861,6 +877,9 @@ async fn send_reconciliation(
                 // the workspace mounted: the row stays parked, and its reap
                 // is retried on every session, until absence is proven in
                 // the launching runtime context (PAR-011).
+                // The same holds for a checkout the crashed session acquired
+                // but never published (PAR-012): the row stays parked until
+                // the journaled acquisition directory holds no tree.
                 let phase = if phase == AttemptPhase::Aborted
                     && !container::recovered_container_gone(config, attempt)
                 {
@@ -871,6 +890,18 @@ async fn send_reconciliation(
                         attempt.attempt_id,
                         attempt.fence_token,
                         attempt.container_name.as_deref().unwrap_or("?")
+                    );
+                    AttemptPhase::ReconciliationRequired
+                } else if phase == AttemptPhase::Aborted
+                    && !source::recovered_acquisition_gone(config, attempt)
+                {
+                    eprintln!(
+                        "recovered attempt {}/{} fence {}: kept reconciliation-required past \
+                         its controller receipt because acquisition {} is not reclaimed",
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                        attempt.acquisition_directory.as_deref().unwrap_or("?")
                     );
                     AttemptPhase::ReconciliationRequired
                 } else {
@@ -957,6 +988,20 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
                 attempt.container_name.as_deref().unwrap_or("?")
             );
         }
+        // Likewise a parked attempt's journaled acquisition: a discard that
+        // failed once is retried every session until the tree is gone.
+        if attempt.phase == AttemptPhase::ReconciliationRequired
+            && attempt.acquisition_directory.is_some()
+            && !source::recovered_acquisition_gone(config, attempt)
+        {
+            eprintln!(
+                "parked attempt {}/{} fence {}: acquisition {} still not reclaimed",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.acquisition_directory.as_deref().unwrap_or("?")
+            );
+        }
         if !matches!(
             attempt.phase,
             AttemptPhase::Accepted | AttemptPhase::Running
@@ -965,6 +1010,30 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         }
         let mut outcome =
             cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
+        // A checkout the crashed session acquired but never published is
+        // reclaimed from the journaled acquisition directory (PAR-012); an
+        // attempt whose tree could not be discarded parks, like one whose
+        // container could not be proven gone, and every session retries.
+        let acquisition_gone = source::recovered_acquisition_gone(config, attempt);
+        if outcome != RecoveredCancellation::ReconciliationRequired && !acquisition_gone {
+            journal.transition(
+                &attempt.organization_id,
+                &attempt.attempt_id,
+                attempt.fence_token,
+                attempt.session_epoch,
+                AttemptPhase::ReconciliationRequired,
+                attempt.process_id,
+            )?;
+            eprintln!(
+                "recovered attempt {}/{} fence {}: acquisition {} could not be reclaimed; \
+                 parked reconciliation-required",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.acquisition_directory.as_deref().unwrap_or("?")
+            );
+            outcome = RecoveredCancellation::ReconciliationRequired;
+        }
         // The terminated group was only the podman client of a container
         // stage; the container it started outlives that client (PAR-011).
         // Reap it by its derived name and require proof it is gone, or park
@@ -1960,6 +2029,7 @@ mod tests {
             current_step: None,
             container_name: None,
             container_context: None,
+            acquisition_directory: None,
             logs: Vec::new(),
             result: None,
         };
@@ -2162,6 +2232,7 @@ mod tests {
                 current_step: None,
                 container_name: None,
                 container_context: None,
+                acquisition_directory: None,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2206,6 +2277,7 @@ mod tests {
             current_step: None,
             container_name: None,
             container_context: None,
+            acquisition_directory: None,
             logs: Vec::new(),
             result: None,
         };

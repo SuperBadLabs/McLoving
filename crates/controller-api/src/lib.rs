@@ -6,8 +6,11 @@ mod input_intent;
 use input_intent::validate_input_mappings;
 pub use input_intent::{INPUT_MAPPING_CATALOG_V1, InputMappingCatalog, InputMappingRecord};
 mod oidc;
+mod source_intent;
 use cache_intent::validate_cache_mappings;
 pub use cache_intent::{CACHE_MAPPING_CATALOG_V1, CacheMappingCatalog, CacheMappingRecord};
+use source_intent::validate_source_mappings;
+pub use source_intent::{SOURCE_MAPPING_CATALOG_V1, SourceMappingCatalog, SourceMappingRecord};
 #[doc(hidden)]
 pub mod sequential;
 
@@ -87,6 +90,7 @@ pub struct ApiState {
     connector_mapping_catalog: ConnectorMappingCatalog,
     cache_mapping_catalog: CacheMappingCatalog,
     input_mapping_catalog: InputMappingCatalog,
+    source_mapping_catalog: SourceMappingCatalog,
 }
 
 /// Deployment-owned admission catalog for one exact execution profile.
@@ -191,6 +195,7 @@ impl ApiState {
             connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
+            source_mapping_catalog: SourceMappingCatalog::deny_all(),
         })
     }
 
@@ -212,6 +217,7 @@ impl ApiState {
             connector_mapping_catalog: ConnectorMappingCatalog::deny_all(),
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
+            source_mapping_catalog: SourceMappingCatalog::deny_all(),
         }
     }
 
@@ -366,6 +372,15 @@ impl ApiState {
     ) -> Result<Self, ApiError> {
         catalog.validate()?;
         self.input_mapping_catalog = catalog;
+        Ok(self)
+    }
+
+    pub fn with_source_mapping_catalog(
+        mut self,
+        catalog: SourceMappingCatalog,
+    ) -> Result<Self, ApiError> {
+        catalog.validate()?;
+        self.source_mapping_catalog = catalog;
         Ok(self)
     }
 
@@ -930,6 +945,9 @@ pub struct PipelineStagePlan {
     pub cache_intent_steps: usize,
     #[serde(default)]
     pub input_intent_steps: usize,
+    /// Checkout steps through the sealed source acquirer (PAR-012).
+    #[serde(default)]
+    pub checkout_steps: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2447,6 +2465,14 @@ async fn validate_pipeline(
         request.pipeline_id,
         &headers,
     )?;
+    validate_source_scope_headers(
+        &pipeline,
+        &state.source_mapping_catalog,
+        organization_id,
+        project_id,
+        request.pipeline_id,
+        &headers,
+    )?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     Ok(Json(ValidationResponse {
         valid: true,
@@ -2487,6 +2513,14 @@ async fn plan_pipeline(
         request.pipeline_id,
         &headers,
     )?;
+    validate_source_scope_headers(
+        &pipeline,
+        &state.source_mapping_catalog,
+        organization_id,
+        project_id,
+        request.pipeline_id,
+        &headers,
+    )?;
     Ok(Json(pipeline_plan(&pipeline)?))
 }
 
@@ -2519,6 +2553,14 @@ async fn put_pipeline(
     validate_input_scope_headers(
         &pipeline,
         &state.input_mapping_catalog,
+        organization_id,
+        project_id,
+        Some(pipeline_id),
+        &headers,
+    )?;
+    validate_source_scope_headers(
+        &pipeline,
+        &state.source_mapping_catalog,
         organization_id,
         project_id,
         Some(pipeline_id),
@@ -4349,6 +4391,15 @@ async fn admit_pipeline_parameters(
         &required_platform,
         &required_trust_pool,
     )?;
+    validate_source_mappings(
+        &pipeline,
+        &state.source_mapping_catalog,
+        organization_id,
+        project_id,
+        Some(pipeline_id),
+        &required_platform,
+        &required_trust_pool,
+    )?;
     // Revalidated here, not only at ingress. A delivery captured by an earlier
     // release can carry a platform outside the closed set, and every admission
     // path — header submission, claimed processing, and replay — funnels
@@ -4586,13 +4637,44 @@ fn validate_input_scope_headers(
     )
 }
 
+fn validate_source_scope_headers(
+    pipeline: &PipelineIr,
+    catalog: &SourceMappingCatalog,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Option<Uuid>,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    if !pipeline
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.steps)
+        .any(|step| matches!(step, Step::Checkout(_)))
+    {
+        return Ok(());
+    }
+    validate_source_mappings(
+        pipeline,
+        catalog,
+        organization_id,
+        project_id,
+        pipeline_id,
+        &submission_platform(headers)?,
+        &submission_trust_pool(headers)?,
+    )
+}
+
 fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<String> {
     use mcloving_domain::cache_intent::{CACHE_CAPABILITY, cache_binding_capability};
     let mut required = Vec::new();
     // The version-5 envelope must never reach an agent that cannot run it:
     // such an agent refuses terminally, and a refusal is permanent for the
     // payload. Routing on the capability keeps old agents out of the offer.
-    if stage.steps.len() > 1 || stage.image.is_some() {
+    let has_checkout = stage
+        .steps
+        .iter()
+        .any(|step| matches!(step, Step::Checkout(_)));
+    if stage.steps.len() > 1 || stage.image.is_some() || has_checkout {
         required.push(mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned());
     }
     // A container stage also needs an agent whose pinned podman answered at
@@ -4615,6 +4697,20 @@ fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<Strin
                     cache.intent.operation,
                 )
                 .expect("compiled cache intent has validated mapping authority"),
+            );
+        }
+    }
+    for step in &stage.steps {
+        if let Step::Checkout(checkout) = step {
+            // A checkout runs the sealed acquirer on the agent host (PAR-012):
+            // only an agent carrying exactly this binding may take the node.
+            required.push(mcloving_domain::source_intent::SOURCE_CAPABILITY.to_owned());
+            required.push(
+                mcloving_domain::source_intent::source_binding_capability(
+                    &checkout.spec.mapping_id,
+                    &checkout.spec.mapping_digest,
+                )
+                .expect("compiled checkout step has validated mapping authority"),
             );
         }
     }
@@ -4647,6 +4743,7 @@ pub(crate) fn execution_spec_parts(steps: &[Step], image: Option<&str>) -> Value
     let contains_connector_intent = steps
         .iter()
         .any(|step| matches!(step, Step::ConnectorIntent(_)));
+    let contains_checkout = steps.iter().any(|step| matches!(step, Step::Checkout(_)));
     let steps = steps
         .iter()
         .map(|step| match step {
@@ -4666,6 +4763,11 @@ pub(crate) fn execution_spec_parts(steps: &[Step], image: Option<&str>) -> Value
             Step::CacheIntent(cache) => {
                 let mut value = serde_json::to_value(&cache.intent).expect("cache intent contains serializable literal fields");
                 value["kind"] = json!("cache_intent");
+                value
+            },
+            Step::Checkout(checkout) => {
+                let mut value = serde_json::to_value(&checkout.spec).expect("checkout step contains serializable literal fields");
+                value["kind"] = json!("checkout");
                 value
             },
             Step::ConnectorIntent(intent) => json!({
@@ -4696,9 +4798,10 @@ pub(crate) fn execution_spec_parts(steps: &[Step], image: Option<&str>) -> Value
         3
     } else if contains_connector_intent {
         2
-    } else if steps.len() > 1 || image.is_some() {
+    } else if steps.len() > 1 || image.is_some() || contains_checkout {
         // A container stage rides the version-5 envelope even with one step:
         // the image is a stage-level property the single-step shape never had.
+        // So does a checkout stage: the step kind did not exist in version 1.
         5
     } else {
         1
@@ -4755,6 +4858,21 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
                 ),
             ));
         }
+        if let Some(stage) = pipeline.stages.iter().find(|stage| {
+            stage
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::Checkout(_)))
+        }) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares a checkout; the sealed source acquirer runs on platform linux only",
+                    stage.id
+                ),
+            ));
+        }
         return Ok(());
     }
     let windows_mode = pipeline
@@ -4794,16 +4912,16 @@ fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
         // A stage of several process steps runs as one attempt under the
         // version-5 envelope (PAR-010). Every other step kind still needs a
         // runtime of its own and therefore a stage of its own.
-        let all_process = stage
+        let all_process_or_checkout = stage
             .steps
             .iter()
-            .all(|step| matches!(step, Step::Process(_)));
-        if stage.steps.len() != 1 && !all_process {
+            .all(|step| matches!(step, Step::Process(_) | Step::Checkout(_)));
+        if stage.steps.len() != 1 && !all_process_or_checkout {
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unsupported_execution_spec",
                 format!(
-                    "stage {} declares {} steps; only process steps may share a stage",
+                    "stage {} declares {} steps; only process and checkout steps may share a stage",
                     stage.id,
                     stage.steps.len()
                 ),
@@ -4830,6 +4948,7 @@ fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
                 Step::ConnectorIntent(intent) => ("connector-intent", Some(intent.timeout_seconds)),
                 Step::CacheIntent(cache) => ("cache-intent", Some(cache.intent.timeout_seconds)),
                 Step::InputIntent(input) => ("input-intent", Some(input.intent.timeout_seconds)),
+                Step::Checkout(checkout) => ("checkout", Some(checkout.spec.timeout_seconds)),
             };
             if !matches!(
                 timeout_seconds,
@@ -4881,7 +5000,9 @@ fn validate_connector_mappings(
         .flat_map(|stage| &stage.steps)
         .filter_map(|step| match step {
             Step::ConnectorIntent(intent) => Some(intent),
-            Step::Process(_) | Step::CacheIntent(_) | Step::InputIntent(_) => None,
+            Step::Process(_) | Step::CacheIntent(_) | Step::InputIntent(_) | Step::Checkout(_) => {
+                None
+            }
         })
     {
         let Some(mapping) = catalog
@@ -5037,6 +5158,11 @@ fn pipeline_plan(pipeline: &PipelineIr) -> Result<PipelinePlanResponse, ApiError
                     .steps
                     .iter()
                     .filter(|step| matches!(step, Step::ConnectorIntent(_)))
+                    .count(),
+                checkout_steps: stage
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Checkout(_)))
                     .count(),
             })
             .collect(),

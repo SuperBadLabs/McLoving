@@ -18,9 +18,13 @@ pub const MAX_ATTEMPT_OUTPUT_BYTES: u64 = 64 * 1_048_576;
 /// Version 3 (PAR-010) adds `attempts.current_step`, the ordinal of the step a
 /// multi-step attempt most recently started. Version 4 (PAR-011) adds
 /// `attempts.container_name`, the container the current step launched, so
-/// recovery reaps only attempts that actually ran one. Both are NULL for
+/// recovery reaps only attempts that actually ran one. Version 5 (PAR-012)
+/// adds `attempts.acquisition_directory`, where the current step's source
+/// acquisition lands, so recovery reclaims a checkout the crashed session
+/// never published from the journaled location rather than from whatever
+/// bindings the restarted agent happens to load. All are NULL for
 /// single-step host work, so an older row reads exactly as it did before.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_PROCESS_BIRTH_IDENTITY_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,8 +146,22 @@ pub struct ReconciliationAttempt {
     /// Runtime and storage context the container was launched in; recovery
     /// in a different context cannot prove anything about the original.
     pub container_context: Option<String>,
+    /// Directory the current step's source acquisition lands in (PAR-012),
+    /// recorded before its spawn; `None` for steps that acquire nothing, so
+    /// recovery reclaims only what a checkout could have left behind.
+    pub acquisition_directory: Option<String>,
     pub logs: Vec<SpoolEntry>,
     pub result: Option<SpoolEntry>,
+}
+
+/// What a multi-step attempt journals before a step spawns (PAR-010): the
+/// ordinal, the container the step launches, if any (PAR-011), and the
+/// directory its source acquisition lands in, if any (PAR-012).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StepStart<'a> {
+    pub ordinal: u32,
+    pub container: Option<(&'a str, &'a str)>,
+    pub acquisition_directory: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,7 +257,7 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(schema_version, 1 | 2 | 3 | SCHEMA_VERSION) {
+        if !matches!(schema_version, 1 | 2 | 3 | 4 | SCHEMA_VERSION) {
             return Err(JournalError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: schema_version,
@@ -330,6 +348,7 @@ impl Journal {
                 current_step INTEGER,
                 container_name TEXT,
                 container_context TEXT,
+                acquisition_directory TEXT,
                 accepted_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY (organization_id, attempt_id, fence_token)
@@ -387,7 +406,7 @@ impl Journal {
         )?;
         match schema_version {
             SCHEMA_VERSION => {}
-            found @ 1..=3 => {
+            found @ 1..=4 => {
                 let transaction = connection.unchecked_transaction()?;
                 if found == 1 {
                     transaction.execute(
@@ -399,9 +418,16 @@ impl Journal {
                     transaction
                         .execute("ALTER TABLE attempts ADD COLUMN current_step INTEGER", [])?;
                 }
-                transaction.execute("ALTER TABLE attempts ADD COLUMN container_name TEXT", [])?;
-                transaction
-                    .execute("ALTER TABLE attempts ADD COLUMN container_context TEXT", [])?;
+                if found <= 3 {
+                    transaction
+                        .execute("ALTER TABLE attempts ADD COLUMN container_name TEXT", [])?;
+                    transaction
+                        .execute("ALTER TABLE attempts ADD COLUMN container_context TEXT", [])?;
+                }
+                transaction.execute(
+                    "ALTER TABLE attempts ADD COLUMN acquisition_directory TEXT",
+                    [],
+                )?;
                 transaction.execute(
                     "UPDATE journal_metadata SET schema_version = ?1 WHERE singleton = 1",
                     [SCHEMA_VERSION],
@@ -609,9 +635,13 @@ impl Journal {
         attempt_id: &str,
         fence_token: u64,
         session_epoch: u64,
-        ordinal: u32,
-        container: Option<(&str, &str)>,
+        step: StepStart<'_>,
     ) -> Result<(), JournalError> {
+        let StepStart {
+            ordinal,
+            container,
+            acquisition_directory,
+        } = step;
         let fence_token = to_sql_integer(fence_token)?;
         let session_epoch = to_sql_integer(session_epoch)?;
         let (container_name, container_context) = match container {
@@ -622,7 +652,7 @@ impl Journal {
             "
             UPDATE attempts
             SET current_step = ?5, container_name = ?6, container_context = ?7,
-                updated_at_unix_ms = ?8
+                acquisition_directory = ?8, updated_at_unix_ms = ?9
             WHERE organization_id = ?1
               AND attempt_id = ?2
               AND fence_token = ?3
@@ -637,6 +667,7 @@ impl Journal {
                 i64::from(ordinal),
                 container_name,
                 container_context,
+                acquisition_directory,
                 unix_time_ms()?
             ],
         )?;
@@ -1075,7 +1106,7 @@ impl Journal {
             SELECT organization_id, attempt_id, fence_token, session_epoch,
                    payload_digest, phase, workspace, process_group_id,
                    process_birth_identity, current_step, container_name,
-                   container_context
+                   container_context, acquisition_directory
             FROM attempts
             WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
             ORDER BY organization_id, attempt_id, fence_token
@@ -1095,6 +1126,7 @@ impl Journal {
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })?;
 
@@ -1113,6 +1145,7 @@ impl Journal {
                 current_step,
                 container_name,
                 container_context,
+                acquisition_directory,
             ) = row?;
             attempts.push(ReconciliationAttempt {
                 logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
@@ -1133,6 +1166,7 @@ impl Journal {
                     .transpose()?,
                 container_name,
                 container_context,
+                acquisition_directory,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -1210,6 +1244,7 @@ impl Journal {
                 current_step: None,
                 container_name: None,
                 container_context: None,
+                acquisition_directory: None,
             });
         }
         Ok(ReconciliationReport { attempts })

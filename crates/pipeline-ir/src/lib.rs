@@ -17,11 +17,12 @@ pub use expression::{
     ParameterValue, evaluate_expression, parse_expression,
 };
 pub use model::{
-    AmbiguityPolicy, CacheIntentStep, CompileError, CompileErrorCategory, CompilerIdentity,
-    ConnectorEffectClass, ConnectorIntentStep, ExpressionBinding, InputIntentStep,
-    IrValidationError, JsonFieldType, ParameterDefinition, ParameterType, PipelineIr, ProcessMode,
-    ProcessStep, Provenance, SchemaCompatibility, SchemaVersion, Stage, Step, compile_strict_yaml,
-    compile_strict_yaml_with_parameters, instantiate_pipeline, validate_pipeline,
+    AmbiguityPolicy, CacheIntentStep, CheckoutStep, CompileError, CompileErrorCategory,
+    CompilerIdentity, ConnectorEffectClass, ConnectorIntentStep, ExpressionBinding,
+    InputIntentStep, IrValidationError, JsonFieldType, ParameterDefinition, ParameterType,
+    PipelineIr, ProcessMode, ProcessStep, Provenance, SchemaCompatibility, SchemaVersion, Stage,
+    Step, compile_strict_yaml, compile_strict_yaml_with_parameters, instantiate_pipeline,
+    validate_pipeline,
 };
 pub use strict_yaml::{
     AdmissionError, ErrorCode, MappingEntry, ParseLimits, SourceLocation, SourceSpan, SpannedValue,
@@ -47,3 +48,6 @@ pub const IR_V1_5: SchemaVersion = SchemaVersion { major: 1, minor: 5 };
 
 /// Container stages: a stage may name a digest-pinned image (PAR-011).
 pub const IR_V1_6: SchemaVersion = SchemaVersion { major: 1, minor: 6 };
+
+/// Checkout steps through the sealed source acquirer (PAR-012).
+pub const IR_V1_7: SchemaVersion = SchemaVersion { major: 1, minor: 7 };

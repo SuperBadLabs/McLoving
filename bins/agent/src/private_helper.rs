@@ -123,6 +123,8 @@ pub(crate) fn seal_executable(_: &Path, _: &str) -> Result<(File, PathBuf), Agen
 pub(crate) enum PreparedHelper {
     Cache(Box<crate::cache::PreparedCache>),
     Input(Box<crate::input::PreparedInput>),
+    #[cfg(target_os = "linux")]
+    Source(Box<crate::source::PreparedSource>),
 }
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl PreparedHelper {
@@ -130,36 +132,57 @@ impl PreparedHelper {
         match self {
             Self::Cache(v) => &v.program,
             Self::Input(v) => &v.program,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => &v.program,
         }
     }
     pub fn arguments(&self) -> &[std::ffi::OsString] {
         match self {
             Self::Cache(v) => &v.arguments,
             Self::Input(v) => &v.arguments,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => &v.arguments,
         }
     }
     pub fn environment(&self) -> std::collections::BTreeMap<String, String> {
         match self {
             Self::Cache(_) => Default::default(),
             Self::Input(v) => v.environment.clone(),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.environment.clone(),
         }
     }
-    pub fn request(&self) -> &[u8] {
+    /// Opens whatever time window the helper's request carries, immediately
+    /// before its spawn. Cache and input requests carry none.
+    pub fn begin(&self) -> Result<(), crate::AgentError> {
         match self {
-            Self::Cache(v) => &v.request,
-            Self::Input(v) => &v.request,
+            Self::Cache(_) | Self::Input(_) => Ok(()),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.begin(),
+        }
+    }
+    pub fn request(&self) -> Vec<u8> {
+        match self {
+            Self::Cache(v) => v.request.clone(),
+            Self::Input(v) => v.request.clone(),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.request(),
         }
     }
     pub fn output_limit(&self) -> u64 {
         match self {
             Self::Cache(v) => v.output_limit,
             Self::Input(v) => v.output_limit,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.output_limit,
         }
     }
     pub fn response_failure(&self) -> &'static str {
         match self {
             Self::Cache(_) => "cache_response_rejected",
             Self::Input(_) => "input_response_rejected",
+            #[cfg(target_os = "linux")]
+            Self::Source(_) => "source_response_rejected",
         }
     }
     pub fn transform(
@@ -170,6 +193,93 @@ impl PreparedHelper {
         match self {
             Self::Cache(v) => v.transform(stdout, stderr),
             Self::Input(v) => v.transform(stdout, stderr),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.transform(stdout, stderr),
         }
     }
+    /// The step reason when the helper's answer was not accepted: the fixed
+    /// rejection name, extended with the sealed acquirer's closed failure
+    /// code for a checkout so the terminal summary says why.
+    pub fn failure_reason(&self) -> String {
+        match self {
+            Self::Cache(_) | Self::Input(_) => self.response_failure().to_owned(),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => match v.last_outcome() {
+                Some(outcome) if outcome != "acquired" => {
+                    format!("{}:{outcome}", self.response_failure())
+                }
+                _ => self.response_failure().to_owned(),
+            },
+        }
+    }
+    /// Where this helper's step will leave what it acquires, journaled
+    /// before the spawn so recovery can reclaim it: a checkout's acquisition
+    /// directory. Cache and input helpers leave nothing.
+    pub fn acquisition_directory(&self) -> Option<String> {
+        match self {
+            Self::Cache(_) | Self::Input(_) => None,
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => Some(v.acquisition_directory()),
+        }
+    }
+    /// Cleanup a helper owes when its step did not end in a completed
+    /// publication: a checkout removes the tree its acquisition may have left
+    /// under the output root. Cache and input helpers leave nothing behind.
+    pub fn discard(&self) -> Result<(), String> {
+        match self {
+            Self::Cache(_) | Self::Input(_) => Ok(()),
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v.discard(),
+        }
+    }
+    /// Work a helper still owes once its process has exited and its answer
+    /// was accepted: a checkout publishes its verified tree into the
+    /// workspace. Cache and input helpers owe nothing.
+    ///
+    /// `interrupted` is the step's deadline and cancellation, honoured
+    /// throughout the work. A `Refused` failure is a failed step with the
+    /// helper's leftovers already discarded; `Unreclaimed` means leftovers
+    /// may remain and the attempt must park until they are.
+    pub fn complete(
+        &self,
+        workspace: &Path,
+        interrupted: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<String>, HelperFailure> {
+        match self {
+            Self::Cache(_) | Self::Input(_) => {
+                let _ = (workspace, interrupted);
+                Ok(None)
+            }
+            #[cfg(target_os = "linux")]
+            Self::Source(v) => v
+                .publish(workspace, interrupted)
+                .map(|published| {
+                    Some(format!(
+                        "checkout {} at {} ({} files)",
+                        published.destination,
+                        published.resolved_commit,
+                        published.materialized_files
+                    ))
+                })
+                .map_err(|failure| match failure {
+                    crate::source::PublishFailure::Refused(reason) => {
+                        HelperFailure::Refused(reason)
+                    }
+                    crate::source::PublishFailure::Unreclaimed(reason) => {
+                        HelperFailure::Unreclaimed(reason)
+                    }
+                }),
+        }
+    }
+}
+
+/// Why a helper's completion did not happen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum HelperFailure {
+    /// The step failed and nothing of the helper's remains to reclaim.
+    Refused(String),
+    /// Something of the helper's may remain on disk; the attempt parks
+    /// reconciliation-required so a later session reclaims it.
+    Unreclaimed(String),
 }

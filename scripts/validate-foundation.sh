@@ -102,6 +102,7 @@ bash "${repo_root}/scripts/verify-jenkins-sequential-retained.sh"
 bash -n "${repo_root}/scripts/run-verified-rust-test.sh"
 bash -n "${repo_root}/scripts/test-cache-product.sh"
 bash -n "${repo_root}/scripts/test-input-product.sh"
+bash -n "${repo_root}/scripts/test-source-product.sh"
 bash -n "${repo_root}/scripts/validate-external-shadow-apparmor.sh"
 unset GLOBIGNORE
 shopt -u failglob
