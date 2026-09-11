@@ -2439,8 +2439,11 @@ fn github_delivery_operation() -> Value {
         admission("Exact redelivery of an admitted delivery id: the same build, nothing minted");
     operation["responses"]["201"] = admission("New delivery admitted or durably captured");
     operation["responses"]["202"] = json!({
-        "description": "Authenticated but not admitted (ignored event or action, tag push, deletion, ping, or a filter miss), acknowledged so GitHub keeps delivering; recorded as a trigger.delivery_unadmitted audit event",
-        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WebhookAcknowledgement"}}}
+        "description": "Either an admitted delivery that is durably leased or waiting for its bounded retry (TriggerEventResponse), or a delivery authenticated but not admitted (ignored event or action, tag push, deletion, ping, or a filter miss) acknowledged so GitHub keeps delivering and recorded as a webhook receipt (WebhookAcknowledgement)",
+        "content": {"application/json": {"schema": {"oneOf": [
+            {"$ref": "#/components/schemas/TriggerEventResponse"},
+            {"$ref": "#/components/schemas/WebhookAcknowledgement"}
+        ]}}}
     });
     operation["responses"]["422"] =
         admission("Delivery is durably dead-lettered and carries its terminal state");

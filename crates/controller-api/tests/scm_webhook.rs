@@ -640,4 +640,83 @@ stages:
         .await
         .unwrap();
     assert_eq!(builds, 2, "the push and the pull request, nothing else");
+
+    // A filtered delivery replayed under another event header with the same
+    // signed body is different authenticated input for that id: conflict.
+    let dev_as_ping = post(
+        app.clone(),
+        &hook_route,
+        "dev-1",
+        "ping",
+        dev.clone(),
+        sign(&secret, &dev),
+    )
+    .await;
+    assert_eq!(dev_as_ping.status(), StatusCode::CONFLICT);
+
+    // The event-source identity is rotated (generation 4, same source
+    // generation so the secret holds, trigger enabled with its original
+    // filter). The accepted push redelivered replays under the identity it
+    // was recorded with; a new push is admitted under the rotated one.
+    let rotated = app
+        .clone()
+        .oneshot(
+            Request::put(&trigger_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"3\"")
+                .header(IDEMPOTENCY_HEADER, "scm-webhook-rotate")
+                .body(Body::from(
+                    json!({
+                        "kind": "scm_webhook",
+                        "state": "enabled",
+                        "implementation_sha256": sha256_hex(b"scm-webhook-v1"),
+                        "configuration_sha256": sha256_hex(&serde_json::to_vec(&configuration).unwrap()),
+                        "filter_sha256": sha256_hex(&serde_json::to_vec(&filter).unwrap()),
+                        "event_source_identity": "scm:github:webhook:cljest-rotated",
+                        "source_generation": "hook-generation-1",
+                        "configuration": configuration,
+                        "deduplication_window_seconds": 7200,
+                        "max_delivery_attempts": 3,
+                        "delivery_ttl_seconds": 7200,
+                        "reason": "rotated the event source identity",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated.status(), StatusCode::OK);
+    assert_eq!(json_body(rotated).await["generation"], 4);
+    let replayed_after_rotation = post(
+        app.clone(),
+        &hook_route,
+        delivery_id,
+        "push",
+        body.clone(),
+        sign(&secret, &body),
+    )
+    .await;
+    assert_eq!(replayed_after_rotation.status(), StatusCode::OK);
+    let replayed_after_rotation = json_body(replayed_after_rotation).await;
+    assert_eq!(replayed_after_rotation["admission"]["build_id"], build_id);
+    assert_eq!(
+        replayed_after_rotation["delivery"]["caller_identity"],
+        "scm:github:webhook:cljest"
+    );
+    let after_rotation = post(
+        app.clone(),
+        &hook_route,
+        "post-rotation-1",
+        "push",
+        body.clone(),
+        sign(&secret, &body),
+    )
+    .await;
+    assert_eq!(after_rotation.status(), StatusCode::CREATED);
+    assert_eq!(
+        json_body(after_rotation).await["delivery"]["caller_identity"],
+        "scm:github:webhook:cljest-rotated"
+    );
 }

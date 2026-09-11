@@ -13,10 +13,13 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac as _};
-use mcloving_controller_store::DeliveryTiming;
-use mcloving_controller_store::{NewAuditEvent, PipelineTrigger, TriggerKind};
+use mcloving_controller_store::{
+    DeliveryTiming, NewWebhookReceipt, WebhookReceipt, WebhookReceiptOutcome,
+};
+use mcloving_controller_store::{PipelineTrigger, TriggerKind};
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -173,51 +176,41 @@ pub(super) async fn receive_github_delivery(
             "the delivery body is not a JSON object",
         ));
     }
-    // A delivery id's first authenticated decision is durable. A repeat of a
-    // delivery that was acknowledged but not admitted answers the recorded
-    // acknowledgement again and appends nothing, so GitHub redeliveries of a
-    // ping or a filtered push cannot grow the audit chain and an id decided
-    // once never enters the ledger later under another event.
-    if let Some(recorded) = state
+    let body_sha256: [u8; 32] = Sha256::digest(&body).into();
+    // A delivery id's first authenticated decision is durable, whichever
+    // ledger holds it: `trigger_deliveries` for an admitted delivery,
+    // `webhook_receipts` for one acknowledged but not admitted. Both are
+    // written under the trigger lock and each refuses an id the other holds,
+    // so two concurrent first deliveries cannot be decided twice. The lookups
+    // here are advisory shortcuts; the locked writes decide.
+    if let Some(receipt) = state
         .store
-        .unadmitted_delivery_acknowledgement(
-            trigger.organization_id,
-            trigger.trigger_id,
-            &delivery_id,
-        )
+        .webhook_receipt(trigger.organization_id, trigger.trigger_id, &delivery_id)
         .await
         .map_err(trigger_error)?
     {
-        return Ok(acknowledgement(
-            &delivery_id,
-            recorded["status"].as_str().unwrap_or("ignored"),
-            recorded["reason"].as_str().unwrap_or_default(),
-        ));
+        return replay_receipt(&receipt, &event, body_sha256);
     }
+    let recorded = state
+        .store
+        .trigger_delivery(trigger.organization_id, trigger.trigger_id, &delivery_id)
+        .await
+        .map_err(trigger_error)?;
     let mapped = match map_delivery(&event, &payload) {
         Ok(mapped) => mapped,
         Err(reason) => {
             // The signature covers the body, not the event header: an
             // admitted delivery id re-sent under an inadmissible event is a
-            // reuse of that id, reported as the ledger would report it.
-            if state
-                .store
-                .trigger_delivery(trigger.organization_id, trigger.trigger_id, &delivery_id)
-                .await
-                .map_err(trigger_error)?
-                .is_some()
-            {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "trigger_ingress_conflict",
-                    "delivery ID was reused for an event that is not admissible",
-                ));
+            // reuse of that id.
+            if recorded.is_some() {
+                return Err(reused_delivery_id());
             }
             return acknowledge_unadmitted(
                 &state,
                 &trigger,
                 &delivery_id,
                 &event,
+                body_sha256,
                 "ignored",
                 &reason,
             )
@@ -243,11 +236,18 @@ pub(super) async fn receive_github_delivery(
         platform: DEFAULT_PLATFORM.to_owned(),
         trust_pool: DEFAULT_TRUST_POOL.to_owned(),
     };
+    // An admitted delivery replays under the caller identity it was recorded
+    // with: the trigger's event-source identity may have been rotated since,
+    // and a redelivery is the same event, not a new one under the new source.
+    let caller_identity = recorded
+        .as_ref()
+        .map(|delivery| delivery.caller_identity.as_str())
+        .unwrap_or(&trigger.event_source_identity);
     match admit_trigger_event(
         &state,
         &trigger,
         &request,
-        &trigger.event_source_identity,
+        caller_identity,
         DeliveryTiming::Receipt,
     )
     .await
@@ -255,10 +255,44 @@ pub(super) async fn receive_github_delivery(
         Ok(response) => Ok(response),
         Err(error) if error.code == "trigger_filtered" => {
             let reason = error.message.clone();
-            acknowledge_unadmitted(&state, &trigger, &delivery_id, &event, "filtered", &reason)
-                .await
+            acknowledge_unadmitted(
+                &state,
+                &trigger,
+                &delivery_id,
+                &event,
+                body_sha256,
+                "filtered",
+                &reason,
+            )
+            .await
         }
         Err(error) => Err(error),
+    }
+}
+
+fn reused_delivery_id() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "trigger_ingress_conflict",
+        "delivery ID was reused for different webhook input",
+    )
+}
+
+/// Answers a recorded receipt again when the repeat carries the same
+/// authenticated input (event header and body), and a conflict otherwise.
+fn replay_receipt(
+    receipt: &WebhookReceipt,
+    event: &str,
+    body_sha256: [u8; 32],
+) -> Result<Response, ApiError> {
+    if receipt.event == event && receipt.body_sha256 == body_sha256 {
+        Ok(acknowledgement(
+            &receipt.delivery_id,
+            &receipt.status,
+            &receipt.reason,
+        ))
+    } else {
+        Err(reused_delivery_id())
     }
 }
 
@@ -508,28 +542,30 @@ async fn acknowledge_unadmitted(
     trigger: &PipelineTrigger,
     delivery_id: &str,
     event: &str,
+    body_sha256: [u8; 32],
     status: &str,
     reason: &str,
 ) -> Result<Response, ApiError> {
-    state
-        .store
-        .append_audit_event(&NewAuditEvent {
-            organization_id: trigger.organization_id,
-            category: "trigger",
-            actor_subject: &trigger.event_source_identity,
-            action: "trigger.delivery_unadmitted",
-            subject: &trigger.trigger_id.to_string(),
-            payload: json!({
-                "provider": "github",
-                "delivery_id": delivery_id,
-                "event": event,
-                "status": status,
-                "reason": reason,
-            }),
-        })
-        .await
-        .map_err(super::product_error)?;
-    Ok(acknowledgement(delivery_id, status, reason))
+    let (WebhookReceiptOutcome::Recorded(receipt) | WebhookReceiptOutcome::Replayed(receipt)) =
+        state
+            .store
+            .record_unadmitted_webhook_delivery(&NewWebhookReceipt {
+                organization_id: trigger.organization_id,
+                trigger_id: trigger.trigger_id,
+                delivery_id,
+                event,
+                body_sha256,
+                status,
+                reason,
+                caller_identity: &trigger.event_source_identity,
+            })
+            .await
+            .map_err(trigger_error)?;
+    Ok(acknowledgement(
+        &receipt.delivery_id,
+        &receipt.status,
+        &receipt.reason,
+    ))
 }
 
 fn acknowledgement(delivery_id: &str, status: &str, reason: &str) -> Response {

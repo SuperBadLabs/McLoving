@@ -914,10 +914,14 @@ delivery is reduced to the closed SCM payload (repository `full_name`,
 oversized or truncated change set (more paths than the bound, or fewer
 commits listed than the push advertises) is admitted pathless so a path
 filter cannot be bypassed by volume or by omission, a delivery id's first
-authenticated decision is durable (a repeated unadmitted delivery answers its
-recorded acknowledgement without a second audit record, an admitted id
-re-sent under an inadmissible event is a conflict), and unadmitted
-deliveries are acknowledged with 202 and
+authenticated decision is durable (admitted ids in `trigger_deliveries`,
+unadmitted ids in the indexed `webhook_receipts` with their event header and
+body digest, both written under the trigger lock and each refusing the
+other's ids; a repeat with the same authenticated input answers its recorded
+acknowledgement without a second audit record, a repeat with different input
+or an admitted id re-sent under an inadmissible event is a conflict; an
+admitted delivery replays under its recorded caller identity across
+event-source rotation), and unadmitted deliveries are acknowledged with 202 and
 recorded as audit events so GitHub keeps delivering. Residual: the operator
 reads the secret over the authenticated API and pastes it into GitHub, so
 the secret's confidentiality in transit and at GitHub is the operator's and

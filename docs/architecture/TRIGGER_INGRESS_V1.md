@@ -272,13 +272,20 @@ action, or an event the trigger's filter refuses, answer 202 with
 `{"status": "ignored" | "filtered", "reason", "delivery_id"}` so GitHub
 reports the hook healthy, and each is recorded as a
 `trigger.delivery_unadmitted` audit event under the event-source identity
+and as a `webhook_receipts` row (event header, body digest, status, reason)
 rather than as a delivery row. A delivery id's first authenticated decision
-is durable: a repeat of an unadmitted delivery answers the recorded
-acknowledgement again without a second audit record and never enters the
-ledger later under another event, and an admitted delivery id re-sent under
-an inadmissible event (the signature covers the body, not the event header)
-is a 409 `trigger_ingress_conflict`. To run an event that was filtered under
-a narrower filter, push again or use the bearer route.
+is durable: admitted ids live in `trigger_deliveries`, unadmitted ids in
+`webhook_receipts`, both written under the trigger lock with each write
+refusing an id the other holds, so two concurrent first deliveries cannot be
+decided twice; a repeat of an unadmitted delivery with the same event header
+and body answers the recorded acknowledgement again without a second audit
+record, and a repeat with a different header or body, or an admitted id
+re-sent under an inadmissible event (the signature covers the body, not the
+event header), is a 409 `trigger_ingress_conflict`. An admitted delivery
+replays under the caller identity it was recorded with, so rotating the
+trigger's event-source identity does not turn its redelivery into a
+conflict. To run an event that was filtered under a narrower filter, push
+again or use the bearer route.
 
 Trigger configuration is a `kind`-discriminated union with separate closed SCM,
 schedule, upstream, and remote API variants and their exact required fields.
