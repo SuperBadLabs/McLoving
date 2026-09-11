@@ -1,7 +1,8 @@
 # Architecture decision records
 
-All decisions were approved during the architecture and design session on
-2026-07-28.
+Decisions 0001 through 0015 were approved during the architecture and design
+session on 2026-07-28. ADR 0016 and the amendment to ADR 0006 were approved on
+2026-09-10.
 
 | ADR | Decision |
 |---|---|
@@ -20,3 +21,4 @@ All decisions were approved during the architecture and design session on
 | [0013](0013-product-surface.md) | API-first UI, CLI, and migration |
 | [0014](0014-verification.md) | Verification and war testing |
 | [0015](0015-roadmap.md) | Repository and implementation roadmap |
+| [0016](0016-product-parity-before-migration-authority.md) | Product parity before migration authority |
