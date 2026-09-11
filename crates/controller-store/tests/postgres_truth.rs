@@ -12975,6 +12975,85 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS
         )
     );
+    // A later build for the same repository, commit and context holds that
+    // status: the earlier build's delivery is superseded by it, unposted.
+    let later = store
+        .admit_test_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "notify-terminal-later".to_owned(),
+            pipeline_digest: [0xe4; 32],
+            priority: 0,
+            notify_targets: targets.clone(),
+            nodes: vec![dag_node("only", DagNodeKind::Work, vec![], "linux", "only")],
+        })
+        .await
+        .expect("admit the later notify DAG");
+    assert!(
+        store
+            .later_github_status_holder(organization_id, admission.build_id, &targets[0])
+            .await
+            .expect("holder before the later build is terminal")
+            .is_none(),
+        "a build that is not terminal holds nothing yet"
+    );
+    let claim = store
+        .claim_next(&dag_claim(organization_id, "agent-n2", "linux", "only"))
+        .await
+        .expect("claim the later node")
+        .expect("the later node is ready");
+    run_dag_claim(&store, &claim).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"exit_code": 1}),
+            )
+            .await
+            .expect("finalize the later node")
+    );
+    assert_eq!(
+        store
+            .later_github_status_holder(organization_id, admission.build_id, &targets[0])
+            .await
+            .expect("holder of the earlier build's status"),
+        Some((later.build_id, 0))
+    );
+    assert!(
+        store
+            .later_github_status_holder(organization_id, later.build_id, &targets[0])
+            .await
+            .expect("holder of the later build's status")
+            .is_none()
+    );
+    let claimed_later = store
+        .claim_due_notifications(organization_id, 10, ALL_KINDS)
+        .await
+        .expect("claim the later build's rows");
+    assert_eq!(claimed_later.len(), 2);
+    assert!(
+        store
+            .supersede_notification(organization_id, later.build_id, 0, 1, 1, admission.build_id)
+            .await
+            .expect("supersede a claimed row")
+    );
+    let ledger = store
+        .build_notifications(organization_id, later.build_id)
+        .await
+        .expect("read the later ledger");
+    assert_eq!(ledger[0].3, "abandoned");
+    assert_eq!(
+        ledger[0].5.as_deref(),
+        Some(format!("superseded by build {}", admission.build_id).as_str())
+    );
 }
 
 #[tokio::test]

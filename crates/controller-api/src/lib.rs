@@ -507,12 +507,12 @@ impl ApiState {
     }
 
     /// Where people reach this controller, for the link a notification
-    /// carries: an `http` or `https` origin with an optional path prefix,
-    /// no query, fragment or credentials.
+    /// carries: an `http` or `https` origin and nothing else, since the UI
+    /// requests its API from the root of that origin.
     pub fn with_public_base_url(mut self, base: &str) -> Result<Self, ApiError> {
         let invalid = || {
             ApiError::configuration(
-                "public base URL must be an http or https origin with an optional path prefix",
+                "public base URL must be an http or https origin with no path, query or fragment",
             )
         };
         let url = reqwest::Url::parse(base).map_err(|_| invalid())?;
@@ -520,6 +520,8 @@ impl ApiState {
             || url.host_str().is_none_or(str::is_empty)
             || !url.username().is_empty()
             || url.password().is_some()
+            || !matches!(url.path(), "" | "/")
+            || !matches!(url.path(), "" | "/")
             || url.query().is_some()
             || url.fragment().is_some()
             || base.len() > 2048

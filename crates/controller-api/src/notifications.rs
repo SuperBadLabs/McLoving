@@ -553,10 +553,42 @@ fn build_url(state: &ApiState, delivery: &NotificationDelivery) -> Option<String
     Some(url.into())
 }
 
+/// What one delivery attempt did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Delivered {
+    /// The target accepted the write.
+    Posted,
+    /// Not written: a later build holds this status; the ledger records
+    /// which.
+    Superseded(Uuid),
+}
+
+/// The later build, if any, that holds the status this delivery names.
+async fn later_holder(
+    state: &ApiState,
+    delivery: &NotificationDelivery,
+) -> Result<Option<(Uuid, i32)>, String> {
+    state
+        .store
+        .later_github_status_holder(
+            delivery.organization_id,
+            delivery.build_id,
+            &delivery.target,
+        )
+        .await
+        .map_err(|error| format!("status holder lookup failed: {error}"))
+}
+
 async fn deliver_github_status(
     state: &ApiState,
     delivery: &NotificationDelivery,
-) -> Result<(), String> {
+) -> Result<Delivered, String> {
+    // A later build for the same repository, commit and context is the
+    // outcome that stands there; an older build's delayed delivery is not
+    // written over it.
+    if let Some((later, _)) = later_holder(state, delivery).await? {
+        return Ok(Delivered::Superseded(later));
+    }
     let token = state
         .notification_github_token
         .as_deref()
@@ -588,7 +620,8 @@ async fn deliver_github_status(
         ],
         serde_json::to_vec(&body).map_err(|error| error.to_string())?,
     )
-    .await
+    .await?;
+    Ok(Delivered::Posted)
 }
 
 /// The record a webhook target receives; signed over its exact bytes.
@@ -624,7 +657,10 @@ pub fn sign_webhook(key: &[u8], body: &[u8]) -> Result<String, String> {
     ))
 }
 
-async fn deliver_webhook(state: &ApiState, delivery: &NotificationDelivery) -> Result<(), String> {
+async fn deliver_webhook(
+    state: &ApiState,
+    delivery: &NotificationDelivery,
+) -> Result<Delivered, String> {
     let key = state
         .notification_signing_key
         .as_deref()
@@ -655,10 +691,11 @@ async fn deliver_webhook(state: &ApiState, delivery: &NotificationDelivery) -> R
         ],
         body,
     )
-    .await
+    .await?;
+    Ok(Delivered::Posted)
 }
 
-async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<(), String> {
+async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<Delivered, String> {
     let attempt = async {
         match delivery.kind.as_str() {
             "github_status" => deliver_github_status(state, delivery).await,
@@ -715,6 +752,19 @@ impl ApiState {
             let state = self.clone();
             tasks.spawn(async move {
                 let outcome = deliver(&state, &delivery).await;
+                if let Ok(Delivered::Superseded(later)) = outcome {
+                    return state
+                        .store
+                        .supersede_notification(
+                            organization_id,
+                            delivery.build_id,
+                            delivery.target_index,
+                            delivery.terminal_generation,
+                            delivery.attempts,
+                            later,
+                        )
+                        .await;
+                }
                 let settled = state
                     .store
                     .settle_notification(
@@ -726,21 +776,33 @@ impl ApiState {
                         outcome.as_ref().err().map(String::as_str),
                     )
                     .await?;
-                if !settled && outcome.is_ok() {
-                    // The row moved on to a later terminal generation while
-                    // this attempt was in flight, so this write may have
-                    // landed after the newer outcome's; if that outcome is
-                    // already delivered it is posted again so it ends up
-                    // last, and a pending one posts after this write anyway.
-                    state
-                        .store
-                        .requeue_after_stale_settlement(
-                            organization_id,
-                            delivery.build_id,
-                            delivery.target_index,
-                            delivery.terminal_generation,
-                        )
-                        .await?;
+                if outcome.is_ok() {
+                    if !settled {
+                        // The row moved on to a later terminal generation
+                        // while this attempt was in flight, so this write
+                        // may have landed after the newer outcome's: the
+                        // newer generation is posted once more.
+                        state
+                            .store
+                            .requeue_after_stale_settlement(
+                                organization_id,
+                                delivery.build_id,
+                                delivery.target_index,
+                                delivery.terminal_generation,
+                            )
+                            .await?;
+                    }
+                    if delivery.kind == "github_status"
+                        && let Ok(Some((later, index))) = later_holder(&state, &delivery).await
+                    {
+                        // A later build for this status became terminal
+                        // while this write was in flight: it is posted once
+                        // more so its outcome is the last write.
+                        state
+                            .store
+                            .requeue_after_stale_settlement(organization_id, later, index, 0)
+                            .await?;
+                    }
                 }
                 Ok::<bool, mcloving_controller_store::StoreError>(settled)
             });

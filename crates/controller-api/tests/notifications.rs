@@ -339,7 +339,7 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         .unwrap()
         .with_notification_signing_key(KEY.to_vec())
         .unwrap()
-        .with_public_base_url("https://mcloving.example.test/prefix")
+        .with_public_base_url("https://mcloving.example.test")
         .unwrap();
     let app = router(state.clone());
     // A deployment with the catalog but no credentials admits no target.
@@ -434,7 +434,7 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
     let key_only = seams(ApiState::new(store.clone(), TOKEN, principal(organization_id)).unwrap())
         .with_notification_signing_key(KEY.to_vec())
         .unwrap()
-        .with_public_base_url("https://mcloving.example.test/prefix")
+        .with_public_base_url("https://mcloving.example.test")
         .unwrap();
     assert_eq!(
         key_only
@@ -498,7 +498,7 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         assert_eq!(
             record["build_url"],
             format!(
-                "https://mcloving.example.test/prefix/?organization={organization_id}&project={project_id}&build={build_id}"
+                "https://mcloving.example.test/?organization={organization_id}&project={project_id}&build={build_id}"
             )
         );
     }
@@ -609,6 +609,62 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         sink.lock().unwrap().hooks.len(),
         1,
         "nothing reached the sink"
+    );
+
+    // A public base URL is an origin and nothing more: the UI requests its
+    // API from the root of that origin.
+    for bad in [
+        "https://mcloving.example.test/prefix",
+        "https://mcloving.example.test/?x=1",
+        "ftp://mcloving.example.test",
+    ] {
+        assert!(
+            ApiState::new(store.clone(), TOKEN, principal(organization_id))
+                .unwrap()
+                .with_public_base_url(bad)
+                .is_err(),
+            "{bad}"
+        );
+    }
+
+    // A later build for the same repository, commit and context holds that
+    // status: the earlier build's delayed delivery is not written over it.
+    let later_build = submit(&app, &path, "notify-build-later").await;
+    run_to_success(&store, organization_id, "agent-later").await;
+    assert_eq!(
+        state
+            .process_due_notifications(organization_id, 32)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(sink.lock().unwrap().statuses.len(), 2);
+    assert!(
+        store
+            .requeue_after_stale_settlement(organization_id, build_id, 0, 0)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        state
+            .process_due_notifications(organization_id, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sink.lock().unwrap().statuses.len(),
+        2,
+        "the superseded build is not posted"
+    );
+    let ledger = store
+        .build_notifications(organization_id, build_id)
+        .await
+        .unwrap();
+    assert_eq!(ledger[0].3, "abandoned");
+    assert_eq!(
+        ledger[0].5.as_deref(),
+        Some(format!("superseded by build {later_build}").as_str())
     );
 
     server.abort();

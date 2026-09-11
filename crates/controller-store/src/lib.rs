@@ -3706,6 +3706,85 @@ impl Store {
         Ok(requeued.is_some())
     }
 
+    /// The later build, if any, whose `github_status` delivery names the same
+    /// repository, commit and context as `target`: its outcome is the one
+    /// that stands at that status, so the older build's is not posted, or,
+    /// if it already was, the later build's is posted again. Later means
+    /// created later; a build's ledger row exists only once it is terminal.
+    pub async fn later_github_status_holder(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target: &Value,
+    ) -> Result<Option<(Uuid, i32)>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let holder = sqlx::query_as::<_, (Uuid, i32)>(
+            "SELECT d.build_id, d.target_index
+             FROM notification_deliveries AS d
+             JOIN builds AS b
+               ON b.organization_id = d.organization_id AND b.id = d.build_id
+             WHERE d.organization_id = $1
+               AND d.kind = 'github_status'
+               AND d.build_id <> $2
+               AND d.target->>'repository' = $3
+               AND d.target->>'commit' = $4
+               AND d.target->>'context' = $5
+               AND (b.created_at, b.id) > (
+                   SELECT created_at, id FROM builds
+                   WHERE organization_id = $1 AND id = $2
+               )
+             ORDER BY b.created_at DESC, b.id DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target["repository"].as_str().unwrap_or_default())
+        .bind(target["commit"].as_str().unwrap_or_default())
+        .bind(target["context"].as_str().unwrap_or_default())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(holder)
+    }
+
+    /// Settles a claimed delivery as superseded: a later build's outcome for
+    /// the same target is the one that stands, so this one is abandoned
+    /// unposted with the superseding build recorded as the reason.
+    pub async fn supersede_notification(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        terminal_generation: i32,
+        attempts: i32,
+        superseded_by: Uuid,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let settled = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET state = 'abandoned',
+                 repost_required = false,
+                 last_error = 'superseded by build ' || $6::text
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'pending'
+               AND terminal_generation = $4
+               AND attempts = $5
+             RETURNING attempts",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(terminal_generation)
+        .bind(attempts)
+        .bind(superseded_by)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(settled.is_some())
+    }
+
     /// Every delivery recorded for a build, in target order, with its state,
     /// attempts and last error: the ledger a reader or a test inspects.
     pub async fn build_notifications(

@@ -138,8 +138,12 @@ capped at an hour) and abandons after twelve attempts, the last error kept in
 the ledger. A commit status is `POST /repos/{owner}/{name}/statuses/{commit}`
 at `api.github.com`, `success`, `failure` or `error` for a succeeded, failed
 or aborted build, under the target's context, with a `target_url` that opens
-the build in the controller UI when `MCLOVING_PUBLIC_BASE_URL` is set. A
-webhook is a JSON record (`mcloving.build-notification/v1`: organization,
+the build in the controller UI when `MCLOVING_PUBLIC_BASE_URL` (an origin,
+no path) is set. A later build for the same repository, commit and context
+holds that status: an earlier build's delayed delivery is recorded as
+abandoned, superseded by the later build, and not written, and if the two
+raced the later build is posted once more so its outcome is the last
+write. A webhook is a JSON record (`mcloving.build-notification/v1`: organization,
 project, pipeline, build, status, mapping, target index, terminal generation,
 attempt, build URL)
 POSTed to the mapping's `https` destination with `X-McLoving-Signature-256:

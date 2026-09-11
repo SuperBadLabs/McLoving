@@ -1108,7 +1108,10 @@ before an operator retry made the build terminal again, is dropped and the
 newer generation is posted once more (re-queued if delivered, marked for a
 re-post if in flight) so its outcome is written last, the resolved targets are part of
 the build's replay contract so catalog drift between controllers is an
-idempotency conflict rather than a race, a scan
+idempotency conflict rather than a race, a commit status is held by the
+latest build for its repository, commit and context so an earlier build's
+delayed delivery is abandoned as superseded rather than written over it and
+a race is settled by posting the later build once more, a scan
 abandons a pending row whose attempts are spent rather than claiming it
 again, and attempts are bounded at twelve per generation with the backoff
 capped at an hour); TM-013 (credentials and host exposure: the token
