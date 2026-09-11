@@ -607,8 +607,6 @@ mod linux {
         /// for its owner so build steps can work in it, walking by descriptor
         /// and never following a link.
         pub fn publish(&self, workspace: &Path) -> Result<PublishedCheckout, String> {
-            use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
-            use nix::sys::stat::{Mode, fchmod, fstatat};
             let receipt = self
                 .verified
                 .lock()
@@ -623,88 +621,11 @@ mod linux {
             let acquisition = open_directory(&acquisition_dir)
                 .map_err(|error| format!("checkout_publication_failed:acquisition:{error}"))?;
             require_owned(&acquisition)?;
-            // The acquirer left its directory 0o500; renaming an entry out of
-            // it needs the owner's write bit back.
-            fchmod(&acquisition, Mode::from_bits_truncate(0o700))
-                .map_err(|error| format!("checkout_publication_failed:chmod:{error}"))?;
-            // Moving a directory to a new parent rewrites its `..` entry, so
-            // the tree itself needs its owner's write bit back as well; the
-            // descriptor doubles as the identity the moved entry must match.
-            let tree_fd = openat(
-                &acquisition,
-                "tree",
-                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|error| format!("checkout_publication_failed:tree:{error}"))?;
-            let tree = nix::sys::stat::fstat(&tree_fd)
-                .map_err(|error| format!("checkout_publication_failed:tree:{error}"))?;
-            fchmod(&tree_fd, Mode::from_bits_truncate(0o700))
-                .map_err(|error| format!("checkout_publication_failed:chmod:{error}"))?;
-            drop(tree_fd);
-            let workspace_fd = open_directory(workspace)
-                .map_err(|error| format!("checkout_publication_failed:workspace:{error}"))?;
-            require_owned(&workspace_fd)?;
-            match fstatat(
-                &workspace_fd,
-                destination,
-                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-            ) {
-                Err(nix::errno::Errno::ENOENT) => {}
-                Ok(_) => return Err(format!("checkout_destination_preexists:{destination}")),
-                Err(error) => {
-                    return Err(format!("checkout_publication_failed:destination:{error}"));
-                }
-            }
-            match renameat2(
-                &acquisition,
-                "tree",
-                &workspace_fd,
-                destination,
-                RenameFlags::RENAME_NOREPLACE,
-            ) {
-                Ok(()) => {}
-                Err(nix::errno::Errno::EEXIST | nix::errno::Errno::ENOTEMPTY) => {
-                    return Err(format!("checkout_destination_substituted:{destination}"));
-                }
-                Err(nix::errno::Errno::EXDEV) => {
-                    return Err(
-                        "checkout_publication_cross_device:the source output root and the workspace root must share a filesystem"
-                            .to_owned(),
-                    );
-                }
-                Err(error) => return Err(format!("checkout_publication_failed:rename:{error}")),
-            }
-            let moved = fstatat(
-                &workspace_fd,
-                destination,
-                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-            )
-            .map_err(|error| format!("checkout_publication_failed:verify:{error}"))?;
-            if moved.st_dev != tree.st_dev
-                || moved.st_ino != tree.st_ino
-                || moved.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR
-            {
-                return Err(format!("checkout_destination_substituted:{destination}"));
-            }
-            let published = openat(
-                &workspace_fd,
-                destination,
-                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|error| format!("checkout_publication_failed:open:{error}"))?;
-            let mut budget = MAX_PUBLICATION_ENTRIES;
-            make_owner_writable(published, &mut budget)
-                .map_err(|error| format!("checkout_publication_failed:writable:{error}"))?;
-            for directory in [&workspace_fd, &acquisition] {
-                File::from(
-                    nix::unistd::dup(directory)
-                        .map_err(|error| format!("checkout_publication_failed:dup:{error}"))?,
-                )
-                .sync_all()
-                .map_err(|error| format!("checkout_publication_failed:sync:{error}"))?;
-            }
+            // A refused publication must not leave the materialized tree
+            // under the output root: every such build would otherwise keep a
+            // whole checkout on the source volume. The receipt and manifest
+            // the acquirer retained beside it stay.
+            publish_tree(&acquisition, workspace, destination)?;
             Ok(PublishedCheckout {
                 destination: destination.to_owned(),
                 resolved_commit: receipt
@@ -715,6 +636,212 @@ mod linux {
                 materialized_files: receipt.materialized_files,
             })
         }
+    }
+
+    /// Moves `tree` under `acquisition` into `<workspace>/<destination>`, and
+    /// on any refusal or failure that leaves the tree behind discards it,
+    /// keeping whatever else the acquirer retained beside it.
+    fn publish_tree(
+        acquisition: &OwnedFd,
+        workspace: &Path,
+        destination: &str,
+    ) -> Result<(), String> {
+        match move_verified_tree(acquisition, workspace, destination) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Err(discard) = discard_acquired_tree(acquisition) {
+                    return Err(format!("{error};tree_not_discarded:{discard}"));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn move_verified_tree(
+        acquisition: &OwnedFd,
+        workspace: &Path,
+        destination: &str,
+    ) -> Result<(), String> {
+        use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
+        use nix::sys::stat::{Mode, fchmod, fstatat};
+        // The acquirer left its directory 0o500; renaming an entry out of it
+        // needs the owner's write bit back.
+        fchmod(acquisition, Mode::from_bits_truncate(0o700))
+            .map_err(|error| format!("checkout_publication_failed:chmod:{error}"))?;
+        // Moving a directory to a new parent rewrites its `..` entry, so the
+        // tree itself needs its owner's write bit back as well; the descriptor
+        // doubles as the identity the moved entry must match.
+        let tree_fd = openat(
+            acquisition,
+            "tree",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| format!("checkout_publication_failed:tree:{error}"))?;
+        let tree = nix::sys::stat::fstat(&tree_fd)
+            .map_err(|error| format!("checkout_publication_failed:tree:{error}"))?;
+        fchmod(&tree_fd, Mode::from_bits_truncate(0o700))
+            .map_err(|error| format!("checkout_publication_failed:chmod:{error}"))?;
+        drop(tree_fd);
+        let workspace_fd = open_directory(workspace)
+            .map_err(|error| format!("checkout_publication_failed:workspace:{error}"))?;
+        require_owned(&workspace_fd)?;
+        match fstatat(
+            &workspace_fd,
+            destination,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            Ok(_) => return Err(format!("checkout_destination_preexists:{destination}")),
+            Err(error) => {
+                return Err(format!("checkout_publication_failed:destination:{error}"));
+            }
+        }
+        match renameat2(
+            acquisition,
+            "tree",
+            &workspace_fd,
+            destination,
+            RenameFlags::RENAME_NOREPLACE,
+        ) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::EEXIST | nix::errno::Errno::ENOTEMPTY) => {
+                return Err(format!("checkout_destination_substituted:{destination}"));
+            }
+            Err(nix::errno::Errno::EXDEV) => {
+                return Err(
+                    "checkout_publication_cross_device:the source output root and the workspace root must share a filesystem"
+                        .to_owned(),
+                );
+            }
+            Err(error) => return Err(format!("checkout_publication_failed:rename:{error}")),
+        }
+        let moved = fstatat(
+            &workspace_fd,
+            destination,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(|error| format!("checkout_publication_failed:verify:{error}"))?;
+        if moved.st_dev != tree.st_dev
+            || moved.st_ino != tree.st_ino
+            || moved.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR
+        {
+            return Err(format!("checkout_destination_substituted:{destination}"));
+        }
+        let published = openat(
+            &workspace_fd,
+            destination,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| format!("checkout_publication_failed:open:{error}"))?;
+        let mut budget = MAX_PUBLICATION_ENTRIES;
+        make_owner_writable(published, &mut budget)
+            .map_err(|error| format!("checkout_publication_failed:writable:{error}"))?;
+        for directory in [&workspace_fd, acquisition] {
+            File::from(
+                nix::unistd::dup(directory)
+                    .map_err(|error| format!("checkout_publication_failed:dup:{error}"))?,
+            )
+            .sync_all()
+            .map_err(|error| format!("checkout_publication_failed:sync:{error}"))?;
+        }
+        Ok(())
+    }
+
+    /// Removes `tree` under `acquisition` if it is still there, by
+    /// descriptor and never following a link, within the publication walk
+    /// budget. Absent already means nothing to do.
+    fn discard_acquired_tree(acquisition: &OwnedFd) -> Result<(), String> {
+        use nix::fcntl::{OFlag, openat};
+        use nix::sys::stat::{Mode, fchmod, fstatat};
+        match fstatat(
+            acquisition,
+            "tree",
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+            Ok(stat) if stat.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR => {
+                return nix::unistd::unlinkat(
+                    acquisition,
+                    "tree",
+                    nix::unistd::UnlinkatFlags::NoRemoveDir,
+                )
+                .map_err(|error| error.to_string());
+            }
+            Ok(_) => {}
+        }
+        fchmod(acquisition, Mode::from_bits_truncate(0o700)).map_err(|error| error.to_string())?;
+        let tree = openat(
+            acquisition,
+            "tree",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut budget = MAX_PUBLICATION_ENTRIES;
+        remove_directory_contents(tree, &mut budget)?;
+        nix::unistd::unlinkat(acquisition, "tree", nix::unistd::UnlinkatFlags::RemoveDir)
+            .map_err(|error| error.to_string())?;
+        File::from(nix::unistd::dup(acquisition).map_err(|error| error.to_string())?)
+            .sync_all()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Empties `directory` by descriptor: subdirectories are recursed into
+    /// and removed, everything else is unlinked, links included but never
+    /// followed.
+    fn remove_directory_contents(directory: OwnedFd, budget: &mut usize) -> Result<(), String> {
+        use nix::dir::{Dir, Type};
+        use nix::fcntl::{OFlag, openat};
+        use nix::sys::stat::{Mode, fchmod, fstatat};
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        // The acquirer left directories 0o500; unlinking their entries needs
+        // the owner's write bit.
+        fchmod(&directory, Mode::from_bits_truncate(0o700)).map_err(|error| error.to_string())?;
+        let listing = nix::unistd::dup(&directory).map_err(|error| error.to_string())?;
+        let mut dir = Dir::from_fd(listing).map_err(|error| error.to_string())?;
+        let mut children: Vec<(std::ffi::CString, Option<Type>)> = Vec::new();
+        for entry in dir.iter() {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let name = entry.file_name();
+            if name == c"." || name == c".." {
+                continue;
+            }
+            *budget = budget
+                .checked_sub(1)
+                .ok_or_else(|| "discard walk exceeded its entry budget".to_owned())?;
+            children.push((name.to_owned(), entry.file_type()));
+        }
+        for (name, kind) in children {
+            let name: &CStr = &name;
+            let is_directory = match kind {
+                Some(kind) => kind == Type::Directory,
+                None => {
+                    let stat = fstatat(&directory, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW)
+                        .map_err(|error| error.to_string())?;
+                    stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR
+                }
+            };
+            if is_directory {
+                let child = openat(
+                    &directory,
+                    name,
+                    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| error.to_string())?;
+                remove_directory_contents(child, budget)?;
+                unlinkat(&directory, name, UnlinkatFlags::RemoveDir)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                unlinkat(&directory, name, UnlinkatFlags::NoRemoveDir)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let _ = directory.as_fd();
+        Ok(())
     }
 
     fn open_directory(path: &Path) -> Result<OwnedFd, nix::errno::Errno> {
@@ -837,72 +964,16 @@ mod linux {
         }
 
         /// The publication primitive with the receipt already verified: the
-        /// same descriptor-relative moves `publish` performs, so the refusals
-        /// can be exercised without a sealed helper.
+        /// same descriptor-relative moves and the same discard on refusal
+        /// `publish` performs, so the refusals can be exercised without a
+        /// sealed helper.
         fn move_tree(
             acquisition: &Path,
             workspace: &Path,
             destination: &str,
         ) -> Result<(), String> {
-            use nix::fcntl::{RenameFlags, renameat2};
-            use nix::sys::stat::{Mode, fchmod, fstatat};
             let acquisition_fd = open_directory(acquisition).map_err(|e| e.to_string())?;
-            fchmod(&acquisition_fd, Mode::from_bits_truncate(0o700)).map_err(|e| e.to_string())?;
-            let tree_fd = nix::fcntl::openat(
-                &acquisition_fd,
-                "tree",
-                nix::fcntl::OFlag::O_RDONLY
-                    | nix::fcntl::OFlag::O_DIRECTORY
-                    | nix::fcntl::OFlag::O_NOFOLLOW,
-                Mode::empty(),
-            )
-            .map_err(|e| e.to_string())?;
-            let tree = nix::sys::stat::fstat(&tree_fd).map_err(|e| e.to_string())?;
-            fchmod(&tree_fd, Mode::from_bits_truncate(0o700)).map_err(|e| e.to_string())?;
-            drop(tree_fd);
-            let workspace_fd = open_directory(workspace).map_err(|e| e.to_string())?;
-            match fstatat(
-                &workspace_fd,
-                destination,
-                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-            ) {
-                Err(nix::errno::Errno::ENOENT) => {}
-                Ok(_) => return Err(format!("checkout_destination_preexists:{destination}")),
-                Err(error) => return Err(error.to_string()),
-            }
-            match renameat2(
-                &acquisition_fd,
-                "tree",
-                &workspace_fd,
-                destination,
-                RenameFlags::RENAME_NOREPLACE,
-            ) {
-                Ok(()) => {}
-                Err(nix::errno::Errno::EEXIST | nix::errno::Errno::ENOTEMPTY) => {
-                    return Err(format!("checkout_destination_substituted:{destination}"));
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-            let moved = fstatat(
-                &workspace_fd,
-                destination,
-                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-            )
-            .map_err(|e| e.to_string())?;
-            if moved.st_ino != tree.st_ino || moved.st_dev != tree.st_dev {
-                return Err(format!("checkout_destination_substituted:{destination}"));
-            }
-            let published = nix::fcntl::openat(
-                &workspace_fd,
-                destination,
-                nix::fcntl::OFlag::O_RDONLY
-                    | nix::fcntl::OFlag::O_DIRECTORY
-                    | nix::fcntl::OFlag::O_NOFOLLOW,
-                Mode::empty(),
-            )
-            .map_err(|e| e.to_string())?;
-            let mut budget = MAX_PUBLICATION_ENTRIES;
-            make_owner_writable(published, &mut budget)
+            publish_tree(&acquisition_fd, workspace, destination)
         }
 
         #[test]
@@ -942,10 +1013,17 @@ mod linux {
             let elsewhere = root.path().join("elsewhere");
             std::fs::create_dir(&elsewhere).unwrap();
             std::os::unix::fs::symlink(&elsewhere, workspace.join("source")).unwrap();
+            std::fs::set_permissions(&acquisition, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(acquisition.join("receipt.json"), b"{}").unwrap();
+            std::fs::set_permissions(&acquisition, std::fs::Permissions::from_mode(0o500)).unwrap();
             let error = move_tree(&acquisition, &workspace, "source").unwrap_err();
             assert_eq!(error, "checkout_destination_preexists:source");
             assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
-            assert!(acquisition.join("tree/README").exists());
+            // The refused tree is discarded, links unlinked not followed, and
+            // the retained receipt beside it is kept.
+            assert!(!acquisition.join("tree").exists());
+            assert!(acquisition.join("receipt.json").exists());
+            assert!(Path::new("/etc/passwd").exists());
         }
 
         #[test]
